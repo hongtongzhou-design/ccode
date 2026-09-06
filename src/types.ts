@@ -155,6 +155,8 @@ export interface GatewayInput {
 
 export interface BindingInput {
   agent: string;
+  /** 绑定级显示名；留空时后端回退网关名。 */
+  name?: string;
   gatewayId: string | null;
   kind: "api" | "official";
   protocol: string | null;
@@ -203,6 +205,7 @@ export interface FetchModelsResultDto {
   models: string[];
   fromCache: boolean;
   fetchedAt: string;
+  capabilityMetadataCount: number;
 }
 
 /** 官方账号连接状态（official_account_status，P1a） */
@@ -956,6 +959,10 @@ export interface ProjectDto {
   lastOpenedAt: string | null;
   /** research / coding / office；缺省 research */
   workMode?: string;
+  /** 项目级默认 Agent；密钥与 profile 不落在项目注册表。 */
+  defaultAgent?: string | null;
+  /** Agent id → 项目默认 profile id；只保存引用。 */
+  defaultProfiles?: Record<string, string>;
 }
 
 /** 档案卡 .ccode/project.toml 的资源条目 */
@@ -1331,7 +1338,7 @@ export interface RunDto {
   sentinel: boolean;
   createdAt: string;
   closedAt: string | null;
-  status: "running" | "completed" | "failed" | "stopped";
+  status: "created" | "starting" | "running" | "completed" | "failed" | "stopped";
   exitCode: number | null;
   closeReason: string | null;
   /** 归属的 Task；旧记录可能为空字符串。 */
@@ -1339,6 +1346,33 @@ export interface RunDto {
   /** Custom Runtime 的稳定配置 id；普通 Runtime 为 null。 */
   customRuntimeId: string | null;
   capabilities: RuntimeCapabilitiesDto;
+}
+
+/** 持久化用户意图；科研流程步骤仍以 project.toml 为真相，只有实际使用时才 materialize。 */
+export interface TaskDto {
+  id: string;
+  projectRoot: string | null;
+  kind: string;
+  taskRef: string | null;
+  name: string;
+  description: string;
+  status: string;
+  inputPaths: string[];
+  outputPaths: string[];
+  reviewRequired: boolean;
+  archivedAt: string | null;
+  agent: string | null;
+  profileId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** 人在「新建任务」里声明的步骤。会话/开步自动登记的为 false。 */
+  declared?: boolean;
+}
+
+export interface TaskOutputChangeDto {
+  path: string;
+  kind: "added" | "modified" | string;
+  bytes: number;
 }
 
 export interface RuntimeCapabilitiesDto {

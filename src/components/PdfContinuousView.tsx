@@ -134,7 +134,7 @@ function PdfContinuousView({
     page: number,
     fileName: string,
     send?: boolean,
-  ) => string | null;
+  ) => string | null | Promise<string | null>;
   /** 加载失败/被白名单拒绝时错误条上的「← 返回」 */
   onBack?: () => void;
   /** 圈选截图「◈ 发给 agent」：返回 null 成功，否则为要展示的提示（批次 B2） */
@@ -604,13 +604,15 @@ function PdfContinuousView({
   function askAi(send?: boolean) {
     const excerpt = selectedExcerpt();
     if (!excerpt) return;
-    const err =
+    void Promise.resolve(
       onAskAi?.(excerpt.text, excerpt.page, fileName, send) ??
-      "当前页面不支持问 AI";
-    showHint(
-      err ?? (send ? "已发送给阅读会话" : "已写入终端输入行，检查后回车发送"),
-    );
-    if (!err) clearSelection();
+        "当前页面不支持问 AI",
+    ).then((err) => {
+      showHint(
+        err ?? (send ? "已发送给阅读会话" : "已写入终端输入行，检查后回车发送"),
+      );
+      if (!err) clearSelection();
+    });
   }
 
   async function organize() {

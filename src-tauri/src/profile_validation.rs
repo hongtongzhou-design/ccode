@@ -595,6 +595,10 @@ fn api_kind(profile: &Profile) -> ApiKind {
     }
 }
 
+fn anthropic_uses_bearer(profile: &Profile) -> bool {
+    matches!(profile.agent.as_str(), "claude-code" | "codebuddy" | "grok")
+}
+
 /// 协议族标签（profiles::copy_to_agent 的兼容性判定用）。与 api_kind 同口径，
 /// 唯一差异是 cursor：api_kind 因 `_` 兜底落入 OpenAi 仅用于跳过云端验证，
 /// 复制判定时 Cursor 是专有协议（见 api_check 注释），自成一族不与任何 agent 互通
@@ -697,9 +701,12 @@ async fn api_check(profile: &Profile, key: Option<&str>) -> ValidationCheckDto {
                 request = request.bearer_auth(key);
             }
             ApiKind::Anthropic => {
-                request = request
-                    .header("x-api-key", key)
-                    .header("anthropic-version", "2023-06-01");
+                request = if anthropic_uses_bearer(profile) {
+                    request.bearer_auth(key)
+                } else {
+                    request.header("x-api-key", key)
+                }
+                .header("anthropic-version", "2023-06-01");
             }
             ApiKind::Gemini => {
                 url.query_pairs_mut().append_pair("key", key);
@@ -903,6 +910,7 @@ pub async fn probe_gateway_slot(
     let binding = crate::profiles::Binding {
         id: format!("probe-{}", gw.id),
         agent: crate::gateway_store::agent_for_slot(slot).into(),
+        name: format!("探测 · {}", gw.name),
         kind: crate::profiles::BindingKind::Api,
         gateway_id: Some(gw.id.clone()),
         protocol: None,
@@ -976,13 +984,20 @@ async fn probe_loaded_profile(
         .build()
         .map_err(|e| format!("创建 API 客户端失败: {e}"))?;
 
-    // 鉴权镜像 CLI 真实形态：Ccode 给 claude 注入的是 ANTHROPIC_AUTH_TOKEN（Bearer），
-    // 探针同口径；codebuddy 协议 Anthropic 兼容同走 Bearer
+    // 鉴权镜像 CLI 真实形态：Claude/CodeBuddy/Grok 使用 Bearer；Qwen/Kimi
+    // Anthropic 兼容通道使用 x-api-key。
     let build = |body: serde_json::Value, with_headers: bool| {
         let mut req = client.post(url.clone()).json(&body);
         if let Some(k) = key.as_deref().filter(|k| !k.trim().is_empty()) {
             req = match kind {
-                ApiKind::Anthropic => req.bearer_auth(k).header("anthropic-version", "2023-06-01"),
+                ApiKind::Anthropic => {
+                    let req = if anthropic_uses_bearer(&profile) {
+                        req.bearer_auth(k)
+                    } else {
+                        req.header("x-api-key", k)
+                    };
+                    req.header("anthropic-version", "2023-06-01")
+                }
                 _ => req.bearer_auth(k),
             };
         }

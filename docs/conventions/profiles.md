@@ -39,6 +39,7 @@ Gateway
 GatewayModel
   id            网关认识的模型 id
   source        fetched | user
+  catalogSlot   最近一次把该 id 标为 available 的协议槽；按槽刷新时只 stale 本槽
   temperature / topP / maxOutputTokens / reasoningEffort   用户设了才存
 
 Binding

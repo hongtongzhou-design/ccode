@@ -13,6 +13,7 @@ export const PAGE_HOTKEY_DEFS = [
   { id: "workspaces", label: "项目", combo: "mod+2" },
   { id: "terminal", label: "运行", combo: "mod+3" },
   { id: "sessions", label: "对话", combo: "mod+4" },
+  { id: "schedules", label: "定时巡检", combo: HOTKEY_DISABLED },
   { id: "profiles", label: "连接", combo: "mod+5" },
   { id: "skills", label: "技能", combo: "mod+6" },
   { id: "mcp", label: "MCP", combo: "mod+7" },

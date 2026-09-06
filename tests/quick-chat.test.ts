@@ -4,6 +4,7 @@ import {
   isScratchCwd,
   pickQuickChatHistory,
   pickQuickChatSessions,
+  pickRememberedProfileId,
   profileCanAutoStart,
   sessionHomeLabel,
   sessionDisplayTitle,
@@ -155,6 +156,12 @@ test("快速开聊自动路径：排除停用和已知失效配置，未知状�
   assert.equal(profileCanAutoStart({ connectionStatus: "probe_failed" }), false);
   assert.equal(profileCanAutoStart({ modelSyncStatus: "missing" }), false);
   assert.equal(profileCanAutoStart({ connectionStatus: "ready" }, true), false);
+});
+
+test("快速开聊直达：记住的 id 不可用时不改用同 Agent 另一条", () => {
+  assert.equal(pickRememberedProfileId("p1", ["p1", "p2"]), "p1");
+  assert.equal(pickRememberedProfileId("gone", ["p2"]), null);
+  assert.equal(pickRememberedProfileId(undefined, ["p2"]), null);
 });
 
 test("withLiveSessionFlags：终端页正在跑的会话补标 live", () => {

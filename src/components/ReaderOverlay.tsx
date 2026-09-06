@@ -105,7 +105,10 @@ export default function ReaderOverlay({
   needsProfile: boolean;
   /** 写入阅读会话 PTY（send=true 补 \r 直接发送；缺省写进终端输入行，用户看着回车）；
       返回 null 成功，否则为提示 */
-  onInject: (data: string, send?: boolean) => string | null;
+  onInject: (
+    data: string,
+    send?: boolean,
+  ) => string | null | Promise<string | null>;
   /** 阅读会话标签被关掉后的「重新启动」（清空一次性标记让 TerminalPage 再派一次） */
   onRestartAgent: () => void;
   onGoProfiles: () => void;
@@ -464,11 +467,14 @@ export default function ReaderOverlay({
   useEffect(() => {
     if (!note || !agentStatus?.running) return;
     if (briefedRef.current === note.path) return;
-    const err = onInject(
-      `【阅读上下文】我在沉浸阅读区读 PDF：${pdfPath}；配套笔记：${note.path}。之后我说「这篇」「笔记」都指它们；要改笔记就直接编辑这个文件。`,
-      true,
-    );
-    if (!err) briefedRef.current = note.path;
+    void Promise.resolve(
+      onInject(
+        `【阅读上下文】我在沉浸阅读区读 PDF：${pdfPath}；配套笔记：${note.path}。之后我说「这篇」「笔记」都指它们；要改笔记就直接编辑这个文件。`,
+        true,
+      ),
+    ).then((err) => {
+      if (!err) briefedRef.current = note.path;
+    });
   }, [note, agentStatus?.running, pdfPath, onInject]);
 
   // ===== 圈选截图去向（批次 B2）：裁好的 PNG 由 PdfContinuousView 交来 =====

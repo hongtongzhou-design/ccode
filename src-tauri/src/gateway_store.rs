@@ -64,6 +64,44 @@ pub fn slot_url<'a>(slots: &'a ProtocolSlots, slot: Slot) -> Option<&'a str> {
     .filter(|s| !s.trim().is_empty())
 }
 
+/// 按槽合并模型目录：只把本槽先前 fetched 的缺失 id 标 stale，其它槽的目录保留。
+pub(crate) fn apply_fetched_catalog(
+    gw: &mut Gateway,
+    slot: &str,
+    ids: &[String],
+    fetched_at: &str,
+) {
+    let id_set: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    for model in gw.models.iter_mut().filter(|m| m.source == "fetched") {
+        let belongs = model.catalog_slot.as_deref() == Some(slot)
+            || (model.catalog_slot.is_none() && gw.catalog_from_slot.as_deref() == Some(slot));
+        if belongs && !id_set.contains(model.id.as_str()) {
+            model.status = "stale".into();
+        }
+    }
+    for id in ids {
+        if !gw.models.iter().any(|m| m.id == *id) {
+            gw.models.push(GatewayModel {
+                id: id.clone(),
+                source: "fetched".into(),
+                status: "available".into(),
+                last_seen_at: Some(fetched_at.to_string()),
+                catalog_slot: Some(slot.to_string()),
+                temperature: None,
+                top_p: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+            });
+        } else if let Some(model) = gw.models.iter_mut().find(|m| m.id == *id) {
+            model.status = "available".into();
+            model.last_seen_at = Some(fetched_at.to_string());
+            model.catalog_slot = Some(slot.to_string());
+        }
+    }
+    gw.catalog_fetched_at = Some(fetched_at.to_string());
+    gw.catalog_from_slot = Some(slot.to_string());
+}
+
 pub fn set_slot_url(slots: &mut ProtocolSlots, slot: Slot, url: Option<String>) {
     let url = url.filter(|s| !s.trim().is_empty());
     match slot {
@@ -270,6 +308,10 @@ pub fn restore_merged_bindings(
         bindings.push(Binding {
             id: e.discarded_id.clone(),
             agent: e.agent.clone(),
+            name: e
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{}（还原）", e.agent)),
             kind: BindingKind::Api,
             gateway_id: Some(gid),
             protocol: e.protocol.clone(),
@@ -312,7 +354,11 @@ pub fn materialize(
                 .or_else(|| binding.models.first().map(String::as_str));
             let gm = model_id.and_then(|id| g.models.iter().find(|m| m.id == id));
             (
-                g.name.clone(),
+                if binding.name.trim().is_empty() {
+                    g.name.clone()
+                } else {
+                    binding.name.clone()
+                },
                 g.no_auth,
                 g.key_hint.clone(),
                 false, // has_key 由调用方填
@@ -514,6 +560,7 @@ fn apply_policy_to_models(
                 source: "user".into(),
                 status: "available".into(),
                 last_seen_at: None,
+                catalog_slot: None,
                 temperature: None,
                 top_p: None,
                 max_output_tokens: None,
@@ -568,6 +615,7 @@ pub fn migrate_from_profiles(
             official.push(Binding {
                 id: p.id,
                 agent: p.agent,
+                name: p.name,
                 kind: BindingKind::Official,
                 gateway_id: None,
                 protocol: None,
@@ -699,6 +747,7 @@ pub fn migrate_from_profiles(
                 bindings.push(Binding {
                     id: kept.id.clone(),
                     agent,
+                    name: kept.name.clone(),
                     kind: BindingKind::Api,
                     gateway_id: Some(gw_id.clone()),
                     protocol: kept.protocol.clone(),
@@ -802,6 +851,50 @@ mod tests {
         assert_eq!(slot_for_agent("kimi", Some("kimi")), Slot::Openai);
         assert_eq!(slot_for_agent("qwen", None), Slot::Openai);
         assert_eq!(slot_for_agent("codebuddy", None), Slot::Anthropic);
+    }
+
+    fn fetched(id: &str, slot: Option<&str>) -> GatewayModel {
+        GatewayModel {
+            id: id.into(),
+            source: "fetched".into(),
+            status: "available".into(),
+            last_seen_at: None,
+            catalog_slot: slot.map(str::to_string),
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+        }
+    }
+
+    #[test]
+    fn apply_fetched_catalog_stales_only_same_slot() {
+        let mut gw = Gateway {
+            id: "g".into(),
+            name: "G".into(),
+            no_auth: false,
+            key_hint: None,
+            slots: ProtocolSlots::default(),
+            header_env: Default::default(),
+            models: vec![
+                fetched("oa-1", Some("openai")),
+                fetched("an-1", Some("anthropic")),
+            ],
+            catalog_fetched_at: None,
+            catalog_from_slot: Some("openai".into()),
+            last_probe: Vec::new(),
+            slot_probes: Vec::new(),
+        };
+        apply_fetched_catalog(&mut gw, "anthropic", &["an-2".into()], "t");
+        let by_id: HashMap<_, _> = gw
+            .models
+            .iter()
+            .map(|m| (m.id.as_str(), m.status.as_str()))
+            .collect();
+        assert_eq!(by_id["oa-1"], "available");
+        assert_eq!(by_id["an-1"], "stale");
+        assert_eq!(by_id["an-2"], "available");
+        assert_eq!(gw.catalog_from_slot.as_deref(), Some("anthropic"));
     }
 
     #[test]
@@ -1035,6 +1128,7 @@ mod tests {
         let mut bindings = vec![Binding {
             id: "new".into(),
             agent: "claude-code".into(),
+            name: "NewAPI".into(),
             kind: BindingKind::Api,
             gateway_id: Some("g1".into()),
             protocol: None,
@@ -1089,6 +1183,7 @@ mod tests {
         let mut bindings = vec![Binding {
             id: "work".into(),
             agent: "claude-code".into(),
+            name: "work".into(),
             kind: BindingKind::Api,
             gateway_id: Some("g1".into()),
             protocol: None,
@@ -1127,6 +1222,7 @@ mod tests {
                     source: "user".into(),
                     status: "available".into(),
                     last_seen_at: None,
+                    catalog_slot: None,
                     temperature: Some(0.1),
                     top_p: None,
                     max_output_tokens: None,
@@ -1137,6 +1233,7 @@ mod tests {
                     source: "user".into(),
                     status: "available".into(),
                     last_seen_at: None,
+                    catalog_slot: None,
                     temperature: Some(0.9),
                     top_p: None,
                     max_output_tokens: None,
@@ -1151,6 +1248,7 @@ mod tests {
         let b = Binding {
             id: "b".into(),
             agent: "claude-code".into(),
+            name: "test".into(),
             kind: BindingKind::Api,
             gateway_id: Some("g".into()),
             protocol: None,
@@ -1160,6 +1258,7 @@ mod tests {
             last_used_at: None,
         };
         let first = materialize(&b, Some(&gw), None);
+        assert_eq!(first.name, "test");
         assert_eq!(
             first.request_policy.reasoning_effort.as_deref(),
             Some("low")

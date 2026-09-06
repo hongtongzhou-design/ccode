@@ -16,6 +16,7 @@ import { groupModelsByVendor, vendorOf } from "../model-vendors";
 import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import { toast } from "../toast";
+import { slotForAgent } from "../gateway-slot";
 import ContextMenu from "../components/ContextMenu";
 import GatewayLibrary from "../components/GatewayLibrary";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
@@ -112,6 +113,7 @@ function ProfileModal({
   const [fetching, setFetching] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[] | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
+  const [fetchedCapabilityCount, setFetchedCapabilityCount] = useState(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
   // 获取模型的厂商分组面板：开关 / 筛选词 / 展开的厂商组
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -335,10 +337,12 @@ function ProfileModal({
       });
       setFetchedModels(res.models);
       setFetchedAt(res.fetchedAt);
+      setFetchedCapabilityCount(res.capabilityMetadataCount);
     } catch (e) {
       setFetchError(String(e));
       setFetchedModels(null);
       setFetchedAt(null);
+      setFetchedCapabilityCount(0);
     } finally {
       setFetching(false);
     }
@@ -370,9 +374,9 @@ function ProfileModal({
     try {
       if (!initial && bindMode === "existing") {
         if (!bindGatewayId) throw new Error("请选择网关");
-        const gw = gateways.find((g) => g.id === bindGatewayId);
         const bind: BindingInput = {
           agent: input.agent,
+          name: input.name,
           gatewayId: bindGatewayId,
           kind: "api",
           protocol: input.protocol,
@@ -381,7 +385,7 @@ function ProfileModal({
           extraEnv: input.extraEnv,
         };
         await bindGateway(bind);
-        onSaved?.(input.agent, gw?.name ?? input.name);
+        onSaved?.(input.agent, input.name);
         onClose();
         return;
       }
@@ -587,7 +591,7 @@ function ProfileModal({
           </div>
         </section>}
 
-        {(initial || bindMode === "new") && (
+        {(initial || bindMode === "new" || bindMode === "existing") && (
         <section className="mb-4">
           <div className="mb-2 flex items-center gap-2">
             <span className="text-xs font-medium text-l2">连接身份</span>
@@ -784,6 +788,14 @@ function ProfileModal({
                 {fetchedAt && (
                   <span className="shrink-0 whitespace-nowrap text-xs text-l4">
                     缓存 · {fmtFetchedAt(fetchedAt)}
+                  </span>
+                )}
+                {fetchedCapabilityCount === 0 && (
+                  <span
+                    className="shrink-0 whitespace-nowrap text-xs text-warn-text"
+                    title="网关只返回模型 ID，能力信息将从公共能力库或内置表补充"
+                  >
+                    未提供能力元数据
                   </span>
                 )}
               </>
@@ -2529,7 +2541,10 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       const gateway = await invoke<{
         catalogFromSlot?: string | null;
         models: { id: string }[];
-      }>("fetch_gateway_catalog", { gatewayId: profile.gatewayId });
+      }>("fetch_gateway_catalog", {
+        gatewayId: profile.gatewayId,
+        preferSlot: slotForAgent(profile.agent, profile.protocol),
+      });
       await loadAll();
       setNotice(
         `已刷新「${profile.name}」的模型目录 · ${gateway.models.length} 个模型${

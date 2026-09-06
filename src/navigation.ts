@@ -15,6 +15,7 @@ export const NAV_GROUPS = [
       { id: "workspaces", label: "项目", Icon: NAV_ICONS.workspaces },
       { id: "terminal", label: "运行", Icon: NAV_ICONS.terminal },
       { id: "sessions", label: "对话", Icon: NAV_ICONS.sessions },
+      { id: "schedules", label: "定时巡检", Icon: NAV_ICONS.schedules },
     ],
   },
   {
@@ -31,4 +32,3 @@ export const NAV_BOTTOM = [
   { id: "stats", label: "用量", Icon: NAV_ICONS.stats },
   { id: "settings", label: "设置", Icon: NAV_ICONS.settings },
 ] as const satisfies readonly NavItem[];
-

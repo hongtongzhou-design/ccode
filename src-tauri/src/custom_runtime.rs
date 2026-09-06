@@ -45,6 +45,32 @@ fn parse_args(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
+pub(crate) fn is_scratch_cwd(path: &str) -> bool {
+    let k = crate::paths::path_key(path);
+    k.ends_with("/ccode/scratch") || k.contains("/ccode/scratch/")
+}
+
+/// 标签 cwd 为空或随手聊 scratch 时启用登记的默认目录；项目根/工作树不覆盖。
+pub(crate) fn resolve_custom_cwd(
+    tab_cwd: &str,
+    default_cwd: Option<&str>,
+) -> Result<String, String> {
+    let tab = crate::sessions::expand_tilde(tab_cwd.trim());
+    let fallback = default_cwd
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(crate::sessions::expand_tilde);
+    if tab.is_empty() {
+        return fallback.ok_or_else(|| "未指定工作目录".to_string());
+    }
+    if let Some(fallback) = fallback {
+        if is_scratch_cwd(&tab) {
+            return Ok(fallback);
+        }
+    }
+    Ok(tab)
+}
+
 pub(crate) fn is_relative_command(cmd: &str) -> bool {
     let t = cmd.trim();
     t.starts_with("./") || t.starts_with(".\\") || t.starts_with("../") || t.starts_with("..\\")
@@ -150,6 +176,12 @@ pub fn save_custom_runtime(
     if cwd.as_deref().is_some_and(|v| v.contains('\0')) {
         return Err("工作目录不能包含 NUL 字符".into());
     }
+    if let Some(ref cwd) = cwd {
+        let expanded = crate::sessions::expand_tilde(cwd);
+        if !std::path::Path::new(&expanded).is_dir() {
+            return Err(format!("默认工作目录不存在：{expanded}"));
+        }
+    }
     let env_json = serde_json::to_string(&env).unwrap_or_else(|_| "{}".into());
     let conn = crate::sessions::open_db()?;
     ensure_schema(&conn)?;
@@ -193,6 +225,23 @@ pub fn delete_custom_runtime(id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_custom_cwd_uses_default_on_empty_or_scratch() {
+        assert_eq!(
+            resolve_custom_cwd("", Some("/proj")).unwrap(),
+            "/proj"
+        );
+        assert_eq!(
+            resolve_custom_cwd("/Users/u/ccode/scratch", Some("/proj")).unwrap(),
+            "/proj"
+        );
+        assert_eq!(
+            resolve_custom_cwd("/Users/u/papers/p", Some("/proj")).unwrap(),
+            "/Users/u/papers/p"
+        );
+        assert!(resolve_custom_cwd("", None).is_err());
+    }
 
     #[test]
     fn relative_commands_rejected() {

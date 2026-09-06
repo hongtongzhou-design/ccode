@@ -1,4 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
+import { confirmKeyAction } from "../confirm-dialog";
+import { imeBlocksEnter } from "../ime-guard";
 
 interface ConfirmRequest {
   message: string;
@@ -71,23 +73,16 @@ export function alertDialog(message: string): Promise<void> {
 export function ConfirmDialogHost() {
   const req = useSyncExternalStore(subscribe, () => current);
   const dialogRef = useRef<HTMLElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
 
-  // Esc = 取消、Enter = 确认；捕获阶段拦截，避免触发遮罩下层的 Esc 快捷键
+  // Esc = 取消；Enter 激活当前焦点按钮（默认焦点在确认钮）。
+  // 捕获阶段拦截，避免触发遮罩下层的 Esc 快捷键。
   useEffect(() => {
     if (!req) return;
     const previous = document.activeElement as HTMLElement | null;
-    const focusFirst = () =>
-      dialogRef.current?.querySelector<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      )?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        settle(false);
-      } else if (e.key === "Enter") {
-        e.stopPropagation();
-        settle(true);
-      } else if (e.key === "Tab" && dialogRef.current) {
+      if (e.key === "Tab" && dialogRef.current) {
         const focusable = Array.from(
           dialogRef.current.querySelectorAll<HTMLElement>(
             'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
@@ -103,10 +98,27 @@ export function ConfirmDialogHost() {
           e.preventDefault();
           first.focus();
         }
+        return;
       }
+      const action = confirmKeyAction({
+        key: e.key,
+        alert: req.alert,
+        focusedIsCancel:
+          Boolean(cancelRef.current) &&
+          document.activeElement === cancelRef.current,
+        enterBlocked: imeBlocksEnter({
+          isComposing: e.isComposing,
+          keyCode: e.keyCode,
+          composingLock: false,
+        }),
+      });
+      if (action === "none") return;
+      e.preventDefault();
+      e.stopPropagation();
+      settle(action === "confirm");
     };
     window.addEventListener("keydown", onKey, true);
-    requestAnimationFrame(focusFirst);
+    requestAnimationFrame(() => confirmRef.current?.focus());
     return () => {
       window.removeEventListener("keydown", onKey, true);
       previous?.focus();
@@ -138,6 +150,7 @@ export function ConfirmDialogHost() {
         <div className="mt-4 flex justify-end gap-2">
           {!req.alert && (
             <button
+              ref={cancelRef}
               type="button"
               onClick={() => settle(false)}
               className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
@@ -146,14 +159,13 @@ export function ConfirmDialogHost() {
             </button>
           )}
           <button
+            ref={confirmRef}
             type="button"
-            // 危险操作的确认钮用警示色（bg-err 系），与批量删除二次确认同口径
             className={`inline-flex h-7 items-center justify-center rounded-md px-3 text-xs transition-[filter] hover:brightness-110 ${
               req.danger
                 ? "bg-err text-err-text"
                 : "border border-cta-bd bg-cta font-medium text-cta-text"
             }`}
-            autoFocus
             onClick={() => settle(true)}
           >
             {req.confirmText}

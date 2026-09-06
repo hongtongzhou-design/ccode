@@ -1,6 +1,6 @@
 /**
  * 项目工作方式与编程状态归类纯逻辑。
- * 科研 / 编程 / 办公终身一种主界面；缺省或旧档案卡 = 科研。
+ * 科研 / 编程 / 工作终身一种主界面；缺省或旧档案卡 = 科研。
  * 项目栏按方式分段见 groupByWorkMode。
  */
 
@@ -11,13 +11,13 @@ export const WORK_MODES: readonly WorkMode[] = ["research", "coding", "office"];
 export const WORK_MODE_LABEL: Record<WorkMode, string> = {
   research: "科研",
   coding: "编程",
-  office: "办公",
+  office: "工作",
 };
 
 export const WORK_MODE_HINT: Record<WorkMode, string> = {
   research: "按课题推进，可选研究流程、任务卡、文献雷达",
   coding: "按分支和工作树推进，管并行改动和合并",
-  office: "处理文档和日常材料",
+  office: "处理工作文档和日常材料",
 };
 
 /** 项目栏分段：三种工作方式之后才是未添加仓库。 */

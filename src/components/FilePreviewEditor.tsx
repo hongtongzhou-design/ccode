@@ -118,7 +118,11 @@ function MarkdownView({
   /** 预览根约束（read_image_bytes 的 cwdHint 来源之一） */
   root: string;
   /** 返回 null 表示已写入；返回字符串为要给用户看的提示（如无运行中 agent）。send=true 直接发送 */
-  onDiscuss?: (text: string, fileName: string, send?: boolean) => string | null;
+  onDiscuss?: (
+    text: string,
+    fileName: string,
+    send?: boolean,
+  ) => string | null | Promise<string | null>;
   /** 相对链接的打开去向（阅读区笔记栏原地打开）；缺省走 store previewReq 终端页预览 */
   onOpenFile?: (absPath: string) => void;
 }) {
@@ -159,14 +163,15 @@ function MarkdownView({
   function discuss(send?: boolean) {
     const selected = window.getSelection()?.toString().trim() ?? "";
     if (!selected || !onDiscuss) return;
-    const err = onDiscuss(selected, fileName, send);
-    showHint(
-      err ??
-        (send
-          ? "已发送到活跃终端"
-          : "已写入活跃终端的输入框，接着输入你的意见后自行发送"),
-    );
-    if (!err) window.getSelection()?.removeAllRanges();
+    void Promise.resolve(onDiscuss(selected, fileName, send)).then((err) => {
+      showHint(
+        err ??
+          (send
+            ? "已发送到活跃终端"
+            : "已写入活跃终端的输入框，接着输入你的意见后自行发送"),
+      );
+      if (!err) window.getSelection()?.removeAllRanges();
+    });
   }
 
   // 每次 layout 都扫剩余 [data-md-src]：父级重绘若把 innerHTML 盖回占位，
@@ -277,7 +282,11 @@ function TextFilePreviewEditor({
   root: string;
   onDirtyChange?: (dirty: boolean) => void;
   /** md 阅读视图选段「◈ 讨论/改写此段」：写入活跃终端输入（send=true 直接发送）；返回 null 已写入，否则为提示 */
-  onDiscuss?: (text: string, fileName: string, send?: boolean) => string | null;
+  onDiscuss?: (
+    text: string,
+    fileName: string,
+    send?: boolean,
+  ) => string | null | Promise<string | null>;
   /** 嵌入阅读区笔记栏时置 true：自带的 ⛶ 沉浸层是 z-30，压在阅读区 z-40 下面会失灵 */
   hideImmersive?: boolean;
   /** md 阅读视图相对链接的打开去向（阅读区笔记栏原地打开）；缺省走 previewReq 终端页预览 */

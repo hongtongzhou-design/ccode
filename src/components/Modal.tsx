@@ -22,6 +22,7 @@ export function Modal({
   dismissOnBackdrop = true,
   panelClassName = "",
   contentClassName = "",
+  overflow = "auto",
 }: {
   open: boolean;
   title: ReactNode;
@@ -33,6 +34,8 @@ export function Modal({
   dismissOnBackdrop?: boolean;
   panelClassName?: string;
   contentClassName?: string;
+  /** hidden：预览类弹层自带滚动，外层再滚会撑破高度并在 WKWebView 里瓦片黑屏 */
+  overflow?: "auto" | "hidden";
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -88,7 +91,7 @@ export function Modal({
   if (!open) return null;
   return (
     <div
-      className="ccode-modal-backdrop fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-3 sm:p-4 ccode-fade"
+      className="ccode-modal-backdrop fixed inset-0 z-40 flex items-center justify-center overflow-hidden overscroll-none bg-black/40 p-3 sm:p-4 ccode-fade"
       onMouseDown={(event) => {
         if (dismissOnBackdrop && event.target === event.currentTarget) onClose();
       }}
@@ -100,7 +103,9 @@ export function Modal({
         aria-labelledby={titleId}
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
-        className={`ccode-modal-panel ccode-float-surface flex max-h-[calc(100vh-24px)] w-full ${sizes[size]} flex-col overflow-y-auto rounded-lg border border-field p-4 sm:p-5 ${panelClassName}`}
+        className={`ccode-modal-panel ccode-float-surface flex max-h-[calc(100vh-24px)] w-full ${sizes[size]} flex-col rounded-lg border border-field p-4 sm:p-5 ${
+          overflow === "hidden" ? "overflow-hidden overscroll-none" : "overflow-y-auto"
+        } ${panelClassName}`}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3">

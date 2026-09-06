@@ -28,9 +28,11 @@ import type {
   ProjectStepDto,
   RepoDto,
   RunDto,
+  TaskDto,
   WorkspaceDto,
 } from "../types";
 import { pickRecoverableRun } from "../run-model";
+import { visibleDeclaredTasks } from "../project-tasks";
 import {
   continueWorkbenchTarget,
   firstOpenStepName,
@@ -112,6 +114,7 @@ function WorkbenchPage({
   const setEnterCwdReq = useAppStore((s) => s.setEnterCwdReq);
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+  const setTaskReviewReq = useAppStore((s) => s.setTaskReviewReq);
   const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
 
   function openRun(runId: string, tabId?: string) {
@@ -144,6 +147,7 @@ function WorkbenchPage({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [recoverableRuns, setRecoverableRuns] = useState<RunDto[]>([]);
+  const [userTasks, setUserTasks] = useState<TaskDto[]>([]);
 
   useEffect(() => {
     if (!visible) return;
@@ -406,6 +410,32 @@ function WorkbenchPage({
     };
   }, [visible, hero?.registered, hero?.path]);
 
+  useEffect(() => {
+    if (!visible || projects.length === 0) {
+      setUserTasks([]);
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      projects.map((project) =>
+        invoke<TaskDto[]>("task_list", { projectRoot: project.path }).catch(
+          () => [] as TaskDto[],
+        ),
+      ),
+    ).then((lists) => {
+      if (cancelled) return;
+      setUserTasks(
+        visibleDeclaredTasks(
+          lists.flat(),
+          new Set(["office_doc", "free_research"]),
+        ),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projects, visible]);
+
   async function enterRepo(repo: RepoDto) {
     const registered = projects.find((p) =>
       samePath(p.path, repo.path, IS_WINDOWS),
@@ -496,6 +526,7 @@ function WorkbenchPage({
   }, [sessions]);
 
   const hasInbox = inboxItems.length > 0;
+  const reviewTasks = userTasks.filter((task) => task.status === "pending_review");
   const statusText = hero
     ? heroStatusLine({
         runningCount: hero.runningCount,
@@ -781,6 +812,55 @@ function WorkbenchPage({
         </section>
         )}
       </div>
+
+      {reviewTasks.length > 0 && (
+        <section className="mt-8">
+          <SectionHeading
+            icon={CircleDot}
+            title="待验收"
+            action={
+              <span className="rounded-full bg-warn px-2 py-0.5 text-micro text-warn-text">
+                {reviewTasks.length}
+              </span>
+            }
+          />
+          <div className="grid gap-2 md:grid-cols-2">
+            {reviewTasks.map((task) => {
+              const project = task.projectRoot
+                ? projects.find((item) =>
+                    samePath(item.path, task.projectRoot!, IS_WINDOWS),
+                  )
+                : undefined;
+              return (
+                <button
+                  key={task.id}
+                  type="button"
+                  className="flex min-w-0 items-center gap-3 rounded-lg border border-hairline bg-raised/40 px-3 py-2.5 text-left hover:bg-hover"
+                  onClick={() => {
+                    if (task.projectRoot) {
+                      setSelectProjectReq(task.projectRoot);
+                      setTaskReviewReq({
+                        projectRoot: task.projectRoot,
+                        taskId: task.id,
+                      });
+                    }
+                    setPage("workspaces");
+                  }}
+                >
+                  <span className="size-1.5 shrink-0 rounded-full bg-warn-text" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm text-l1">{task.name}</span>
+                    <span className="mt-0.5 block truncate text-micro text-l4">
+                      {project?.name ?? "项目"} · 等待验收
+                    </span>
+                  </span>
+                  <ChevronRight size={14} className="shrink-0 text-l4" aria-hidden="true" />
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <div className="mt-10 grid gap-8 lg:grid-cols-2">
         <section className="min-w-0">

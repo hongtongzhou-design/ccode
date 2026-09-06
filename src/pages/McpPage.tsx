@@ -215,6 +215,22 @@ export default function McpPage({ visible }: { visible: boolean }) {
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
+  const applyingRef = useRef<Set<string>>(new Set());
+  function beginApply(key: string): boolean {
+    if (applyingRef.current.has(key)) return false;
+    applyingRef.current.add(key);
+    setApplying((prev) => ({ ...prev, [key]: true }));
+    return true;
+  }
+  function endApply(key: string) {
+    applyingRef.current.delete(key);
+    setApplying((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
   const [expanded, setExpanded] = useState<string | null>(null);
   // 分发五态缓存（server id → agent id → off|ok|modified|missing|disabled_externally）：
   // 探测要读各 CLI 的配置文件，不轮询；但缓存在三个时机主动作废——展开条目、
@@ -436,17 +452,16 @@ export default function McpPage({ visible }: { visible: boolean }) {
   }
 
   /** 全局启用/停用：停用从各 agent 移除条目但保留分发映射（重开按原样重投） */
-  async function setEnabled(s: McpServerDto, enabled: boolean, force = false) {
+  async function setEnabled(s: McpServerDto, enabled: boolean) {
     const key = `${s.id}:__global__`;
-    if (applying[key]) return;
-    setApplying((prev) => ({ ...prev, [key]: true }));
+    if (!beginApply(key)) return;
     setError(null);
     try {
       setServers(
         await invoke<McpServerDto[]>("set_mcp_server_enabled", {
           id: s.id,
           enabled,
-          force,
+          force: false,
         }),
       );
       setDistStatus((prev) => {
@@ -461,7 +476,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
       );
     } catch (e) {
       const msg = String(e);
-      if (msg.startsWith("EXTMOD:") && !force) {
+      if (msg.startsWith("EXTMOD:")) {
         const agents = msg.slice("EXTMOD:".length);
         if (
           await confirmDialog(
@@ -469,13 +484,33 @@ export default function McpPage({ visible }: { visible: boolean }) {
             { danger: true },
           )
         ) {
-          return setEnabled(s, enabled, true);
+          try {
+            setServers(
+              await invoke<McpServerDto[]>("set_mcp_server_enabled", {
+                id: s.id,
+                enabled,
+                force: true,
+              }),
+            );
+            setDistStatus((prev) => {
+              const next = { ...prev };
+              delete next[s.id];
+              return next;
+            });
+            toast(
+              enabled
+                ? `已启用「${s.name}」并按映射重新分发`
+                : `已停用「${s.name}」（分发映射保留，重新启用时恢复）`,
+            );
+          } catch (retry) {
+            setError(String(retry));
+          }
         }
       } else {
         setError(msg);
       }
     } finally {
-      setApplying((prev) => ({ ...prev, [key]: false }));
+      endApply(key);
     }
   }
 
@@ -486,7 +521,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
     force = false,
   ) {
     const key = `${server.id}:${agent}`;
-    if (applying[key]) return;
+    if (applyingRef.current.has(key)) return;
     // $VAR 引用预检：拨开前先问（GUI 应用读不到 shell rc 的变量，分发后可能起不来），非阻断
     if (
       on &&
@@ -515,7 +550,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
       )
         return;
     }
-    setApplying((prev) => ({ ...prev, [key]: true }));
+    if (!beginApply(key)) return;
     setError(null);
     try {
       setServers(
@@ -548,14 +583,34 @@ export default function McpPage({ visible }: { visible: boolean }) {
             { danger: true },
           )
         ) {
-          setApplying((prev) => ({ ...prev, [key]: false }));
-          return toggleApp(server, agent, on, true);
+          try {
+            setServers(
+              await invoke<McpServerDto[]>("set_mcp_server_app", {
+                id: server.id,
+                agent,
+                enabled: on,
+                force: true,
+              }),
+            );
+            setDistStatus((prev) => {
+              const next = { ...prev };
+              delete next[server.id];
+              return next;
+            });
+            toast(
+              on
+                ? `已分发到 ${AGENTS.find((a) => a.id === agent)?.label}`
+                : `已从 ${AGENTS.find((a) => a.id === agent)?.label} 移除`,
+            );
+          } catch (retry) {
+            setError(String(retry));
+          }
         }
       } else {
         setError(msg);
       }
     } finally {
-      setApplying((prev) => ({ ...prev, [key]: false }));
+      endApply(key);
     }
   }
 

@@ -9,6 +9,7 @@ export type RunTaskKind =
   | "pipeline_step"
   | "coding_lane"
   | "office_doc"
+  | "free_research"
   | "watch"
   | "reader"
   | "scratch"
@@ -32,6 +33,7 @@ export function inferTaskKind(
   if (key.startsWith("reader:")) return "reader";
   if (key.startsWith("watch:")) return "watch";
   if (key.startsWith("office:")) return "office_doc";
+  if (key.startsWith("free:") || key.startsWith("research:")) return "free_research";
   if (key.startsWith("ws:")) return "pipeline_step";
   if (key.startsWith("lane:") || key.startsWith("coding:")) return "coding_lane";
   if (key.startsWith("headless:")) return "scratch";
@@ -55,6 +57,8 @@ export function isTaskReuseKey(reuseKey: string | undefined): boolean {
     key.startsWith("ws:") ||
     key.startsWith("lane:") ||
     key.startsWith("office:") ||
+    key.startsWith("free:") ||
+    key.startsWith("task:") ||
     key.startsWith("reader:") ||
     key.startsWith("custom:") ||
     key.startsWith("research:") ||

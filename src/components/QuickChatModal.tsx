@@ -10,6 +10,7 @@ import { abbrevHome } from "../path-utils";
 import { Modal } from "./Modal";
 import {
   pickQuickChatHistory,
+  pickRememberedProfileId,
   profileCanAutoStart,
   sessionDisplayTitle,
 } from "../quick-chat";
@@ -62,11 +63,12 @@ export async function launchQuickChatDirect(): Promise<boolean> {
   const usable = agentProfiles.filter((p) =>
     profileCanAutoStart(p, hidden.has(p.id)),
   );
-  // 记住的配置可能已删除/停用/失效：只在有明确可启动配置时直达，
-  // 否则退回弹层，让用户看见并修正连接，而不是静默启动失败。
-  const profileId = usable.some((p) => p.id === r.profileId)
-    ? r.profileId!
-    : (usable[0]?.id ?? "");
+  // 记住的配置可能已删除/停用/失效：只在原配置仍可启动时直达，
+  // 否则退回弹层，让用户看见并修正连接。不改用同 Agent 另一条。
+  const profileId = pickRememberedProfileId(
+    r.profileId,
+    usable.map((p) => p.id),
+  );
   if (!profileId) return false;
   let cwd = r.cwd?.trim() ?? "";
   if (!cwd) {

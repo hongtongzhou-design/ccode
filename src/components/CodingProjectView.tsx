@@ -37,6 +37,7 @@ import {
 } from "../coding-lanes";
 import { loadAskAiRemembered } from "../ask-ai";
 import { codingTerminalLaunch } from "../kickoff-launch";
+import { loadProjectContextPack } from "../project-context-load";
 import { absTime, relTime } from "../rel-time";
 import { imeBlocksEnter } from "../ime-guard";
 import {
@@ -376,12 +377,26 @@ export default function CodingProjectView({
       );
       if (!ok) return;
     }
+    const launch = codingTerminalLaunch(
+      profiles,
+      loadAskAiRemembered(),
+      project?.defaultAgent,
+      project?.defaultAgent
+        ? project.defaultProfiles?.[project.defaultAgent]
+        : undefined,
+    );
+    const pack = await loadProjectContextPack({
+      name: project?.name ?? title,
+      path: repoPath,
+      workMode: "coding",
+    });
     setPendingTerminal({
       cwd: w.path,
       extraEnv: {},
       title,
       reuseKey: `lane:${w.path}`,
-      ...codingTerminalLaunch(profiles, loadAskAiRemembered()),
+      ...launch,
+      initialPrompt: pack,
     });
     setPage("terminal");
   }
@@ -487,14 +502,27 @@ export default function CodingProjectView({
             /* 车道覆盖层失败不阻断开工 */
           }
           setLaneName("");
-          const launch = codingTerminalLaunch(profiles, loadAskAiRemembered());
+          const launch = codingTerminalLaunch(
+            profiles,
+            loadAskAiRemembered(),
+            project?.defaultAgent,
+            project?.defaultAgent
+              ? project.defaultProfiles?.[project.defaultAgent]
+              : undefined,
+          );
+          const pack = await loadProjectContextPack({
+            name: project?.name ?? name,
+            path: repoPath,
+            workMode: "coding",
+            goal: name || r.worktree.branch || branch,
+          });
           setPendingTerminal({
             cwd: r.worktree.path,
             extraEnv: {},
             title: name || r.worktree.branch || branch,
             reuseKey: `lane:${r.worktree.path}`,
-            initialPrompt: "先读 TASK.md 再动手",
             ...(launch ?? {}),
+            initialPrompt: `${pack}\n\n----\n\n先读 TASK.md 再动手`,
           });
           setPage("terminal");
         }
@@ -727,7 +755,7 @@ export default function CodingProjectView({
     setMenu({ x: rect.right, y: rect.bottom + 4, items });
   }
 
-  const name = project?.name ?? repoPath.split(/[\\/]/).pop() ?? repoPath;
+  const projectName = project?.name ?? repoPath.split(/[\\/]/).pop() ?? repoPath;
   const branches = ov?.branches ?? [];
   const base = ov?.baseBranch ?? "";
   const statusLine = ov
@@ -736,7 +764,6 @@ export default function CodingProjectView({
         merging: ov.merging,
       })
     : "";
-  const showPath = homeDir ? abbrevHome(repoPath, homeDir, IS_WINDOWS) : repoPath;
   const origin = ov?.origin ?? null;
   const hostKind = (origin?.hostKind === "github" ? "github" : origin ? "other" : null) as
     | "github"
@@ -754,36 +781,7 @@ export default function CodingProjectView({
     <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-0">
       <div className={`min-w-0 flex-1 space-y-5 ${sessionsOpen ? "lg:pr-6" : ""}`}>
         <section>
-          <div className="flex min-w-0 items-start gap-2">
-            <p className="min-w-0 flex-1 text-base font-semibold tracking-tight text-l1">
-              {name}
-            </p>
-            {ov?.isRepo && (
-              <div className="ccode-mobile-sessions-trigger">
-                <ProjectSessionsSection
-                  projectPath={repoPath}
-                  extraRoots={extraRoots}
-                  variant="sidebar"
-                  collapsed
-                  onToggle={() => setSessionsOpen(true)}
-                  onError={onError}
-                />
-              </div>
-            )}
-          </div>
-          <div className="mt-1 flex min-w-0 items-center gap-1">
-            <p
-              className="min-w-0 truncate font-mono text-micro text-l3"
-              title={repoPath}
-            >
-              {showPath}
-            </p>
-            <PathActions path={repoPath} onError={onError} />
-          </div>
-          <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-l3">
-            <span className="rounded-full bg-strip px-2 py-0.5 text-micro text-l2">
-              编程
-            </span>
+          <p className="flex flex-wrap items-center gap-2 text-xs text-l3">
             {base && (
               <span className="inline-flex items-center gap-1 text-l4">
                 基准
@@ -825,6 +823,19 @@ export default function CodingProjectView({
               </TipWrap>
             )}
             <span className="ml-auto flex items-center gap-1">
+              {ov?.isRepo && (
+                <span className="ccode-mobile-sessions-trigger md:hidden">
+                  <ProjectSessionsSection
+                    projectPath={repoPath}
+                    extraRoots={extraRoots}
+                    variant="sidebar"
+                    collapsed
+                    onToggle={() => setSessionsOpen(true)}
+                    onError={onError}
+                  />
+                </span>
+              )}
+              <PathActions path={repoPath} onError={onError} />
               {origin && (
                 <button
                   type="button"
@@ -1380,7 +1391,15 @@ export default function CodingProjectView({
               onError={onError}
               onNewChat={(e) =>
                 beginProjectChat(
-                  { cwd: repoPath, name, kind: "coding" },
+                  {
+                    cwd: repoPath,
+                    name: projectName,
+                    kind: "coding",
+                    preferredAgent: project?.defaultAgent,
+                    preferredProfile: project?.defaultAgent
+                      ? project.defaultProfiles?.[project.defaultAgent]
+                      : undefined,
+                  },
                   { forcePick: !!(e.metaKey || e.ctrlKey) },
                 )
               }

@@ -3657,6 +3657,7 @@ mod gateway_usage_tests {
         Binding {
             id: id.into(),
             agent: agent.into(),
+            name: id.into(),
             kind,
             gateway_id: gid.map(|s| s.into()),
             protocol: None,

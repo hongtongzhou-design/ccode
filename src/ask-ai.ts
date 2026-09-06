@@ -15,6 +15,13 @@ export interface AskAiFile {
   prompt?: string;
   /** 默认：有 path 就开右栏预览 */
   preview?: boolean;
+  /** 项目级默认 Agent；只影响本次弹层预选，不覆盖全局记忆。 */
+  preferredAgent?: string | null;
+  /** 项目级默认 profile；需与 preferredAgent 属于同一 Agent。 */
+  preferredProfile?: string | null;
+  /** 项目对话：true = 隔离写入，结束后验收。 */
+  writeReview?: boolean;
+  workMode?: "office" | "coding" | "research";
 }
 
 export interface AskAiRemembered {

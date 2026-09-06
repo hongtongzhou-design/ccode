@@ -5,6 +5,7 @@ import { AGENTS } from "../types";
 import { Checkbox, fieldClass, FoldMark, primaryActionClass, secondaryActionClass } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import { policyFieldHint, policyFieldMode } from "../combo-field";
+import { firstFilledCatalogSlot } from "../gateway-slot";
 import type {
   BindingInput,
   ComboSurfaceDto,
@@ -90,6 +91,7 @@ export default function GatewayLibrary({
   const [probingAll, setProbingAll] = useState(false);
   const [bindAgent, setBindAgent] = useState("");
   const [monthUsage, setMonthUsage] = useState<GatewayUsageRow[]>([]);
+  const modelSurfaceGen = useRef(0);
 
   useEffect(() => {
     void loadGateways().catch((e) => {
@@ -113,6 +115,7 @@ export default function GatewayLibrary({
   const rate = useAppStore((s) => s.settings?.rateUsdCny) ?? 7.2;
 
   function openEdit(g: Gateway | "new") {
+    modelSurfaceGen.current += 1;
     setError(null);
     setExpanded(null);
     setComboByModel({});
@@ -167,16 +170,20 @@ export default function GatewayLibrary({
   const modelIdsKey = models.map((m) => m.id).join("\u0001");
   async function loadModelSurface(ids: string[]) {
     if (editing === null || editing === "new" || ids.length === 0) return;
+    const gatewayId = editing.id;
+    const gen = ++modelSurfaceGen.current;
     const [combo, capability] = await Promise.allSettled([
       invoke<ComboSurfaceDto[]>("combo_surface_for_gateway_batch", {
-        gatewayId: editing.id,
+        gatewayId,
         models: ids,
       }),
       invoke<ModelCapabilityDto[]>("model_capabilities", {
         models: ids,
-        gatewayId: editing.id,
+        gatewayId,
       }),
     ]);
+    if (gen !== modelSurfaceGen.current) return;
+    const failures: string[] = [];
     if (combo.status === "fulfilled") {
       setComboByModel((current) => ({
         ...current,
@@ -185,6 +192,8 @@ export default function GatewayLibrary({
           return all;
         }, {}),
       }));
+    } else {
+      failures.push(`模型策略加载失败：${String(combo.reason)}`);
     }
     if (capability.status === "fulfilled") {
       setCaps((current) => ({
@@ -194,7 +203,10 @@ export default function GatewayLibrary({
           return all;
         }, {}),
       }));
+    } else {
+      failures.push(`模型能力加载失败：${String(capability.reason)}`);
     }
+    if (failures.length) setError(failures.join("；"));
   }
 
   useEffect(() => {
@@ -302,7 +314,10 @@ export default function GatewayLibrary({
     setFetchingCatalog(true);
     setError(null);
     try {
-      const saved = await invoke<Gateway>("fetch_gateway_catalog", { gatewayId: editing.id });
+      const saved = await invoke<Gateway>("fetch_gateway_catalog", {
+        gatewayId: editing.id,
+        preferSlot: firstFilledCatalogSlot(slots, editing.catalogFromSlot),
+      });
       const list = await invoke<Gateway[]>("list_gateways");
       const fresh = list.find((g) => g.id === saved.id) ?? saved;
       setModels(fresh.models.map((m) => ({ ...m })));
@@ -400,6 +415,7 @@ export default function GatewayLibrary({
     if (editing === null || editing === "new" || !bindAgent) return;
     const input: BindingInput = {
       agent: bindAgent,
+      name: editing.name,
       gatewayId: editing.id,
       kind: "api",
       protocol: null,

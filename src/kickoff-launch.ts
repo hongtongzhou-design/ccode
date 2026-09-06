@@ -14,11 +14,21 @@ export function pickKickoffLaunch(
   profiles: readonly { id: string; agent: string; models?: string[] }[],
   remembered: AskAiRemembered | null,
   last?: { agentId?: string; profileId?: string; model?: string } | null,
+  preferredAgent?: string | null,
+  preferredProfile?: string | null,
 ): KickoffLaunch | null {
   if (profiles.length === 0) return null;
   const has = (id: string) => profiles.some((p) => p.id === id);
   const from = remembered ?? last ?? null;
   const profile =
+    (preferredProfile &&
+    (!preferredAgent ||
+      profiles.find((p) => p.id === preferredProfile)?.agent === preferredAgent)
+      ? profiles.find((p) => p.id === preferredProfile) ?? null
+      : null) ??
+    (preferredAgent
+      ? profiles.find((p) => p.agent === preferredAgent) ?? null
+      : null) ??
     (from?.profileId && has(from.profileId)
       ? profiles.find((p) => p.id === from.profileId)
       : null) ??
@@ -39,13 +49,21 @@ export function pickKickoffLaunch(
 export function codingTerminalLaunch(
   profiles: readonly { id: string; agent: string; models?: string[] }[],
   remembered: AskAiRemembered | null,
+  preferredAgent?: string | null,
+  preferredProfile?: string | null,
 ): {
   agentId: string;
   profileId: string;
   model: string;
   autoStart: boolean;
 } | null {
-  const launch = pickKickoffLaunch(profiles, remembered);
+  const launch = pickKickoffLaunch(
+    profiles,
+    remembered,
+    null,
+    preferredAgent,
+    preferredProfile,
+  );
   if (!launch) return null;
   return {
     ...launch,

@@ -38,6 +38,7 @@ import type { RunOverviewInput } from "./run-overview";
 import type { DepCheckDto } from "./dep-check";
 import type { AskAiFile } from "./ask-ai";
 import { paperResourceFor } from "./lit-watch";
+import { toast } from "./toast";
 import type {
   BindingInput,
   DetectResult,
@@ -224,6 +225,8 @@ export interface PendingTerminal {
   stepName?: string;
   /** 第 1 期 Run 身份；恢复同一 Run 时带上 */
   runId?: string;
+  /** 新建 Task 后预创建的 Run 所属 Task。 */
+  taskId?: string;
 }
 
 /** 工作区页 / 改动面板 → 终端全宽审阅视图的一次性交接。 */
@@ -375,28 +378,35 @@ export function runInboxAction(item: InboxItem) {
       s.setPage("terminal");
     } else if (runId) {
       void import("@tauri-apps/api/core").then(({ invoke }) =>
-        invoke<RunDto | null>("run_get", { id: runId }).then((run) => {
-          if (!run) return;
-          const custom = run.runtime === "custom" || run.agent === "custom";
-          s.setPendingTerminal({
-            cwd: run.isolationPath,
-            extraEnv: {},
-            agentId: custom ? "custom" : run.agent,
-            profileId: custom ? undefined : run.profileId ?? undefined,
-            customRuntimeId: custom
-              ? run.customRuntimeId ??
-                run.reuseKey?.match(/^custom:([^:]+):/)?.[1]
-              : undefined,
-            reuseKey: run.reuseKey ?? undefined,
-            runId,
-            permission: run.permission === "discuss" ? "discuss" : "write_tree",
-            resume: !custom && run.sessionId
-              ? { agentId: run.agent, sessionId: run.sessionId }
-              : undefined,
-            autoStart: !custom && Boolean(run.sessionId),
-          });
-          s.setPage("terminal");
-        }),
+        invoke<RunDto | null>("run_get", { id: runId })
+          .then((run) => {
+            if (!run) {
+              toast("找不到这次运行，可能已被清理", "warning");
+              return;
+            }
+            const custom = run.runtime === "custom" || run.agent === "custom";
+            s.setPendingTerminal({
+              cwd: run.isolationPath,
+              extraEnv: {},
+              agentId: custom ? "custom" : run.agent,
+              profileId: custom ? undefined : run.profileId ?? undefined,
+              customRuntimeId: custom
+                ? run.customRuntimeId ??
+                  run.reuseKey?.match(/^custom:([^:]+):/)?.[1]
+                : undefined,
+              reuseKey: run.reuseKey ?? undefined,
+              runId,
+              permission: run.permission === "discuss" ? "discuss" : "write_tree",
+              resume: !custom && run.sessionId
+                ? { agentId: run.agent, sessionId: run.sessionId }
+                : undefined,
+              autoStart: !custom && Boolean(run.sessionId),
+            });
+            s.setPage("terminal");
+          })
+          .catch((reason) => {
+            toast(`打开运行失败：${String(reason)}`, "error");
+          }),
       );
     }
   } else if (item.action.type === "session") {
@@ -583,6 +593,9 @@ interface AppState {
     r: { kind: "project" | "step" | "task" | "agent"; value: string; label: string } | null,
   ) => void;
   setSelectProjectReq: (path: string | null) => void;
+  /** 工作台「待验收」→ 项目页打开对应目标的验收层 */
+  taskReviewReq: { projectRoot: string; taskId: string } | null;
+  setTaskReviewReq: (req: { projectRoot: string; taskId: string } | null) => void;
   /** 任务卡（按项目根缓存；list_task_cards 对非项目目录返回空表不报错） */
   taskCards: Record<string, TaskCardDto[]>;
   /** 拉取并缓存某项目的任务卡；失败抛错由调用方行内报错 */
@@ -815,6 +828,8 @@ export const useAppStore = create<AppState>((set, get) => {
   helpViewReq: null,
   setHelpViewReq: (path) => set({ helpViewReq: path }),
   setSelectProjectReq: (path) => set({ selectProjectReq: path }),
+  taskReviewReq: null,
+  setTaskReviewReq: (req) => set({ taskReviewReq: req }),
   sessionScopeReq: null,
   setSessionScopeReq: (r) => set({ sessionScopeReq: r }),
   taskCards: {},

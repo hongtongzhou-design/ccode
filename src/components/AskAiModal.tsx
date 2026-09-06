@@ -17,20 +17,51 @@ import {
 } from "../ask-ai";
 import { projectChatReuseKey } from "../work-mode";
 import { Modal } from "./Modal";
+import { composeLaunchPrompt } from "../project-context";
+import { loadProjectContextPack } from "../project-context-load";
+import { invoke } from "@tauri-apps/api/core";
+import type { RunDto, TaskDto } from "../types";
 
 export function beginAskAi(
   file: AskAiFile,
   opts?: { forcePick?: boolean },
 ): void {
-  const { profiles, setAskAiReq, setPendingTerminal, setPage } =
-    useAppStore.getState();
-  const remembered = loadAskAiRemembered();
-  if (!opts?.forcePick && askAiCanSkip(remembered, profiles)) {
-    setPendingTerminal(buildAskAiPending(file, remembered!));
-    setPage("terminal");
-    return;
-  }
-  setAskAiReq(file);
+  void (async () => {
+    const pack = await loadProjectContextPack({
+      name: file.name,
+      path: file.root || file.cwd,
+      workMode: file.workMode,
+      writeReview: false,
+    });
+    const userPrompt =
+      file.prompt !== undefined
+        ? file.prompt
+        : file.path.trim()
+          ? `请看这份文件：${/\s/.test(file.path) ? `"${file.path}"` : file.path}`
+          : "";
+    const next: AskAiFile = {
+      ...file,
+      prompt: composeLaunchPrompt(pack, userPrompt),
+    };
+    const { profiles, setAskAiReq, setPendingTerminal, setPage } =
+      useAppStore.getState();
+    const remembered = loadAskAiRemembered();
+    const preferredMatches =
+      !next.preferredAgent || remembered?.agentId === next.preferredAgent;
+    const profileMatches =
+      !next.preferredProfile || remembered?.profileId === next.preferredProfile;
+    if (
+      !opts?.forcePick &&
+      preferredMatches &&
+      profileMatches &&
+      askAiCanSkip(remembered, profiles)
+    ) {
+      setPendingTerminal(buildAskAiPending(next, remembered!));
+      setPage("terminal");
+      return;
+    }
+    setAskAiReq(next);
+  })();
 }
 
 /** 项目侧栏「＋ 新对话」：在项目根开聊，不预览文件。⌘/Ctrl 点可重选配置。 */
@@ -39,6 +70,8 @@ export function beginProjectChat(
     cwd: string;
     name: string;
     kind: "office" | "coding" | "research";
+    preferredAgent?: string | null;
+    preferredProfile?: string | null;
   },
   opts?: { forcePick?: boolean },
 ): void {
@@ -51,6 +84,9 @@ export function beginProjectChat(
       reuseKey: projectChatReuseKey(input.kind, input.cwd),
       prompt: "",
       preview: false,
+      preferredAgent: input.preferredAgent,
+      preferredProfile: input.preferredProfile,
+      workMode: input.kind,
     },
     opts,
   );
@@ -86,20 +122,33 @@ export default function AskAiModal() {
   const [useDefault, setUseDefault] = useState(
     () => remembered?.useDefault ?? false,
   );
+  const [writeReview, setWriteReview] = useState(false);
+  const [starting, setStarting] = useState(false);
 
   useEffect(() => {
     if (!req) return;
     const r = loadAskAiRemembered();
-    const nextAgent = r?.agentId ?? agentOptions[0]?.id ?? "claude-code";
+    const preferred = req.preferredAgent?.trim();
+    const nextAgent =
+      (preferred && profiles.some((p) => p.agent === preferred)
+        ? preferred
+        : r?.agentId) ??
+      agentOptions[0]?.id ??
+      "claude-code";
     setAgentId(nextAgent);
     const list = profiles.filter((p) => p.agent === nextAgent);
+    const preferredProfile = req.preferredProfile?.trim();
     const nextProfile =
-      (r?.profileId && list.some((p) => p.id === r.profileId)
-        ? r.profileId
-        : list[0]?.id) ?? "";
+      (preferredProfile && list.some((p) => p.id === preferredProfile)
+        ? preferredProfile
+        : r?.profileId && list.some((p) => p.id === r.profileId)
+          ? r.profileId
+          : list[0]?.id) ?? "";
     setProfileId(nextProfile);
     setModel(r?.model ?? "");
     setUseDefault(r?.useDefault ?? false);
+    setWriteReview(false);
+    setStarting(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req]);
 
@@ -133,10 +182,56 @@ export default function AskAiModal() {
     setAskAiReq(null);
   }
 
-  function start() {
+  async function start() {
     if (!profileId) return;
     const choice = { agentId, profileId, model: model.trim() };
     saveAskAiRemembered({ ...choice, useDefault });
+    const projectChat = !file.path.trim();
+    if (projectChat && writeReview && file.workMode && file.workMode !== "coding") {
+      setStarting(true);
+      try {
+        const pack = await loadProjectContextPack({
+          name: file.name,
+          path: file.cwd,
+          workMode: file.workMode,
+          writeReview: true,
+        });
+        const task = await invoke<TaskDto>("task_create", {
+          input: {
+            projectRoot: file.cwd,
+            kind: file.workMode === "office" ? "office_doc" : "free_research",
+            name: file.name,
+            description: "项目对话（验收后写入）",
+            inputPaths: ["."],
+            outputPaths: ["."],
+            permission: "write_tree",
+            agent: agentId,
+            profileId,
+          },
+        });
+        const run = await invoke<RunDto>("task_prepare_run", {
+          input: { taskId: task.id, agent: agentId, profileId },
+        });
+        setPendingTerminal({
+          ...buildAskAiPending(
+            { ...file, prompt: composeLaunchPrompt(pack, "") },
+            choice,
+          ),
+          cwd: run.isolationPath,
+          permission: "write_tree",
+          reuseKey: `task:${task.id}`,
+          runId: run.id,
+          taskId: task.id,
+          autoStart: true,
+        });
+        setPage("terminal");
+        close();
+      } catch {
+        setStarting(false);
+        return;
+      }
+      return;
+    }
     setPendingTerminal(buildAskAiPending(file, choice));
     setPage("terminal");
     close();
@@ -208,6 +303,14 @@ export default function AskAiModal() {
               ))}
             </datalist>
           </label>
+          {!file.path.trim() && file.workMode && file.workMode !== "coding" && (
+            <Checkbox
+              className="mb-3 text-xs text-l3"
+              checked={writeReview}
+              onChange={setWriteReview}
+              label="验收后写入（改动先放副本，你勾选再进项目）"
+            />
+          )}
           <Checkbox
             className="mb-3 text-xs text-l3"
             checked={useDefault}
@@ -228,10 +331,10 @@ export default function AskAiModal() {
             <button
               type="submit"
               className={primaryActionClass}
-              disabled={!profileId}
+              disabled={!profileId || starting}
               autoFocus
             >
-              开始
+              {starting ? "正在准备…" : "开始"}
             </button>
           </div>
         </form>

@@ -959,32 +959,42 @@ function BindToStepModal({
   onBound: (msg: string) => void;
 }) {
   const [projects, setProjects] = useState<ProjectDto[] | null>(null);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
   const [projectPath, setProjectPath] = useState("");
-  const [steps, setSteps] = useState<ProjectStepDto[] | null>(null);
+  const [steps, setSteps] = useState<ProjectStepDto[] | "loading" | "error">(
+    "loading",
+  );
+  const [stepsTick, setStepsTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  function loadProjects() {
+    setProjects(null);
+    setProjectsError(null);
     invoke<ProjectDto[]>("list_projects")
       .then((list) => {
         setProjects(list);
-        if (list.length > 0) setProjectPath(list[0].path);
+        if (list.length > 0) setProjectPath((cur) => cur || list[0].path);
       })
-      .catch((reason) => setError(String(reason)));
+      .catch((reason) => setProjectsError(String(reason)));
+  }
+
+  useEffect(() => {
+    loadProjects();
   }, []);
 
   useEffect(() => {
     if (!projectPath) return;
-    setSteps(null);
+    setSteps("loading");
     setError(null);
     invoke<ProjectConfigReadDto>("read_project_config", { path: projectPath })
       .then((read) => setSteps(read.config.steps))
       .catch((reason) => {
-        // 读取失败不能伪装成“没有步骤”，否则用户会误以为可以安全跳过配置。
-        setSteps(null);
+        // 读取失败不能伪装成“没有步骤”或一直“读取中”。
+        setSteps("error");
         setError(`读取项目研究流程失败：${String(reason)}`);
       });
-  }, [projectPath]);
+  }, [projectPath, stepsTick]);
 
   async function bind(step: ProjectStepDto) {
     if (busy || step.skills.includes(skill.name)) return;
@@ -1010,7 +1020,18 @@ function BindToStepModal({
         <p className="mb-3 text-xs text-l3">
           把技能挂到项目研究流程的某一步；下次开工 TASK.md 的「本步骤技能」段会列出它。
         </p>
-        {projects === null ? (
+        {projectsError ? (
+          <div className="py-6 text-center">
+            <p className="text-sm text-err-text">读取项目列表失败：{projectsError}</p>
+            <button
+              type="button"
+              className="mt-2 rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+              onClick={() => loadProjects()}
+            >
+              重试
+            </button>
+          </div>
+        ) : projects === null ? (
           <p className="py-6 text-center text-sm text-l4">读取项目列表…</p>
         ) : projects.length === 0 ? (
           <p className="py-6 text-center text-sm text-l4">
@@ -1030,10 +1051,20 @@ function BindToStepModal({
               ))}
             </select>
             <div className="max-h-56 overflow-auto rounded-sm border border-field">
-              {steps === null ? (
+              {steps === "loading" ? (
                 <p className="px-3 py-4 text-center text-xs text-l4">
                   读取步骤…
                 </p>
+              ) : steps === "error" ? (
+                <div className="px-3 py-4 text-center">
+                  <button
+                    type="button"
+                    className="text-xs text-l2 hover:bg-hover rounded-sm px-2 py-1"
+                    onClick={() => setStepsTick((n) => n + 1)}
+                  >
+                    重新读取步骤
+                  </button>
+                </div>
               ) : steps.length === 0 ? (
                 <p className="px-3 py-4 text-center text-xs text-l4">
                   该项目还没有研究流程步骤

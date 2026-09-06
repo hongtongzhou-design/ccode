@@ -24,6 +24,10 @@ pub struct ProjectDto {
     pub last_opened_at: Option<String>,
     /// research / coding / office；读自 project.toml，缺省 research
     pub work_mode: String,
+    /// 项目级默认 Agent；密钥与 profile 仍只存全局配置。
+    pub default_agent: Option<String>,
+    /// Agent id → 项目默认 profile id；只保存引用，不保存密钥。
+    pub default_profiles: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -273,6 +277,24 @@ fn db_at(path: &Path) -> Result<Connection, String> {
           created_at TEXT, last_opened_at TEXT);",
     )
     .map_err(|e| format!("初始化 projects 表失败: {e}"))?;
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(projects)")
+        .map_err(|e| format!("读取 projects 表结构失败: {e}"))?
+        .query_map([], |r| r.get(1))
+        .map_err(|e| format!("读取 projects 表结构失败: {e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("读取 projects 表结构失败: {e}"))?;
+    if !columns.iter().any(|c| c == "default_agent") {
+        conn.execute("ALTER TABLE projects ADD COLUMN default_agent TEXT", [])
+            .map_err(|e| format!("升级 projects 表失败: {e}"))?;
+    }
+    if !columns.iter().any(|c| c == "default_profiles") {
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN default_profiles TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )
+        .map_err(|e| format!("升级 projects 表失败: {e}"))?;
+    }
     Ok(conn)
 }
 
@@ -324,11 +346,28 @@ fn register_at(
         )
         .ok();
     Ok(attach_work_mode(ProjectDto {
-        path: key,
+        path: key.clone(),
         name,
         created_at,
         last_opened_at: Some(now.to_string()),
         work_mode: "research".into(),
+        default_agent: conn
+            .query_row(
+                "SELECT default_agent FROM projects WHERE path=?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten(),
+        default_profiles: conn
+            .query_row(
+                "SELECT default_profiles FROM projects WHERE path=?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default(),
     }))
 }
 
@@ -340,7 +379,7 @@ fn attach_work_mode(mut p: ProjectDto) -> ProjectDto {
 pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT path, name, created_at, last_opened_at FROM projects
+            "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles FROM projects
              ORDER BY last_opened_at DESC, path ASC",
         )
         .map_err(|e| format!("读取项目列表失败: {e}"))?;
@@ -352,6 +391,11 @@ pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, Str
                 created_at: r.get(2)?,
                 last_opened_at: r.get(3)?,
                 work_mode: "research".into(),
+                default_agent: r.get(4)?,
+                default_profiles: serde_json::from_str(
+                    &r.get::<_, String>(5)?,
+                )
+                .unwrap_or_default(),
             })
         })
         .map_err(|e| format!("读取项目列表失败: {e}"))?;
@@ -376,6 +420,45 @@ pub(crate) fn project_root_containing(path: &str) -> Option<String> {
         }
     }
     best.map(|(_, p)| p)
+}
+
+/// 删除 profile 时清理项目默认配置引用；不影响项目默认 Agent。
+pub(crate) fn clear_project_default_profile(profile_id: &str) {
+    let Ok(conn) = db() else {
+        return;
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT path, default_profiles FROM projects") else {
+        return;
+    };
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default();
+    drop(stmt);
+    if rows.is_empty() {
+        return;
+    }
+    for (path, raw) in rows {
+        let mut defaults: BTreeMap<String, String> =
+            serde_json::from_str(&raw).unwrap_or_default();
+        let before = defaults.len();
+        defaults.retain(|_, id| id != profile_id);
+        if defaults.len() == before {
+            continue;
+        }
+        if let Ok(encoded) = serde_json::to_string(&defaults) {
+            let _ = conn.execute(
+                "UPDATE projects SET default_profiles=?2 WHERE path=?1",
+                params![path, encoded],
+            );
+        }
+    }
 }
 
 /// P2a PDF 白名单用（pdf.rs）：全部注册项目根 + 各项目 project.toml 登记资源的绝对路径。
@@ -2150,6 +2233,95 @@ pub async fn register_project(path: String, name: String) -> Result<ProjectDto, 
     .map_err(|e| format!("注册项目失败: {e}"))?
 }
 
+/// 项目只保存默认 Agent id 引用，不保存密钥或模型目录。
+#[tauri::command]
+pub async fn set_project_default_agent(
+    project_root: String,
+    agent: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = PathBuf::from(crate::sessions::expand_tilde(&project_root));
+        let key = canonical_key(&project);
+        let agent = agent.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        });
+        if let Some(agent) = agent.as_deref() {
+            if crate::agent_specs::agent_spec(agent).is_none() {
+                return Err(format!("未知 Agent：{agent}"));
+            }
+        }
+        let conn = db()?;
+        let changed = conn
+            .execute(
+                "UPDATE projects SET default_agent=?2 WHERE path=?1",
+                params![key, agent],
+            )
+            .map_err(|e| format!("保存项目默认 Agent 失败: {e}"))?;
+        if changed == 0 {
+            return Err("项目尚未注册，不能保存默认 Agent".into());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("保存项目默认 Agent 失败: {e}"))?
+}
+
+/// 保存某个 Agent 在该项目中的默认 profile id；只保存 profile 引用。
+#[tauri::command]
+pub async fn set_project_default_profile(
+    project_root: String,
+    agent: String,
+    profile_id: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = PathBuf::from(crate::sessions::expand_tilde(&project_root));
+        let key = canonical_key(&project);
+        if crate::agent_specs::agent_spec(&agent).is_none() {
+            return Err(format!("未知 Agent：{agent}"));
+        }
+        if let Some(profile_id) = profile_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            let bindings = crate::gateway_store::load_bindings()?;
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.id == profile_id)
+                .ok_or("默认配置不存在")?;
+            if binding.agent != agent {
+                return Err("默认配置与 Agent 不匹配".into());
+            }
+        }
+        let conn = db()?;
+        let raw: String = conn
+            .query_row(
+                "SELECT default_profiles FROM projects WHERE path=?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .map_err(|_| "项目尚未注册，不能保存默认配置".to_string())?;
+        let mut defaults: BTreeMap<String, String> =
+            serde_json::from_str(&raw).unwrap_or_default();
+        if let Some(profile_id) = profile_id.map(|value| value.trim().to_string()) {
+            if profile_id.is_empty() {
+                defaults.remove(&agent);
+            } else {
+                defaults.insert(agent, profile_id);
+            }
+        } else {
+            defaults.remove(&agent);
+        }
+        let encoded =
+            serde_json::to_string(&defaults).map_err(|e| format!("保存默认配置失败: {e}"))?;
+        conn.execute(
+            "UPDATE projects SET default_profiles=?2 WHERE path=?1",
+            params![key, encoded],
+        )
+        .map_err(|e| format!("保存项目默认配置失败: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("保存项目默认配置失败: {e}"))?
+}
+
 #[tauri::command]
 pub async fn remove_project(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -2740,7 +2912,7 @@ fn seed_demo_task_card(root: &Path) -> Result<(), String> {
 /// 按 canonical 主键查注册表；未注册返回 None
 fn demo_registered(conn: &Connection, key: &str) -> Result<Option<ProjectDto>, String> {
     match conn.query_row(
-        "SELECT path, name, created_at, last_opened_at FROM projects WHERE path=?1",
+        "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles FROM projects WHERE path=?1",
         params![key],
         |r| {
             Ok(attach_work_mode(ProjectDto {
@@ -2749,6 +2921,11 @@ fn demo_registered(conn: &Connection, key: &str) -> Result<Option<ProjectDto>, S
                 created_at: r.get(2)?,
                 last_opened_at: r.get(3)?,
                 work_mode: "research".into(),
+                default_agent: r.get(4)?,
+                default_profiles: serde_json::from_str(
+                    &r.get::<_, String>(5)?,
+                )
+                .unwrap_or_default(),
             }))
         },
     ) {

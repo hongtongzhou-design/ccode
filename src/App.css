@@ -1017,6 +1017,20 @@ select:focus-visible {
   box-shadow: none !important;
 }
 
+/* 文件列表用选中底色表示当前预览项；方向键切换时不要再套系统蓝框。 */
+.ccode-file-list,
+.ccode-file-list:focus,
+.ccode-file-list button:focus,
+.ccode-file-list button:focus-visible {
+  outline: none;
+}
+
+/* 预览弹层禁止橡皮筋回弹：触控板推到边缘时 WKWebView 会露出黑瓦片。 */
+.ccode-modal-backdrop,
+.ccode-modal-panel {
+  overscroll-behavior: none;
+}
+
 ::selection {
   background: var(--color-seg-sel);
   color: var(--color-l1);

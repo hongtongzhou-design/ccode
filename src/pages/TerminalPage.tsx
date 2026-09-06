@@ -48,7 +48,8 @@ import {
   mergeConversationPages,
   shouldAutoPeek,
 } from "../chat-handoff";
-import { AGENTS, type OfficialAccountStatusDto } from "../types";
+import { AGENTS, type CustomRuntimeDto, type OfficialAccountStatusDto } from "../types";
+import { resolveCustomRuntimeCwd } from "../custom-runtime";
 import { cwdIsCodingWorktree } from "../coding-git";
 import { loadCodingOverview } from "../components/CodingProjectView";
 import { normalizeWorkMode } from "../work-mode";
@@ -267,6 +268,17 @@ export interface FocusTabActions {
   loadOlderConversation: () => Promise<void>;
 }
 
+async function resolveLaunchCwdForCustom(
+  runtimeId: string,
+  tabCwd: string,
+): Promise<string> {
+  const list = await invoke<CustomRuntimeDto[]>("list_custom_runtimes");
+  const runtime = list.find((item) => item.id === runtimeId);
+  const resolved = resolveCustomRuntimeCwd(tabCwd, runtime?.cwd, IS_WINDOWS);
+  if (!resolved) throw new Error("未指定工作目录");
+  return resolved;
+}
+
 /** TerminalView 上报的当前会话联动数据（主工作区聊天层与阅读区 Agent 栏渲染用） */
 export interface SessionLinkState {
   file: string | null;
@@ -400,6 +412,7 @@ const TerminalView = memo(function TerminalView({
   stepClaimName,
   reuseKey,
   initialRunId,
+  taskId,
   externalCwd,
   onConsumeExternalCwd,
   onStatus,
@@ -457,6 +470,8 @@ const TerminalView = memo(function TerminalView({
   stepClaimName?: string;
   reuseKey?: string;
   initialRunId?: string;
+  /** 新建 Task 后预创建的 Run 所属 Task */
+  taskId?: string;
   /** 最近项目「真进入」：把目标目录注入活动标签的启动栏（TerminalView 消费后清空） */
   externalCwd?: string | null;
   onConsumeExternalCwd?: () => void;
@@ -1611,12 +1626,16 @@ const TerminalView = memo(function TerminalView({
       return;
     void (async () => {
       try {
-        if (!(await checkWorkingDirectory(cwd))) return;
+        const launchCwd = customRuntimeId
+          ? await resolveLaunchCwdForCustom(customRuntimeId, cwd)
+          : cwd;
+        if (!(await checkWorkingDirectory(launchCwd))) return;
         autoStartedRef.current = true;
+        if (launchCwd !== cwd) setCwd(launchCwd);
         const ptyId = customRuntimeId
           ? (await invoke<{ ptyId: string }>("pty_spawn_custom", {
               runtimeId: customRuntimeId,
-              cwd,
+              cwd: launchCwd,
               runId: runId ?? initialRunId,
             })).ptyId
           : await invoke<string>("shell_spawn", {
@@ -2117,21 +2136,23 @@ const TerminalView = memo(function TerminalView({
       if (restored) {
         setError("自定义 Runtime 不支持恢复；点击“运行”会创建新的 Run");
       }
-      if (!(await checkWorkingDirectory(cwd))) {
-        setBarExpanded(true);
-        return null;
-      }
-      await cleanupPty();
       try {
+        const launchCwd = await resolveLaunchCwdForCustom(customRuntimeId, cwd);
+        if (!(await checkWorkingDirectory(launchCwd))) {
+          setBarExpanded(true);
+          return null;
+        }
+        await cleanupPty();
+        if (launchCwd !== cwd) setCwd(launchCwd);
         const fresh = await invoke<{ id: string }>("run_open_custom", {
-          cwd,
-          reuseKey: reuseKey ?? `custom:${customRuntimeId}:${cwd}`,
+          cwd: launchCwd,
+          reuseKey: reuseKey ?? `custom:${customRuntimeId}:${launchCwd}`,
           runId: null,
           customRuntimeId,
         });
         const res = await invoke<{ ptyId: string; runId: string | null }>(
           "pty_spawn_custom",
-          { runtimeId: customRuntimeId, cwd, runId: fresh.id },
+          { runtimeId: customRuntimeId, cwd: launchCwd, runId: fresh.id },
         );
         setRunId(res.runId ?? fresh.id);
         await attach(res.ptyId, "agent", { reset: true });
@@ -2215,6 +2236,7 @@ const TerminalView = memo(function TerminalView({
           (options?.readonly ?? readonly ? "discuss" : "write_tree"),
         reuseKey: reuseKey ?? null,
         runId: runId ?? initialRunId ?? null,
+        taskId: taskId ?? null,
       });
       if (res.runId) setRunId(res.runId);
       // 后端兜底模型回传（前端留空 = profile 首个模型）：同步进标签状态，
@@ -3130,6 +3152,7 @@ interface Tab {
       让该标签产出的会话归到该步骤。仅内存标记，不进重启持久化白名单 */
   stepName?: string;
   runId?: string;
+  taskId?: string;
 }
 
 export default function TerminalPage({ visible }: { visible: boolean }) {
@@ -3154,6 +3177,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       customRuntimeId: tab.customRuntimeId ?? undefined,
       resumeSessionId: tab.customRuntimeId ? undefined : tab.sessionId ?? undefined,
       runId: tab.runId ?? undefined,
+      taskId: tab.taskId ?? undefined,
       restored: true,
     }));
     return {
@@ -3735,6 +3759,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             model: status?.model ?? tab.initialModel ?? "",
             sessionId,
             runId: status?.runId ?? tab.runId ?? null,
+            taskId: tab.taskId ?? null,
           },
         },
       ];
@@ -3836,30 +3861,34 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       缺省不自动回车、用户检查后发送）。右栏选段（活跃标签）与阅读区（阅读会话标签）共用；
       返回 null 表示已写入，返回字符串为要展示给用户的提示。 */
   const injectToTab = useCallback(
-    (tabId: string, data: string, send?: boolean): string | null => {
+    async (tabId: string, data: string, send?: boolean): Promise<string | null> => {
       const s = statuses[tabId];
       if (!s?.running || !s.ptyId) {
         return "当前标签没有运行中的 Agent，请先启动再试";
       }
-      invoke("pty_write", {
-        ptyId: s.ptyId,
-        data: send ? `${data}\r` : data,
-      }).catch(() => {});
-      return null;
+      try {
+        await invoke("pty_write", {
+          ptyId: s.ptyId,
+          data: send ? `${data}\r` : data,
+        });
+        return null;
+      } catch (reason) {
+        return `终端输入失败：${String(reason)}`;
+      }
     },
     [statuses],
   );
 
   /** 写入当前活跃终端标签 agent 输入（PDF 问 AI 与 md 讨论/改写共用） */
   const injectToActiveAgent = useCallback(
-    (data: string, send?: boolean): string | null =>
+    (data: string, send?: boolean): Promise<string | null> =>
       injectToTab(focusedId, data, send),
     [injectToTab, focusedId],
   );
 
   /** PDF 选段「◈ 问 AI」：选段 + 出处格式化后注入活跃终端（格式单一出处在 reader.ts，阅读区共用） */
   const askAiFromPdf = useCallback(
-    (text: string, page: number, fileName: string, send?: boolean): string | null => {
+    (text: string, page: number, fileName: string, send?: boolean): Promise<string | null> => {
       return injectToActiveAgent(formatPdfExcerptPrompt(text, page, fileName), send);
     },
     [injectToActiveAgent],
@@ -3867,7 +3896,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   /** md 阅读视图选段「◈ 讨论/改写此段」：引用块格式注入，末尾引导行让用户接着补指令 */
   const discussMdExcerpt = useCallback(
-    (text: string, fileName: string, send?: boolean): string | null => {
+    (text: string, fileName: string, send?: boolean): Promise<string | null> => {
       // 注入上限保护：选段超过 4000 字截断
       const body = text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
       const quoted = body
@@ -4005,6 +4034,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       /** 步骤认领（pendingTerminal.stepName 透传）：launch 时登记会话归步骤 */
       stepName?: string;
       runId?: string;
+      taskId?: string;
     }): string => {
       const t: Tab = {
         id: crypto.randomUUID(),
@@ -4027,6 +4057,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         reuseKey: init?.reuseKey,
         stepName: init?.stepName,
         runId: init?.runId,
+        taskId: init?.taskId,
       };
       setTabs((prev) => [...prev, t]);
       setActiveId(t.id);
@@ -4247,6 +4278,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         reuseKey: pt.reuseKey,
         stepName: pt.stepName,
         runId: pt.runId,
+        taskId: pt.taskId,
       });
       // 纯 shell/脚本标签（登录、CLI 自更新、run 脚本）没有会话可供聊天层展示——
       // 显式落终端面（当前默认面层已是终端，这里守住「未来默认值再变也不回到 chat」的口径；
@@ -4449,10 +4481,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   /** 阅读区注入（选段「↵ 直接发送」/ 输入框回车）：走与右栏选段同一条 injectToTab 链路，目标换成阅读会话标签 */
   const injectToReader = useCallback(
-    (data: string, send?: boolean): string | null =>
+    (data: string, send?: boolean): Promise<string | null> =>
       readerTabId
         ? injectToTab(readerTabId, data, send)
-        : "阅读会话还没建好，稍等片刻再试",
+        : Promise.resolve("阅读会话还没建好，稍等片刻再试"),
     [injectToTab, readerTabId],
   );
 
@@ -5370,6 +5402,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 stepClaimName={t.stepName}
                 reuseKey={t.reuseKey}
                 initialRunId={t.runId}
+                taskId={t.taskId}
                 externalCwd={t.id === focusedId ? enterCwd : null}
                 onConsumeExternalCwd={consumeExternalCwd}
                 onStatus={reportStatus}

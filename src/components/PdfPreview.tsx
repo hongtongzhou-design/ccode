@@ -333,7 +333,7 @@ function PdfPreview({
     page: number,
     fileName: string,
     send?: boolean,
-  ) => string | null;
+  ) => string | null | Promise<string | null>;
   /** P2b：整理为笔记；返回展示给用户的提示（ok 决定是否清空选区） */
   onOrganize?: (
     text: string,
@@ -484,15 +484,17 @@ function PdfPreview({
   function askAi(send?: boolean) {
     const excerpt = selectedExcerpt();
     if (!excerpt) return;
-    const err =
+    void Promise.resolve(
       onAskAi?.(excerpt.text, excerpt.page, fileName, send) ??
-      "当前页面不支持问 AI";
-    showHint({
-      msg:
-        err ??
-        (send ? "已发送到活跃终端" : "已写入活跃终端的输入框，检查后自行发送"),
+        "当前页面不支持问 AI",
+    ).then((err) => {
+      showHint({
+        msg:
+          err ??
+          (send ? "已发送到活跃终端" : "已写入活跃终端的输入框，检查后自行发送"),
+      });
+      if (!err) clearSelection();
     });
-    if (!err) clearSelection();
   }
 
   /** P2b：选段 → 归属项目的笔记工作区 notes/inbox.md；失败不静默（提示条展示原因） */

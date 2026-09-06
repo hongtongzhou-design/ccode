@@ -83,6 +83,18 @@ test("isDiscussPermission：permission 优先于 readonly", () => {
   assert.equal(isDiscussPermission(undefined, true), true);
 });
 
+test("自由任务标签按任务入口进入工作台白名单", () => {
+  assert.equal(inferTaskKind("free:task-1", "/Users/me/project"), "free_research");
+  assert.equal(
+    isWorkbenchSurfaceRun({
+      reuseKey: "task:task-1",
+      running: true,
+      attention: null,
+    }),
+    true,
+  );
+});
+
 test("pickRecoverableRun：关标签后按项目找回可恢复 Run", () => {
   const caps = {
     canResume: true,

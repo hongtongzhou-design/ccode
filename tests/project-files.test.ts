@@ -1,0 +1,57 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  fileMatchesProjectFilter,
+  flattenVisibleFiles,
+  neighborFile,
+  projectFilePreviewKind,
+} from "../src/project-files.ts";
+
+test("research and coding files preview in-pane, including source", () => {
+  assert.equal(projectFilePreviewKind("notes/a.md"), "text");
+  assert.equal(projectFilePreviewKind("src/main.rs"), "text");
+  assert.equal(projectFilePreviewKind("app.tsx"), "text");
+  assert.equal(projectFilePreviewKind("Cargo.toml"), "text");
+  assert.equal(projectFilePreviewKind("papers/a.pdf"), "pdf");
+  assert.equal(projectFilePreviewKind("fig.png"), "image");
+  assert.equal(projectFilePreviewKind("data.xlsx"), "xlsx");
+  assert.equal(projectFilePreviewKind("draft.docx"), "docx");
+  assert.equal(projectFilePreviewKind("old.doc"), "legacy-doc");
+});
+
+test("type filter keeps original office categories", () => {
+  assert.equal(fileMatchesProjectFilter("a.md", "all"), true);
+  assert.equal(fileMatchesProjectFilter("a.rs", "all"), true);
+  assert.equal(fileMatchesProjectFilter("a.md", "doc"), true);
+  assert.equal(fileMatchesProjectFilter("a.rs", "doc"), false);
+  assert.equal(fileMatchesProjectFilter("a.pdf", "pdf"), true);
+  assert.equal(fileMatchesProjectFilter("a.xlsx", "sheet"), true);
+  assert.equal(fileMatchesProjectFilter("a.pptx", "slide"), true);
+});
+
+test("flattenVisibleFiles only walks expanded directories", () => {
+  const cache = {
+    "/p": [
+      { path: "/p/a.md", isDir: false },
+      { path: "/p/src", isDir: true },
+    ],
+    "/p/src": [{ path: "/p/src/main.rs", isDir: false }],
+  };
+  assert.deepEqual(
+    flattenVisibleFiles(cache, "/p", new Set()).map((item) => item.path),
+    ["/p/a.md"],
+  );
+  assert.deepEqual(
+    flattenVisibleFiles(cache, "/p", new Set(["/p/src"])).map((item) => item.path),
+    ["/p/a.md", "/p/src/main.rs"],
+  );
+});
+
+test("neighborFile steps to previous and next, and stops at ends", () => {
+  const files = [{ path: "a" }, { path: "b" }, { path: "c" }];
+  assert.equal(neighborFile(files, "b", 1)?.path, "c");
+  assert.equal(neighborFile(files, "b", -1)?.path, "a");
+  assert.equal(neighborFile(files, "a", -1), null);
+  assert.equal(neighborFile(files, "c", 1), null);
+  assert.equal(neighborFile(files, null, 1)?.path, "a");
+});

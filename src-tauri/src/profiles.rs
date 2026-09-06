@@ -156,6 +156,9 @@ pub struct GatewayModel {
     pub status: String,
     #[serde(default)]
     pub last_seen_at: Option<String>,
+    /// 最近一次把该 id 标为 available 的协议槽；按槽刷新时只 stale 本槽模型。
+    #[serde(default)]
+    pub catalog_slot: Option<String>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_output_tokens: Option<u64>,
@@ -224,6 +227,9 @@ pub struct Gateway {
 pub struct Binding {
     pub id: String,
     pub agent: String,
+    /// 绑定级配置名；旧数据为空时回退共享网关名。
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub kind: BindingKind,
     #[serde(default)]
@@ -259,6 +265,9 @@ pub struct GatewayInput {
 #[serde(rename_all = "camelCase")]
 pub struct BindingInput {
     pub agent: String,
+    /// 绑定级配置名；选用已有网关时也必须独立保存。
+    #[serde(default)]
+    pub name: String,
     pub gateway_id: Option<String>,
     #[serde(default)]
     pub kind: BindingKind,
@@ -320,6 +329,25 @@ fn normalize_models(models: Vec<String>) -> Vec<String> {
         .filter(|m| !m.is_empty())
         .filter(|m| seen.insert(m.clone()))
         .collect()
+}
+
+/// 同一 Agent/网关下，只有完全相同的模型选择与绑定参数才算重复。
+/// 模型列表顺序有意义：第一个模型是该连接的默认模型。
+fn same_binding_selection(
+    binding: &Binding,
+    agent: &str,
+    gateway_id: &str,
+    protocol: Option<&str>,
+    api_backend: Option<&str>,
+    models: &[String],
+    extra_env: &std::collections::HashMap<String, String>,
+) -> bool {
+    binding.agent == agent
+        && binding.gateway_id.as_deref() == Some(gateway_id)
+        && binding.protocol.as_deref() == protocol
+        && binding.api_backend.as_deref() == api_backend
+        && normalize_models(binding.models.clone()) == models
+        && binding.extra_env == *extra_env
 }
 
 pub(crate) fn sensitive_env_name(name: &str) -> bool {
@@ -495,6 +523,7 @@ impl ProfileStore {
             let binding = Binding {
                 id: uuid::Uuid::new_v4().to_string(),
                 agent: input.agent,
+                name: "官方账号".into(),
                 kind: BindingKind::Official,
                 gateway_id: None,
                 protocol: None,
@@ -524,6 +553,7 @@ impl ProfileStore {
                     source: "user".into(),
                     status: "available".into(),
                     last_seen_at: None,
+                    catalog_slot: None,
                     temperature: input.request_policy.temperature,
                     top_p: input.request_policy.top_p,
                     max_output_tokens: input.request_policy.max_output_tokens,
@@ -548,6 +578,7 @@ impl ProfileStore {
         let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
             agent: input.agent.clone(),
+            name: input.name.clone(),
             kind: BindingKind::Api,
             gateway_id: Some(gateway.id.clone()),
             protocol: input.protocol.clone(),
@@ -583,6 +614,7 @@ impl ProfileStore {
             return Err("这条绑定没有网关".into());
         };
         let mut gateways = crate::gateway_store::load_gateways()?;
+        let mut bindings = crate::gateway_store::load_bindings()?;
         let src_gw = gateways
             .iter()
             .find(|g| g.id == gid)
@@ -599,6 +631,14 @@ impl ProfileStore {
         let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
             agent: src.agent.clone(),
+            name: copy_name(
+                &bindings
+                    .iter()
+                    .filter(|b| b.agent == src.agent)
+                    .map(|b| b.name.as_str())
+                    .collect::<Vec<_>>(),
+                &src.name,
+            ),
             kind: BindingKind::Api,
             gateway_id: Some(gw.id.clone()),
             protocol: src.protocol.clone(),
@@ -613,7 +653,6 @@ impl ProfileStore {
             delete_key(&gw.id);
             return Err(error);
         }
-        let mut bindings = crate::gateway_store::load_bindings()?;
         gateways.push(gw);
         bindings.push(binding);
         crate::gateway_store::save_gateways(&gateways)?;
@@ -637,11 +676,19 @@ impl ProfileStore {
             return Err("这条绑定没有网关".into());
         };
         let mut bindings = crate::gateway_store::load_bindings()?;
-        if bindings
-            .iter()
-            .any(|b| b.agent == target_agent && b.gateway_id.as_deref() == Some(gid.as_str()))
-        {
-            return Err("该 Agent 已经绑过这个网关".into());
+        let models = normalize_models(src.models.clone());
+        if bindings.iter().any(|b| {
+            same_binding_selection(
+                b,
+                target_agent,
+                &gid,
+                protocol.as_deref(),
+                None,
+                &models,
+                &src.extra_env,
+            )
+        }) {
+            return Err("该 Agent 已经有相同模型选择的绑定".into());
         }
         let mut gateways = crate::gateway_store::load_gateways()?;
         let gw = gateways
@@ -655,12 +702,13 @@ impl ProfileStore {
         let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
             agent: target_agent.to_string(),
+            name: src.name.clone(),
             kind: BindingKind::Api,
             gateway_id: Some(gid.clone()),
             protocol,
             // grok 专用字段不跨 agent 携带；绑到 grok 时取缺省（chat_completions）
             api_backend: None,
-            models: src.models.clone(),
+            models,
             extra_env: src.extra_env.clone(),
             last_used_at: None,
         };
@@ -686,6 +734,9 @@ impl ProfileStore {
         }
         if input.account_type == AccountType::Official && input.no_auth {
             return Err("官方账号不能设置为无密钥模式".into());
+        }
+        if !input.name.trim().is_empty() {
+            bindings[idx].name = input.name.trim().to_string();
         }
         bindings[idx].protocol = input.protocol.clone();
         bindings[idx].api_backend = input.api_backend.clone();
@@ -713,7 +764,6 @@ impl ProfileStore {
         };
         let key_changed = input.api_key.as_deref().is_some_and(|k| !k.is_empty());
         let no_auth_changed = gateways[gw_idx].no_auth != input.no_auth;
-        gateways[gw_idx].name = input.name.clone();
         gateways[gw_idx].no_auth = input.no_auth;
         gateways[gw_idx].header_env = input.request_policy.header_env.clone();
         let slot = crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
@@ -733,6 +783,7 @@ impl ProfileStore {
                     source: "user".into(),
                     status: "available".into(),
                     last_seen_at: None,
+                    catalog_slot: None,
                     temperature: None,
                     top_p: None,
                     max_output_tokens: None,
@@ -768,6 +819,7 @@ impl ProfileStore {
             let _ = fs::remove_file(p);
         }
         crate::settings::clear_profile_refs(id);
+        crate::projects::clear_project_default_profile(id);
         Ok(())
     }
 
@@ -938,12 +990,20 @@ impl ProfileStore {
             });
         }
         let gid = input.gateway_id.clone().ok_or("请选择网关")?;
+        let models = normalize_models(input.models.clone());
         let mut bindings = crate::gateway_store::load_bindings()?;
-        if bindings
-            .iter()
-            .any(|b| b.agent == input.agent && b.gateway_id.as_deref() == Some(gid.as_str()))
-        {
-            return Err("该 Agent 已经绑过这个网关".into());
+        if bindings.iter().any(|b| {
+            same_binding_selection(
+                b,
+                &input.agent,
+                &gid,
+                input.protocol.as_deref(),
+                input.api_backend.as_deref(),
+                &models,
+                &input.extra_env,
+            )
+        }) {
+            return Err("该 Agent 已经有相同模型选择的绑定".into());
         }
         let gateways = crate::gateway_store::load_gateways()?;
         let gw = gateways.iter().find(|g| g.id == gid).ok_or("网关不存在")?;
@@ -954,11 +1014,12 @@ impl ProfileStore {
         let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
             agent: input.agent,
+            name: input.name.clone(),
             kind: BindingKind::Api,
             gateway_id: Some(gid.clone()),
             protocol: input.protocol,
             api_backend: input.api_backend,
-            models: normalize_models(input.models),
+            models,
             extra_env: input.extra_env,
             last_used_at: None,
         };
@@ -1002,30 +1063,7 @@ impl ProfileStore {
             return Err(format!("未知协议槽: {slot}"));
         }
         let fetched_at = crate::sessions::now_iso();
-        for model in &mut gw.models {
-            if model.source == "fetched" {
-                model.status = "stale".into();
-            }
-        }
-        for id in &ids {
-            if !gw.models.iter().any(|m| m.id == *id) {
-                gw.models.push(GatewayModel {
-                    id: id.clone(),
-                    source: "fetched".into(),
-                    status: "available".into(),
-                    last_seen_at: Some(fetched_at.clone()),
-                    temperature: None,
-                    top_p: None,
-                    max_output_tokens: None,
-                    reasoning_effort: None,
-                });
-            } else if let Some(model) = gw.models.iter_mut().find(|m| m.id == *id) {
-                model.status = "available".into();
-                model.last_seen_at = Some(fetched_at.clone());
-            }
-        }
-        gw.catalog_fetched_at = Some(fetched_at);
-        gw.catalog_from_slot = Some(slot.to_string());
+        crate::gateway_store::apply_fetched_catalog(gw, slot, &ids, &fetched_at);
         let mut saved = gw.clone();
         saved.slot_probes = crate::gateway_store::slot_probe_summaries(&saved.last_probe);
         crate::gateway_store::save_gateways(&gateways)?;
@@ -1448,6 +1486,8 @@ struct GatewayExportV2 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BindingExportV2 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     agent: String,
     gateway_ref: GatewayRefV2,
     protocol: Option<String>,
@@ -1514,6 +1554,7 @@ fn build_export_v2(
                 .iter()
                 .find(|g| Some(g.id.as_str()) == b.gateway_id.as_deref())?;
             Some(BindingExportV2 {
+                name: (!b.name.trim().is_empty()).then(|| b.name.clone()),
                 agent: b.agent.clone(),
                 gateway_ref: GatewayRefV2 {
                     name: gw.name.clone(),
@@ -1675,6 +1716,11 @@ fn apply_import_v2(
         }
         bindings.push(Binding {
             id: uuid::Uuid::new_v4().to_string(),
+            name: b
+                .name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| b.gateway_ref.name.clone()),
             // grok 专用字段：导入对象非 grok 时丢弃
             api_backend: if b.agent == "grok" {
                 b.api_backend.clone()
@@ -1787,6 +1833,9 @@ fn merge_incoming_binding(
     incoming: &BindingExportV2,
     skipped: &mut Vec<String>,
 ) {
+    if let Some(name) = incoming.name.as_deref().filter(|name| !name.trim().is_empty()) {
+        existing.name = name.to_string();
+    }
     for m in &incoming.models {
         if !existing.models.contains(m) {
             existing.models.push(m.clone());
@@ -2214,6 +2263,7 @@ mod tests {
         Binding {
             id: uuid::Uuid::new_v4().to_string(),
             agent: agent.into(),
+            name: "sample".into(),
             kind: BindingKind::Api,
             gateway_id: Some(gid.into()),
             protocol: None,
@@ -2222,6 +2272,32 @@ mod tests {
             extra_env: Default::default(),
             last_used_at: None,
         }
+    }
+
+    #[test]
+    fn same_gateway_allows_different_model_selection_but_rejects_exact_duplicate() {
+        let existing = sample_bind("claude-code", "g1", &["model-a"]);
+        let env = std::collections::HashMap::new();
+        let model_b = vec!["model-b".to_string()];
+        let model_a = vec!["model-a".to_string()];
+        assert!(!same_binding_selection(
+            &existing,
+            "claude-code",
+            "g1",
+            None,
+            None,
+            &model_b,
+            &env,
+        ));
+        assert!(same_binding_selection(
+            &existing,
+            "claude-code",
+            "g1",
+            None,
+            None,
+            &model_a,
+            &env,
+        ));
     }
 
     #[test]
@@ -2270,6 +2346,7 @@ mod tests {
                 api_key: Some("sk-live-secret-abcdef".into()),
             }],
             bindings: vec![BindingExportV2 {
+                name: Some("另一个连接".into()),
                 agent: "claude-code".into(),
                 gateway_ref: GatewayRefV2 {
                     name: "中转 A".into(),

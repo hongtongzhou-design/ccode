@@ -434,6 +434,7 @@ mod tests {
                 source: "user".into(),
                 status: "available".into(),
                 last_seen_at: None,
+                catalog_slot: None,
                 temperature: None,
                 top_p: None,
                 max_output_tokens: None,

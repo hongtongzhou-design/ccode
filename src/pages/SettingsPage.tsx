@@ -556,7 +556,7 @@ function CustomRuntimeBlock({
     <div className="mt-4 border-t border-hairline pt-3">
       <div className="mb-1 text-sm text-l2">自定义运行时</div>
       <p className="mb-2 text-micro text-l4">
-        登记一条本机命令，在工作树里当普通终端跑。不注入密钥、不解析会话。相对路径命令不能用。
+        登记一条本机命令，在当前终端目录当普通终端跑。不注入密钥、不解析会话。相对路径命令不能用。默认工作目录只在随手聊或空目录时启用，不会覆盖项目根或工作树。
       </p>
       {list.length > 0 && (
         <ul className="mb-2 space-y-1">
@@ -575,12 +575,22 @@ function CustomRuntimeBlock({
                 type="button"
                 className={`${ghostActionClass} shrink-0 text-micro`}
                 onClick={() => {
-                  void invoke("delete_custom_runtime", { id: r.id })
-                    .then(async () => {
+                  void (async () => {
+                    if (
+                      !(await confirmDialog(
+                        `删除自定义运行时「${r.name}」？登记的命令会从列表里去掉，已有终端标签不受影响。`,
+                        { danger: true },
+                      ))
+                    )
+                      return;
+                    try {
+                      await invoke("delete_custom_runtime", { id: r.id });
                       await reload();
                       onNotice(`已删除自定义运行时「${r.name}」`);
-                    })
-                    .catch((e) => onError(String(e)));
+                    } catch (e) {
+                      onError(String(e));
+                    }
+                  })();
                 }}
               >
                 删除

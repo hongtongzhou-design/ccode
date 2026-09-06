@@ -29,6 +29,13 @@ import ContextMenu from "../components/ContextMenu";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ProjectGroup from "../components/ProjectGroup";
 import ArtifactChecklist from "../components/ArtifactChecklist";
+import ProjectAgentsView from "../components/ProjectAgentsView";
+import ProjectFilesView from "../components/ProjectFilesView";
+import ProjectSurfaceTabs from "../components/ProjectSurfaceTabs";
+import ProjectIdentityHeader, {
+  type ProjectChromeAction,
+} from "../components/ProjectIdentityHeader";
+import ProjectUserTasksView from "../components/ProjectUserTasksView";
 import TemplatePickModal from "../components/TemplatePickModal";
 import { Modal } from "../components/Modal";
 import { filterWorkspacesByFocus } from "../workspace-visibility";
@@ -39,7 +46,6 @@ import {
   inlineActionClass,
   NoticeBar,
   PageFrame,
-  PageHeader,
   primaryActionClass,
   rowActionClass,
   hoverRevealClass,
@@ -73,7 +79,6 @@ import type {
 import CodingProjectView, {
   prefetchCodingOverview,
 } from "../components/CodingProjectView";
-import OfficeProjectView from "../components/OfficeProjectView";
 import {
   WORK_MODE_HINT,
   WORK_MODE_LABEL,
@@ -87,6 +92,12 @@ import {
 import { sortWorkspacesByAttention } from "../project-status";
 import { samePath as samePathKey } from "../path-utils";
 import { toast } from "../toast";
+import {
+  projectSurfaceStorageKey,
+  projectSurfaceTabsForMode,
+  readProjectSurfaceTab,
+  type ProjectSurfaceTab,
+} from "../project-surface";
 
 /** 保留工作区的合并已完成，且分支尚未产生新的待合并提交。 */
 function isMerged(
@@ -125,7 +136,7 @@ async function fireHelpNotification(sourceCount: number) {
   });
 }
 
-/** 添加项目：选目录后填名称并选工作方式（科研 / 编程 / 办公） */
+/** 添加项目：选目录后填名称并选工作方式（科研 / 编程 / 工作） */
 function AddProjectModal({
   path,
   existingMode,
@@ -182,7 +193,7 @@ function AddProjectModal({
     setError(null);
     try {
       // 提交时再读一遍档案卡：弹窗打开后立刻点添加时，预填 effect 可能还没回来，
-      // 不能把已是编程/办公的项目静默写回科研。
+      // 不能把已是编程/工作的项目静默写回科研。
       let chosen = mode;
       let skipTemplate = modeLocked;
       try {
@@ -880,6 +891,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     ws: WorkspaceDto;
   } | null>(null);
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  const [projectSurfaceTabs, setProjectSurfaceTabs] = useState<
+    Record<string, ProjectSurfaceTab>
+  >({});
   const [projectRailCollapsed, setProjectRailCollapsed] = useState(() => {
     try {
       return localStorage.getItem(PROJECT_RAIL_COLLAPSED_KEY) === "1";
@@ -1267,8 +1281,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const active = workspaces.filter(
     (workspace) => workspace.status === "active",
   );
-  const repoCount = new Set(workspaces.map((workspace) => workspace.repoPath))
-    .size;
   // 分组 = 注册项目（last_opened 降序）∪ 未注册的工作区 repo 组；注册项目没有工作区也显示
   const repoPaths = [...new Set(workspaces.map((w) => w.repoPath))];
   const groups: {
@@ -1301,6 +1313,47 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   );
   const selectedGroup =
     groups.find((group) => group.key === selectedGroupKey) ?? groups[0] ?? null;
+  const selectedProjectPath = selectedGroup?.project?.path ?? null;
+  const selectedSurfaceTab: ProjectSurfaceTab =
+    selectedProjectPath && selectedGroup?.project
+      ? (() => {
+          const tabs = projectSurfaceTabsForMode(selectedGroup.project.workMode);
+          const stored =
+            projectSurfaceTabs[selectedProjectPath] ??
+            readProjectSurfaceTab(
+              selectedProjectPath,
+              undefined,
+              selectedGroup.project.workMode,
+            );
+          return tabs.includes(stored) ? stored : tabs[0];
+        })()
+      : "tasks";
+  const selectedWorkMode = selectedGroup?.project
+    ? normalizeWorkMode(selectedGroup.project.workMode)
+    : null;
+  const [identityChrome, setIdentityChrome] = useState<{
+    action: ProjectChromeAction;
+    token: number;
+  } | null>(null);
+  useEffect(() => {
+    setIdentityChrome(null);
+  }, [selectedGroupKey]);
+  function requestIdentityChrome(action: ProjectChromeAction) {
+    if (action !== "rename" && action !== "topic") selectProjectSurface("tasks");
+    setIdentityChrome({ action, token: Date.now() });
+  }
+  function selectProjectSurface(tab: ProjectSurfaceTab) {
+    if (!selectedProjectPath) return;
+    try {
+      localStorage.setItem(projectSurfaceStorageKey(selectedProjectPath), tab);
+    } catch {
+      /* 隐私模式或存储不可用时仍保持本次页面状态 */
+    }
+    setProjectSurfaceTabs((current) => ({
+      ...current,
+      [selectedProjectPath]: tab,
+    }));
+  }
   // 顶栏上下文镜像（v3.88）：本页是唯一写入方，顶栏跨页只读消费，不新增任何请求
   const setContextLabel = useAppStore((s) => s.setContextLabel);
   const contextProject = selectedGroup
@@ -2158,43 +2211,33 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
 
       <div className="min-w-0 flex-1 overflow-auto">
         <PageFrame width="fluid">
-      <PageHeader
-        leading={
-          projectRailCollapsed ? (
-            <button
-              type="button"
-              onClick={toggleProjectRail}
-              title="显示项目列表"
-              aria-label="显示项目列表"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1"
-            >
-              <PanelLeftOpen aria-hidden="true" size={16} strokeWidth={1.8} />
-            </button>
-          ) : undefined
-        }
-        title="项目"
-        meta={
-          selectedGroup
-            ? `${selectedGroup.project?.name ?? selectedGroup.repoName} · ${selectedGroup.list.length} 个任务`
-            : groups.length === 0
-              ? // 空态：下方空状态区已经把「这页干嘛的」说清楚了，页头再说一遍是重复
-                ""
-              : `${active.length} 个活跃 · ${projects.length} 个项目 · ${repoCount} 个仓库`
-        }
-        actions={
-          // 页头唯一主动作 = 添加项目；新建工作区收进各项目分组的工作区列表头部（仓库固定为当前分组）。
-          // 空状态下收起：空态卡片里已经有同一个主按钮，一屏两个实心 CTA 指同一件事是噪音
-          groups.length === 0 ? null : (
-            <button
-              type="button"
-              onClick={() => void onAddProject()}
-              className={selectedGroup ? secondaryActionClass : primaryActionClass}
-            >
-              + 添加项目
-            </button>
-          )
-        }
-      />
+      {selectedGroup && (
+        <ProjectIdentityHeader
+          project={selectedGroup.project}
+          repoPath={selectedGroup.repoPath}
+          repoName={selectedGroup.repoName}
+          homeDir={homeDir}
+          refreshToken={refreshToken}
+          chromeReq={identityChrome}
+          leading={
+            projectRailCollapsed ? (
+              <button
+                type="button"
+                onClick={toggleProjectRail}
+                title="显示项目列表"
+                aria-label="显示项目列表"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1"
+              >
+                <PanelLeftOpen aria-hidden="true" size={16} strokeWidth={1.8} />
+              </button>
+            ) : undefined
+          }
+          onRegisterProject={setAddProjectPath}
+          onRefresh={refresh}
+          onError={setError}
+          onChromeAction={requestIdentityChrome}
+        />
+      )}
       {error && <p role="alert" className="mb-4 text-sm text-err-text">{error}</p>}
       {notice && (
         <NoticeBar className="mb-4" onDismiss={() => setNotice(null)}>
@@ -2242,7 +2285,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       {groups.length === 0 ? (
         <EmptyState
           title="从一个项目文件夹开始"
-          detail="选一个文件夹添加进来，并选择科研、编程或办公。"
+          detail="选一个文件夹添加进来，并选择科研、编程或工作。"
           action={
             <div className="flex items-center justify-center gap-2">
               <button
@@ -2265,7 +2308,42 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           }
         />
       ) : selectedGroup ? (
-        normalizeWorkMode(selectedGroup.project?.workMode) === "coding" ? (
+        <ProjectSurfaceTabs
+          project={selectedGroup.project}
+          active={selectedSurfaceTab}
+          onChange={selectProjectSurface}
+          taskPanel={
+            selectedGroup.project && selectedWorkMode === "office" ? (
+              <ProjectUserTasksView project={selectedGroup.project} />
+            ) : undefined
+          }
+        >
+        {selectedGroup.project && selectedSurfaceTab === "files" ? (
+          <ProjectFilesView
+            projectPath={selectedGroup.repoPath}
+            preferredAgent={selectedGroup.project.defaultAgent}
+            preferredProfile={
+              selectedGroup.project.defaultAgent
+                ? selectedGroup.project.defaultProfiles?.[
+                    selectedGroup.project.defaultAgent
+                  ]
+                : undefined
+            }
+            onError={setError}
+          />
+        ) : selectedGroup.project && selectedSurfaceTab === "agents" ? (
+          <ProjectAgentsView
+            project={selectedGroup.project}
+            onProjectChanged={(next) =>
+              setProjects((current) =>
+                current.map((item) =>
+                  samePath(item.path, next.path) ? next : item,
+                ),
+              )
+            }
+            onError={setError}
+          />
+        ) : selectedWorkMode === "coding" ? (
           <CodingProjectView
             project={selectedGroup.project}
             repoPath={selectedGroup.repoPath}
@@ -2273,14 +2351,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             onError={setError}
             onNotice={setNotice}
           />
-        ) : normalizeWorkMode(selectedGroup.project?.workMode) === "office" ? (
-          <OfficeProjectView
-            project={selectedGroup.project}
-            repoPath={selectedGroup.repoPath}
-            homeDir={homeDir}
-            onError={setError}
-          />
-        ) : (
+        ) : selectedWorkMode === "office" ? null : (
           <ProjectGroup
             key={selectedGroup.key}
             project={selectedGroup.project}
@@ -2309,8 +2380,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             onOpenTerminal={(ws, initialPrompt) =>
               void openInTerminal(ws, initialPrompt)
             }
-            onRegisterProject={setAddProjectPath}
             onError={setError}
+            chromeReq={identityChrome}
+            onIdentityAction={requestIdentityChrome}
           >
             {(wsView) => {
             // 聚焦步骤可见性（纯逻辑 src/workspace-visibility.ts）：聚焦 = 绑定该步骤的工作区
@@ -2551,7 +2623,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             );
             }}
           </ProjectGroup>
-        )
+        )}
+        </ProjectSurfaceTabs>
       ) : null}
       {addProjectPath && (
         <AddProjectModal

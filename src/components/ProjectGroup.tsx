@@ -6,7 +6,7 @@ import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
 import PipelineEditor from "./PipelineEditor";
 import HistoryOverlay from "./HistoryOverlay";
-import { IS_WINDOWS } from "../hotkeys";
+
 import TemplatePicker, { type TemplatePickItem } from "./TemplatePicker";
 import ArtifactChecklist, {
   absoluteResourcePath,
@@ -16,8 +16,7 @@ import TaskCardsSection from "./TaskCardsSection";
 import ScheduleSection from "./ScheduleSection";
 import LitWatchCard from "./LitWatchCard";
 import ResourceListSection from "./ResourceListSection";
-import NotesListSection from "./NotesListSection";
-import DataListSection from "./DataListSection";
+import ProjectUserTasksView from "./ProjectUserTasksView";
 import ProjectSessionsSection, {
   sessionsAsideOpenClass,
 } from "./ProjectSessionsSection";
@@ -38,8 +37,7 @@ import { startPipelineStep } from "../pipeline-start";
 import type { KickoffLaunch } from "../kickoff-launch";
 import { upsertLitSourceSection } from "../task-md-sections";
 import { isDecisionsOnly } from "../step-decisions";
-import { abbrevHome, normSep } from "../path-utils";
-import { partitionResources } from "../project-status";
+import { normSep } from "../path-utils";
 import { beginAskAi, beginProjectChat } from "./AskAiModal";
 import { runIdForPath, type RunOverviewInput } from "../run-overview";import type {
   DiscoveredResourceDto,
@@ -61,16 +59,12 @@ const ctaSm = compactPrimaryActionClass;
 const fieldSm = compactFieldClass;
 
 // 家目录（项目路径缩略 ~ 显示用）：模块级缓存，全部项目组共用一次查询
-let homeDirPromise: Promise<string> | null = null;
-function getHomeDir(): Promise<string> {
-  homeDirPromise ??= invoke<string>("home_dir").catch(() => "");
-  return homeDirPromise;
-}
+
 /** 绝对路径缩略：家目录前缀 → ~（完整路径仍在外层 title 悬浮里）。
  *  两侧都先剥 verbatim 前缀：存量库里的项目路径可能仍是 `\\?\C:\Users\...`，
  *  而 home 是普通形式，不剥就永远缩不掉、界面直接把 `\\?\` 显示给用户。
  *  Windows 文件系统大小写不敏感，前缀判定同样要折叠大小写。 */
-export { abbrevHome } from "../path-utils";
+
 /** 步进器带级整条虚线链：真实 6×6px 方块按 12px 等距（6px 块 + 6px 间隙）铺满整个带宽。
  *  块位以圆心为锚分段计算（圆是列中心，列等宽，段长相等）——每个圆两侧的断口、
  *  每个步骤之间的块数与间隙严格一致（按全局相位铺排时圆会随机截断方块，用户反馈不规则）。
@@ -337,13 +331,14 @@ export default function ProjectGroup({
   onDismissGitGuide,
   onRefresh,
   onOpenTerminal,
-  onRegisterProject,
   onError,
   children,
   focusStepReq,
   projectFocusReq,
   onProjectFocusHandled,
   pageVisible,
+  chromeReq,
+  onIdentityAction,
 }: {
   /** null = 未注册分组（仅按工作区 repo 归组） */
   project: ProjectDto | null;
@@ -364,8 +359,6 @@ export default function ProjectGroup({
     initialPrompt?: string,
     opts?: { autoStart?: boolean; launch?: KickoffLaunch },
   ) => void;
-  /** 未注册分组的「注册项目」：打开与页头「+ 添加项目」相同的注册弹窗（预选该 repo 路径） */
-  onRegisterProject: (repoPath: string) => void;
   onError: (msg: string) => void;
   /** 工作区列表渲染（render prop）：回传聚焦视图上下文，父级按步骤过滤列表 */
   children: (wsView: {
@@ -390,15 +383,12 @@ export default function ProjectGroup({
    *  若聚焦的步骤已完成（ merged ），放掉手动聚焦、回落到当前步骤（第一个未完成），
    *  否则用户看到的永远是上次点过的那一步（实测：已完成的「文献检索」一直占着聚焦） */
   pageVisible?: boolean;
+  chromeReq?: { action: string; token: number } | null;
+  onIdentityAction?: (action: "rename" | "topic") => void;
 }) {
   const registered = project !== null;
   const projectPath = project?.path ?? repoPath;
   const displayName = project?.name ?? repoName;
-  // 项目路径缩略显示（/Users/x/… → ~/…）：家目录模块级缓存，全组共用一次查询
-  const [homeDir, setHomeDir] = useState("");
-  useEffect(() => {
-    void getHomeDir().then(setHomeDir);
-  }, []);
 
   // ===== 档案卡（仅注册项目） =====
   const [cfg, setCfg] = useState<ProjectConfigDto | null>(null);
@@ -476,63 +466,12 @@ export default function ProjectGroup({
     }
   }
 
-  // ===== 分组头：重命名 / 移除注册 =====
-  const [renamingProject, setRenamingProject] = useState(false);
-  const [projectName, setProjectName] = useState("");
-  const [projectMenu, setProjectMenu] = useState<{ x: number; y: number } | null>(
-    null,
-  );
-  // 课题主题：存 project.toml 顶层 topic，一键开步写进 TASK.md
-  const [editingTopic, setEditingTopic] = useState(false);
-  const [topicDraft, setTopicDraft] = useState("");
-
   // 保存历史（白话时间线）：全宽覆盖层，同 PipelineEditor 形态
   const [historyOpen, setHistoryOpen] = useState(false);
   // 工作区名 → 步骤名：merge commit 的「验收合并」优先显示步骤名
   const wsStepMap = Object.fromEntries(
     (cfg?.steps ?? []).map((s) => [s.workspaceName, s.name]),
   );
-
-  async function submitRenameProject(e: React.FormEvent) {
-    e.preventDefault();
-    if (!project) return;
-    try {
-      await invoke("register_project", {
-        path: project.path,
-        name: projectName.trim(),
-      });
-      setRenamingProject(false);
-      await onRefresh();
-    } catch (reason) {
-      onError(String(reason));
-    }
-  }
-
-  async function submitTopic(e: React.FormEvent) {
-    e.preventDefault();
-    if (!cfg) return;
-    // 留空 = 清除课题主题（渲染时移除 topic 行）
-    const topic = topicDraft.trim();
-    if (await saveConfig({ ...cfg, topic: topic || null })) {
-      setEditingTopic(false);
-    }
-  }
-
-  async function removeRegistration() {
-    if (!project) return;
-    if (
-      !(await confirmDialog(
-        `只移除「${project.name}」的项目注册，不删除磁盘目录；项目内工作区保留。继续？`,
-      ))
-    )
-      return;
-    try {
-      await invoke("remove_project", { path: project.path });
-      await onRefresh();
-    } catch (reason) {
-      onError(String(reason));
-    }
-  }
 
   function copyText(text: string, failMsg: string) {
     void navigator.clipboard.writeText(text).catch(() => onError(failMsg));
@@ -617,8 +556,6 @@ export default function ProjectGroup({
   }, [cfg]);
   // 模板选择器：首启引导与「更换模板」共用，列出内置 + 用户模板
   const [pickerOpen, setPickerOpen] = useState(false);
-  // 校验提示浮层：⚠ 徽标点击展开逐条全文（WKWebView 不显示 title 悬浮）
-  const [warnOpen, setWarnOpen] = useState(false);
   // 另存为模板：内联表单（WKWebView 无 window.prompt），同名覆盖先 confirm
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [tplNameDraft, setTplNameDraft] = useState("");
@@ -890,6 +827,16 @@ export default function ProjectGroup({
   // 各占详情页一条常驻带，配置项还散在 ⋯ 菜单八项里；收进抽屉后详情页少两条带、
   // ⋯ 菜单收到四项，项目级配置也终于有了一个能一眼看全的地方。
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const chromeConsumed = useRef<number | null>(null);
+  useEffect(() => {
+    if (!chromeReq || !cfg) return;
+    if (chromeConsumed.current === chromeReq.token) return;
+    if (chromeReq.action === "rename" || chromeReq.action === "topic") return;
+    chromeConsumed.current = chromeReq.token;
+    if (chromeReq.action === "settings") setSettingsOpen(true);
+    if (chromeReq.action === "editor") openEditor();
+    if (chromeReq.action === "history") setHistoryOpen(true);
+  }, [chromeReq, cfg]);
   // 全局设定编辑（抽屉内）：textarea 一行一条，失焦即存
   const [globalsDraft, setGlobalsDraft] = useState("");
   useEffect(() => {
@@ -1219,6 +1166,10 @@ export default function ProjectGroup({
         cwd: projectPath,
         root: projectPath,
         reuseKey: `lit:${projectPath}:${r.path.replace(/\\/g, "/")}`,
+        preferredAgent: project?.defaultAgent,
+        preferredProfile: project?.defaultAgent
+          ? project.defaultProfiles?.[project.defaultAgent]
+          : undefined,
       },
       { forcePick: !!(e?.metaKey || e?.ctrlKey) },
     );
@@ -1252,16 +1203,6 @@ export default function ProjectGroup({
   }
 
   // ===== 渲染 =====
-  // 分组头只保留需要用户介入的阻塞提醒；进行中/待评审由下方流程线表达。
-  let blockedCount = 0;
-  for (const ws of workspaces) {
-    if (ws.status !== "active") continue;
-    const h = health[ws.id];
-    const d = drift[ws.id];
-    if (d?.canResolveMerge === true || h?.conflict === true) {
-      blockedCount += 1;
-    }
-  }
   // 步骤状态表：每步算一次，下面各处派生共用同一份快照。
   // 原先 7 处各调一次 deriveStepStatus，每次都遍历 workspaces——N 步项目每渲染要跑 2N+ 次
   // find（describeStep 与 currentStep 还会互相嵌套调用）。纯派生无副作用，
@@ -1280,14 +1221,6 @@ export default function ProjectGroup({
       ? deriveStepStatus(cfg.steps[i], workspaces, health, drift)
       : null);
   /** 资源构成一句话（折叠态也让人知道里面有什么）：按类型计数，零资源时明说扫过了 */
-  /** 已真正填写的全局设定：模板预填的是「综述角度：（领域全景 / 聚焦某个子问题）」这种
-   *  带括号占位的空答案——原样显示会让项目头挂一串没意义的问号，用户还以为是已定的结论。
-   *  判定：冒号后去掉括号内容还剩字才算填过 */
-  const filledSettings = (cfg?.settings ?? []).filter((line) => {
-    const ans = line.split(/[：:]/).slice(1).join(":");
-    return ans.replace(/[（(].*?[）)]/g, "").trim().length > 0;
-  });
-
   const resourceSummary = (() => {
     const rs = cfg?.resources ?? [];
     if (rs.length === 0) return "还没有登记文献/数据";
@@ -1297,9 +1230,6 @@ export default function ProjectGroup({
       .map(([t, n]) => `${n} 个${RESOURCE_TYPE_LABELS[t] ?? t}`)
       .join(" · ");
   })();
-  // 课题主题直接显示在项目名旁（v3.47：只挂悬浮提示等于不存在——用户反馈看不到）
-  const topicText =
-    registered && cfg?.topic?.trim() ? cfg.topic.trim() : undefined;
   // 产物核验手风琴展开项（单开）：无绑定工作区不渲染（菜单项本身已禁用，此处兜底）
   const artStep =
     cfg && artifactsStep !== null ? (cfg.steps[artifactsStep] ?? null) : null;
@@ -1486,188 +1416,20 @@ export default function ProjectGroup({
             : undefined
         }
       >
-      {/* 身份段：名称 + 课题主题一行；路径 / 全局设定次行。篇幅、读者、去向仍在项目头
-          （step-panel 项目层）但收成一粒可点芯片，全文进抽屉，避免扫成一段灰字。 */}
-      <div className="px-3 pb-3 pt-2.5">
-      <div className="flex min-h-9 min-w-0 items-center gap-2">
-        {renamingProject ? (
-          <form
-            onSubmit={submitRenameProject}
-            className="flex shrink-0 items-center gap-1"
-          >
-            <input
-              className={fieldSm}
-              value={projectName}
-              onChange={(e) => setProjectName(e.target.value)}
-              autoFocus
-              required
-            />
-            <button type="submit" className={actionBtn}>
-              确定
-            </button>
-            <button
-              type="button"
-              className={actionBtn}
-              onClick={() => setRenamingProject(false)}
-            >
-              取消
-            </button>
-          </form>
-        ) : (
-          <h2 className="shrink-0 text-base font-semibold text-l1">
-            {displayName}
-          </h2>
-        )}
-        {registered && (
-          <span className="shrink-0 rounded-full bg-strip px-2 py-0.5 text-micro text-l2">
-            {cfg?.pipelineOptOut ? "科研 · 只读文献" : "科研"}
-          </span>
-        )}
-        {topicText ? (
-          <span
-            className="min-w-0 flex-1 truncate text-sm text-l3"
-            title={topicText}
-          >
-            {topicText}
-          </span>
-        ) : (
-          registered &&
-          cfg &&
-          !liteResearch && (
-            <button
-              type="button"
-              onClick={() => {
-                setTopicDraft("");
-                setEditingTopic(true);
-              }}
-              className="shrink-0 text-xs text-l4 hover:text-l2"
-              title="课题主题会写进每次开工的 TASK.md，给 Agent 交代研究背景"
-            >
-              ＋ 写一句课题主题
-            </button>
-          )
-        )}
-        {!registered && (
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l3">
-            <span className="size-2 rounded-full bg-l4" />
-            未添加
-          </span>
-        )}
-        {blockedCount > 0 && (
-          <span className="flex shrink-0 items-center gap-1 text-xs text-l3">
-            <span className="size-2 rounded-full bg-err-text" />
-            {blockedCount} 阻塞
-          </span>
-        )}
-        {cfgWarnings.length > 0 && (
-          <span className="relative shrink-0">
-            <button
-              type="button"
-              aria-expanded={warnOpen}
-              title="查看全部校验提示"
-              className="rounded-sm px-1 text-xs text-warn-text hover:bg-hover"
-              onClick={() => setWarnOpen((v) => !v)}
-            >
-              ! {cfgWarnings.length}
-            </button>
-            {warnOpen && (
-              <>
-                <div
-                  className="fixed inset-0 z-40"
-                  onClick={() => setWarnOpen(false)}
-                />
-                <ul className="absolute left-0 z-50 mt-1 w-72 space-y-1.5 rounded-md border border-hairline ccode-float-surface p-2">
-                  {cfgWarnings.map((w, i) => (
-                    <li key={i} className="break-words text-xs text-l2">
-                      {w}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </span>
-        )}
-        {(!registered || !liteResearch || !sessionsOpen) && (
-        <div className="ml-auto flex shrink-0 items-center gap-1">
-          {!registered && (
-            <button
-              type="button"
-              className={actionBtn}
-              title="添加到 Ccode，获得研究流程与资源面板"
-              onClick={() => onRegisterProject(repoPath)}
-            >
-              添加到 Ccode
-            </button>
-          )}
-          {registered && !liteResearch && (
-            <button
-              type="button"
-              onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                setProjectMenu({ x: rect.right, y: rect.bottom + 4 });
-              }}
-              title="项目操作"
-              aria-label={`项目操作：${displayName}`}
-              className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
-            >
-              ⋯
-            </button>
-          )}
-          {liteResearch && !sessionsOpen && (
-            <ProjectSessionsSection
-              projectPath={projectPath}
-              extraRoots={workspaces.map((w) => w.worktreePath)}
-              variant="sidebar"
-              collapsed
-              onToggle={() => setSessionsOpen(true)}
-            />
-          )}
+      {liteResearch && !sessionsOpen && (
+        <div className="mb-2 flex justify-end">
+          <ProjectSessionsSection
+            projectPath={projectPath}
+            extraRoots={workspaces.map((w) => w.worktreePath)}
+            variant="sidebar"
+            collapsed
+            onToggle={() => setSessionsOpen(true)}
+          />
         </div>
-        )}
-      </div>
-      <div className="mt-1 flex min-w-0 items-center gap-2">
-        {registered && filledSettings.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setSettingsOpen(true)}
-            title={filledSettings.join("\n")}
-            className="shrink-0 rounded-sm px-1 text-micro text-l4 hover:bg-hover hover:text-l2"
-          >
-            全局设定
-          </button>
-        )}
-        <span
-          className="min-w-0 truncate font-mono text-micro text-l4"
-          title={projectPath}
-        >
-          {abbrevHome(projectPath, homeDir, IS_WINDOWS)}
-        </span>
-      </div>
-      </div>
+      )}
 
       {/* 分组主体：左侧 1px 缩进线 + 透明度分层，保持原 p-4 留白节奏 */}
       <div className="border-l border-white/5 pb-4 pl-3 pr-1">
-      {editingTopic && cfg && (
-        <form onSubmit={submitTopic} className="mb-2 flex items-center gap-1">
-          <input
-            className={`${fieldSm} min-w-0 flex-1`}
-            value={topicDraft}
-            onChange={(e) => setTopicDraft(e.target.value)}
-            placeholder="课题主题：一键开步时写进 TASK.md；留空清除"
-            autoFocus
-          />
-          <button type="submit" className={ctaSm}>
-            保存
-          </button>
-          <button
-            type="button"
-            className={actionBtn}
-            onClick={() => setEditingTopic(false)}
-          >
-            取消
-          </button>
-        </form>
-      )}
 
       {savingTemplate && cfg && (
         <form
@@ -1773,68 +1535,12 @@ export default function ProjectGroup({
 
       {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入研究流程；
           「不使用研究流程」（pipelineOptOut）显式隐藏本横幅，回流入口在项目设置 */}
+      {liteResearch && project && (
+        <ProjectUserTasksView project={project} embed />
+      )}
+
       {liteResearch && cfg && (
         <div className="mb-8 space-y-8">
-          <ResourceListSection
-            projectPath={projectPath}
-            resources={partitionResources(cfg.resources).papers}
-            collapsible
-            defaultOpen
-            showLitStatus
-            stripPrefix="papers"
-            emptyActions={
-              <>
-                <button
-                  type="button"
-                  className={actionBtn}
-                  disabled={discoverLoading}
-                  onClick={() => {
-                    setSettingsOpen(true);
-                    setResOpen(true);
-                    void discoverResources();
-                  }}
-                >
-                  {discoverLoading ? "扫描中…" : "重新扫描"}
-                </button>
-                <button
-                  type="button"
-                  className={actionBtn}
-                  onClick={() => {
-                    setSettingsOpen(true);
-                    setResOpen(true);
-                    void importSearchResults();
-                  }}
-                >
-                  导入 RIS / BibTeX
-                </button>
-              </>
-            }
-            onImmerse={immerseResource}
-            onAskAi={askAiResource}
-            onMenu={(r, el) => {
-              const index = cfg.resources.findIndex((x) => x.path === r.path);
-              if (index < 0) return;
-              const rect = el.getBoundingClientRect();
-              setResourceMenu({
-                x: rect.right,
-                y: rect.bottom + 4,
-                index,
-              });
-            }}
-          />
-          <NotesListSection
-            projectPath={projectPath}
-            onOpenFromLit={() => {
-              const pdf = cfg.resources.find((r) => /\.pdf$/i.test(r.path));
-              if (pdf) immerseResource(pdf);
-              else void discoverResources();
-            }}
-          />
-          <DataListSection
-            projectPath={projectPath}
-            registered={cfg.resources}
-            onAskAi={askAiResource}
-          />
           <div ref={litWatchRef}>
           <LitWatchCard
             projectRoot={projectPath}
@@ -1859,11 +1565,6 @@ export default function ProjectGroup({
             }
           />
           </div>
-          {registered && (
-            <div ref={schedulePanelRef}>
-              <ScheduleSection projectRoot={projectPath} steps={[]} />
-            </div>
-          )}
         </div>
       )}
 
@@ -2270,9 +1971,8 @@ export default function ProjectGroup({
                         type="button"
                         className={actionBtn}
                         onClick={() => {
-                          setProjectName(project.name);
-                          setRenamingProject(true);
                           setSettingsOpen(false);
+                          onIdentityAction?.("rename");
                         }}
                       >
                         重命名
@@ -2292,9 +1992,8 @@ export default function ProjectGroup({
                         className={actionBtn}
                         disabled={!cfg}
                         onClick={() => {
-                          setTopicDraft(cfg?.topic ?? "");
-                          setEditingTopic(true);
                           setSettingsOpen(false);
+                          onIdentityAction?.("topic");
                         }}
                       >
                         编辑
@@ -2650,59 +2349,36 @@ export default function ProjectGroup({
 
       {liteResearch && sessionsOpen && (
         <aside className={sessionsAsideOpenClass}>
-          <ProjectSessionsSection
-            projectPath={projectPath}
-            extraRoots={workspaces.map((w) => w.worktreePath)}
-            variant="sidebar"
-            collapsed={false}
-            onToggle={() => setSessionsOpen(false)}
-            onNewChat={(e) =>
-              beginProjectChat(
-                { cwd: projectPath, name: displayName, kind: "research" },
-                { forcePick: !!(e.metaKey || e.ctrlKey) },
-              )
-            }
-          />
+          <div className="flex min-w-0 flex-col gap-4">
+            <ProjectSessionsSection
+              projectPath={projectPath}
+              extraRoots={workspaces.map((w) => w.worktreePath)}
+              variant="sidebar"
+              collapsed={false}
+              onToggle={() => setSessionsOpen(false)}
+              onNewChat={(e) =>
+                beginProjectChat(
+                  {
+                    cwd: projectPath,
+                    name: displayName,
+                    kind: "research",
+                    preferredAgent: project?.defaultAgent,
+                    preferredProfile: project?.defaultAgent
+                      ? project.defaultProfiles?.[project.defaultAgent]
+                      : undefined,
+                  },
+                  { forcePick: !!(e.metaKey || e.ctrlKey) },
+                )
+              }
+            />
+            <div ref={schedulePanelRef}>
+              <ScheduleSection projectRoot={projectPath} steps={[]} layout="card" />
+            </div>
+          </div>
         </aside>
       )}
 
-      {projectMenu && project && (
-        <ContextMenu
-          x={projectMenu.x}
-          y={projectMenu.y}
-          alignRight
-          onClose={() => setProjectMenu(null)}
-          items={[
-            {
-              label: "编辑研究流程",
-              disabled: !cfg,
-              title: cfg
-                ? "编辑步骤名称、简报、预期产物和脚本"
-                : "project.toml 尚未加载完成",
-              onSelect: () => openEditor(),
-            },
-            {
-              // 项目级低频配置的单一入口（v3.85）：原先「重命名 / 课题主题 / 更换模板 /
-              // 另存为模板 / 复制路径」五项平铺在这里，加上详情页两条常驻带，
-              // 项目配置散在四处；现在统一进抽屉
-              label: "项目设置…",
-              title: "项目名 / 课题主题 / 研究流程模板 / 文献与数据 / 定时巡检",
-              onSelect: () => setSettingsOpen(true),
-            },
-            {
-              label: "历史",
-              title: "项目的白话保存时间线（只读）",
-              onSelect: () => setHistoryOpen(true),
-            },
-            {
-              label: "从 Ccode 移除",
-              title:
-                "只把项目从 Ccode 列表里摘掉，不动磁盘文件；清除痕迹与删除目录在左侧项目栏右键菜单里",
-              onSelect: () => void removeRegistration(),
-            },
-          ]}
-        />
-      )}
+
       {stepMenu && (
         <ContextMenu
           x={stepMenu.x}
@@ -2812,6 +2488,12 @@ export default function ProjectGroup({
           projectPath={project.path}
           step={cfg.steps[kickoff.index]}
           cfg={cfg}
+          preferredAgent={project.defaultAgent}
+          preferredProfile={
+            project.defaultAgent
+              ? project.defaultProfiles?.[project.defaultAgent]
+              : undefined
+          }
           originCardId={kickoff.originCardId}
           busy={starting !== null}
           onCancel={() => setKickoff(null)}

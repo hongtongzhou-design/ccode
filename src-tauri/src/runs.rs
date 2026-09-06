@@ -2,6 +2,12 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+const MAX_TASK_INPUT_FILES: usize = 20_000;
+const MAX_TASK_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 
 fn now_rfc3339() -> String {
     chrono::Local::now().to_rfc3339()
@@ -29,6 +35,9 @@ pub(crate) fn infer_task_kind(reuse_key: &str, isolation: &str) -> &'static str 
     }
     if key.starts_with("office:") {
         return "office_doc";
+    }
+    if key.starts_with("free:") || key.starts_with("research:") {
+        return "free_research";
     }
     if key.starts_with("ws:") {
         return "pipeline_step";
@@ -120,6 +129,10 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, identity_key TEXT NOT NULL UNIQUE, project_root TEXT,
         kind TEXT NOT NULL, task_ref TEXT, name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+        input_paths TEXT NOT NULL DEFAULT '[]', output_paths TEXT NOT NULL DEFAULT '[]',
+        review_required INTEGER NOT NULL DEFAULT 0, archived_at TEXT, agent TEXT,
+        profile_id TEXT,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runs (
         id TEXT PRIMARY KEY, project_root TEXT, task_kind TEXT NOT NULL, task_ref TEXT,
@@ -136,6 +149,31 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(tasks)")
+        .map_err(|e| e.to_string())?
+        .query_map([], |r| r.get(1))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    for (column, definition) in [
+        ("description", "TEXT NOT NULL DEFAULT ''"),
+        ("status", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("input_paths", "TEXT NOT NULL DEFAULT '[]'"),
+        ("output_paths", "TEXT NOT NULL DEFAULT '[]'"),
+        ("review_required", "INTEGER NOT NULL DEFAULT 0"),
+        ("archived_at", "TEXT"),
+        ("agent", "TEXT"),
+        ("profile_id", "TEXT"),
+    ] {
+        if !columns.iter().any(|c| c == column) {
+            conn.execute(
+                &format!("ALTER TABLE tasks ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    let run_columns: Vec<String> = conn
         .prepare("PRAGMA table_info(runs)")
         .map_err(|e| e.to_string())?
         .query_map([], |r| r.get(1))
@@ -149,7 +187,7 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         ("task_id", "TEXT"),
         ("custom_runtime_id", "TEXT"),
     ] {
-        if !columns.iter().any(|c| c == column) {
+        if !run_columns.iter().any(|c| c == column) {
             conn.execute(
                 &format!("ALTER TABLE runs ADD COLUMN {column} {definition}"),
                 [],
@@ -210,21 +248,42 @@ pub struct TaskDto {
     pub kind: String,
     pub task_ref: Option<String>,
     pub name: String,
+    pub description: String,
+    pub status: String,
+    pub input_paths: Vec<String>,
+    pub output_paths: Vec<String>,
+    pub review_required: bool,
+    pub archived_at: Option<String>,
+    pub agent: Option<String>,
+    pub profile_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub declared: bool,
 }
 fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
+    let input_paths: String = r.get(7)?;
+    let output_paths: String = r.get(8)?;
+    let identity_key: String = r.get(15)?;
     Ok(TaskDto {
         id: r.get(0)?,
         project_root: r.get(1)?,
         kind: r.get(2)?,
         task_ref: r.get(3)?,
         name: r.get(4)?,
-        created_at: r.get(5)?,
-        updated_at: r.get(6)?,
+        description: r.get(5)?,
+        status: r.get(6)?,
+        input_paths: serde_json::from_str(&input_paths).unwrap_or_default(),
+        output_paths: serde_json::from_str(&output_paths).unwrap_or_default(),
+        review_required: r.get::<_, i64>(9)? != 0,
+        archived_at: r.get(10)?,
+        agent: r.get(11)?,
+        profile_id: r.get(12)?,
+        created_at: r.get(13)?,
+        updated_at: r.get(14)?,
+        declared: identity_key.starts_with("user:"),
     })
 }
-const TASK_COLS: &str = "id,project_root,kind,task_ref,name,created_at,updated_at";
+const TASK_COLS: &str = "id,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,archived_at,agent,profile_id,created_at,updated_at,identity_key";
 fn ensure_task_at(
     conn: &Connection,
     root: Option<&str>,
@@ -255,6 +314,669 @@ fn ensure_task_at(
         map_task,
     )
     .map_err(|e| e.to_string())
+}
+
+fn task_json_paths(value: &[String]) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|e| format!("任务文件路径无法保存: {e}"))
+}
+
+fn prune_nested_rel_paths(paths: &[String]) -> Vec<String> {
+    let mut items = paths.to_vec();
+    items.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+    let mut kept = Vec::new();
+    for path in items {
+        if path == "." {
+            return vec![".".into()];
+        }
+        let covered = kept.iter().any(|parent: &String| {
+            parent == "." || path == *parent || path.starts_with(&format!("{parent}/"))
+        });
+        if !covered {
+            kept.push(path);
+        }
+    }
+    kept
+}
+
+fn task_rel_path(root: &Path, raw: &str, label: &str) -> Result<(String, PathBuf), String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(format!("{label}不能是空路径"));
+    }
+    let candidate = {
+        let path = PathBuf::from(crate::sessions::expand_tilde(raw));
+        if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        }
+    };
+    let canonical = crate::paths::canonicalize_plain(&candidate)
+        .map_err(|e| format!("{label}无法解析：{e}"))?;
+    if !crate::paths::path_within(&canonical.to_string_lossy(), &root.to_string_lossy()) {
+        return Err(format!("{label}必须位于项目目录内"));
+    }
+    let relative = canonical
+        .strip_prefix(root)
+        .map_err(|_| format!("{label}无法计算项目相对路径"))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if relative.is_empty() {
+        return Err(format!("{label}不能是项目根目录本身"));
+    }
+    if relative
+        .split('/')
+        .any(|part| matches!(part, ".git" | ".ccode"))
+    {
+        return Err(format!("{label}不能指向 Ccode 或 Git 内部目录"));
+    }
+    Ok((relative, canonical))
+}
+
+#[derive(Default)]
+struct TaskCopyBudget {
+    files: usize,
+    bytes: u64,
+}
+
+fn copy_task_tree_with_budget(
+    source: &Path,
+    target: &Path,
+    budget: &mut TaskCopyBudget,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source).map_err(|e| format!("读取输入文件失败：{e}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("输入文件不能是符号链接：{}", source.display()));
+    }
+    if metadata.is_dir() {
+        if matches!(
+            source.file_name().and_then(|name| name.to_str()),
+            Some(".git" | ".ccode" | "node_modules" | "target")
+        ) {
+            return Ok(());
+        }
+        fs::create_dir_all(target).map_err(|e| format!("创建任务输入目录失败：{e}"))?;
+        for entry in
+            fs::read_dir(source).map_err(|e| format!("读取任务输入目录失败：{e}"))?
+        {
+            let entry = entry.map_err(|e| format!("读取任务输入目录失败：{e}"))?;
+            let child = entry.path();
+            let name = entry.file_name();
+            copy_task_tree_with_budget(&child, &target.join(name), budget)?;
+        }
+    } else if metadata.is_file() {
+        budget.files += 1;
+        budget.bytes = budget.bytes.saturating_add(metadata.len());
+        if budget.files > MAX_TASK_INPUT_FILES {
+            return Err(format!("输入文件超过上限（{} 个）", MAX_TASK_INPUT_FILES));
+        }
+        if budget.bytes > MAX_TASK_INPUT_BYTES {
+            return Err("输入文件总大小超过 512 MB 上限".into());
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建任务输入目录失败：{e}"))?;
+        }
+        fs::copy(source, target).map_err(|e| format!("复制任务输入失败：{e}"))?;
+    } else {
+        return Err(format!("输入路径不是普通文件或目录：{}", source.display()));
+    }
+    Ok(())
+}
+
+fn copy_project_contents(
+    source: &Path,
+    target: &Path,
+    budget: &mut TaskCopyBudget,
+) -> Result<(), String> {
+    for entry in fs::read_dir(source).map_err(|e| format!("读取项目范围失败：{e}"))? {
+        let entry = entry.map_err(|e| format!("读取项目范围失败：{e}"))?;
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some(".git" | ".ccode" | "node_modules" | "target")) {
+            continue;
+        }
+        copy_task_tree_with_budget(&entry.path(), &target.join(name), budget)?;
+    }
+    Ok(())
+}
+
+fn task_entry_is_ignored(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(".git" | ".ccode" | "node_modules" | "target")
+    )
+}
+
+fn rel_posix(root: &Path, path: &Path) -> Result<String, String> {
+    path.strip_prefix(root)
+        .map_err(|_| format!("变更路径不在任务目录内：{}", path.display()))
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+}
+
+fn reject_symlink(path: &Path, label: &str) -> Result<fs::Metadata, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| format!("{label}失败：{e}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("{label}不能是符号链接：{}", path.display()));
+    }
+    Ok(metadata)
+}
+
+fn validate_output_rel(path: &str) -> Result<String, String> {
+    let path = path.trim().replace('\\', "/");
+    let path = path.trim_matches('/');
+    if path.is_empty()
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("输出路径必须是项目内相对路径".into());
+    }
+    Ok(path.to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskOutputChangeDto {
+    pub path: String,
+    pub kind: String,
+    pub bytes: u64,
+}
+
+fn push_file_change(
+    source: &Path,
+    target: &Path,
+    source_root: &Path,
+    changes: &mut Vec<TaskOutputChangeDto>,
+) -> Result<(), String> {
+    let metadata = reject_symlink(source, "读取任务输出")?;
+    if !metadata.is_file() {
+        return Err(format!("任务输出不是普通文件：{}", source.display()));
+    }
+    if target.exists() {
+        let target_meta = reject_symlink(target, "读取项目文件")?;
+        if target_meta.is_dir() {
+            return Err(format!("输出目标是目录：{}", target.display()));
+        }
+        if files_equal(source, target)? {
+            return Ok(());
+        }
+        changes.push(TaskOutputChangeDto {
+            path: rel_posix(source_root, source)?,
+            kind: "modified".into(),
+            bytes: metadata.len(),
+        });
+        return Ok(());
+    }
+    changes.push(TaskOutputChangeDto {
+        path: rel_posix(source_root, source)?,
+        kind: "added".into(),
+        bytes: metadata.len(),
+    });
+    Ok(())
+}
+
+fn collect_output_changes(
+    source: &Path,
+    target: &Path,
+    source_root: &Path,
+    changes: &mut Vec<TaskOutputChangeDto>,
+) -> Result<(), String> {
+    let metadata = reject_symlink(source, "读取任务输出")?;
+    if metadata.is_dir() {
+        if let Ok(target_meta) = fs::symlink_metadata(target) {
+            if target_meta.file_type().is_symlink() {
+                return Err(format!("输出目标不能是符号链接：{}", target.display()));
+            }
+            if !target_meta.is_dir() {
+                return Err(format!("输出目标不是目录：{}", target.display()));
+            }
+        }
+        for entry in fs::read_dir(source).map_err(|e| format!("读取任务输出目录失败：{e}"))? {
+            let entry = entry.map_err(|e| format!("读取任务输出目录失败：{e}"))?;
+            if task_entry_is_ignored(&entry.file_name()) {
+                continue;
+            }
+            collect_output_changes(
+                &entry.path(),
+                &target.join(entry.file_name()),
+                source_root,
+                changes,
+            )?;
+        }
+        return Ok(());
+    }
+    push_file_change(source, target, source_root, changes)
+}
+
+fn list_output_changes(
+    run_root: &Path,
+    project_root: &Path,
+    output_paths: &[String],
+) -> Result<Vec<TaskOutputChangeDto>, String> {
+    let mut changes = Vec::new();
+    if output_paths.iter().any(|path| path == ".") {
+        collect_output_changes(run_root, project_root, run_root, &mut changes)?;
+    } else {
+        for raw in output_paths {
+            let relative = validate_output_rel(raw)?;
+            let source = run_root.join(&relative);
+            if !source.exists() {
+                continue;
+            }
+            collect_output_changes(
+                &source,
+                &project_root.join(&relative),
+                run_root,
+                &mut changes,
+            )?;
+        }
+    }
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    changes.dedup_by(|a, b| a.path == b.path);
+    Ok(changes)
+}
+
+fn copy_adopt_file(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = reject_symlink(source, "读取任务输出")?;
+    if !metadata.is_file() {
+        return Err(format!("任务输出不是普通文件：{}", source.display()));
+    }
+    if target.exists() {
+        let target_meta = reject_symlink(target, "读取项目文件")?;
+        if target_meta.is_dir() {
+            return Err(format!("输出目标是目录：{}", target.display()));
+        }
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建输出目录失败：{e}"))?;
+    }
+    fs::copy(source, target).map_err(|e| format!("接收任务输出失败：{e}"))?;
+    Ok(())
+}
+
+fn files_equal(source: &Path, target: &Path) -> Result<bool, String> {
+    let source_meta = fs::metadata(source).map_err(|e| format!("读取任务输出失败：{e}"))?;
+    let target_meta = match fs::metadata(target) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("读取项目文件失败：{error}")),
+    };
+    if !source_meta.is_file() || !target_meta.is_file() {
+        return Ok(false);
+    }
+    if source_meta.len() != target_meta.len() {
+        return Ok(false);
+    }
+    let mut source_file = fs::File::open(source).map_err(|e| format!("读取任务输出失败：{e}"))?;
+    let mut target_file = fs::File::open(target).map_err(|e| format!("读取项目文件失败：{e}"))?;
+    let mut source_buffer = [0_u8; 8192];
+    let mut target_buffer = [0_u8; 8192];
+    loop {
+        let source_read = source_file
+            .read(&mut source_buffer)
+            .map_err(|e| format!("读取任务输出失败：{e}"))?;
+        let target_read = target_file
+            .read(&mut target_buffer)
+            .map_err(|e| format!("读取项目文件失败：{e}"))?;
+        if source_read != target_read
+            || source_buffer[..source_read] != target_buffer[..target_read]
+        {
+            return Ok(false);
+        }
+        if source_read == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn copy_project_changes(source: &Path, target: &Path) -> Result<(), String> {
+    let changes = list_output_changes(source, target, &[".".to_string()])?;
+    for change in changes {
+        copy_adopt_file(&source.join(&change.path), &target.join(&change.path))?;
+    }
+    Ok(())
+}
+
+fn task_runs_root() -> Result<PathBuf, String> {
+    let base = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .or_else(dirs::config_dir)
+        .ok_or("无法确定 Ccode 数据目录")?;
+    let root = base.join("ccode").join("task-runs");
+    fs::create_dir_all(&root).map_err(|e| format!("创建任务运行目录失败：{e}"))?;
+    Ok(root)
+}
+
+fn task_by_id(conn: &Connection, id: &str) -> Result<TaskDto, String> {
+    conn.query_row(
+        &format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"),
+        [id],
+        map_task,
+    )
+    .optional()
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "Task 不存在".into())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTaskInput {
+    pub project_root: String,
+    pub kind: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub input_paths: Vec<String>,
+    pub output_paths: Vec<String>,
+    pub permission: Option<String>,
+    pub agent: Option<String>,
+    pub profile_id: Option<String>,
+}
+
+#[tauri::command]
+pub fn task_create(input: CreateTaskInput) -> Result<TaskDto, String> {
+    let root = validate_existing_dir(&input.project_root, "项目根目录")?;
+    if !matches!(input.kind.as_str(), "free_research" | "office_doc") {
+        return Err("这里只能创建自由科研或工作任务".into());
+    }
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("Task 名称不能为空".into());
+    }
+    let permission = input.permission.as_deref().unwrap_or("write_tree");
+    if !matches!(permission, "discuss" | "write_tree") {
+        return Err("不支持的权限政策".into());
+    }
+    let agent = input
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(agent) = agent {
+        if crate::agent_specs::agent_spec(agent).is_none() {
+            return Err(format!("未知 Agent：{agent}"));
+        }
+    }
+    let conn = db()?;
+    let project = crate::projects::canonical_key(Path::new(&root));
+    let registered = conn
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE path=?1",
+            [&project],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if registered == 0 {
+        return Err("项目尚未注册，不能创建 Task".into());
+    }
+    let mut inputs = Vec::new();
+    for path in &input.input_paths {
+        if path.trim() == "." {
+            if !inputs.is_empty() {
+                return Err("整个项目范围不能与指定路径同时使用".into());
+            }
+            if !inputs.contains(&".".to_string()) {
+                inputs.push(".".into());
+            }
+            continue;
+        }
+        if inputs.iter().any(|item| item == ".") {
+            return Err("整个项目范围不能与指定路径同时使用".into());
+        }
+        let (relative, _) = task_rel_path(Path::new(&root), path, "输入路径")?;
+        if !inputs.contains(&relative) {
+            inputs.push(relative);
+        }
+    }
+    if inputs.iter().any(|item| item == ".") {
+        inputs = vec![".".into()];
+    } else {
+        inputs = prune_nested_rel_paths(&inputs);
+    }
+    let mut outputs = Vec::new();
+    for path in &input.output_paths {
+        let path = path.trim().replace('\\', "/");
+        let path = path.trim_matches('/');
+        if path == "." {
+            if !outputs.is_empty() {
+                return Err("全部项目变更不能与指定输出路径同时使用".into());
+            }
+            outputs.push(".".to_string());
+            continue;
+        }
+        if outputs.iter().any(|item| item == ".") {
+            return Err("全部项目变更不能与指定输出路径同时使用".into());
+        }
+        if path.is_empty()
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err("输出路径必须是项目内相对路径".into());
+        }
+        if !outputs.contains(&path.to_string()) {
+            outputs.push(path.to_string());
+        }
+    }
+    let review_required = permission == "write_tree";
+    if !review_required && !outputs.is_empty() {
+        return Err("只讨论任务不能指定输出路径；如需生成文件请改为写入后审核".into());
+    }
+    if review_required && outputs.is_empty() {
+        return Err("需要写文件的 Task 必须指定输出路径".into());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = now_rfc3339();
+    let identity = format!("user:{id}");
+    conn.execute(
+        "INSERT INTO tasks(id,identity_key,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,agent,profile_id,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11,?12,?13,?13)",
+        params![
+            id,
+            identity,
+            project,
+            input.kind,
+            id,
+            name,
+            input.description.unwrap_or_default(),
+            task_json_paths(&inputs)?,
+            task_json_paths(&outputs)?,
+            review_required as i64,
+            agent,
+            input
+                .profile_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty()),
+            now
+        ],
+    )
+    .map_err(|e| format!("创建 Task 失败: {e}"))?;
+    task_by_id(&conn, &id)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareTaskRunInput {
+    pub task_id: String,
+    pub agent: String,
+    pub profile_id: String,
+}
+
+#[tauri::command]
+pub async fn task_prepare_run(input: PrepareTaskRunInput) -> Result<RunDto, String> {
+    tauri::async_runtime::spawn_blocking(move || task_prepare_run_impl(input))
+        .await
+        .map_err(|e| format!("准备任务失败：{e}"))?
+}
+
+fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
+    let conn = db()?;
+    let task = task_by_id(&conn, &input.task_id)?;
+    if task.archived_at.is_some() {
+        return Err("已归档的 Task 不能启动".into());
+    }
+    if task.kind != "free_research" && task.kind != "office_doc" {
+        return Err("该 Task 类型由现有项目流程负责启动".into());
+    }
+    if let Some(active) = query_runs(
+        &conn,
+        "WHERE task_id=?1 AND closed_at IS NULL AND internal=0 ORDER BY created_at DESC LIMIT 1",
+        [&task.id],
+    )?
+    .into_iter()
+    .next()
+    {
+        return Ok(active);
+    }
+    let root = validate_existing_dir(
+        task.project_root.as_deref().ok_or("Task 没有关联项目")?,
+        "项目根目录",
+    )?;
+    let staging_id = uuid::Uuid::new_v4().to_string();
+    let run_root = task_runs_root()?.join(&task.id).join(&staging_id);
+    fs::create_dir_all(&run_root).map_err(|e| format!("创建 Task 独立目录失败：{e}"))?;
+    let mut copy_budget = TaskCopyBudget::default();
+    for relative in &task.input_paths {
+        let result = if relative == "." {
+            copy_project_contents(Path::new(&root), &run_root, &mut copy_budget)
+        } else {
+            let source = Path::new(&root).join(relative);
+            let target = run_root.join(relative);
+            copy_task_tree_with_budget(&source, &target, &mut copy_budget)
+        };
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&run_root);
+            return Err(error);
+        }
+    }
+    let permission = if task.review_required {
+        "write_tree"
+    } else {
+        "discuss"
+    };
+    let run = open_run_impl(OpenRunInput {
+        id: None,
+        task_id: Some(task.id.clone()),
+        project_root: Some(root),
+        task_kind: Some(task.kind.clone()),
+        task_ref: Some(task.name.clone()),
+        isolation_path: run_root.to_string_lossy().into_owned(),
+        runtime: Some("local_cli".into()),
+        agent: input.agent,
+        profile_id: Some(input.profile_id),
+        permission: Some(permission.into()),
+        reuse_key: Some(format!("task:{}", task.id)),
+        session_id: None,
+        custom_runtime_id: None,
+        internal: Some(false),
+        sentinel: Some(false),
+    });
+    let run = match run {
+        Ok(run) => run,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&run_root);
+            return Err(error);
+        }
+    };
+    conn.execute(
+        "UPDATE tasks SET status='running', updated_at=?2 WHERE id=?1",
+        params![task.id, now_rfc3339()],
+    )
+    .map_err(|e| format!("更新 Task 状态失败: {e}"))?;
+    Ok(run)
+}
+
+fn task_output_changes_impl(run_id: &str) -> Result<Vec<TaskOutputChangeDto>, String> {
+    let conn = db()?;
+    let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
+    if run.status != "completed" {
+        return Err("只有已完成的 Run 才能审核输出".into());
+    }
+    let task = task_by_id(&conn, &run.task_id)?;
+    if !task.review_required {
+        return Err("该任务不需要审核输出".into());
+    }
+    let root = validate_existing_dir(
+        task.project_root.as_deref().ok_or("Task 没有关联项目")?,
+        "项目根目录",
+    )?;
+    list_output_changes(Path::new(&run.isolation_path), Path::new(&root), &task.output_paths)
+}
+
+#[tauri::command]
+pub async fn task_output_changes(run_id: String) -> Result<Vec<TaskOutputChangeDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || task_output_changes_impl(&run_id))
+        .await
+        .map_err(|e| format!("读取任务变更失败：{e}"))?
+}
+
+fn task_adopt_outputs_impl(run_id: &str, paths: Option<Vec<String>>) -> Result<TaskDto, String> {
+    let conn = db()?;
+    let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
+    if run.status != "completed" {
+        return Err("只有已完成的 Run 才能采纳输出".into());
+    }
+    let task = task_by_id(&conn, &run.task_id)?;
+    let root = validate_existing_dir(
+        task.project_root.as_deref().ok_or("Task 没有关联项目")?,
+        "项目根目录",
+    )?;
+    let run_root = Path::new(&run.isolation_path);
+    let available = list_output_changes(run_root, Path::new(&root), &task.output_paths)?;
+    let selected = match paths {
+        None => available.iter().map(|change| change.path.clone()).collect::<Vec<_>>(),
+        Some(list) if list.is_empty() => Vec::new(),
+        Some(list) => {
+            let allowed: std::collections::HashSet<_> =
+                available.iter().map(|change| change.path.clone()).collect();
+            let mut selected = Vec::new();
+            for raw in list {
+                let relative = validate_output_rel(&raw)?;
+                if !allowed.contains(&relative) {
+                    return Err(format!("没有可采纳的变更：{relative}"));
+                }
+                if !selected.contains(&relative) {
+                    selected.push(relative);
+                }
+            }
+            selected
+        }
+    };
+    for relative in &selected {
+        let target = Path::new(&root).join(relative);
+        if let Some(mut probe) = target.parent() {
+            while !probe.exists() {
+                probe = probe.parent().ok_or("输出目标无法解析")?;
+            }
+            let parent = crate::paths::canonicalize_plain(probe)
+                .map_err(|e| format!("输出目标无法解析：{e}"))?;
+            if !crate::paths::path_within(&parent.to_string_lossy(), &root) {
+                return Err("输出目标必须位于项目目录内".into());
+            }
+        }
+        copy_adopt_file(&run_root.join(relative), &target)?;
+    }
+    conn.execute(
+        "UPDATE tasks SET status='completed', updated_at=?2 WHERE id=?1",
+        params![task.id, now_rfc3339()],
+    )
+    .map_err(|e| format!("更新 Task 完成状态失败：{e}"))?;
+    record_event(
+        &conn,
+        run_id,
+        "task.outputs_adopted",
+        Some(&serde_json::json!({"taskId": task.id, "paths": selected}).to_string()),
+    )?;
+    task_by_id(&conn, &run.task_id)
+}
+
+#[tauri::command]
+pub async fn task_adopt_outputs(
+    run_id: String,
+    paths: Option<Vec<String>>,
+) -> Result<TaskDto, String> {
+    tauri::async_runtime::spawn_blocking(move || task_adopt_outputs_impl(&run_id, paths))
+        .await
+        .map_err(|e| format!("采纳输出失败：{e}"))?
 }
 #[tauri::command]
 pub fn task_list(project_root: Option<String>) -> Result<Vec<TaskDto>, String> {
@@ -312,6 +1034,7 @@ pub struct RunDto {
 #[serde(rename_all = "camelCase")]
 pub struct OpenRunInput {
     pub id: Option<String>,
+    pub task_id: Option<String>,
     pub project_root: Option<String>,
     pub task_kind: Option<String>,
     pub task_ref: Option<String>,
@@ -382,6 +1105,10 @@ pub(crate) fn validate_existing_dir(path: &str, label: &str) -> Result<String, S
         .map(|p| p.to_string_lossy().into_owned())
         .map_err(|e| format!("{label} 无法解析: {e}"))
 }
+fn requires_isolated_write_tree(kind: &str, sentinel: bool) -> bool {
+    !sentinel && matches!(kind, "pipeline_step" | "coding_lane" | "watch")
+}
+
 fn validate_policy(input: &OpenRunInput) -> Result<(), String> {
     let kind = input.task_kind.as_deref().unwrap_or("scratch");
     let runtime = input.runtime.as_deref().unwrap_or("local_cli");
@@ -404,7 +1131,13 @@ fn validate_policy(input: &OpenRunInput) -> Result<(), String> {
     }
     if !matches!(
         kind,
-        "pipeline_step" | "coding_lane" | "office_doc" | "watch" | "reader" | "scratch"
+        "pipeline_step"
+            | "coding_lane"
+            | "office_doc"
+            | "free_research"
+            | "watch"
+            | "reader"
+            | "scratch"
     ) {
         return Err("不支持的 Task 类型".into());
     }
@@ -412,8 +1145,7 @@ fn validate_policy(input: &OpenRunInput) -> Result<(), String> {
         return Err("只有定时无头任务可以声明主仓哨兵".into());
     }
     if permission == "write_tree"
-        && !input.sentinel.unwrap_or(false)
-        && (matches!(kind, "pipeline_step" | "coding_lane" | "watch") || runtime == "custom")
+        && requires_isolated_write_tree(kind, input.sentinel.unwrap_or(false))
     {
         let root = input
             .project_root
@@ -495,6 +1227,10 @@ fn open_at(conn: &Connection, input: OpenRunInput) -> Result<RunDto, String> {
                     .permission
                     .as_deref()
                     .is_some_and(|permission| existing.permission != permission)
+                || input
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|task_id| existing.task_id != task_id)
             {
                 return Err("Run 身份与启动目标不一致，不能改写已有 Run".into());
             }
@@ -523,13 +1259,36 @@ fn open_at(conn: &Connection, input: OpenRunInput) -> Result<RunDto, String> {
             }
         }
     }
-    let task = ensure_task_at(
-        conn,
-        input.project_root.as_deref(),
-        kind,
-        input.task_ref.as_deref(),
-        &input.isolation_path,
-    )?;
+    let task = if let Some(task_id) = input.task_id.as_deref() {
+        let task = conn
+            .query_row(
+                &format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"),
+                [task_id],
+                map_task,
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or("Task 不存在")?;
+        if input
+            .project_root
+            .as_deref()
+            .is_some_and(|root| task.project_root.as_deref() != Some(root))
+        {
+            return Err("Task 与项目不匹配".into());
+        }
+        if task.kind != kind {
+            return Err("Task 类型与 Run 不匹配".into());
+        }
+        task
+    } else {
+        ensure_task_at(
+            conn,
+            input.project_root.as_deref(),
+            kind,
+            input.task_ref.as_deref(),
+            &input.isolation_path,
+        )?
+    };
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_rfc3339();
     conn.execute("INSERT INTO runs(id,project_root,task_kind,task_ref,isolation_path,runtime,agent,profile_id,permission,reuse_key,session_id,internal,sentinel,created_at,status,task_id,custom_runtime_id)
@@ -584,9 +1343,33 @@ fn close_at(
         return Err("无效的 Run 结束状态".into());
     }
     let reason = reason.map(crate::sessions::redact_sensitive_text);
+    let task_meta: Option<(String, bool)> = conn
+        .query_row(
+            "SELECT t.id, t.review_required
+             FROM runs r JOIN tasks t ON t.id=r.task_id
+             WHERE r.id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
     let changed = conn.execute("UPDATE runs SET closed_at=?2,session_id=COALESCE(?3,session_id),status=?4,exit_code=?5,close_reason=?6 WHERE id=?1 AND closed_at IS NULL",
         params![id,now_rfc3339(),session,status,code,reason]).map_err(|e| e.to_string())?;
     if changed > 0 {
+        if let Some((task_id, review_required)) = task_meta {
+            let task_status = match status {
+                "completed" if review_required => "pending_review",
+                "completed" => "completed",
+                "failed" => "failed",
+                "stopped" => "stopped",
+                _ => "pending",
+            };
+            conn.execute(
+                "UPDATE tasks SET status=?2, updated_at=?3 WHERE id=?1",
+                params![task_id, task_status, now_rfc3339()],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         record_event(
             conn,
             id,
@@ -764,15 +1547,21 @@ pub fn open_for_interactive_spawn(
     session: Option<&str>,
     readonly: bool,
     existing_id: Option<&str>,
+    task_id: Option<&str>,
 ) -> Result<Option<RunDto>, String> {
     if reuse.unwrap_or("").starts_with("login:") {
         return Ok(None);
     }
+    let task_context = task_id
+        .and_then(|id| db().ok().and_then(|conn| task_by_id(&conn, id).ok()));
     let dto = open_run_impl(OpenRunInput {
         id: existing_id.map(Into::into),
-        project_root: None,
-        task_kind: None,
-        task_ref: None,
+        task_id: task_id.map(Into::into),
+        project_root: task_context
+            .as_ref()
+            .and_then(|task| task.project_root.clone()),
+        task_kind: task_context.as_ref().map(|task| task.kind.clone()),
+        task_ref: task_context.as_ref().map(|task| task.name.clone()),
         isolation_path: cwd.into(),
         runtime: Some("local_cli".into()),
         agent: agent.into(),
@@ -810,6 +1599,7 @@ pub fn open_headless_with_root(
 ) -> Result<RunDto, String> {
     open_run_impl(OpenRunInput {
         id: None,
+        task_id: None,
         project_root: project_root.map(str::to_owned),
         task_kind: None,
         task_ref: None,
@@ -832,8 +1622,15 @@ pub fn run_open_custom(
     run_id: Option<String>,
     custom_runtime_id: Option<String>,
 ) -> Result<RunDto, String> {
+    let runtime_id = custom_runtime_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("Custom Runtime 必须绑定已保存的运行时配置")?;
+    let runtime = crate::custom_runtime::get_custom_runtime(runtime_id)?;
+    let cwd = crate::custom_runtime::resolve_custom_cwd(&cwd, runtime.cwd.as_deref())?;
     let dto = open_run_impl(OpenRunInput {
         id: run_id,
+        task_id: None,
         project_root: None,
         task_kind: None,
         task_ref: Some(cwd.clone()),
@@ -858,11 +1655,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn custom_runtime_on_scratch_is_not_isolated_write() {
+        assert!(!requires_isolated_write_tree("scratch", false));
+        assert!(!requires_isolated_write_tree("office_doc", false));
+        assert!(!requires_isolated_write_tree("free_research", false));
+        assert!(requires_isolated_write_tree("coding_lane", false));
+        assert!(requires_isolated_write_tree("pipeline_step", false));
+        assert!(requires_isolated_write_tree("watch", false));
+        assert!(!requires_isolated_write_tree("watch", true));
+    }
+
+    #[test]
     fn infer_task_kind_prefixes() {
         assert_eq!(infer_task_kind("login:claude-code", "/x"), "login");
         assert_eq!(infer_task_kind("reader:/p", "/p"), "reader");
         assert_eq!(infer_task_kind("watch:s1:/p", "/p"), "watch");
         assert_eq!(infer_task_kind("office:/p:file", "/p"), "office_doc");
+        assert_eq!(infer_task_kind("free:/p:task", "/p"), "free_research");
         assert_eq!(infer_task_kind("ws:/wt", "/wt"), "pipeline_step");
         assert_eq!(canonicalize_reuse_key("wt:/t"), "lane:/t");
         assert_eq!(infer_task_kind("wt:/t", "/t"), "coding_lane");
@@ -892,5 +1701,152 @@ mod tests {
         assert!(is_internal_kind("watch", "watch:1:/p"));
         assert!(is_internal_kind("scratch", "headless:ai-prompt:x"));
         assert!(!is_internal_kind("pipeline_step", "ws:/x"));
+    }
+
+    #[test]
+    fn prune_nested_rel_paths_keeps_parent() {
+        assert_eq!(
+            prune_nested_rel_paths(&["notes/a.md".into(), "notes".into(), "papers/a.pdf".into()]),
+            vec!["notes".to_string(), "papers/a.pdf".to_string()]
+        );
+        assert_eq!(prune_nested_rel_paths(&[".".into(), "notes".into()]), vec![".".to_string()]);
+    }
+
+    #[test]
+    fn project_scope_copy_skips_ccode_and_dependency_directories() {
+        let root =
+            std::env::temp_dir().join(format!("ccode-task-scope-{}", uuid::Uuid::new_v4()));
+        let target = root.join("target");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".ccode")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join(".git/config"), "secret").unwrap();
+        std::fs::write(root.join(".ccode/project.toml"), "secret").unwrap();
+        std::fs::write(root.join("node_modules/pkg.js"), "dependency").unwrap();
+        std::fs::write(root.join("src/main.ts"), "export {}").unwrap();
+        copy_project_contents(&root, &target, &mut TaskCopyBudget::default()).unwrap();
+        assert!(target.join("src/main.ts").is_file());
+        assert!(!target.join(".git").exists());
+        assert!(!target.join(".ccode").exists());
+        assert!(!target.join("node_modules").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adopt_all_project_changes_copies_new_and_modified_files() {
+        let root =
+            std::env::temp_dir().join(format!("ccode-task-sync-{}", uuid::Uuid::new_v4()));
+        let source = root.join("run");
+        let target = root.join("project");
+        std::fs::create_dir_all(source.join("notes")).unwrap();
+        std::fs::create_dir_all(target.join("notes")).unwrap();
+        std::fs::write(source.join("notes/changed.md"), "new").unwrap();
+        std::fs::write(target.join("notes/changed.md"), "old").unwrap();
+        std::fs::write(source.join("notes/new.md"), "added").unwrap();
+        std::fs::create_dir_all(source.join(".ccode")).unwrap();
+        std::fs::write(source.join(".ccode/ignored"), "no").unwrap();
+
+        copy_project_changes(&source, &target).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes/changed.md")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes/new.md")).unwrap(),
+            "added"
+        );
+        assert!(!target.join(".ccode").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn list_output_changes_marks_added_and_modified() {
+        let root =
+            std::env::temp_dir().join(format!("ccode-task-review-{}", uuid::Uuid::new_v4()));
+        let source = root.join("run");
+        let target = root.join("project");
+        std::fs::create_dir_all(source.join("notes")).unwrap();
+        std::fs::create_dir_all(target.join("notes")).unwrap();
+        std::fs::write(source.join("notes/changed.md"), "new").unwrap();
+        std::fs::write(target.join("notes/changed.md"), "old").unwrap();
+        std::fs::write(source.join("notes/new.md"), "added").unwrap();
+        std::fs::write(source.join("notes/same.md"), "same").unwrap();
+        std::fs::write(target.join("notes/same.md"), "same").unwrap();
+
+        let changes = list_output_changes(&source, &target, &[".".to_string()]).unwrap();
+        assert_eq!(
+            changes
+                .iter()
+                .map(|item| (item.path.as_str(), item.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("notes/changed.md", "modified"), ("notes/new.md", "added")]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adopt_selected_files_overwrites_after_review() {
+        let root =
+            std::env::temp_dir().join(format!("ccode-task-adopt-{}", uuid::Uuid::new_v4()));
+        let source = root.join("run");
+        let target = root.join("project");
+        std::fs::create_dir_all(source.join("notes")).unwrap();
+        std::fs::create_dir_all(target.join("notes")).unwrap();
+        std::fs::write(source.join("notes/keep.md"), "new-keep").unwrap();
+        std::fs::write(target.join("notes/keep.md"), "old-keep").unwrap();
+        std::fs::write(source.join("notes/skip.md"), "new-skip").unwrap();
+        std::fs::write(target.join("notes/skip.md"), "old-skip").unwrap();
+        std::fs::write(source.join("notes/extra.md"), "added").unwrap();
+
+        copy_adopt_file(
+            &source.join("notes/keep.md"),
+            &target.join("notes/keep.md"),
+        )
+        .unwrap();
+        copy_adopt_file(
+            &source.join("notes/extra.md"),
+            &target.join("notes/extra.md"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes/keep.md")).unwrap(),
+            "new-keep"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes/skip.md")).unwrap(),
+            "old-skip"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes/extra.md")).unwrap(),
+            "added"
+        );
+        #[cfg(unix)]
+        {
+            let link = target.join("notes/link.md");
+            std::os::unix::fs::symlink(target.join("notes/keep.md"), &link).unwrap();
+            assert!(copy_adopt_file(&source.join("notes/keep.md"), &link).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn specified_output_existing_file_is_modified_not_rejected() {
+        let root =
+            std::env::temp_dir().join(format!("ccode-task-specified-{}", uuid::Uuid::new_v4()));
+        let source = root.join("run");
+        let target = root.join("project");
+        std::fs::create_dir_all(source.join("notes")).unwrap();
+        std::fs::create_dir_all(target.join("notes")).unwrap();
+        std::fs::write(source.join("notes/result.md"), "new").unwrap();
+        std::fs::write(target.join("notes/result.md"), "old").unwrap();
+        let changes =
+            list_output_changes(&source, &target, &["notes/result.md".to_string()]).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "notes/result.md");
+        assert_eq!(changes[0].kind, "modified");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

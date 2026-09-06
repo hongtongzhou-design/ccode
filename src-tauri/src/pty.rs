@@ -465,6 +465,8 @@ pub fn pty_spawn(
     run_id: Option<String>,
     // 对外政策名；缺省时回落 readonly 布尔（旧启动入口）。
     permission: Option<String>,
+    // 已由任务入口创建的 Run 所属 Task。
+    task_id: Option<String>,
 ) -> Result<SpawnResult, String> {
     let selected = model.filter(|m| !m.trim().is_empty());
     let mut profile = store.get_with_model(&profile_id, selected.as_deref())?;
@@ -565,6 +567,7 @@ pub fn pty_spawn(
         resume_session_id.as_deref().or(session_hint.as_deref()),
         discuss,
         run_id.as_deref(),
+        task_id.as_deref(),
     )?;
     if opened.is_none() {
         let reuse = reuse_key.as_deref().unwrap_or("");
@@ -717,14 +720,16 @@ pub fn pty_spawn_custom(
     run_id: String,
 ) -> Result<SpawnResult, String> {
     let runtime = crate::custom_runtime::get_custom_runtime(&runtime_id)?;
+    let cwd = crate::custom_runtime::resolve_custom_cwd(&cwd, runtime.cwd.as_deref())?;
     let cwd = expand_tilde(&cwd);
     let run = crate::runs::run_get(run_id.clone())?
         .ok_or_else(|| "Custom Runtime 对应的 Run 不存在".to_string())?;
     let isolation = expand_tilde(&run.isolation_path);
-    let cwd_path = std::fs::canonicalize(&cwd).map_err(|e| format!("工作目录不可用：{e}"))?;
-    let isolation_path =
-        std::fs::canonicalize(&isolation).map_err(|e| format!("隔离目录不可用：{e}"))?;
-    if !cwd_path.starts_with(&isolation_path) {
+    let cwd_path = crate::paths::canonicalize_plain(std::path::Path::new(&cwd))
+        .map_err(|e| format!("工作目录不可用：{e}"))?;
+    let isolation_path = crate::paths::canonicalize_plain(std::path::Path::new(&isolation))
+        .map_err(|e| format!("隔离目录不可用：{e}"))?;
+    if !crate::paths::path_within_path(&cwd_path, &isolation_path) {
         return Err("Custom Runtime 的工作目录必须位于 Run 隔离目录内".into());
     }
     if run.runtime != "custom" {

@@ -488,22 +488,23 @@ fn parse_price_map(text: &str) -> Vec<(String, (f64, f64))> {
 
 /// fetch_models 顺带调用：把网关 /models 响应里的元数据合并进实测缓存。
 /// 键为 `{gatewayId}|{model}`；无网关 id 不写（禁止再写无前缀键互踩）。
-pub(crate) fn record_relay_models(v: &serde_json::Value, gateway_id: Option<&str>) {
+pub(crate) fn record_relay_models(v: &serde_json::Value, gateway_id: Option<&str>) -> usize {
     let Some(gid) = gateway_id.filter(|s| !s.is_empty()) else {
-        return;
+        return 0;
     };
     let Some(path) = relay_cache_path() else {
-        return;
+        return 0;
     };
-    record_relay_models_to(&path, v, gid);
+    record_relay_models_to(&path, v, gid)
 }
 
 /// record_relay_models 的可注入内核（测试用）
-fn record_relay_models_to(path: &Path, v: &serde_json::Value, gateway_id: &str) {
+fn record_relay_models_to(path: &Path, v: &serde_json::Value, gateway_id: &str) -> usize {
     let fresh = parse_openrouter_models(v);
     if fresh.is_empty() {
-        return;
+        return 0;
     }
+    let count = fresh.len();
     let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -517,18 +518,20 @@ fn record_relay_models_to(path: &Path, v: &serde_json::Value, gateway_id: &str) 
                 "context": c.context,
                 "output": c.output,
                 "vision": c.vision,
+                "api_backend": c.api_backend,
             }),
         );
     }
     let Ok(text) =
         serde_json::to_string_pretty(&serde_json::Value::Object(map)).map_err(|e| e.to_string())
     else {
-        return;
+        return 0;
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = crate::profiles::atomic_write(path, &text);
+    count
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1136,12 +1139,20 @@ mod tests {
             "id": "relay/custom-model-x",
             "context_length": 99999,
             "architecture": {"input_modalities": ["text", "image"]},
-            "supported_parameters": ["tools", "reasoning"]
+            "supported_parameters": ["tools", "reasoning"],
+            "apiBackend": "responses"
         }]});
         record_relay_models_to(&path, &v, "gw1");
-        let loaded = parse_caps_map(&std::fs::read_to_string(&path).unwrap());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"api_backend\": \"responses\""));
+        let loaded = parse_caps_map(&raw);
         let c = longest_match(&loaded, "gw1|custom-model-x").unwrap();
-        assert!(c.thinking == Some(true) && c.vision == Some(true) && c.context == Some(99999));
+        assert!(
+            c.thinking == Some(true)
+                && c.vision == Some(true)
+                && c.context == Some(99999)
+                && c.api_backend.as_deref() == Some("responses")
+        );
         // 再记一条别的模型：合并不覆盖
         let v2 = serde_json::json!({"data": [{"id": "other", "context_length": 1000}]});
         record_relay_models_to(&path, &v2, "gw1");

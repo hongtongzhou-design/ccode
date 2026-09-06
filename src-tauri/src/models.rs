@@ -41,6 +41,9 @@ struct ModelListCacheEntry {
     models: Vec<String>,
     /// RFC3339 本地时间，仅展示用
     fetched_at: String,
+    /// 能力元数据条目数；旧缓存缺省为 0。
+    #[serde(default)]
+    capability_metadata_count: usize,
 }
 
 type ModelListCache = std::collections::HashMap<String, ModelListCacheEntry>;
@@ -122,6 +125,8 @@ pub struct FetchModelsResult {
     models: Vec<String>,
     from_cache: bool,
     fetched_at: String,
+    /// 0 表示网关只返回模型 ID，能力会回退到其他能力层。
+    capability_metadata_count: usize,
 }
 
 /// 从 profile 的端点拉取可用模型列表。
@@ -187,6 +192,7 @@ pub async fn fetch_models(
                 models: hit.models,
                 from_cache: true,
                 fetched_at: hit.fetched_at,
+                capability_metadata_count: hit.capability_metadata_count,
             });
         }
     }
@@ -241,7 +247,8 @@ pub async fn fetch_models(
                     .map_err(|e| format!("解析响应失败: {e}；响应开头: {}", body_preview(&text)))?;
                 // 顺带沉淀能力元数据（OpenRouter 风格响应带 context_length/modality 等；
                 // 纯 id 列表的网关此调用为 no-op）——能力注册表的最准数据源
-                crate::model_registry::record_relay_models(&body, resolved_gateway.as_deref());
+                let capability_metadata_count =
+                    crate::model_registry::record_relay_models(&body, resolved_gateway.as_deref());
                 let fetched_at = chrono::Local::now().to_rfc3339();
                 let models = parse_model_ids(&body);
                 model_list_cache_put(
@@ -249,12 +256,14 @@ pub async fn fetch_models(
                     ModelListCacheEntry {
                         models: models.clone(),
                         fetched_at: fetched_at.clone(),
+                        capability_metadata_count,
                     },
                 );
                 return Ok(FetchModelsResult {
                     models,
                     from_cache: false,
                     fetched_at,
+                    capability_metadata_count,
                 });
             }
             Ok(resp) => {
@@ -341,25 +350,42 @@ fn parse_model_ids(v: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// 按 openai → anthropic → gemini → responses 顺序拉目录，第一个成功的写入 catalogFromSlot。
+fn catalog_slot_walk_order(
+    prefer: Option<&str>,
+) -> Vec<(crate::gateway_store::Slot, &'static str)> {
+    let mut order = vec![
+        (crate::gateway_store::Slot::Anthropic, "claude-code"),
+        (crate::gateway_store::Slot::Openai, "opencode"),
+        (crate::gateway_store::Slot::Responses, "codex"),
+        (crate::gateway_store::Slot::Gemini, "gemini"),
+    ];
+    if let Some(pref) = prefer.and_then(crate::gateway_store::Slot::from_str) {
+        if let Some(i) = order.iter().position(|(slot, _)| *slot == pref) {
+            let item = order.remove(i);
+            order.insert(0, item);
+        }
+    }
+    order
+}
+
+/// 优先调用方指定的协议槽（连接行刷新）或网关上次成功槽，再按 Anthropic → OpenAI → Responses → Gemini。
 #[tauri::command]
 pub async fn fetch_gateway_catalog(
     store: tauri::State<'_, crate::profiles::ProfileStore>,
     gateway_id: String,
+    prefer_slot: Option<String>,
 ) -> Result<crate::profiles::Gateway, String> {
     let gw = store
         .list_gateways()?
         .into_iter()
         .find(|g| g.id == gateway_id)
         .ok_or("网关不存在")?;
-    let order = [
-        ("opencode", crate::gateway_store::Slot::Openai, None),
-        ("claude-code", crate::gateway_store::Slot::Anthropic, None),
-        ("gemini", crate::gateway_store::Slot::Gemini, None),
-        ("codex", crate::gateway_store::Slot::Responses, None),
-    ];
+    let prefer = prefer_slot
+        .as_deref()
+        .or(gw.catalog_from_slot.as_deref());
+    let order = catalog_slot_walk_order(prefer);
     let mut last_err = "没有可拉取的协议槽".to_string();
-    for (agent, slot, protocol) in order {
+    for (slot, agent) in order {
         let Some(url) = crate::gateway_store::slot_url(&gw.slots, slot) else {
             continue;
         };
@@ -368,7 +394,7 @@ pub async fn fetch_gateway_catalog(
             None,
             None,
             Some(agent.to_string()),
-            protocol,
+            None,
             Some(gateway_id.clone()),
             Some(true),
         )
@@ -388,6 +414,21 @@ pub async fn fetch_gateway_catalog(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn catalog_slot_walk_puts_prefer_first() {
+        let names: Vec<_> = catalog_slot_walk_order(Some("openai"))
+            .into_iter()
+            .map(|(slot, _)| slot.as_str())
+            .collect();
+        assert_eq!(names[0], "openai");
+        assert!(names.contains(&"anthropic"));
+        let default: Vec<_> = catalog_slot_walk_order(None)
+            .into_iter()
+            .map(|(slot, _)| slot.as_str())
+            .collect();
+        assert_eq!(default[0], "anthropic");
+    }
 
     #[test]
     fn parses_openai_data_format() {

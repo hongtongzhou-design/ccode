@@ -51,6 +51,22 @@ test("pickKickoffLaunch：都没有则用列表第一个", () => {
   assert.equal(picked?.model, "sonnet");
 });
 
+test("pickKickoffLaunch：项目默认 Agent 优先于全局记忆", () => {
+  const picked = pickKickoffLaunch(
+    profiles,
+    {
+      agentId: "codex",
+      profileId: "p-codex",
+      model: "gpt-5",
+      useDefault: true,
+    },
+    null,
+    "claude-code",
+  );
+  assert.equal(picked?.agentId, "claude-code");
+  assert.equal(picked?.profileId, "p-claude");
+});
+
 test("codingTerminalLaunch：勾过默认才自动启动", () => {
   assert.equal(codingTerminalLaunch(profiles, null)?.autoStart, false);
   assert.equal(

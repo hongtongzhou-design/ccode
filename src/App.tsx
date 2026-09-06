@@ -46,6 +46,7 @@ import { toast } from "./toast";
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
 const McpPage = lazy(() => import("./pages/McpPage"));
 const SessionsPage = lazy(() => import("./pages/SessionsPage"));
+const SchedulesPage = lazy(() => import("./pages/SchedulesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const SkillsPage = lazy(() => import("./pages/SkillsPage"));
 const StatsPage = lazy(() => import("./pages/StatsPage"));
@@ -767,6 +768,13 @@ function App() {
             {visited.has("sessions") && (
               <Suspense fallback={<PageLoading />}>
                 <SessionsPage visible={page === "sessions"} />
+              </Suspense>
+            )}
+          </div>
+          <div className={page === "schedules" ? "h-full overflow-auto" : "hidden"}>
+            {visited.has("schedules") && (
+              <Suspense fallback={<PageLoading />}>
+                <SchedulesPage visible={page === "schedules"} />
               </Suspense>
             )}
           </div>

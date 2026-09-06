@@ -248,6 +248,10 @@ export default function OfficeProjectView({
         root: repoPath,
         reuseKey: officeFileReuseKey(repoPath, d.rel),
         prompt,
+        preferredAgent: project?.defaultAgent,
+        preferredProfile: project?.defaultAgent
+          ? project.defaultProfiles?.[project.defaultAgent]
+          : undefined,
       },
       { forcePick: !!(e?.metaKey || e?.ctrlKey) },
     );
@@ -282,7 +286,15 @@ export default function OfficeProjectView({
 
   function startProjectChat(e?: { metaKey: boolean; ctrlKey: boolean }) {
     beginProjectChat(
-      { cwd: repoPath, name, kind: "office" },
+      {
+        cwd: repoPath,
+        name,
+        kind: "office",
+        preferredAgent: project?.defaultAgent,
+        preferredProfile: project?.defaultAgent
+          ? project.defaultProfiles?.[project.defaultAgent]
+          : undefined,
+      },
       { forcePick: !!(e?.metaKey || e?.ctrlKey) },
     );
   }
@@ -305,7 +317,7 @@ export default function OfficeProjectView({
             </p>
             <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-l3">
               <span className="rounded-full bg-strip px-2 py-0.5 text-micro text-l2">
-                办公
+                工作
               </span>
               <span className="text-micro text-l4">{statusLine}</span>
             </p>

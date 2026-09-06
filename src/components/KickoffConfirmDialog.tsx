@@ -65,6 +65,8 @@ export default function KickoffConfirmDialog({
   projectPath,
   step,
   cfg,
+  preferredAgent,
+  preferredProfile,
   busy,
   onCancel,
   onConfirm,
@@ -73,6 +75,10 @@ export default function KickoffConfirmDialog({
   projectPath: string;
   step: ProjectStepDto;
   cfg: ProjectConfigDto;
+  /** 项目级默认 Agent；单次开工仍可在弹层里改选 */
+  preferredAgent?: string | null;
+  /** 项目级默认 profile；仅在与默认 Agent 匹配时生效 */
+  preferredProfile?: string | null;
   /** 从哪张卡点的开工（步进器大圆开工为 null）；简报来源勾选删除后仅作调用方记录保留 */
   originCardId: string | null;
   /** 确认开工后的链路进行中（父组件自持 starting） */
@@ -189,8 +195,15 @@ export default function KickoffConfirmDialog({
     [agents],
   );
   const picked = useMemo(
-    () => pickKickoffLaunch(profiles, remembered),
-    [profiles, remembered],
+    () =>
+      pickKickoffLaunch(
+        profiles,
+        remembered,
+        null,
+        preferredAgent,
+        preferredProfile,
+      ),
+    [profiles, remembered, preferredAgent, preferredProfile],
   );
   const [agentId, setAgentId] = useState(
     () => picked?.agentId ?? "claude-code",
@@ -206,7 +219,13 @@ export default function KickoffConfirmDialog({
   );
 
   useEffect(() => {
-    const next = pickKickoffLaunch(profiles, loadAskAiRemembered());
+    const next = pickKickoffLaunch(
+      profiles,
+      loadAskAiRemembered(),
+      null,
+      preferredAgent,
+      preferredProfile,
+    );
     if (!next) {
       setProfileId("");
       return;
@@ -214,7 +233,7 @@ export default function KickoffConfirmDialog({
     setAgentId(next.agentId);
     setProfileId(next.profileId);
     setModel(next.model);
-  }, [profiles]);
+  }, [profiles, preferredAgent, preferredProfile]);
 
   useEffect(() => {
     if (!agentProfiles.some((p) => p.id === profileId))

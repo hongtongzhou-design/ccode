@@ -35,7 +35,7 @@ Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）—�
 - 项目列表**从各 agent 历史会话自动聚合并分类**，辅以手动添加
 - token/费用统计随 P3 顺带做，不提前
 - **三平台（macOS/Windows/Linux）同步**支持，功能不得以平台为由裁剪
-- **多 Agent 工作台（v3.221 / v3.222 / v3.225）**：产品一等对象是 Project → Task → Run，终端标签是 Run 的视图；并行只来自人声明或模板，禁止自动拆任务 / 智能路由；Agent 是 Runtime，CLI 是第一种实现。科研/编程两套 worktree 库不合并。工作台「正在进行」只列交互活，无头（定时雷达等）不进主卡、不进本项目会话；关标签后按 `runId` 找回。定时隔离产物经评审才进主仓。改工作台主卡、标签生命周期、编程并行、无头入口、AgentSpec 执行形态前必读 `docs/conventions/agent-workbench.md`
+- **Agent Workspace（v3.221 / v3.235）**：以 Project 为家。人负责目标，系统给环境（文件地图、规则、上下文）和验收门；Agent 自己规划。CLI 是第一种 Runtime。用户不面对 Run。并行只来自人声明或模板，禁止自动拆任务 / 智能路由。科研/编程两套 worktree 库不合并。工作台「正在进行」只列交互活；关标签后按 `runId` 找回。定时隔离产物经评审才进主仓。改工作台/目标/验收前必读 `docs/conventions/agent-workbench.md`
 
 ## 构建与运行
 
@@ -159,6 +159,12 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
   run-model.ts               # Project→Task→Run 前端镜像：inferTaskKind / 工作台白名单 isWorkbenchSurfaceRun
                              # （登录/无头/空闲 shell 不进「正在进行」；阅读标签还开着则进；tests/run-model.test.ts）
+  project-tasks.ts           # 人声明任务：资料范围（不带入/勾选/整个项目）/ 嵌套路径剪枝 /
+                             # 声明步骤过滤（不含会话自动登记）/ 审核回流文案（tests/project-tasks.test.ts）
+  project-agents.ts          # 项目 Agents 名册：每家默认配置 / 项目默认 / 声明步骤归属
+                             # （不自动分派；tests/project-agents.test.ts）
+  project-context.ts         # 项目环境包：名称/规则/顶层文件地图/当前目标（启动注入）
+                             # （tests/project-context.test.ts）
   coding-lanes.ts            # 编程车道覆盖层：有树无行按分支现算、theme 分组、空闲/Agent
                              # （tests/coding-lanes.test.ts）
   agent-caps.ts              # 能力表前端消费：定时任务禁选未验证无头、grok 无沙箱附注
@@ -244,7 +250,11 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   quick-chat.ts              # 快速开聊弹层「随手聊历史」纯逻辑：只列 ~/ccode/scratch（isScratchCwd），
                              # 排除工作区/已注册项目/其他仓库/归档/内部/live/源文件已删；
                              # pickQuickChatHistory 用 store 会话列表现算；sidebarLaunchesDirect
-                             # 侧栏记住选择后直达（tests/quick-chat.test.ts）
+                             # 侧栏记住选择后直达；pickRememberedProfileId 直达只认记住的那条
+                             # （tests/quick-chat.test.ts）
+  confirm-dialog.ts          # 确认框键盘语义：Esc 取消，Enter 激活当前焦点钮（tests/confirm-dialog.test.ts）
+  custom-runtime.ts          # 自定义运行时默认 cwd：仅空目录/scratch 启用（tests/custom-runtime.test.ts）
+  gateway-slot.ts            # Agent→协议槽与目录刷新优先槽（与 slot_for_agent 双端镜像，tests/gateway-slot.test.ts）
   command-palette.ts         # 命令面板过滤纯逻辑
   stats-insight.ts           # 统计页花费环比 / 缓存命中率 / 会话标题回落纯逻辑（tests/stats-insight.test.ts）
   hotkeys.ts                 # 快捷键组合串纯逻辑
@@ -642,3 +652,8 @@ src-tauri/src/
 - CodeBuddy 的 `reasoning_effort` 通过当前 CLI 的 `--effort` 启动参数注入；Grok 的模型/思考档通过 `-m`/`--reasoning-effort` 注入。
 - Grok 的 `api_backend`、`context_window` 不得通过受限 `GROK_CONFIG` 猜测注入；若绑定声明非 `chat_completions`，必须先在 Grok `[model.<id>]` 配置中登记，否则启动和无头调用均 fail-closed。
 - 配置页查询模型能力必须带 `gatewayId`，网关级能力声明优先于公共/内置能力库；写 Grok 逐模型上下文时只使用显式声明值，不使用通用估值。
+
+- **项目页三视图（2026-09-06）**：项目页顶栏是当前项目身份（名称、工作方式、课题主题、路径），添加项目在左侧列表 +。已注册项目使用「科研任务 / 工作任务 / 编程任务 + 文件 + Agents」项目内页签。任务页是该工作方式的主面（有流程科研=步骤/工作区，无流程科研=人声明任务 + 雷达 + 右侧对话/定时巡检，办公=人声明任务，编程=工作树）。文献/笔记/数据只在「文件」页。文件页：点文件才弹出右侧预览；预览有上下切换，窗口预览时方向键也换文件；搜索与分类筛选；可切窗口预览。Agents 页是这个项目的 Agent 名册（谁在干活、默认给谁、正在负责哪些步骤），不是连接页的模型配置表单；配置用当前项点选切换，不用下拉。不自动分派，密钥仍在连接页。侧栏「定时巡检」是全局计划/历史汇总，后台巡检不进入工作台交互活。
+- **绑定与网关命名（2026-09-06）**：Gateway.name 是共享端点/网关名称，Binding.name 是单个 Agent 配置名称，必须分开存储；旧 Binding 缺 name 时展示回退 Gateway.name。修改 profile 名称只更新 Binding.name，不得改共享 Gateway.name 或其他 Binding。相同 Agent + 网关允许不同模型选择，完全相同的模型/协议/附加环境变量仍拒绝重复。
+- **目标与验收（2026-09-06）**：无流程科研和工作的「新建目标」写一句话即可；默认把整个项目复制进隔离副本，人验收后写回。可选用指定资料或不带入。＋新对话默认直接改项目根；开聊可选「验收后写入」。列表只显示 `user:` 声明目标。有流程科研走步骤/工作区，编程走工作树。禁止自动拆任务、智能路由、创建时空目录。失败/停止在原目标上重试；修改意见也走同一目标继续。
+- **确认框与自动路径（2026-09-06）**：`confirmDialog` 默认焦点在确认钮，Enter 激活当前焦点按钮（焦点在取消则取消）。快速开聊直达只接受记住的那条 profile，失效退回弹层。Custom Runtime 不是隔离工作树任务；写盘必须离开主仓只约束 pipeline/coding/watch。网关目录按槽刷新。交互 `pty_write`（含选段问 AI）失败必须可见。

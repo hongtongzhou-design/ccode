@@ -26,6 +26,15 @@ export function profileCanAutoStart(
   );
 }
 
+/** 侧栏直达只接受记住的那条配置本身；失效时退回弹层，不改用同 Agent 另一条。 */
+export function pickRememberedProfileId(
+  rememberedId: string | undefined,
+  usableIds: readonly string[],
+): string | null {
+  if (!rememberedId) return null;
+  return usableIds.includes(rememberedId) ? rememberedId : null;
+}
+
 /** 「没法恢复」的会话统一排除口径 */
 function recoverable(s: SessionMetaDto): boolean {
   return !s.archived && !s.internal && !s.live && s.alive;
