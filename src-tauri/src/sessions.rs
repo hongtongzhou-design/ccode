@@ -3962,6 +3962,7 @@ pub(crate) fn migrate_session_meta(conn: &Connection) {
         "profile_id TEXT",
         "project_path TEXT",
         "internal INTEGER NOT NULL DEFAULT 0",
+        "title_source TEXT",
     ] {
         let _ = conn.execute_batch(&format!("ALTER TABLE session_meta ADD COLUMN {col}"));
     }
@@ -5552,15 +5553,74 @@ pub fn set_session_meta(
 ) -> Result<(), String> {
     let conn = open_db()?;
     let tags_json = serde_json::to_string(&tags).map_err(|e| e.to_string())?;
+    let title_source = custom_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|_| "user");
     conn.execute(
-        "INSERT INTO session_meta(agent, session_id, custom_title, tags, archived)
-         VALUES(?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(agent, session_id) DO UPDATE SET custom_title=?3, tags=?4, archived=?5",
-        params![agent, session_id, custom_title, tags_json, archived],
+        "INSERT INTO session_meta(agent, session_id, custom_title, tags, archived, title_source)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(agent, session_id) DO UPDATE SET custom_title=?3, tags=?4, archived=?5, title_source=?6",
+        params![agent, session_id, custom_title, tags_json, archived, title_source],
     )
     .map_err(|e| format!("写入 session_meta 失败: {e}"))?;
     invalidate_scan_cache();
     Ok(())
+}
+
+/// 无头/内部会话按 id 标记后，自动起名要跳过。
+pub(crate) fn session_marked_internal(agent: &str, session_id: &str) -> bool {
+    let Ok(conn) = open_db() else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT internal FROM session_meta WHERE agent=?1 AND session_id=?2",
+        params![agent, session_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .ok()
+    .is_some_and(|v| v != 0)
+}
+
+/// 自动起名写入。人手改过的标题（title_source=user）不覆盖；机器临时标题可被聊完校正覆盖。
+/// 返回是否写入。
+pub(crate) fn try_set_custom_title(
+    agent: &str,
+    session_id: &str,
+    title: &str,
+) -> Result<bool, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(false);
+    }
+    let conn = open_db()?;
+    let row: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT custom_title, title_source FROM session_meta WHERE agent=?1 AND session_id=?2",
+            params![agent, session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    if let Some((existing, source)) = row {
+        if source.as_deref() == Some("user") {
+            return Ok(false);
+        }
+        // 旧数据没有 title_source：有标题就当人改过的，避免自动起名盖掉已整理的历史标题
+        if source.is_none() && existing.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+            return Ok(false);
+        }
+    }
+    conn.execute(
+        "INSERT INTO session_meta(agent, session_id, custom_title, title_source)
+         VALUES(?1, ?2, ?3, 'auto')
+         ON CONFLICT(agent, session_id) DO UPDATE SET custom_title=?3, title_source='auto'
+         WHERE session_meta.title_source IS NULL OR session_meta.title_source != 'user'",
+        params![agent, session_id, title],
+    )
+    .map_err(|e| format!("写入会话标题失败: {e}"))?;
+    invalidate_scan_cache();
+    Ok(true)
 }
 
 /// 会话归卡（任务卡）：写 session_meta.task_id；None 或空白 = 移出卡片。

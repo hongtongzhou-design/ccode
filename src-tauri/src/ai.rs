@@ -1,5 +1,5 @@
 //! 无头 AI 调用层（§6.12 闭环）：复用 profile 的 launch_plan 注入，
-//! 以各 agent 的非交互模式跑一次性 prompt，供提交信息/会话摘要/PR 描述三个生成功能使用。
+//! 以各 agent 的非交互模式跑一次性 prompt，供提交信息/会话摘要/自动起名/PR 描述等生成功能使用。
 
 use crate::agents;
 use crate::profiles::{self, Profile, ProfileStore};
@@ -9,12 +9,17 @@ use std::time::Duration;
 
 const AI_TIMEOUT: Duration = Duration::from_secs(120);
 const DIFF_CAP: usize = 8 * 1024;
+const USER_TURN_CAP: usize = 800;
+const USER_TITLE_CAP: usize = 4 * 1024;
+const SESSION_TITLE_KINDS: &[&str] = &[
+    "功能", "设计", "修复", "优化", "发布", "探索", "文档", "研究",
+];
 
 // ===== profile 解析与无头参数 =====
 
 /// 内置 AI 功能 key（settings.ai_profiles 的键）：按功能独立指定 profile
 pub const FN_COMMIT: &str = "commit"; // ai_commit_message（◈ 提交信息）
-pub const FN_SUMMARIZE: &str = "summarize"; // ai_summarize_session（会话摘要）
+pub const FN_SUMMARIZE: &str = "summarize"; // ai_summarize_session（会话摘要）+ ai_auto_title_session（聊完起名）
 pub const FN_PR: &str = "pr"; // ai_draft_pr（PR 描述起草）
 pub const FN_DISTILL: &str = "distill"; // ai_distill_skill（✦ 沉淀为技能）
 pub const FN_CONFLICT: &str = "conflict"; // ai_conflict_advice（冲突选侧建议）
@@ -789,6 +794,237 @@ pub(crate) fn conversation_text(msgs: &[crate::sessions::ChatMessageDto]) -> Str
     out
 }
 
+pub(crate) fn shanghai_mmdd(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let east = chrono::FixedOffset::east_opt(8 * 3600)?;
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&east).format("%m%d").to_string());
+    }
+    if let Ok(n) = raw.parse::<f64>() {
+        let secs = if n > 1e11 { n / 1000.0 } else { n };
+        let dt = chrono::DateTime::from_timestamp(secs as i64, 0)?;
+        return Some(dt.with_timezone(&east).format("%m%d").to_string());
+    }
+    None
+}
+
+fn first_message_timestamp(msgs: &[crate::sessions::ChatMessageDto]) -> Option<String> {
+    msgs.iter().find_map(|m| m.timestamp.clone())
+}
+
+fn user_turn_text(m: &crate::sessions::ChatMessageDto) -> Option<String> {
+    if m.role != "user" {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for b in &m.blocks {
+        if b.kind != "text" {
+            continue;
+        }
+        let t = b.text.trim();
+        if t.is_empty() || crate::sessions::is_injected_context_message(t) {
+            continue;
+        }
+        parts.push(t);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+pub(crate) fn user_turns(msgs: &[crate::sessions::ChatMessageDto]) -> Vec<String> {
+    msgs.iter().filter_map(user_turn_text).collect()
+}
+
+fn turn_too_thin(text: &str) -> bool {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.is_empty() {
+        return true;
+    }
+    let mut rest = compact.to_lowercase();
+    for g in ["你好", "您好", "hello", "hi", "hey", "nihao", "哈喽", "在吗"] {
+        rest = rest.replace(&g.to_lowercase(), "");
+    }
+    rest.chars().count() < 8
+}
+
+pub(crate) fn conversation_too_thin(msgs: &[crate::sessions::ChatMessageDto]) -> bool {
+    user_turns(msgs).iter().all(|t| turn_too_thin(t))
+}
+
+fn cap_chars(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        chars[..max].iter().collect()
+    }
+}
+
+/// 只取用户原话：开头看首条；聊完看首条意图 + 中途纠正 + 最后定题。不取助手回复。
+pub(crate) fn user_title_material(
+    msgs: &[crate::sessions::ChatMessageDto],
+    early: bool,
+) -> String {
+    let real: Vec<String> = user_turns(msgs)
+        .into_iter()
+        .filter(|t| !turn_too_thin(t))
+        .collect();
+    if real.is_empty() {
+        return String::new();
+    }
+    if early || real.len() == 1 {
+        return format!(
+            "[用户·首条] {}",
+            cap_chars(&real[0], USER_TURN_CAP)
+        );
+    }
+    let mut parts = vec![format!(
+        "[用户·首条] {}",
+        cap_chars(&real[0], USER_TURN_CAP)
+    )];
+    if real.len() >= 3 {
+        if let Some(mid) = real[1..real.len() - 1]
+            .iter()
+            .max_by_key(|s| s.chars().count())
+        {
+            parts.push(format!(
+                "[用户·纠正] {}",
+                cap_chars(mid, USER_TURN_CAP)
+            ));
+        }
+    }
+    let last = real.last().unwrap();
+    if last != &real[0] {
+        parts.push(format!(
+            "[用户·定题] {}",
+            cap_chars(last, USER_TURN_CAP)
+        ));
+    }
+    cap_text(&parts.join("\n\n"), USER_TITLE_CAP)
+}
+
+fn extract_title_candidate(raw: &str) -> Option<String> {
+    let stripped = raw
+        .trim()
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if stripped.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(stripped) {
+            for key in ["text", "message", "content", "output"] {
+                if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                    return extract_title_candidate(s);
+                }
+            }
+        }
+    }
+    stripped
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains('|') && !l.starts_with('#'))
+        .map(|s| s.to_string())
+}
+
+pub(crate) fn parse_kind_theme(line: &str) -> Option<(String, String)> {
+    let line = line
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '`' || c == '“' || c == '”');
+    let parts: Vec<&str> = line
+        .split('|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (kind, theme) = match parts.as_slice() {
+        [k, t] => (*k, *t),
+        [_, k, t] => (*k, *t),
+        _ => return None,
+    };
+    if !SESSION_TITLE_KINDS.contains(&kind) {
+        return None;
+    }
+    let chars: Vec<char> = theme.chars().collect();
+    let n = chars.len();
+    let cjk = chars
+        .iter()
+        .filter(|c| **c >= '\u{4e00}' && **c <= '\u{9fff}')
+        .count();
+    if !(4..=12).contains(&n) || cjk == 0 {
+        return None;
+    }
+    Some((kind.to_string(), theme.to_string()))
+}
+
+fn build_session_title_prompt(material: &str, mmdd: &str, early: bool) -> String {
+    let scope = if early {
+        "这是临时标题，只根据用户第一条真正的问题。"
+    } else {
+        "根据用户自己说过的话。首条是最初意图，纠正是中途改方向，定题是最后要求。不要参考助手回复或工具调用。"
+    };
+    format!(
+        "{scope}只输出一行，不要解释、不要引号、不要代码块。\n\
+         格式：类型|主题\n\
+         类型只能是以下之一：功能、设计、修复、优化、发布、探索、文档、研究。\n\
+         同时符合多个类型时选最能代表这次目的的一个。\n\
+         主题：4到12个汉字，概括这次解决或讨论的核心问题；不要项目名，不要完整句子，\
+         不要「优化项目」「功能开发」「问题修复」这种空标题；优先写具体对象。\n\
+         不要输出日期（日期由系统填写，创建日为 {mmdd}）。\n\n\
+         ## 用户原话\n{material}"
+    )
+}
+
+fn auto_title_session_impl(
+    profiles: Vec<Profile>,
+    agent: &str,
+    session_id: &str,
+    file_path: &str,
+    created_at: Option<&str>,
+    early: bool,
+) -> Result<Option<String>, String> {
+    if crate::sessions::session_marked_internal(agent, session_id) {
+        return Ok(None);
+    }
+    let msgs = crate::sessions::conversation_impl(agent, file_path);
+    if conversation_too_thin(&msgs) {
+        return Ok(None);
+    }
+    let mmdd = created_at
+        .and_then(shanghai_mmdd)
+        .or_else(|| first_message_timestamp(&msgs).as_deref().and_then(shanghai_mmdd));
+    let Some(mmdd) = mmdd else {
+        return Ok(None);
+    };
+    let material = user_title_material(&msgs, early);
+    if material.trim().is_empty() {
+        return Ok(None);
+    }
+    let raw = match ai_prompt_impl(
+        profiles,
+        None,
+        Some(FN_SUMMARIZE),
+        build_session_title_prompt(&material, &mmdd, early),
+    ) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let Some(line) = extract_title_candidate(&raw) else {
+        return Ok(None);
+    };
+    let Some((kind, theme)) = parse_kind_theme(&line) else {
+        return Ok(None);
+    };
+    let title = crate::sessions::redact_sensitive_text(&format!("{mmdd}|{kind}|{theme}"));
+    if !crate::sessions::try_set_custom_title(agent, session_id, &title)? {
+        return Ok(None);
+    }
+    Ok(Some(title))
+}
+
 // ===== Tauri commands =====
 
 /// 「✦ 沉淀为技能」的草稿：name/description 进 SKILL.md frontmatter，content 为正文规则清单
@@ -874,6 +1110,33 @@ pub async fn ai_summarize_session(
         let summary = crate::sessions::redact_sensitive_text(&summary);
         crate::sessions::set_session_summary(&agent, &session_id, &summary)?;
         Ok(summary)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 自动起名：`stage=early` 只用首条用户问题；默认/final 用用户侧首条+纠正+定题。
+/// 人手改过的标题、内部会话、内容不足或没有创建日则跳过。
+#[tauri::command]
+pub async fn ai_auto_title_session(
+    store: tauri::State<'_, ProfileStore>,
+    agent: String,
+    session_id: String,
+    file_path: String,
+    created_at: Option<String>,
+    stage: Option<String>,
+) -> Result<Option<String>, String> {
+    let profiles = store.list()?;
+    let early = stage.as_deref() == Some("early");
+    tauri::async_runtime::spawn_blocking(move || {
+        auto_title_session_impl(
+            profiles,
+            &agent,
+            &session_id,
+            &file_path,
+            created_at.as_deref(),
+            early,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1546,5 +1809,103 @@ ERROR: Your access token could not be refreshed because your refresh token was r
         let pr = build_pr_prompt("abc123 feat: x", "5\t1\tsrc/a.rs");
         assert!(pr.contains("## 变更点"));
         assert!(pr.contains("不要编造"));
+        let t = build_session_title_prompt("[用户·首条] 加预设", "0908", true);
+        assert!(t.contains("类型|主题"));
+        assert!(t.contains("0908"));
+        assert!(t.contains("第一条真正的问题"));
+        assert!(t.contains("[用户·首条] 加预设"));
+        let t2 = build_session_title_prompt("[用户·定题] 改成雷达", "0908", false);
+        assert!(t2.contains("不要参考助手回复"));
+        assert!(!t2.contains("第一条真正的问题"));
+    }
+
+    fn chat(role: &str, text: &str, ts: Option<&str>) -> crate::sessions::ChatMessageDto {
+        crate::sessions::ChatMessageDto {
+            role: role.into(),
+            blocks: vec![crate::sessions::BlockDto {
+                kind: "text".into(),
+                text: text.into(),
+                tool_name: None,
+            }],
+            timestamp: ts.map(String::from),
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn shanghai_mmdd_uses_create_date_not_utc_calendar_day() {
+        assert_eq!(
+            shanghai_mmdd("2026-09-08T16:30:00Z").as_deref(),
+            Some("0909")
+        );
+        assert_eq!(
+            shanghai_mmdd("2026-09-08T10:00:00+08:00").as_deref(),
+            Some("0908")
+        );
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-09-08T16:00:00Z")
+            .unwrap()
+            .timestamp()
+            .to_string();
+        assert_eq!(shanghai_mmdd(&ts).as_deref(), Some("0909"));
+        assert_eq!(shanghai_mmdd(""), None);
+        assert_eq!(shanghai_mmdd("not-a-date"), None);
+    }
+
+    #[test]
+    fn parse_kind_theme_accepts_with_or_without_date() {
+        assert_eq!(
+            parse_kind_theme("修复|登录状态异常"),
+            Some(("修复".into(), "登录状态异常".into()))
+        );
+        assert_eq!(
+            parse_kind_theme("0908|优化|Agent 会话管理"),
+            Some(("优化".into(), "Agent 会话管理".into()))
+        );
+        assert!(parse_kind_theme("闲聊|随便说说").is_none());
+        assert!(parse_kind_theme("修复|短").is_none());
+        assert!(parse_kind_theme("修复|这是一个远远超过十二个汉字的主题").is_none());
+        assert!(parse_kind_theme("hello|world").is_none());
+        assert_eq!(
+            parse_kind_theme(&extract_title_candidate("```\n功能|Blender 预设\n```").unwrap()),
+            Some(("功能".into(), "Blender 预设".into()))
+        );
+        assert_eq!(
+            parse_kind_theme(
+                &extract_title_candidate(r#"{"text":"设计|项目环境架构"}"#).unwrap()
+            ),
+            Some(("设计".into(), "项目环境架构".into()))
+        );
+    }
+
+    #[test]
+    fn conversation_too_thin_skips_greetings() {
+        assert!(conversation_too_thin(&[chat("user", "你好", None)]));
+        assert!(conversation_too_thin(&[chat("user", "hello", None)]));
+        assert!(conversation_too_thin(&[]));
+        assert!(!conversation_too_thin(&[chat(
+            "user",
+            "把 Blender 的 MCP 加到预设里",
+            None
+        )]));
+    }
+
+    #[test]
+    fn user_title_material_uses_user_turns_not_assistant() {
+        let msgs = vec![
+            chat("user", "你好", None),
+            chat("assistant", "很长的助手回复不应进标题材料", None),
+            chat("user", "把 Blender 的 MCP 加到预设里", None),
+            chat("user", "不对，改成只探测安装，不要代装", None),
+            chat("user", "再补一条预设说明", None),
+        ];
+        let early = user_title_material(&msgs, true);
+        assert!(early.contains("Blender"));
+        assert!(!early.contains("助手"));
+        assert!(!early.contains("纠正"));
+        let fin = user_title_material(&msgs, false);
+        assert!(fin.contains("首条"));
+        assert!(fin.contains("纠正") || fin.contains("定题"));
+        assert!(fin.contains("预设说明"));
+        assert!(!fin.contains("很长的助手回复"));
     }
 }

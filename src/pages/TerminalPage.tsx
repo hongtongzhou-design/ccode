@@ -937,6 +937,7 @@ const TerminalView = memo(function TerminalView({
     filePath: string | null;
     /** 锁定的会话 id（liveSessions 登记用） */
     sessionId: string | null;
+    createdAt: string | null;
   } | null>(null);
   const linkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sessionWatchIdRef = useRef<string | null>(null);
@@ -944,6 +945,7 @@ const TerminalView = memo(function TerminalView({
   const sessionWatchStartingRef = useRef(false);
   const linkStartedAtRef = useRef(0);
   const conversationRequestRef = useRef(0);
+  const autoTitleEarlyRef = useRef(false);
   const setLiveSession = useAppStore((s) => s.setLiveSession);
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const setPage = useAppStore((s) => s.setPage);
@@ -1850,6 +1852,7 @@ const TerminalView = memo(function TerminalView({
     filePath: string;
     sessionId: string;
     title: string | null;
+    createdAt: string | null;
   } | null> {
     const ctx = linkCtxRef.current;
     if (!ctx) return null;
@@ -1864,6 +1867,7 @@ const TerminalView = memo(function TerminalView({
               filePath: hit.filePath,
               sessionId: ctx.hint,
               title: hit.customTitle || hit.title,
+              createdAt: hit.createdAt ?? null,
             }
           : null;
       }
@@ -1875,6 +1879,7 @@ const TerminalView = memo(function TerminalView({
             filePath: meta.filePath,
             sessionId: meta.sessionId,
             title: meta.customTitle || meta.title,
+            createdAt: meta.createdAt ?? null,
           }
         : null;
     } catch {
@@ -1961,6 +1966,15 @@ const TerminalView = memo(function TerminalView({
       }
       if (nextSig) convSigRef.current = nextSig;
       setLinkState("linked");
+      if (
+        !autoTitleEarlyRef.current &&
+        mergedMessages.some(
+          (m) => m.role === "user" && m.blocks.some((b) => b.kind === "text" && b.text.trim()),
+        )
+      ) {
+        autoTitleEarlyRef.current = true;
+        scheduleAutoTitle("early");
+      }
     } catch {
       // 会话文件可能写到一半，下轮再试
     }
@@ -2027,11 +2041,17 @@ const TerminalView = memo(function TerminalView({
   }
 
   /** 会话文件锁定：登记 liveSessions（会话页「进行中」+ 反向跳转） */
-  function lockLink(filePath: string, sessionId: string, title: string | null) {
+  function lockLink(
+    filePath: string,
+    sessionId: string,
+    title: string | null,
+    createdAt?: string | null,
+  ) {
     const ctx = linkCtxRef.current;
     if (!ctx || ctx.filePath) return;
     ctx.filePath = filePath;
     ctx.sessionId = sessionId;
+    if (createdAt) ctx.createdAt = createdAt;
     olderRef.current = [];
     latestWindowRef.current = [];
     convCursorRef.current = null;
@@ -2096,7 +2116,7 @@ const TerminalView = memo(function TerminalView({
           setLinkState("timeout");
         return;
       }
-      lockLink(hit.filePath, hit.sessionId, hit.title);
+      lockLink(hit.filePath, hit.sessionId, hit.title, hit.createdAt);
     }
     const linkedCtx = linkCtxRef.current;
     if (linkedCtx?.filePath && !sessionWatchIdRef.current) {
@@ -2118,7 +2138,7 @@ const TerminalView = memo(function TerminalView({
     if (!ctx) return;
     if (!ctx.filePath) {
       const hit = await findSessionFile();
-      if (hit) lockLink(hit.filePath, hit.sessionId, hit.title);
+      if (hit) lockLink(hit.filePath, hit.sessionId, hit.title, hit.createdAt);
       else setLinkState("timeout");
     }
     await fetchConversation(true);
@@ -2129,6 +2149,43 @@ const TerminalView = memo(function TerminalView({
     const sid = linkCtxRef.current?.sessionId;
     const linkedAgent = linkCtxRef.current?.agentId;
     if (sid && linkedAgent) setLiveSession(linkedAgent, sid, null);
+    if (!linkCtxRef.current?.filePath) {
+      window.setTimeout(() => {
+        void (async () => {
+          const hit = await findSessionFile();
+          if (hit)
+            lockLink(hit.filePath, hit.sessionId, hit.title, hit.createdAt);
+          scheduleAutoTitle("final");
+        })();
+      }, 2500);
+    } else {
+      scheduleAutoTitle("final");
+    }
+  }
+
+  function scheduleAutoTitle(stage: "early" | "final") {
+    const ctx = linkCtxRef.current;
+    const agent = ctx?.agentId;
+    const sessionId = ctx?.sessionId;
+    const filePath = ctx?.filePath;
+    const createdAt = ctx?.createdAt ?? null;
+    if (!agent || !sessionId || !filePath) return;
+    window.setTimeout(() => {
+      void invoke<string | null>("ai_auto_title_session", {
+        agent,
+        sessionId,
+        filePath,
+        createdAt,
+        stage,
+      })
+        .then((title) => {
+          if (!title) return;
+          const cur = linkCtxRef.current;
+          if (cur?.sessionId === sessionId) setLinkedSessionTitle(title);
+          void useAppStore.getState().loadSessions(true);
+        })
+        .catch(() => {});
+    }, 2500);
   }
 
   function resetLink() {
@@ -2138,6 +2195,7 @@ const TerminalView = memo(function TerminalView({
     const linkedAgent = linkCtxRef.current?.agentId;
     if (sid && linkedAgent) setLiveSession(linkedAgent, sid, null);
     invoke("release_session_claim", { claimId: tabId }).catch(() => {});
+    autoTitleEarlyRef.current = false;
     linkCtxRef.current = null;
     convSigRef.current = "";
     olderRef.current = [];
@@ -2315,6 +2373,7 @@ const TerminalView = memo(function TerminalView({
         hint: res.sessionHint,
         filePath: null,
         sessionId: null,
+        createdAt: null,
       };
       // 首次关联阶段使用短间隔，避免聊天层长时间停留在“识别中”；关联成功后
       // lockLink 会切回较宽松的兜底轮询，正常刷新由 session watcher 驱动。
