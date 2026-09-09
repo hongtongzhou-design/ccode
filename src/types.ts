@@ -1467,6 +1467,8 @@ export interface TaskDto {
   declared?: boolean;
   /** 最近一次验收写回的相对路径。 */
   adoptedPaths?: string[];
+  /** 本目标点名的技能（新建目标时从项目技能池勾选）；空 = 不点名 */
+  skills?: string[];
 }
 
 export interface RunEventDto {

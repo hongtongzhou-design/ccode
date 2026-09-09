@@ -138,7 +138,7 @@ test("composeLaunchPrompt keeps pack and user text apart", () => {
   assert.equal(composeLaunchPrompt("PACK", "hello"), "PACK\n\n----\n\nhello");
 });
 
-test("pack lists project skills with content version and contract", () => {
+test("pack splits named goal skills from project skill pool", () => {
   const pack = renderProjectContextPack({
     name: "数据分析",
     path: "/tmp/p",
@@ -151,13 +151,18 @@ test("pack lists project skills with content version and contract", () => {
         digest: "a1b2c3d4e5f6",
         inputs: ["data/"],
         outputs: ["artifacts/"],
+        named: true,
       },
-      { name: "ghost-skill", missing: true },
+      { name: "lit-search", digest: "ff00ff00", named: false },
+      { name: "ghost-skill", missing: true, named: false },
     ],
   });
-  assert.match(pack, /项目技能（工具箱，不是任务清单——列出 ≠ 要用/);
+  assert.match(pack, /本目标点名要用的技能（按其规范执行/);
   assert.match(pack, /data-clean（版本 a1b2c3d4）：数据清洗规范（读取 data\/；产出 artifacts\/）/);
+  assert.match(pack, /项目技能池（可用工具，列出 ≠ 要用；本目标没点名的默认不用）/);
   assert.match(pack, /ghost-skill（未安装，可在技能页新建或导入）/);
+  // 纪律线：只有点名的才执行
+  assert.match(pack, /只有「本目标点名要用的技能」才按其规范执行/);
 });
 
 test("pack always carries skill discipline line against over-engineering", () => {

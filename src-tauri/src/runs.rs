@@ -165,6 +165,7 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         ("agent", "TEXT"),
         ("profile_id", "TEXT"),
         ("adopted_paths", "TEXT NOT NULL DEFAULT '[]'"),
+        ("skills", "TEXT NOT NULL DEFAULT '[]'"),
     ] {
         if !columns.iter().any(|c| c == column) {
             conn.execute(
@@ -261,6 +262,9 @@ pub struct TaskDto {
     pub updated_at: String,
     pub declared: bool,
     pub adopted_paths: Vec<String>,
+    /// 本目标点名的技能（新建目标时勾选；与项目级 skills 名单互补：项目=工具箱，目标=点名）
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
     let input_paths: String = r.get(7)?;
@@ -284,9 +288,10 @@ fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
         updated_at: r.get(14)?,
         declared: identity_key.starts_with("user:"),
         adopted_paths: serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default(),
+        skills: serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default(),
     })
 }
-const TASK_COLS: &str = "id,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,archived_at,agent,profile_id,created_at,updated_at,identity_key,adopted_paths";
+const TASK_COLS: &str = "id,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,archived_at,agent,profile_id,created_at,updated_at,identity_key,adopted_paths,skills";
 fn ensure_task_at(
     conn: &Connection,
     root: Option<&str>,
@@ -848,6 +853,8 @@ pub struct CreateTaskInput {
     pub permission: Option<String>,
     pub agent: Option<String>,
     pub profile_id: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 #[tauri::command]
@@ -945,9 +952,16 @@ pub fn task_create(input: CreateTaskInput) -> Result<TaskDto, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_rfc3339();
     let identity = format!("user:{id}");
+    let mut skills: Vec<String> = Vec::new();
+    for skill in &input.skills {
+        let name = skill.trim();
+        if !name.is_empty() && !skills.iter().any(|item| item == name) {
+            skills.push(name.to_string());
+        }
+    }
     conn.execute(
-        "INSERT INTO tasks(id,identity_key,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,agent,profile_id,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11,?12,?13,?13)",
+        "INSERT INTO tasks(id,identity_key,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,agent,profile_id,skills,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11,?12,?14,?15,?15)",
         params![
             id,
             identity,
@@ -965,6 +979,7 @@ pub fn task_create(input: CreateTaskInput) -> Result<TaskDto, String> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|id| !id.is_empty()),
+            task_json_paths(&skills)?,
             now
         ],
     )

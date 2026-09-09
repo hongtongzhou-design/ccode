@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { effectiveProjectRules } from "../project-context";
 import {
   pathIsProtected,
   protectableEntries,
+  relativeProjectPath,
   suggestProtectedPaths,
   toggleProtectedFolder,
   type ProtectEntry,
@@ -45,7 +47,6 @@ export default function ProjectRulesPanel({
   const [error, setError] = useState<string | null>(null);
   const [protectOpen, setProtectOpen] = useState(false);
   const [showAllFolders, setShowAllFolders] = useState(false);
-  const [fileDraft, setFileDraft] = useState("");
   const [skillNames, setSkillNames] = useState<string[]>([]);
   const [librarySkills, setLibrarySkills] = useState<SkillDto[]>([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
@@ -286,33 +287,34 @@ export default function ProjectRulesPanel({
                         {protectedFiles.map(renderProtectRow)}
                       </ul>
                     )}
-                    <input
-                      className={`${fieldClass} mt-1.5 text-micro`}
-                      value={fileDraft}
-                      onChange={(event) => setFileDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key !== "Enter") return;
-                        event.preventDefault();
-                        const path = fileDraft
-                          .trim()
-                          .replace(/\\+/g, "/")
-                          .replace(/^\/+|\/+$/g, "");
-                        setFileDraft("");
-                        if (
-                          !path ||
-                          path === "." ||
-                          path.split("/").some((part) => !part || part === "..") ||
-                          pathIsProtected(path, protectedPaths)
-                        ) {
-                          return;
-                        }
-                        const next = [...protectedPaths, path];
-                        setProtectedPaths(next);
-                        void save(rulesDraft, next, skillNames);
+                    <button
+                      type="button"
+                      className="mt-1.5 text-micro text-l4 hover:text-l2"
+                      onClick={() => {
+                        void (async () => {
+                          const picked = await openFileDialog({
+                            multiple: true,
+                            directory: false,
+                            defaultPath: projectPath,
+                          });
+                          if (!picked) return;
+                          const list = Array.isArray(picked) ? picked : [picked];
+                          const next = [...protectedPaths];
+                          for (const abs of list) {
+                            const rel = relativeProjectPath(projectPath, abs);
+                            // 项目外/解析不出相对路径的跳过，不写非法保护项
+                            if (!rel || rel.startsWith("/") || /^[a-zA-Z]:/.test(rel)) continue;
+                            if (!pathIsProtected(rel, next)) next.push(rel);
+                          }
+                          if (next.length !== protectedPaths.length) {
+                            setProtectedPaths(next);
+                            void save(rulesDraft, next, skillNames);
+                          }
+                        })();
                       }}
-                      placeholder="添加单个文件保护：输入相对路径后回车"
-                      aria-label="添加单个文件保护"
-                    />
+                    >
+                      ＋ 选择文件添加保护…
+                    </button>
                   </>
                 ))}
             </div>
@@ -325,42 +327,70 @@ export default function ProjectRulesPanel({
               aria-expanded={skillsOpen}
             >
               <FoldMark open={skillsOpen} />
-              <span className="text-xs text-l3">项目技能</span>
+              <span className="text-xs text-l3">项目技能池</span>
               {skillNames.length > 0 && (
                 <span className="text-micro text-l4">{skillNames.length}</span>
               )}
             </button>
-            {skillsOpen &&
-              (librarySkills.length === 0 ? (
-                <p className="mt-1.5 text-micro text-l4">
-                  技能库里还没有技能，先到技能页新建或导入。
+            {skillsOpen && (
+              <>
+                <p className="mt-1 text-micro text-l4">
+                  从技能库添加进来、新建目标时可以点名。添加 ≠ 启用——池子里的技能默认都不用。
                 </p>
-              ) : (
-                <>
-                  <p className="mt-1 text-micro text-l4">
-                    勾选的技能随项目上下文下发给 Agent，开工快照会记录当时的内容版本。
-                  </p>
-                  <ul className="mt-1.5 max-h-56 space-y-0.5 overflow-auto">
-                    {librarySkills.map((skill) => (
-                      <li key={skill.id}>
-                        <Checkbox
-                          className="min-w-0"
-                          checked={skillNames.includes(skill.name)}
-                          label={
-                            <span className="min-w-0 truncate text-xs text-l2">
-                              {skill.name}
-                              {skill.description && (
-                                <span className="text-l4">　{skill.description}</span>
-                              )}
-                            </span>
-                          }
-                          onChange={(next) => toggleSkill(skill.name, next)}
-                        />
+                {skillNames.length > 0 && (
+                  <ul className="mt-1.5 flex flex-wrap gap-1">
+                    {skillNames.map((name) => (
+                      <li
+                        key={name}
+                        className="inline-flex h-7 items-center gap-1 rounded-full bg-strip px-2.5 text-xs text-l2"
+                      >
+                        {name}
+                        <button
+                          type="button"
+                          className="text-l4 hover:text-err-text"
+                          aria-label={`移出 ${name}`}
+                          onClick={() => toggleSkill(name, false)}
+                        >
+                          ×
+                        </button>
                       </li>
                     ))}
                   </ul>
-                </>
-              ))}
+                )}
+                {(() => {
+                  const addable = librarySkills.filter(
+                    (skill) => !skillNames.includes(skill.name),
+                  );
+                  if (librarySkills.length === 0) {
+                    return (
+                      <p className="mt-1.5 text-micro text-l4">
+                        技能库里还没有技能，先到技能页新建或导入。
+                      </p>
+                    );
+                  }
+                  if (addable.length === 0) return null;
+                  return (
+                    <select
+                      className={`${fieldClass} mt-1.5 text-xs`}
+                      value=""
+                      onChange={(event) => {
+                        const name = event.target.value;
+                        if (name) toggleSkill(name, true);
+                      }}
+                      aria-label="从技能库添加"
+                    >
+                      <option value="">＋ 从技能库添加…</option>
+                      {addable.map((skill) => (
+                        <option key={skill.id} value={skill.name}>
+                          {skill.name}
+                          {skill.description ? `（${skill.description}）` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  );
+                })()}
+              </>
+            )}
           </div>
           <div className="flex items-center gap-2 text-micro">
             {saved && <span className="text-ok-text">✓ 已保存</span>}

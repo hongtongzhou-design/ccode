@@ -16,6 +16,8 @@ export async function loadProjectContextPack(input: {
   goal?: string | null;
   writeReview?: boolean;
   feedback?: string | null;
+  /** 本目标点名的技能（Task.skills）；与项目技能池（config.skills）分两段进上下文包 */
+  goalSkills?: readonly string[];
 }): Promise<string> {
   let topic: string | null = null;
   let settings: string[] = [];
@@ -80,25 +82,35 @@ export async function loadProjectContextPack(input: {
   } catch {
     /* 没有目标列表时省略已验收段 */
   }
-  // 项目技能：按名单顺序出库记录，带上内容版本与接口契约；库里没有的如实标「未安装」
+  // 技能两段式：本目标点名（要用）在前，项目技能池（可用但默认不用）在后
   let skills: ProjectSkillPack[] = [];
-  if (skillNames.length > 0) {
+  const named = (input.goalSkills ?? []).filter((name) => name.trim());
+  const pool = skillNames.filter((name) => !named.includes(name));
+  if (named.length + pool.length > 0) {
     try {
       const library = await invoke<SkillDto[]>("list_skills");
       const byName = new Map(library.map((skill) => [skill.name, skill]));
-      skills = skillNames.map((name) => {
+      const toEntry = (name: string, isNamed: boolean): ProjectSkillPack => {
         const skill = byName.get(name);
-        if (!skill) return { name, missing: true };
+        if (!skill) return { name, missing: true, named: isNamed };
         return {
           name,
           description: skill.description,
           digest: skill.contentDigest ?? null,
           inputs: skill.inputs ?? [],
           outputs: skill.outputs ?? [],
+          named: isNamed,
         };
-      });
+      };
+      skills = [
+        ...named.map((name) => toEntry(name, true)),
+        ...pool.map((name) => toEntry(name, false)),
+      ];
     } catch {
-      skills = skillNames.map((name) => ({ name }));
+      skills = [
+        ...named.map((name) => ({ name, named: true })),
+        ...pool.map((name) => ({ name, named: false })),
+      ];
     }
   }
   return renderProjectContextPack({

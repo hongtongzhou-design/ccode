@@ -35,6 +35,7 @@ export async function prepareGoalRun(
     goal: input.packGoal === null ? undefined : (input.packGoal ?? goal),
     writeReview: input.task.reviewRequired,
     feedback: input.feedback,
+    goalSkills: input.task.skills ?? [],
   });
   const prompt = composeLaunchPrompt(
     pack,

@@ -20,6 +20,8 @@ export type ProjectSkillPack = {
   outputs?: readonly string[];
   /** true = 项目名单里有但技能库里没有（被删/未导入），如实标注不静默省略 */
   missing?: boolean;
+  /** true = 本目标点名要用（新建目标时勾选）；false/缺省 = 项目技能池成员（可用但默认不用） */
+  named?: boolean;
 };
 
 export type ProjectContextInput = {
@@ -207,32 +209,35 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
     );
   }
   const skills = input.skills ?? [];
-  if (skills.length) {
-    lines.push("", "项目技能（工具箱，不是任务清单——列出 ≠ 要用；开工时记录内容版本）：");
-    for (const skill of skills) {
-      if (skill.missing) {
-        lines.push(`- ${skill.name}（未安装，可在技能页新建或导入）`);
-        continue;
-      }
-      const version = skill.digest ? `（版本 ${skill.digest.slice(0, 8)}）` : "";
-      const desc = skill.description?.trim();
-      const contract = [
-        skill.inputs?.length ? `读取 ${skill.inputs.join("、")}` : "",
-        skill.outputs?.length ? `产出 ${skill.outputs.join("、")}` : "",
-      ]
-        .filter(Boolean)
-        .join("；");
-      lines.push(
-        `- ${skill.name}${version}${desc ? `：${desc}` : ""}${contract ? `（${contract}）` : ""}`,
-      );
+  const namedSkills = skills.filter((skill) => skill.named);
+  const poolSkills = skills.filter((skill) => !skill.named);
+  const renderSkill = (skill: (typeof skills)[number]) => {
+    if (skill.missing) {
+      return `- ${skill.name}（未安装，可在技能页新建或导入）`;
     }
+    const version = skill.digest ? `（版本 ${skill.digest.slice(0, 8)}）` : "";
+    const desc = skill.description?.trim();
+    const contract = [
+      skill.inputs?.length ? `读取 ${skill.inputs.join("、")}` : "",
+      skill.outputs?.length ? `产出 ${skill.outputs.join("、")}` : "",
+    ]
+      .filter(Boolean)
+      .join("；");
+    return `- ${skill.name}${version}${desc ? `：${desc}` : ""}${contract ? `（${contract}）` : ""}`;
+  };
+  if (namedSkills.length) {
+    lines.push("", "本目标点名要用的技能（按其规范执行；开工时记录内容版本）：");
+    for (const skill of namedSkills) lines.push(renderSkill(skill));
   }
-  // 技能纪律（实机反馈：Agent 会把简单目标套进重型技能流程，且把「项目技能」列出误读为
-  // 必须执行）。技能分发在 CLI 全局目录里撤不掉，能约束的是这条明示——列出只是可用，
-  // 目标不需要就一个都不用；简单任务直接做完。
+  if (poolSkills.length) {
+    lines.push("", "项目技能池（可用工具，列出 ≠ 要用；本目标没点名的默认不用）：");
+    for (const skill of poolSkills) lines.push(renderSkill(skill));
+  }
+  // 技能纪律（实机反馈：Agent 会把简单目标套进重型技能流程，且把「列出」误读为「必须」）。
+  // 技能分发在 CLI 全局目录里撤不掉，能约束的是这条明示——点名才用，池里只是可用。
   lines.push(
     "",
-    "技能纪律：只做目标要求的事，范围以目标为准。技能（包括上方列出的）只是可用工具，不是要求——先判断目标是否真的需要；不需要就一个都不用。简单任务直接做完，不要自行引入额外流程、模板或重型技能（如文献检索/精读/综述流程）。",
+    "技能纪律：只做目标要求的事，范围以目标为准。只有「本目标点名要用的技能」才按其规范执行；项目技能池和其他技能只是可用工具，目标不需要就一个都不用。简单任务直接做完，不要自行引入额外流程、模板或重型技能（如文献检索/精读/综述流程）。",
   );
   const goal = input.goal?.trim();
   if (goal) {

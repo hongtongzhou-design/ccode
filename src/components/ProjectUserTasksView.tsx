@@ -603,6 +603,21 @@ function CreateTaskModal({
   const [permission, setPermission] = useState<TaskPermission>("write_tree");
   const [scope, setScope] = useState<TaskMaterialScope>("whole");
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [poolSkills, setPoolSkills] = useState<string[]>([]);
+  const [pickedSkills, setPickedSkills] = useState<string[]>([]);
+  useEffect(() => {
+    let stale = false;
+    invoke<{ config: { skills?: string[] } }>("read_project_config", {
+      path: project.path,
+    })
+      .then((read) => {
+        if (!stale) setPoolSkills(read.config.skills ?? []);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [project.path]);
   const configuredAgents = AGENTS.filter((agent) =>
     profiles.some((profile) => profile.agent === agent.id),
   );
@@ -668,6 +683,7 @@ function CreateTaskModal({
           permission,
           agent: taskAgent || null,
           profileId: taskProfile || null,
+          skills: pickedSkills,
         },
       });
       await onCreated(task, start);
@@ -726,6 +742,44 @@ function CreateTaskModal({
                   selected={selectedPaths}
                   onChange={setSelectedPaths}
                 />
+              )}
+            </div>
+            <div>
+              <p className="mb-1 text-xs text-l3">
+                技能
+                <span className="ml-1 font-normal text-micro text-l4">
+                  本次点名才按其规范执行；不点就是不用
+                </span>
+              </p>
+              {poolSkills.length === 0 ? (
+                <p className="text-xs text-l4">
+                  项目技能池是空的——可先在任务页「规则 → 项目技能」从技能库添加；池子里的技能默认都不用。
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1">
+                  {poolSkills.map((skill) => {
+                    const on = pickedSkills.includes(skill);
+                    return (
+                      <button
+                        key={skill}
+                        type="button"
+                        aria-pressed={on}
+                        className={`inline-flex h-7 items-center rounded-full px-2.5 text-xs ${
+                          on ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
+                        }`}
+                        onClick={() =>
+                          setPickedSkills(
+                            on
+                              ? pickedSkills.filter((item) => item !== skill)
+                              : [...pickedSkills, skill],
+                          )
+                        }
+                      >
+                        {skill}
+                      </button>
+                    );
+                  })}
+                </div>
               )}
             </div>
             <div>
