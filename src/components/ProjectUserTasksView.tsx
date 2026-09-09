@@ -235,6 +235,13 @@ export default function ProjectUserTasksView({
     }
     setStartingId(task.id);
     try {
+      // 重试（失败/已停止）且有上一版：复用上次的隔离副本，并尽量恢复上次会话——
+      // 「重试」的产品语义是接着干，不是从零复制一份重跑
+      const previousRun = latestRunByTask.get(task.id);
+      const retrying =
+        (task.status === "failed" || task.status === "stopped") && previousRun
+          ? previousRun
+          : null;
       const { run, prompt } = await prepareGoalRun({
         projectName: project.name,
         projectPath: project.path,
@@ -242,7 +249,7 @@ export default function ProjectUserTasksView({
         task,
         agent: profile.agent,
         profileId: profile.id,
-        reuseIsolation: opts?.reuseIsolation,
+        reuseIsolation: opts?.reuseIsolation ?? Boolean(retrying),
         feedback: opts?.feedback,
       });
       setPendingTerminal({
@@ -251,6 +258,10 @@ export default function ProjectUserTasksView({
         agentId: profile.agent,
         profileId: profile.id,
         model: profile.models[0] ?? "",
+        resume:
+          retrying?.sessionId && retrying.agent === profile.agent
+            ? { agentId: retrying.agent, sessionId: retrying.sessionId }
+            : undefined,
         ...goalRunTerminalFields(task, run, prompt),
       });
       setPage("terminal");

@@ -1859,6 +1859,12 @@ fn open_at(conn: &Connection, input: OpenRunInput) -> Result<RunDto, String> {
                 return Err("恢复会话与原 Run 不一致；请从原会话入口恢复".into());
             }
             conn.execute("UPDATE runs SET status='created',closed_at=NULL,exit_code=NULL,close_reason=NULL,profile_id=?2 WHERE id=?1", params![id,input.profile_id]).map_err(|e| e.to_string())?;
+            // 恢复目标关联的 Run = 目标回到进行中（否则项目页一直显示「重试」，与事实相反）
+            conn.execute(
+                "UPDATE tasks SET status='running', updated_at=?1 WHERE id=(SELECT task_id FROM runs WHERE id=?2) AND status IN ('failed','stopped','pending_review')",
+                params![now_rfc3339(), id],
+            )
+            .map_err(|e| e.to_string())?;
             record_event(conn, id, "run.resumed", None)?;
             return get_run_at(conn, id)?.ok_or("Run 不存在".into());
         }
@@ -2519,6 +2525,37 @@ mod tests {
         assert!(requires_isolated_write_tree("pipeline_step", false));
         assert!(requires_isolated_write_tree("watch", false));
         assert!(!requires_isolated_write_tree("watch", true));
+    }
+
+    #[test]
+    fn resume_returns_goal_task_to_running() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute("INSERT INTO tasks(id,identity_key,kind,name,status,created_at,updated_at) VALUES('task','user:目标','free_research','目标X','failed','now','now')", []).unwrap();
+        conn.execute("INSERT INTO runs(id,task_id,task_kind,task_ref,isolation_path,runtime,agent,permission,created_at,status,closed_at,session_id,reuse_key) VALUES('run','task','free_research','目标X','/tmp/ccode-task-runs/task/x','local_cli','claude-code','write_tree','now','failed','later','s1','task:task')", []).unwrap();
+        let input = OpenRunInput {
+            id: Some("run".into()),
+            task_id: None,
+            project_root: None,
+            task_kind: None,
+            task_ref: None,
+            isolation_path: "/tmp/ccode-task-runs/task/x".into(),
+            runtime: Some("local_cli".into()),
+            agent: "claude-code".into(),
+            profile_id: None,
+            permission: Some("write_tree".into()),
+            reuse_key: Some("task:task".into()),
+            session_id: Some("s1".into()),
+            custom_runtime_id: None,
+            internal: Some(false),
+            sentinel: Some(false),
+        };
+        let resumed = open_at(&conn, input).unwrap();
+        assert_eq!(resumed.id, "run");
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE id='task'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "running", "恢复 Run 后目标不能停在 failed/重试");
     }
 
     #[test]
