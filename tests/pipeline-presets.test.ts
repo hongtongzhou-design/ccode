@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   PIPELINE_TEMPLATES,
   pipelineStepsForTemplate,
+  settingsForTemplateApply,
 } from "../src/pipeline-presets.ts";
 
 test("内置模板的 workspaceName 全局唯一，避免追加时互相覆盖", () => {
@@ -123,6 +124,29 @@ test("空落点人工事项必须使用 manual，且推荐技能存在于内置�
       for (const skill of step.skills) assert.ok(builtin.has(skill), `${template.id}/${step.name} 使用未播种技能：${skill}`);
     }
   }
+});
+
+test("每套模板有自己的纪律，应用时不把空表格写进 settings", () => {
+  for (const template of PIPELINE_TEMPLATES) {
+    assert.ok(
+      (template.projectRules ?? []).length > 0,
+      `${template.id} 缺少 projectRules`,
+    );
+  }
+  const review = PIPELINE_TEMPLATES.find((t) => t.id === "review")!;
+  const data = PIPELINE_TEMPLATES.find((t) => t.id === "data-processing")!;
+  assert.match(review.projectRules!.join("\n"), /不要虚构文献/);
+  assert.doesNotMatch(review.projectRules!.join("\n"), /原始数据/);
+  assert.match(data.projectRules!.join("\n"), /原始数据/);
+  assert.doesNotMatch(data.projectRules!.join("\n"), /虚构文献/);
+  assert.deepEqual(settingsForTemplateApply(review), review.projectRules);
+  assert.deepEqual(
+    settingsForTemplateApply(review, ["聚焦某个子问题", "", "", "", ""]),
+    [
+      ...review.projectRules!,
+      "综述角度：聚焦某个子问题",
+    ],
+  );
 });
 
 test("Zotero 只默认挂到三套科研文献检索步骤，Origin/EndNote 保持可选", () => {

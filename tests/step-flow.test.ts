@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildStepFlow } from "../src/step-flow.ts";
+import {
+  buildStepFlow,
+  demoReadPaperResource,
+  stripOptionalTitlePrefix,
+} from "../src/step-flow.ts";
 import type { HumanTaskStateDto, ProjectStepDto } from "../src/types.ts";
 
 function ht(partial: Partial<HumanTaskStateDto>): HumanTaskStateDto {
@@ -119,6 +123,25 @@ test("可选 after 事项进主干但不抢「当前节点」（v3.97）", () =>
   assert.equal(flow.currentKey, "review");
 });
 
+test("可选事项标题去掉「（可选）」前缀，分区已经标明", () => {
+  assert.equal(stripOptionalTitlePrefix("（可选）配置学术检索 MCP"), "配置学术检索 MCP");
+  const flow = buildStepFlow({
+    step: step({}),
+    states: [
+      ht({
+        title: "（可选）配置学术检索 MCP",
+        timing: "before",
+        optional: true,
+      }),
+    ],
+    hasDraft: false,
+    runStatus: "pending",
+  });
+  const node = flow.nodes.find((n) => n.kind === "human");
+  assert.equal(node?.section, "optional");
+  assert.equal(node?.label, "配置学术检索 MCP");
+});
+
 test("决策项未拍板完：discuss 节点不算完成，即使草稿已存在", () => {
   const s = step({
     discussionSeeds: [],
@@ -191,5 +214,61 @@ test("有种子但无决策项：discuss 节点仍在（种子就是要聊的东
   assert.ok(
     flow.nodes.find((n) => n.key === "discuss"),
     "配了种子 = 模板认为这一步有东西要商量",
+  );
+});
+
+const paper = { type: "paper", path: "papers/demo.pdf" };
+const demoSteps = [
+  step({ name: "文献检索与筛选", seedComplete: true, skills: ["lit-search"] }),
+  step({ name: "文献精读与笔记", skills: ["lit-notes"] }),
+];
+
+test("开读这一篇：普通模板即使有 PDF 也不出按钮", () => {
+  const templateSteps = [
+    step({ name: "文献检索与筛选", skills: ["lit-search"] }),
+    step({ name: "文献精读与笔记", skills: ["lit-notes"] }),
+  ];
+  assert.equal(
+    demoReadPaperResource({
+      steps: templateSteps,
+      focusStepName: "文献精读与笔记",
+      resources: [paper],
+    }),
+    undefined,
+  );
+  assert.equal(
+    demoReadPaperResource({
+      steps: templateSteps,
+      focusStepName: "文献检索与筛选",
+      resources: [paper],
+    }),
+    undefined,
+  );
+});
+
+test("开读这一篇：示例课题只在精读步且已有 PDF 时才出", () => {
+  assert.equal(
+    demoReadPaperResource({
+      steps: demoSteps,
+      focusStepName: "文献检索与筛选",
+      resources: [paper],
+    }),
+    undefined,
+  );
+  assert.equal(
+    demoReadPaperResource({
+      steps: demoSteps,
+      focusStepName: "文献精读与笔记",
+      resources: [{ type: "paper", path: "papers/notes.md" }],
+    }),
+    undefined,
+  );
+  assert.equal(
+    demoReadPaperResource({
+      steps: demoSteps,
+      focusStepName: "文献精读与笔记",
+      resources: [paper],
+    }),
+    paper,
   );
 });

@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { Download, Upload } from "lucide-react";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Download, Trash2, Upload } from "lucide-react";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import { codexThreadDeeplink } from "../codex-client";
 import { sessionRuntimeKey, useAppStore } from "../store";
@@ -13,6 +13,9 @@ import {
   QUICK_FILTERS,
   SCOPE_KIND_LABEL,
   applySessionFilters,
+  sessionFilterQuickForSearch,
+  groupSearchHitsByArchive,
+  SEARCH_ARCHIVED_HEADER,
   buildScopeSuggestions,
   groupSessionsByProjectPath,
   sessionLooksInternal,
@@ -26,6 +29,10 @@ import {
   type SearchFocus,
 } from "../session-search";
 import { pathKey, samePath } from "../path-utils";
+import {
+  projectSessionLabel,
+  tidySessionTitle,
+} from "../session-title";
 import { AGENTS } from "../types";
 import {
   codexSessionChannelChip,
@@ -37,6 +44,7 @@ import HandoffPicker from "../components/HandoffPicker";
 import DigestPicker from "../components/DigestPicker";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import { resumeSessionInTerminal } from "../components/QuickChatModal";
+import { isScratchCwd } from "../quick-chat";
 import SessionImportModal from "../components/SessionImportModal";
 import { SECRET_EXPORT_WARNING } from "../session-transfer";
 import {
@@ -44,7 +52,6 @@ import {
   EmptyState,
   FoldMark,
   ghostActionClass,
-  hoverRevealClass,
   LoadingRows,
   rowActionClass,
   searchFieldClass,
@@ -107,7 +114,8 @@ type Filter =
   // 项目挂在 agent 下，筛选必须同时限定 agent 和路径（同名目录可能跨 agent）
   | { kind: "project"; agent: string; path: string }
   // 「范围 → 按项目」：只按路径、跨 Agent
-  | { kind: "projectPath"; path: string };
+  | { kind: "projectPath"; path: string }
+  | { kind: "scratch" };
 
 function projectScopePath(f: Filter): string | null {
   return f.kind === "project" || f.kind === "projectPath" ? f.path : null;
@@ -130,7 +138,7 @@ function basename(p: string): string {
 }
 
 function sessionTitle(s: SessionMetaDto): string {
-  return s.customTitle || s.title || `未命名对话 · ${s.sessionId.slice(0, 8)}`;
+  return projectSessionLabel(tidySessionTitle(s));
 }
 
 export default function SessionsPage({ visible }: { visible: boolean }) {
@@ -149,6 +157,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const sessionScopeReq = useAppStore((s) => s.sessionScopeReq);
   const setSessionScopeReq = useAppStore((s) => s.setSessionScopeReq);
   const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
+  const sessionsScratchReq = useAppStore((s) => s.sessionsScratchReq);
+  const setSessionsScratchReq = useAppStore((s) => s.setSessionsScratchReq);
   // 任务卡：移到卡片菜单的候选列表（按项目根缓存）+ 卡片 chip 跳工作区页的一次性请求
   const taskCards = useAppStore((s) => s.taskCards);
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
@@ -276,6 +286,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       setSessionsQuery(null);
     }
   }, [sessionsQuery, setSessionsQuery]);
+
+  useEffect(() => {
+    if (!sessionsScratchReq) return;
+    setFilter({ kind: "scratch" });
+    setQuery("");
+    setScopes([]);
+    setSessionsScratchReq(false);
+  }, [sessionsScratchReq, setSessionsScratchReq]);
 
   useEffect(() => {
     if (!q) {
@@ -480,15 +498,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
 
   // 快筛 + 作用域 chip（v3.88）先过一道；archived/internal 口径由 applySessionFilters 统一裁决，
   // 下游 archiveVisible 保留原表达式做兜底（showArchived 与 archived chip 已同步）
+  const liveKeys = useMemo(
+    () => new Set(Object.keys(liveSessions)),
+    [liveSessions],
+  );
   const quickFiltered = useMemo(
-    () =>
-      applySessionFilters(
-        searched,
-        quick,
-        scopes,
-        new Set(Object.keys(liveSessions)),
-      ),
-    [searched, quick, scopes, liveSessions],
+    () => applySessionFilters(searched, quick, scopes, liveKeys),
+    [searched, quick, scopes, liveKeys],
   );
   const archiveVisible = useMemo(
     () => quickFiltered.filter((s) => showArchived || !s.archived),
@@ -552,7 +568,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   }, [expandedAgent, tree]);
 
   const sessionList = useMemo(() => {
-    let src = filter.kind === "internal" ? internalVisible : regularVisible;
+    let src: SessionMetaDto[];
+    if (q) {
+      if (filter.kind === "internal") {
+        src = searched.filter((s) => sessionLooksInternal(s));
+      } else {
+        src = applySessionFilters(
+          searched,
+          sessionFilterQuickForSearch(quick, true),
+          scopes,
+          liveKeys,
+        ).filter((s) => !sessionLooksInternal(s));
+      }
+    } else {
+      src = filter.kind === "internal" ? internalVisible : regularVisible;
+    }
     if (filter.kind === "agent")
       src = src.filter((s) => s.agent === filter.agent);
     else if (filter.kind === "project")
@@ -561,20 +591,35 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       );
     else if (filter.kind === "projectPath")
       src = src.filter((s) => samePath(s.projectPath, filter.path, IS_WINDOWS));
+    else if (filter.kind === "scratch")
+      src = src.filter(
+        (s) => isScratchCwd(s.projectPath, IS_WINDOWS) && s.workspace == null,
+      );
     return src;
-  }, [regularVisible, internalVisible, filter]);
+  }, [
+    q,
+    searched,
+    quick,
+    scopes,
+    liveKeys,
+    regularVisible,
+    internalVisible,
+    filter,
+  ]);
 
   // 项目筛选下按任务卡分组（对话归入卡片；无卡片的收「未归置」恒在最前，与原「无工作区会话
   // 排最前」同口径）：组内保持时间降序，组按各自最近活跃排序；其余筛选保持纯时间序（跨项目分组无意义）。
   // header 只挂在每组首条上，渲染时据此插组名小标题。
   const displayList = useMemo(() => {
-    // 搜索时按相关度排，不再按任务卡分组打乱
-    if (q || projectScopePath(filter) == null)
+    // 搜索时按相关度排，已归档命中沉底挂「已归档」组头
+    if (q) return groupSearchHitsByArchive(sessionList);
+    if (projectScopePath(filter) == null)
       return sessionList.map((s) => ({ header: null as string | null, s }));
     return groupSessionsByTask(sessionList).flatMap((g) =>
       g.list.map((s, i) => ({ header: i === 0 ? g.name : null, s })),
     );
   }, [sessionList, filter, q]);
+  const shownSessionRows = displayList;
 
   /** 切换树筛选：同时退出回放态回到列表，保证右栏与所选节点对应 */
   function selectFilter(f: Filter) {
@@ -697,6 +742,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       setError(String(e));
     } finally {
       setExportingPack(false);
+    }
+  }
+
+  async function openExported() {
+    if (!exportPath) return;
+    try {
+      await revealItemInDir(exportPath);
+      setError(null);
+    } catch (e) {
+      setError(`无法打开：${String(e)}`);
     }
   }
 
@@ -1254,11 +1309,14 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
       filter.path === f.path) ||
     (filter.kind === "projectPath" &&
       f.kind === "projectPath" &&
-      samePath(filter.path, f.path, IS_WINDOWS));
+      samePath(filter.path, f.path, IS_WINDOWS)) ||
+    (filter.kind === "scratch" && f.kind === "scratch");
   const filterChipLabel =
     filter.kind === "internal"
-      ? "Ccode 内部 AI"
-      : filter.kind === "agent"
+      ? "Mesa 内部 AI"
+      : filter.kind === "scratch"
+        ? "随手聊"
+        : filter.kind === "agent"
         ? agentLabel(filter.agent)
         : filter.kind === "project"
           ? `${agentLabel(filter.agent)} · ${basename(filter.path)}`
@@ -1329,6 +1387,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     </>
                   )}
                 </button>
+                {exportPath && (
+                  <button
+                    type="button"
+                    onClick={() => void openExported()}
+                    className={ghostActionClass}
+                    title={exportPath}
+                  >
+                    打开
+                  </button>
+                )}
                 <button
                   onClick={exitSelectMode}
                   className={ghostActionClass}
@@ -1585,19 +1653,42 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   {regularVisible.length}
                 </span>
               </button>
+              <button
+                onClick={() => {
+                  pickScope({ kind: "scratch" });
+                }}
+                className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
+                  filterActive({ kind: "scratch" })
+                    ? "bg-rail-sel text-l1"
+                    : "text-l3 hover:bg-hover"
+                }`}
+              >
+                <span className="truncate">随手聊</span>
+                <span
+                  className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "scratch" }) ? "text-l2" : "text-l4"}`}
+                >
+                  {
+                    regularVisible.filter(
+                      (s) =>
+                        isScratchCwd(s.projectPath, IS_WINDOWS) &&
+                        s.workspace == null,
+                    ).length
+                  }
+                </span>
+              </button>
               {internalVisible.length > 0 && (
                 <button
                   onClick={() => {
                     pickScope({ kind: "internal" });
                   }}
-                  title="Ccode 自己调用 AI 生成提交信息、摘要等产生的内部对话"
+                  title="Mesa 自己调用 AI 生成提交信息、摘要等产生的内部对话"
                   className={`mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-between gap-1 rounded-md px-2 text-left text-xs ${
                     filterActive({ kind: "internal" })
                       ? "bg-rail-sel text-l1"
                       : "text-l3 hover:bg-hover"
                   }`}
                 >
-                  <span className="truncate">Ccode 内部 AI</span>
+                  <span className="truncate">Mesa 内部 AI</span>
                   <span
                     className={`shrink-0 text-xs opacity-70 ${filterActive({ kind: "internal" }) ? "text-l2" : "text-l4"}`}
                   >
@@ -1773,13 +1864,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               {tree.length === 0 && (
                 <EmptyState
                   title="还没有对话"
-                  detail="跑过 agent 会话后，这里按项目列出来。"
+                  detail="各项目里 Agent 做过的记录会列在这里。定时巡检等后台跑的不进这份列表。"
                 />
               )}
             </div>
         ) : (
         <div className="min-h-0 flex-1 overflow-auto">
-            {displayList.map(({ header, s }) => {
+            {shownSessionRows.map(({ header, s }) => {
               const isEditing =
                 editing?.agent === s.agent && editing.sessionId === s.sessionId;
               if (isEditing && editing) {
@@ -1843,7 +1934,11 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 <Fragment key={skey(s)}>
                   {header && (
                     <div className="flex items-center justify-between gap-2 border-b border-hairline bg-strip px-3 pb-1 pt-2 text-xs text-l3">
-                      <span>{header === "未归置" ? header : `▤ ${header}`}</span>
+                      <span>
+                        {header === "未归置" || header === SEARCH_ARCHIVED_HEADER
+                          ? header
+                          : `▤ ${header}`}
+                      </span>
                       {header === "未归置" && projectHasCards && (
                         <span className="text-micro text-l4">
                           ⋯ 可移到卡片归类
@@ -1943,10 +2038,19 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         失效
                       </span>
                     )}
+                    {/* 右侧：平时相对时间，悬停换成操作（同一槽，不留空） */}
+                    <span
+                      className={`shrink-0 font-mono text-micro text-l4 ${
+                        selecting
+                          ? ""
+                          : "group-hover:hidden group-focus-within:hidden"
+                      }`}
+                      title={absTime(s.updatedAt)}
+                    >
+                      {relTime(s.updatedAt)}
+                    </span>
                     {!selecting && (
-                      <div
-                        className={`ml-1 flex shrink-0 items-center gap-1 ${hoverRevealClass}`}
-                      >
+                      <div className="ml-1 hidden shrink-0 items-center gap-1 group-hover:flex group-focus-within:flex">
                         {clickable && (
                           <button
                             type="button"
@@ -1959,8 +2063,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             恢复
                           </button>
                         )}
-                        {/* ⚑ 保留提为行内 hover（v3.88）：与「恢复」并列为两个高频项，
-                            其余低频统一进 ⋯ 的三组菜单 */}
                         {!s.pinned && (
                           <button
                             type="button"
@@ -1974,6 +2076,18 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             ⚑
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void deleteSession(s);
+                          }}
+                          title="删除"
+                          aria-label={`删除：${sessionTitle(s)}`}
+                          className={`${ghostActionClass} text-l3 hover:text-err-text`}
+                        >
+                          <Trash2 size={14} strokeWidth={1.8} />
+                        </button>
                         <button
                           type="button"
                           onClick={(event) => {
@@ -1993,14 +2107,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         </button>
                       </div>
                     )}
-                    {/* 右侧相对时间：主显相对、悬浮绝对（白话双层）；
-                        hover/聚焦行时渐隐，把右端让给浮现的操作组（v3.92） */}
-                    <span
-                      className="shrink-0 font-mono text-micro text-l4 transition-opacity group-hover:opacity-0"
-                      title={absTime(s.updatedAt)}
-                    >
-                      {relTime(s.updatedAt)}
-                    </span>
                   </div>
                   {/* meta 行：agent 品牌色胶囊（扫一眼分家）· token mono 小字 + 步骤/接力/标签 chip，AI 摘要截断尾随 */}
                   <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-micro text-l4">
@@ -2024,7 +2130,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         title={
                           (s.stepName
                             ? `研究步骤：${s.stepName}（工作区：${s.workspace}）`
-                            : `任务工作区：${s.workspace}`) + "\n点击回项目页查看该项目"
+                            : `工作区：${s.workspace}`) + "\n点击回项目页"
                         }
                       >
                         ⎇ {s.stepName ?? s.workspace}
@@ -2034,7 +2140,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       <button
                         type="button"
                         className="max-w-28 shrink-0 truncate rounded-sm bg-inset px-1 text-l3 hover:bg-seg-sel hover:text-l1"
-                        title={`任务卡：${s.taskName}（点击跳到项目页对应项目）`}
+                        title={`目标：${s.taskName}（点击回项目页）`}
                         onClick={(event) => {
                           event.stopPropagation();
                           setSelectProjectReq(s.projectPath);
@@ -2177,7 +2283,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   title={
                     selected.stepName
                       ? `研究步骤：${selected.stepName}（工作区：${selected.workspace}）`
-                      : `任务工作区：${selected.workspace}`
+                      : `工作区：${selected.workspace}`
                   }
                 >
                   ⎇ {selected.stepName ?? selected.workspace}
@@ -2223,6 +2329,16 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 >
                   {exporting ? "导出中…" : "导出"}
                 </button>
+                {exportPath && (
+                  <button
+                    type="button"
+                    onClick={() => void openExported()}
+                    className="ml-1 inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover"
+                    title={exportPath}
+                  >
+                    打开
+                  </button>
+                )}
                 <button
                   onClick={(e) => {
                     const r = e.currentTarget.getBoundingClientRect();
@@ -2253,14 +2369,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </div>
             {error && (
               <p className="px-4 py-1 text-xs text-err-text">{error}</p>
-            )}
-            {exportPath && (
-              <p
-                className="truncate px-4 py-1 text-xs text-l4"
-                title={exportPath}
-              >
-                已导出：{exportPath}
-              </p>
             )}
             {replayTab === "diff" ? (
               <div className="flex min-h-0 flex-1 flex-col">
@@ -2305,11 +2413,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                   <div className="mx-auto max-w-3xl p-4">
                     {loadingConv ? (
                       <LoadingRows compact />
-                    ) : messages.length === 0 ? (
-                      <EmptyState
-                        title="这条会话没有可回放的内容"
-                        detail="本地会话文件里没有解析出消息记录。"
-                      />
                     ) : (
                       <>
                         {conversationCursor !== null && (
@@ -2324,14 +2427,24 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                             </button>
                           </div>
                         )}
-                        {/* key 按会话隔离展开状态：切会话时旧会话的展开集合不带进新会话 */}
-                        <ConversationView
-                          key={`${selected?.sessionId ?? "none"}:${searchFocus?.around ?? "tail"}`}
-                          messages={messages}
-                          cwd={selected?.projectPath ?? null}
-                          focusIndex={findFocusMessageIndex(messages, searchFocus)}
-                          focusKeywords={searchFocus?.matchedKeywords ?? []}
-                        />
+                        {messages.length === 0 ? (
+                          <EmptyState
+                            title="这条会话没有可回放的内容"
+                            detail={
+                              conversationCursor !== null
+                                ? "这一段里没有解析出消息。点上面「加载更早对话」继续往前。"
+                                : "本地会话文件里没有解析出消息记录。"
+                            }
+                          />
+                        ) : (
+                          <ConversationView
+                            key={`${selected?.sessionId ?? "none"}:${searchFocus?.around ?? "tail"}`}
+                            messages={messages}
+                            cwd={selected?.projectPath ?? null}
+                            focusIndex={findFocusMessageIndex(messages, searchFocus)}
+                            focusKeywords={searchFocus?.matchedKeywords ?? []}
+                          />
+                        )}
                       </>
                     )}
                   </div>
@@ -2358,7 +2471,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         title={
                           clientOpenable(selected)
                             ? "唤起 Codex 桌面客户端直接打开这条对话，可接着聊"
-                            : `这条会话记录的渠道「${selected.provider}」在客户端 config.toml 里没有定义，跳过去客户端会报「Model provider not found」无法继续；用上方「继续」在终端续聊（Ccode 会自动补渠道定义）`
+                            : `这条会话记录的渠道「${selected.provider}」在客户端 config.toml 里没有定义，客户端打开会报「Model provider not found」。想在客户端续聊：到连接页对这条 Codex 连接用「注册到客户端」（写入 config.toml 的渠道定义）；用上方「继续」则是在 Mesa 终端里续聊——启动时临时注入渠道定义，不改客户端配置`
                         }
                         className={ghostActionClass}
                       >

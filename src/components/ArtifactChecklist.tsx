@@ -1,3 +1,5 @@
+import { previewSaveCompletion, type FilePreviewSnapshot } from "../file-preview";
+import { sanitizeDocumentHtml } from "../document-html";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { marked } from "marked";
@@ -189,6 +191,8 @@ export default function ArtifactChecklist({
     text: string;
     edit: boolean;
     truncated: boolean;
+    revision: string | null;
+    readOnlyReason: string | null;
     saving: boolean;
     error: string | null;
   } | null>(null);
@@ -201,17 +205,19 @@ export default function ArtifactChecklist({
       text: "",
       edit: false,
       truncated: false,
+      revision: null,
+      readOnlyReason: null,
       saving: false,
       error: null,
     });
     try {
-      const r = await invoke<{ text: string; truncated: boolean }>(
+      const r = await invoke<FilePreviewSnapshot>(
         "read_file_preview",
         { path: f.path, root },
       );
       setInlinePreview((s) =>
         s && s.path === f.path
-          ? { ...s, origin: r.text, text: r.text, truncated: r.truncated }
+          ? { ...s, ...r, origin: r.text }
           : s,
       );
     } catch (reason) {
@@ -222,26 +228,33 @@ export default function ArtifactChecklist({
   }
 
   async function saveInlinePreview() {
-    if (!inlinePreview || inlinePreview.saving) return;
+    if (!inlinePreview || inlinePreview.saving || !inlinePreview.revision) return;
     setInlinePreview({ ...inlinePreview, saving: true, error: null });
     try {
-      await invoke("save_file_preview", {
+      const revision = await invoke<string>("save_file_preview", {
         path: inlinePreview.path,
         root,
         text: inlinePreview.text,
+        expectedRevision: inlinePreview.revision,
       });
-      setInlinePreview(null);
+      setInlinePreview((current) => {
+        if (!current || current.path !== inlinePreview.path) return current;
+        const saved = previewSaveCompletion(inlinePreview.text, current.text, revision);
+        return saved.dirty
+          ? { ...current, origin: saved.snapshot.text, revision, saving: false }
+          : null;
+      });
       setRefreshTick((v) => v + 1);
     } catch (reason) {
       setInlinePreview((s) =>
-        s ? { ...s, saving: false, error: String(reason) } : s,
+        s && s.path === inlinePreview.path ? { ...s, saving: false, error: String(reason) } : s,
       );
     }
   }
 
   /** 关闭前守一道：有未保存改动时确认（与 TASK.md 弹层同口径） */
   async function closeInlinePreview() {
-    if (!inlinePreview) return;
+    if (!inlinePreview || inlinePreview.saving) return;
     if (
       inlinePreview.text !== inlinePreview.origin &&
       !(await confirmDialog("有未保存的改动，确定放弃？", {
@@ -301,11 +314,13 @@ export default function ArtifactChecklist({
   const previewHtml = useMemo(
     () =>
       inlinePreview && isMd
-        ? marked.parse(inlinePreview.text, {
-            gfm: true,
-            breaks: false,
-            async: false,
-          })
+        ? sanitizeDocumentHtml(
+            marked.parse(inlinePreview.text, {
+              gfm: true,
+              breaks: false,
+              async: false,
+            }) as string,
+          )
         : "",
     [inlinePreview, isMd],
   );
@@ -525,7 +540,7 @@ export default function ArtifactChecklist({
               >
                 {inlinePreview.path}
               </span>
-              {!inlinePreview.truncated && (
+              {inlinePreview.revision && (
                 <button
                   type="button"
                   onClick={() =>
@@ -563,8 +578,8 @@ export default function ArtifactChecklist({
               </pre>
             )}
             <p className="mt-2 shrink-0 text-micro text-l4">
-              {inlinePreview.truncated
-                ? "文件较大，只显示了开头部分（只读）；要完整编辑请「在终端页打开」。"
+              {inlinePreview.readOnlyReason
+                ? inlinePreview.readOnlyReason
                 : "改动保存后直接写回该文件。"}
             </p>
             <div className="mt-3 flex shrink-0 items-center gap-2">
@@ -607,7 +622,7 @@ export default function ArtifactChecklist({
                 >
                   取消
                 </button>
-                {!inlinePreview.truncated && (
+                {inlinePreview.revision && (
                   <button
                     type="button"
                     disabled={

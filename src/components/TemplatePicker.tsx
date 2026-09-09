@@ -17,6 +17,7 @@ export interface TemplatePickItem {
   id?: string;
   name: string;
   steps: ProjectStepDto[];
+  projectRules?: string[];
   projectSettings?: string[];
   mode?: SubmissionMode;
   round?: number;
@@ -78,6 +79,7 @@ export default function TemplatePicker({
       name: string;
       description: string;
       steps: ProjectStepDto[];
+      projectRules?: string[];
       projectSettings?: string[];
     },
     key: string,
@@ -121,6 +123,7 @@ export default function TemplatePicker({
                           round,
                         )
                       : t.steps,
+                  projectRules: t.projectRules,
                   projectSettings: t.projectSettings,
                   mode,
                   round: mode === "revision" ? round : undefined,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DECISIONS_HEADING,
+  formatDecisionAnswer,
   isDecisionsOnly,
   orderedAnswers,
   parseDecisions,
@@ -91,11 +92,11 @@ test("未答项与推荐值：已答的不被一键覆盖", () => {
     ["纳入标准定多严"],
   );
   assert.deepEqual(recommendedAnswers(DECISIONS, answered), [
-    { q: "纳入标准定多严", answer: "只要高质量期刊/顶会" },
+    { q: "纳入标准定多严", answer: formatDecisionAnswer("approve", "只要高质量期刊/顶会") },
   ]);
   assert.deepEqual(recommendedAnswers(DECISIONS, new Map()), [
-    { q: "综述角度怎么收", answer: "领域全景铺开" },
-    { q: "纳入标准定多严", answer: "只要高质量期刊/顶会" },
+    { q: "综述角度怎么收", answer: formatDecisionAnswer("approve", "领域全景铺开") },
+    { q: "纳入标准定多严", answer: formatDecisionAnswer("approve", "只要高质量期刊/顶会") },
   ]);
 });
 

@@ -239,10 +239,8 @@ pub async fn fetch_models(
             Ok(resp) if resp.status().is_success() => {
                 // 先读文本再解析：失败时能把响应开头（脱敏后）带进报错，
                 // 否则 reqwest 的 "error decoding response body" 无任何自查线索
-                let text = resp
-                    .text()
-                    .await
-                    .map_err(|e| format!("读取响应失败: {e}"))?;
+                let bytes = crate::storage::response_bytes(resp, 16 * 1024 * 1024).await?;
+                let text = String::from_utf8_lossy(&bytes);
                 let body: serde_json::Value = serde_json::from_str(&text)
                     .map_err(|e| format!("解析响应失败: {e}；响应开头: {}", body_preview(&text)))?;
                 // 顺带沉淀能力元数据（OpenRouter 风格响应带 context_length/modality 等；

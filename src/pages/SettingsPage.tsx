@@ -1,3 +1,4 @@
+import BackgroundTasksPanel from "../components/BackgroundTasksPanel";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -52,6 +53,11 @@ import {
   resolvePaletteId,
 } from "../terminal-palettes";
 import { THEMES, isCustomThemeId, isLightTheme } from "../themes";
+import appCss from "../App.css?raw";
+import {
+  parseThemeSwatchesFromCss,
+  themeSwatchFor,
+} from "../theme-swatch";
 import { confirmDialog } from "../components/ConfirmDialog";
 import {
   addCustomThemeCard,
@@ -68,8 +74,6 @@ import {
   renameCustomThemeCard,
   resolveCustomThemeCardId,
   seedsFromComputed,
-  snapshotCustomThemeVars,
-  restoreCustomThemeVars,
   type CustomThemeCard,
   type CustomThemeSeeds,
 } from "../custom-theme";
@@ -86,28 +90,7 @@ function paletteDots(id: string): string[] {
 
 // 主题清单单一出处在 ../themes（命令面板共用）
 
-type ThemeSwatch = { rail: string; canvas: string; accent: string; ink: string };
 
-/** 预览色运行时从 CSS 变量读取：临时切 data-theme 同步读回再还原，
-    避免与 src/App.css 双份维护色值漂移（App.css 无 transition，同步还原不会闪烁） */
-function readThemeSwatch(id: string): ThemeSwatch {
-  const el = document.documentElement;
-  const prev = el.dataset.theme;
-  const customSnap = snapshotCustomThemeVars(el);
-  restoreCustomThemeVars(el, {});
-  el.dataset.theme = id;
-  const cs = getComputedStyle(el);
-  const swatch = {
-    rail: cs.getPropertyValue("--color-rail").trim(),
-    canvas: cs.getPropertyValue("--color-canvas").trim(),
-    accent: cs.getPropertyValue("--color-cta").trim(),
-    ink: cs.getPropertyValue("--color-l1").trim(),
-  };
-  if (prev === undefined) el.removeAttribute("data-theme");
-  else el.dataset.theme = prev;
-  restoreCustomThemeVars(el, customSnap);
-  return swatch;
-}
 
 /** 整块点开系统取色器；名称和色值只展示，不在色块上改 */
 function ColorChip({
@@ -735,11 +718,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   // 分区折叠状态：首次仅展开高频外观，切换后持久化。
   // 应用版本（「关于」分区）：Tauri 从 tauri.conf.json 取，与打包产物一致
   const [appVersion, setAppVersion] = useState<string | null>(null);
-  useEffect(() => {
-    getVersion()
-      .then(setAppVersion)
-      .catch(() => toast("应用版本读取失败", "warning"));
-  }, []);
   // 精确注意力标记支持清单（九家全列出，支持与否与备注以后端注册表为准）
   const [hookSupport, setHookSupport] = useState<HookSupport[]>([]);
   const [hookSupportError, setHookSupportError] = useState<string | null>(null);
@@ -751,9 +729,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setHookSupportError(`注意力标记支持清单加载失败：${String(e)}`);
     }
   }
-  useEffect(() => {
-    void loadHookSupport();
-  }, []);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
       const raw = localStorage.getItem(SECTIONS_KEY);
@@ -798,47 +773,59 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   }, [visible, activeSection, collapsed.storage]);
 
   useEffect(() => {
-    if (visible) {
-      loadSettings().catch((e) => setError(String(e)));
-      // AI 专用配置下拉需要 profile 列表
-      if (profiles.length === 0)
-        loadAll().catch((e) => setError(`连接配置加载失败：${String(e)}`));
-      refreshFontStatus();
-      // 有未保存草稿时保留，不用文件内容覆盖
-      if (!pricingDirtyRef.current) {
-        invoke<string>("read_pricing_file")
-          .then((t) => {
-            if (!t.trim()) {
-              setPricingRows([]);
-              setPricingRateExtra(null);
-            } else {
-              // 解析失败（手改坏的存量文件）：提示并给空表，保存即覆盖
-              try {
-                const v = JSON.parse(t) as Record<string, unknown>;
-                setPricingRateExtra(
-                  typeof v._rate === "number" ? v._rate : null,
-                );
-                setPricingRows(
-                  Object.entries(v)
-                    .filter(([k, val]) => k !== "_rate" && Array.isArray(val))
-                    .map(([prefix, val]) => ({
-                      prefix,
-                      input: String((val as unknown[])[0] ?? ""),
-                      output: String((val as unknown[])[1] ?? ""),
-                    })),
-                );
-              } catch (e) {
-                setPricingRows([]);
-                setPricingRateExtra(null);
-                setError(`pricing.json 解析失败（${e}），编辑后保存将覆盖原文件`);
-              }
-            }
-            markPricingDirty(false);
-          })
-          .catch((e) => setError(String(e)));
-      }
-    }
+    if (!visible) return;
+    loadSettings().catch((e) => setError(String(e)));
+    refreshFontStatus();
   }, [visible, loadSettings]);
+
+  useEffect(() => {
+    if (!visible || activeSection !== "integration") return;
+    if (profiles.length === 0)
+      loadAll().catch((e) => setError(`连接配置加载失败：${String(e)}`));
+    if (hookSupport.length === 0 && !hookSupportError) void loadHookSupport();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, activeSection]);
+
+  useEffect(() => {
+    if (!visible || activeSection !== "about" || appVersion !== null) return;
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => toast("应用版本读取失败", "warning"));
+  }, [visible, activeSection, appVersion]);
+
+  useEffect(() => {
+    if (!visible || activeSection !== "stats") return;
+    if (pricingDirtyRef.current) return;
+    invoke<string>("read_pricing_file")
+      .then((t) => {
+        if (!t.trim()) {
+          setPricingRows([]);
+          setPricingRateExtra(null);
+        } else {
+          try {
+            const v = JSON.parse(t) as Record<string, unknown>;
+            setPricingRateExtra(
+              typeof v._rate === "number" ? v._rate : null,
+            );
+            setPricingRows(
+              Object.entries(v)
+                .filter(([k, val]) => k !== "_rate" && Array.isArray(val))
+                .map(([prefix, val]) => ({
+                  prefix,
+                  input: String((val as unknown[])[0] ?? ""),
+                  output: String((val as unknown[])[1] ?? ""),
+                })),
+            );
+          } catch (e) {
+            setPricingRows([]);
+            setPricingRateExtra(null);
+            setError(`pricing.json 解析失败（${e}），编辑后保存将覆盖原文件`);
+          }
+        }
+        markPricingDirty(false);
+      })
+      .catch((e) => setError(String(e)));
+  }, [visible, activeSection]);
 
   // settings 到达后同步草稿（正在编辑、未提交的输入框跳过）
   useEffect(() => {
@@ -864,11 +851,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     }
   }, [settings]);
 
-  // 主题色卡只算一次：七套主题的 CSS 变量在会话内不变
-  const themeSwatches = useMemo(
-    () => THEMES.map((t) => ({ ...t, ...readThemeSwatch(t.id) })),
-    [],
-  );
+  // 主题色卡：从 App.css 源文本抽色，不切正在显示的主题
+  const themeSwatches = useMemo(() => {
+    const colors = parseThemeSwatchesFromCss(appCss);
+    return THEMES.map((t) => ({ ...t, ...themeSwatchFor(t.id, colors) }));
+  }, []);
   const customCards = normalizeCustomThemeCards(settings?.customThemes);
   const selectedCardId = resolveCustomThemeCardId(
     customCards,
@@ -2523,6 +2510,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             重新检测
           </button>
         </Row>
+        <BackgroundTasksPanel />
         <div className="py-3">
           <div className="group mb-2 flex items-center gap-2">
             <span className="text-xs text-l4">
@@ -2602,7 +2590,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         open={!collapsed.storage}
         onToggle={() => toggleSection("storage")}
       >
-        {/* 用户此前完全不知道 Ccode 在硬盘上占了多少、存在哪（v3.88 补） */}
+        {/* 用户此前完全不知道 Mesa 在硬盘上占了多少、存在哪（v3.88 补） */}
         {storageError ? (
           <p className="py-2 text-xs text-err-text">{storageError}</p>
         ) : storage === null ? (

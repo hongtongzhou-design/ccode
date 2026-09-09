@@ -66,10 +66,12 @@ import ReaderOverlay from "../components/ReaderOverlay";
 import { renderTaskMd } from "../pipeline-start";
 import { formatPdfExcerptPrompt, readerReuseKey } from "../reader";
 import { defaultCommitMessage } from "../git-commit-message";
+import { skipDisconnectedOfficial } from "../resume-profile";
 import {
-  pickResumeProfile,
-  skipDisconnectedOfficial,
-} from "../resume-profile";
+  findResumeHolderTab,
+  resolveResumeLaunch,
+} from "../terminal-resume";
+import { toast } from "../toast";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import {
   isUnsafeLitProjectDir,
@@ -536,15 +538,25 @@ const TerminalView = memo(function TerminalView({
   const [officialSt, setOfficialSt] = useState<OfficialAccountStatusDto | null>(
     null,
   );
+  // 登录检测是否已落锤（成功或失败都算）；officialSt=null 既可能是「未探测完」
+  // 也可能是「探测失败」，自动启动必须区分这两种（见下方 autoStart 守卫）
+  const [officialStReady, setOfficialStReady] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setOfficialSt(null);
+    setOfficialStReady(false);
     invoke<OfficialAccountStatusDto>("official_account_status", { agentId })
       .then((st) => {
-        if (!cancelled) setOfficialSt(st);
+        if (!cancelled) {
+          setOfficialSt(st);
+          setOfficialStReady(true);
+        }
       })
       .catch(() => {
-        if (!cancelled) setOfficialSt(null);
+        if (!cancelled) {
+          setOfficialSt(null);
+          setOfficialStReady(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -566,8 +578,13 @@ const TerminalView = memo(function TerminalView({
     const remembered = profiles.find(
       (p) => p.id === pick && p.agent === agentId,
     );
+    // 停用/缺槽的「上次配置」不参与自动预选（停用的本意就是别自动落到它头上，
+    // 与 resume-profile.ts 的 wishedId 口径一致；手动下拉仍可选）。全停用时
+    // 由下方最末回落兜底，不拦死。
     const rememberedOk =
       remembered &&
+      !hiddenProfiles.includes(remembered.id) &&
+      !remembered.slotMissing &&
       (remembered.accountType !== "official" || officialSt?.connected)
         ? remembered.id
         : undefined;
@@ -1365,9 +1382,7 @@ const TerminalView = memo(function TerminalView({
       ) {
         const id = ptyIdRef.current;
         if (id)
-          invoke("pty_write", { ptyId: id, data: KIMI_CSI_U_ENTER }).catch(
-            () => {},
-          );
+          invoke("pty_write", { ptyId: id, data: KIMI_CSI_U_ENTER }).catch((e) => setError(String(e)));
         return false;
       }
       if (
@@ -1398,7 +1413,7 @@ const TerminalView = memo(function TerminalView({
           // 与同函数上方 Enter → CSI-u 同一改写模式
           const data =
             agentIdRef.current === "kimi" ? KIMI_CSI_U_CTRL_V : "\x16";
-          invoke("pty_write", { ptyId: id, data }).catch(() => {});
+          invoke("pty_write", { ptyId: id, data }).catch((e) => setError(String(e)));
         }
         return false;
       }
@@ -1507,7 +1522,7 @@ const TerminalView = memo(function TerminalView({
     const subs = [
       term.onData((data) => {
         const id = ptyIdRef.current;
-        if (id) invoke("pty_write", { ptyId: id, data }).catch(() => {});
+        if (id) invoke("pty_write", { ptyId: id, data }).catch((e) => setError(String(e)));
       }),
       term.onResize(({ cols, rows }) => {
         pendingResize = { cols, rows };
@@ -1666,12 +1681,28 @@ const TerminalView = memo(function TerminalView({
   useEffect(() => {
     if (!autoStart || !visible || !everVisible || autoLaunchedRef.current)
       return;
+    const profile = customRuntimeId
+      ? undefined
+      : profiles.find((p) => p.id === profileId);
+    // 官方账号必须等登录检测落锤：未探测完不启动（避免拿 401 当启动结果），
+    // 已确认未登录则停自动启动并提示，不静默改道别的配置
+    if (profile?.accountType === "official") {
+      if (!officialStReady) return;
+      if (!officialSt?.connected) {
+        autoLaunchedRef.current = true;
+        setError(
+          "官方账号未登录：请到连接页登录，或在启动栏改选网关配置后手动启动",
+        );
+        setBarExpanded(true);
+        return;
+      }
+    }
     autoLaunchedRef.current = true;
-    if (customRuntimeId || profiles.some((p) => p.id === profileId)) {
+    if (customRuntimeId || profile) {
       void (restored && !customRuntimeId ? restoreTask() : launch());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, everVisible, autoStart, profileId, profiles, restored]);
+  }, [visible, everVisible, autoStart, profileId, profiles, restored, officialSt, officialStReady]);
 
   /** 把一个 PTY 接到 xterm 上；agent 退出时自动回落到 shell */
   async function attach(
@@ -2582,7 +2613,7 @@ const TerminalView = memo(function TerminalView({
           if (!dir) return;
           if (
             !(await confirmDialog(
-              `把「${dir}」登记为 Ccode 项目？\n只登记这个目录，不会建工作区、不改动任何文件。写论文可在项目页选研究流程；只读文献写笔记可以不选。`,
+              `把「${dir}」登记为 Mesa 项目？\n只登记这个目录，不会建工作区、不改动任何文件。写论文可在项目页选研究流程；只读文献写笔记可以不选。`,
               { confirmText: "登记" },
             ))
           )
@@ -4209,24 +4240,37 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       // 显式打开另一任务的终端时，不让上一次任务审阅继续盖住新标签。
       setReviewPath(null);
       const pt = pendingTerminal;
-      // 会话恢复：profile 依次 autoLaunchProfileId → ccode.lastProfile → 该 agent 首个配置；
+      // 会话恢复：显式带了原配置（runId 恢复）时优先原配置；否则依次
+      // autoLaunchProfileId → ccode.lastProfile → 该 agent 首个配置；
       // Codex 三条渠道分开挑（网关 / ChatGPT 官方 / 客户端磁盘渠道），见 pickResumeProfile。
       const launchAgentId = pt.agentId ?? pt.resume?.agentId;
       let profileId = pt.profileId;
       let model = pt.model;
-      if (pt.resume) {
-        const wished =
-          pt.autoLaunchProfileId ??
-          localStorage.getItem(`ccode.lastProfile.${pt.resume.agentId}`);
-        const pick = pickResumeProfile(
+      let autoStart = !!pt.resume || !!pt.autoStart;
+      if (pt.resume && launchAgentId) {
+        const pick = resolveResumeLaunch(
           profiles,
-          pt.resume.agentId,
-          pt.resume.provider,
-          wished,
+          {
+            agentId: launchAgentId,
+            provider: pt.resume.provider,
+            profileId: pt.profileId,
+            model: pt.model,
+            autoLaunchProfileId: pt.autoLaunchProfileId,
+          },
           appSettings?.hiddenProfiles,
+          localStorage.getItem(`ccode.lastProfile.${pt.resume.agentId}`),
         );
-        profileId = pick?.id ?? "";
-        model = pick?.models[0] ?? "";
+        profileId = pick.profileId;
+        model = pick.model;
+        if (pick.reselectNeeded) {
+          // 原配置已删除/停用：不静默替换成别的——只预填、不自动启动，
+          // 由用户在启动栏确认或重选后手动启动
+          autoStart = false;
+          toast(
+            "原配置已失效或已停用，请在启动栏重新选择连接后启动",
+            "warning",
+          );
+        }
       }
       // 复用键：已有同 key 标签就切过去，不再新开（「快速开聊」「跟 AI 商量一下」等
       // 重复入口防标签堆积；恢复出的占位标签不带 reuseKey，不参与复用——会话已断，新开才诚实）。
@@ -4244,16 +4288,17 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           }
         }
       }
-      // resume 兜底：reuseKey 没命中（restored/手动开的标签不带 key）时，若某活标签的 cwd
-      // 就是目标目录，聚焦它而不是新开 resume——那个会话正被它的 CLI 进程持有，
-      // 再 resume 会被拒（codex: thread already has an active writer）
+      // resume 兜底：reuseKey 没命中（restored/手动开的标签不带 key）时，若某活标签
+      // 正持有这条会话，聚焦它而不是新开 resume——那个会话正被它的 CLI 进程持有，
+      // 再 resume 会被拒（codex: thread already has an active writer）。
+      // 只按 runId 或 agent+sessionId 认身份；cwd 相同不算数——同目录的别家
+      // agent/shell 标签不是这条会话的持有者，不能抢过去
       if (!tabId && pt.resume) {
-        const norm = (p: string) => p.replace(/[\\/]+$/, "");
-        const holder = tabs.find(
-          (t) =>
-            statuses[t.id]?.alive &&
-            norm(statuses[t.id]?.cwd ?? t.initialCwd ?? "") === norm(pt.cwd),
-        );
+        const holder = findResumeHolderTab(tabs, statuses, {
+          runId: pt.runId,
+          agentId: pt.resume.agentId,
+          sessionId: pt.resume.sessionId,
+        });
         if (holder) {
           tabId = holder.id;
           setActiveId(holder.id);
@@ -4268,7 +4313,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         model,
         resumeSessionId: pt.resume?.sessionId,
         resumeProvider: pt.resume?.provider ?? undefined,
-        autoStart: !!pt.resume || !!pt.autoStart,
+        autoStart,
         prefillCommand: pt.prefillCommand,
         shellOnly: pt.shellOnly,
         customRuntimeId: pt.customRuntimeId,
@@ -4956,6 +5001,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           attention: s?.attention ?? null,
           reuseKey: t.reuseKey,
           runId: s?.runId ?? t.runId,
+          taskId: t.taskId,
         };
       }),
     [tabs, statuses],
@@ -5209,14 +5255,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   </span>
                 )}
                 <span className="min-w-0 flex-1 truncate">
-                  {s?.title ?? "终端"}
+                  {s?.title && s.title !== "终端" ? s.title : "终端"}
                 </span>
                 {t.restored && (
                   <span
                     className="shrink-0 text-micro text-l4"
-                    title="应用重启前未结束的任务，点「恢复任务」重建"
+                    title="应用重启前未结束，点恢复任务"
                   >
-                    可恢复
+                    恢复
                   </span>
                 )}
                 {splitActive && t.id === splitTabId && (

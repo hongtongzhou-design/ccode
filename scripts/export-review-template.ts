@@ -23,6 +23,7 @@ writeFileSync(
     {
       id: tpl.id,
       name: tpl.name,
+      projectRules: tpl.projectRules ?? [],
       projectSettings: tpl.projectSettings ?? [],
       steps: tpl.steps,
     },

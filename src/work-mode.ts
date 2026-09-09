@@ -84,6 +84,16 @@ export function lockWorkModeFromConfig(input: {
   return { mode: "research", locked: false };
 }
 
+/** 顶栏课题主题可见性：科研项目（含无流程科研）都展示并可编辑——
+ *  课题主题是项目身份四件套之一（2026-09-06「项目页三视图」），
+ *  无流程科研（pipelineOptOut 且无步骤）同样可能已填主题，不该从顶栏隐去。 */
+export function headerShowsTopic(input: {
+  registered: boolean;
+  workMode?: string | null;
+}): boolean {
+  return input.registered && normalizeWorkMode(input.workMode) === "research";
+}
+
 /** 编程第四行状态：git 事实 → 白话归类 */
 export type CodingKind = "base" | "idle" | "dev" | "sync" | "ready" | "prune";
 
@@ -119,11 +129,47 @@ export function codingKindUrgent(kind: CodingKind): boolean {
 /** 工作树/分支行上的 git 事实芯片：只亮非默认态，干净且已推送不占位。 */
 export type CodingFactTone = "ok" | "warn" | "muted";
 
+export type CodingFactMark =
+  | "dirty"
+  | "unpushed"
+  | "upstreamBehind"
+  | "noUpstream";
+
 export interface CodingFactChip {
   key: string;
   label: string;
+  mark: CodingFactMark;
   tone: CodingFactTone;
   tip: string;
+}
+
+export function codingDivergenceBar(
+  ahead: number,
+  behind: number,
+): { ahead: number; behind: number; aheadShare: number; behindShare: number } | null {
+  const a = Math.max(0, ahead);
+  const b = Math.max(0, behind);
+  if (a === 0 && b === 0) return null;
+  const cap = Math.max(a, b, 1);
+  return {
+    ahead: a,
+    behind: b,
+    aheadShare: a / cap,
+    behindShare: b / cap,
+  };
+}
+
+export function codingDivergenceTip(
+  ahead: number,
+  behind: number,
+  baseBranch: string,
+): string {
+  const base = baseBranch.trim() || "基准";
+  const a = Math.max(0, ahead);
+  const b = Math.max(0, behind);
+  if (a > 0 && b > 0) return `比基准 ${base} 多 ${a} 个提交，落后 ${b} 个`;
+  if (a > 0) return `待合入：比基准 ${base} 多 ${a} 个提交`;
+  return `落后基准 ${base} ${b} 个提交`;
 }
 
 export function codingFactChips(facts: {
@@ -139,38 +185,23 @@ export function codingFactChips(facts: {
 }): CodingFactChip[] {
   const gh = facts.hostKind === "github";
   const remoteWord = gh ? "GitHub" : "远程";
-  const base = facts.baseBranch.trim() || "基准";
   const chips: CodingFactChip[] = [];
   if (facts.dirty) {
     const n = facts.dirtyCount ?? 0;
     chips.push({
       key: "dirty",
-      label: n > 0 ? `${n} 个未提交` : "有改动",
+      label: n > 0 ? String(n) : "",
+      mark: "dirty",
       tone: "warn",
-      tip: "有未提交的改动",
-    });
-  }
-  if (facts.ahead > 0) {
-    chips.push({
-      key: "ahead",
-      label: `待合入 ${facts.ahead}`,
-      tone: "ok",
-      tip: `比基准 ${base} 多 ${facts.ahead} 个提交，可以合并`,
-    });
-  }
-  if (facts.behind > 0) {
-    chips.push({
-      key: "behind",
-      label: `落后基准 ${facts.behind}`,
-      tone: "warn",
-      tip: `基准 ${base} 有 ${facts.behind} 个新提交`,
+      tip: n > 0 ? `${n} 个未提交` : "有未提交的改动",
     });
   }
   const upstreamBehind = facts.upstreamBehind ?? 0;
   if (!facts.hasUpstream) {
     chips.push({
       key: "remote",
-      label: "无上游",
+      label: "",
+      mark: "noUpstream",
       tone: "muted",
       tip: gh
         ? "还没推到 GitHub，第一次推送会设上游"
@@ -179,22 +210,17 @@ export function codingFactChips(facts: {
   } else if (facts.unpushed > 0) {
     chips.push({
       key: "remote",
-      label: facts.unpushed === 1 ? "未推送" : `未推送 ${facts.unpushed}`,
+      label: String(facts.unpushed),
+      mark: "unpushed",
       tone: "warn",
-      tip: `比 ${remoteWord} 上该分支多 ${facts.unpushed} 个提交`,
-    });
-  } else if (facts.dirty || facts.ahead > 0) {
-    chips.push({
-      key: "remote",
-      label: "已推送",
-      tone: "muted",
-      tip: gh ? "该分支已推到 GitHub" : "该分支已推到远程",
+      tip: `未推送：比 ${remoteWord} 上该分支多 ${facts.unpushed} 个提交`,
     });
   }
   if (facts.hasUpstream && upstreamBehind > 0) {
     chips.push({
       key: "upstreamBehind",
-      label: `远程有更新 ${upstreamBehind}`,
+      label: String(upstreamBehind),
+      mark: "upstreamBehind",
       tone: "warn",
       tip: gh
         ? `GitHub 上该分支有 ${upstreamBehind} 个新提交，可拉取`

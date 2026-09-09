@@ -117,24 +117,79 @@ fn normalize_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
-pub fn probe_field_status(gateway: &Gateway, slot: Slot, field: &str) -> ProbeStatus {
+pub fn url_fingerprint(url: &str) -> String {
+    format!("{:x}", md5::compute(normalize_url(url).as_bytes()))
+}
+
+pub fn key_presence_fp(has_key: bool) -> String {
+    if has_key { "has".into() } else { "none".into() }
+}
+
+pub fn gateway_content_revision(gateway: &Gateway) -> String {
+    let mut models: Vec<String> = gateway
+        .models
+        .iter()
+        .map(|m| {
+            format!(
+                "{}:{}:{:?}:{:?}:{:?}:{:?}",
+                m.id, m.status, m.temperature, m.top_p, m.max_output_tokens, m.reasoning_effort
+            )
+        })
+        .collect();
+    models.sort();
+    let raw = format!(
+        "{}|{}|{}|{}|{}|{}",
+        gateway.name,
+        gateway.no_auth,
+        serde_json::to_string(&gateway.slots).unwrap_or_default(),
+        serde_json::to_string(&gateway.header_env).unwrap_or_default(),
+        gateway.key_hint.as_deref().unwrap_or(""),
+        models.join(";")
+    );
+    format!("{:x}", md5::compute(raw.as_bytes()))
+}
+
+pub fn probe_field_status(
+    gateway: &Gateway,
+    slot: Slot,
+    field: &str,
+    model: Option<&str>,
+) -> ProbeStatus {
     let slot_s = slot.as_str();
+    let url = slot_url(&gateway.slots, slot).unwrap_or("");
+    let url_fp = url_fingerprint(url);
+    let key_fp = key_presence_fp(gateway.key_hint.is_some());
     let rec = gateway
         .last_probe
         .iter()
         .filter(|p| p.slot == slot_s)
+        .filter(|p| p.url_fp == url_fp && p.key_fp == key_fp)
+        .filter(|p| match model.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => p.model.as_deref() == Some(m),
+            None => p.model.as_deref().is_none() || p.model.as_deref() == Some(""),
+        })
         .max_by_key(|p| p.probed_at.as_str());
     let Some(rec) = rec else {
         return ProbeStatus::Never;
     };
     match field {
         "effort" => rec.effort,
-        "temperature" | "top_p" => rec.effort, // 策略参数共用「带策略的流式」检查
+        "temperature" | "top_p" | "sampling" => rec.sampling,
         "headers" => rec.headers,
         "streaming" => rec.streaming,
         "basic" => rec.basic,
         _ => ProbeStatus::Never,
     }
+}
+
+/// 体检结果只对写下时的地址/密钥指纹有效。网关已改则丢弃迟到的回包。
+pub fn probe_record_still_valid(gateway: &Gateway, rec: &crate::profiles::ProbeRecord) -> bool {
+    let Some(slot) = Slot::from_str(&rec.slot) else {
+        return false;
+    };
+    let url = slot_url(&gateway.slots, slot).unwrap_or("");
+    rec.url_fp == url_fingerprint(url)
+        && rec.key_fp == key_presence_fp(gateway.key_hint.is_some())
 }
 
 pub fn invalidate_slot_probes(gateway: &mut Gateway, slot: Slot) {
@@ -530,6 +585,7 @@ pub fn refresh_profile_connection_state(
 // ===== 迁移 =====
 
 #[derive(Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct MigrationResult {
     pub gateways: Vec<Gateway>,
     pub bindings: Vec<Binding>,
@@ -770,6 +826,7 @@ pub fn migrate_from_profiles(
                 catalog_from_slot: None,
                 last_probe: Vec::new(),
                 slot_probes: Vec::new(),
+                revision: String::new(),
             });
         }
     }
@@ -783,13 +840,12 @@ pub fn migrate_from_profiles(
     }
 }
 
-pub fn apply_rewrites_to_settings_and_schedules(rewrites: &[(String, String)]) {
-    if rewrites.is_empty() {
-        return;
-    }
-    crate::settings::rewrite_profile_refs(rewrites);
-    crate::scheduler::rewrite_profile_ids(rewrites);
-    crate::sessions::rewrite_session_profile_ids(rewrites);
+pub fn apply_rewrites_to_settings_and_schedules(rewrites: &[(String, String)]) -> Result<(), String> {
+    if rewrites.is_empty() { return Ok(()); }
+    crate::settings::rewrite_profile_refs(rewrites)?;
+    crate::scheduler::rewrite_profile_ids(rewrites)?;
+    crate::sessions::rewrite_session_profile_ids(rewrites)?;
+    Ok(())
 }
 
 pub fn split_migrated() -> bool {
@@ -884,6 +940,7 @@ mod tests {
             catalog_from_slot: Some("openai".into()),
             last_probe: Vec::new(),
             slot_probes: Vec::new(),
+            revision: String::new(),
         };
         apply_fetched_catalog(&mut gw, "anthropic", &["an-2".into()], "t");
         let by_id: HashMap<_, _> = gw
@@ -1124,6 +1181,7 @@ mod tests {
             catalog_from_slot: None,
             last_probe: vec![],
             slot_probes: vec![],
+            revision: String::new(),
         }];
         let mut bindings = vec![Binding {
             id: "new".into(),
@@ -1179,6 +1237,7 @@ mod tests {
             catalog_from_slot: None,
             last_probe: vec![],
             slot_probes: vec![],
+            revision: String::new(),
         }];
         let mut bindings = vec![Binding {
             id: "work".into(),
@@ -1244,6 +1303,7 @@ mod tests {
             catalog_from_slot: None,
             last_probe: Vec::new(),
             slot_probes: Vec::new(),
+            revision: String::new(),
         };
         let b = Binding {
             id: "b".into(),
@@ -1281,6 +1341,7 @@ mod tests {
                 key_fp: "k".into(),
                 streaming: ProbeStatus::Passed,
                 effort: ProbeStatus::Passed,
+                sampling: ProbeStatus::Never,
                 headers: ProbeStatus::Never,
                 basic: ProbeStatus::Passed,
                 probed_at: "2026-08-01T00:00:00Z".into(),
@@ -1293,6 +1354,7 @@ mod tests {
                 key_fp: "k".into(),
                 streaming: ProbeStatus::Passed,
                 effort: ProbeStatus::Failed,
+                sampling: ProbeStatus::Never,
                 headers: ProbeStatus::Never,
                 basic: ProbeStatus::Failed,
                 probed_at: "2026-08-30T12:00:00Z".into(),
@@ -1305,6 +1367,7 @@ mod tests {
                 key_fp: "k".into(),
                 streaming: ProbeStatus::Never,
                 effort: ProbeStatus::Never,
+                sampling: ProbeStatus::Never,
                 headers: ProbeStatus::Never,
                 basic: ProbeStatus::Passed,
                 probed_at: "2026-08-20T00:00:00Z".into(),
@@ -1319,5 +1382,89 @@ mod tests {
         let oai = sum.iter().find(|s| s.slot == "openai").unwrap();
         assert_eq!(oai.last_ok, Some(true));
         assert_eq!(oai.last_latency_ms, Some(80));
+    }
+
+    #[test]
+    fn probe_field_status_matches_model_and_url_not_latest_slot() {
+        let mut gw = Gateway {
+            id: "g".into(),
+            name: "g".into(),
+            no_auth: false,
+            key_hint: Some("····".into()),
+            slots: ProtocolSlots {
+                anthropic: Some("https://example.com".into()),
+                ..Default::default()
+            },
+            header_env: Default::default(),
+            models: vec![],
+            catalog_fetched_at: None,
+            catalog_from_slot: None,
+            last_probe: vec![
+                crate::profiles::ProbeRecord {
+                    slot: "anthropic".into(),
+                    model: Some("model-a".into()),
+                    url_fp: url_fingerprint("https://example.com"),
+                    key_fp: "has".into(),
+                    streaming: ProbeStatus::Passed,
+                    effort: ProbeStatus::Failed,
+                    sampling: ProbeStatus::Never,
+                    headers: ProbeStatus::Never,
+                    basic: ProbeStatus::Passed,
+                    probed_at: "2026-09-01T00:00:00Z".into(),
+                    latency_ms: None,
+                },
+                crate::profiles::ProbeRecord {
+                    slot: "anthropic".into(),
+                    model: Some("model-b".into()),
+                    url_fp: url_fingerprint("https://example.com"),
+                    key_fp: "has".into(),
+                    streaming: ProbeStatus::Passed,
+                    effort: ProbeStatus::Passed,
+                    sampling: ProbeStatus::Never,
+                    headers: ProbeStatus::Never,
+                    basic: ProbeStatus::Passed,
+                    probed_at: "2026-09-02T00:00:00Z".into(),
+                    latency_ms: None,
+                },
+            ],
+            slot_probes: vec![],
+            revision: String::new(),
+        };
+        assert_eq!(
+            probe_field_status(&gw, Slot::Anthropic, "effort", Some("model-a")),
+            ProbeStatus::Failed
+        );
+        assert_eq!(
+            probe_field_status(&gw, Slot::Anthropic, "effort", Some("model-b")),
+            ProbeStatus::Passed
+        );
+        assert_eq!(
+            probe_field_status(&gw, Slot::Anthropic, "temperature", Some("model-a")),
+            ProbeStatus::Never
+        );
+        gw.slots.anthropic = Some("https://other.example.com".into());
+        assert_eq!(
+            probe_field_status(&gw, Slot::Anthropic, "effort", Some("model-b")),
+            ProbeStatus::Never
+        );
+        let rec = crate::profiles::ProbeRecord {
+            slot: "anthropic".into(),
+            model: Some("model-b".into()),
+            url_fp: url_fingerprint("https://example.com"),
+            key_fp: "has".into(),
+            streaming: ProbeStatus::Passed,
+            effort: ProbeStatus::Passed,
+            sampling: ProbeStatus::Never,
+            headers: ProbeStatus::Never,
+            basic: ProbeStatus::Passed,
+            probed_at: "2026-09-02T00:00:00Z".into(),
+            latency_ms: None,
+        };
+        assert!(
+            !probe_record_still_valid(&gw, &rec),
+            "地址已改，迟到回包不得当作新配置结论"
+        );
+        gw.slots.anthropic = Some("https://example.com/".into());
+        assert!(probe_record_still_valid(&gw, &rec));
     }
 }

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   PIPELINE_TEMPLATES,
   pipelineStepsForTemplate,
+  settingsForTemplateApply,
   type PipelineTemplateDef,
   type SubmissionMode,
 } from "../pipeline-presets";
@@ -21,7 +22,7 @@ import { Modal } from "./Modal";
  * v3.90 第二屏「全局设定」：模板带 projectSettings（贯穿全程的决定）时，
  * 选中模板先进入填写屏——注册当下正是人最有耐心的时刻，只预填空答案等人
  * 自己去项目设置抽屉里发现，等于没引导（用户实测反馈）。全部可留空跳过，
- * 跳过则按原样预填提示行（答案留空，之后在抽屉里补）。
+ * 跳过则不写空表格，之后在项目规则里补。
  */
 export default function TemplatePickModal({
   projectPath,
@@ -132,10 +133,7 @@ export default function TemplatePickModal({
       const mode = tpl.id === "submission-rebuttal" ? submissionMode : undefined;
       const round = Math.max(1, Math.floor(submissionRound));
       const submission = tpl.id === "submission-rebuttal";
-      const projectSettings = (tpl.projectSettings ?? []).map((line, i) => {
-        const answer = filled?.[i]?.trim();
-        return answer ? `${splitSetting(line).q}：${answer}` : line;
-      });
+      const projectSettings = settingsForTemplateApply(tpl, filled);
       const res = await invoke<AppendStepsResultDto>(
         "apply_pipeline_template",
         {

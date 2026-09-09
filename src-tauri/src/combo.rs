@@ -102,31 +102,19 @@ fn probe_blocks(status: ProbeStatus) -> bool {
     status == ProbeStatus::Failed
 }
 
-fn probe_status_any(gateway: Option<&Gateway>, slot: Option<Slot>, field: &str) -> ProbeStatus {
+fn probe_status_any(
+    gateway: Option<&Gateway>,
+    slot: Option<Slot>,
+    field: &str,
+    model: &str,
+) -> ProbeStatus {
     let Some(g) = gateway else {
         return ProbeStatus::Never;
     };
-    if let Some(s) = slot {
-        return probe_field_status(g, s, field);
-    }
-    let mut worst = ProbeStatus::Never;
-    for s in [
-        Slot::Anthropic,
-        Slot::Openai,
-        Slot::Responses,
-        Slot::Gemini,
-        Slot::Cursor,
-    ] {
-        if gateway_store::slot_url(&g.slots, s).is_none() {
-            continue;
-        }
-        match probe_field_status(g, s, field) {
-            ProbeStatus::Failed => return ProbeStatus::Failed,
-            ProbeStatus::Passed => worst = ProbeStatus::Passed,
-            ProbeStatus::Never => {}
-        }
-    }
-    worst
+    let Some(s) = slot else {
+        return ProbeStatus::Never;
+    };
+    probe_field_status(g, s, field, Some(model))
 }
 
 fn probe_note_for(gateway: Option<&Gateway>, probe_effort: ProbeStatus) -> Option<String> {
@@ -201,9 +189,9 @@ pub fn surface_for_agents(
             .is_some_and(|(levels, _)| levels.len() > 1)
     });
 
-    let probe_effort = probe_status_any(gateway, slot, "effort");
-    let probe_temp = probe_status_any(gateway, slot, "temperature");
-    let probe_headers = probe_status_any(gateway, slot, "headers");
+    let probe_effort = probe_status_any(gateway, slot, "effort", model);
+    let probe_temp = probe_status_any(gateway, slot, "temperature", model);
+    let probe_headers = probe_status_any(gateway, slot, "headers", model);
 
     let inject_effort_allowed =
         thinking && channel_ok(channel_effort) && !probe_blocks(probe_effort);
@@ -382,6 +370,14 @@ pub fn combo_surface_for_gateway(
         .map(|(a, p)| (a.as_str(), p.as_deref()))
         .collect();
     let gm = gw.models.iter().find(|m| m.id == model);
+    let slot = gm
+        .and_then(|m| m.catalog_slot.as_deref())
+        .and_then(Slot::from_str)
+        .or_else(|| {
+            agents
+                .first()
+                .map(|(a, p)| gateway_store::slot_for_agent(a, p.as_deref()))
+        });
     let binding_models: Vec<String> = bindings
         .iter()
         .filter(|b| b.gateway_id.as_deref() == Some(gateway_id.as_str()))
@@ -391,7 +387,7 @@ pub fn combo_surface_for_gateway(
         &agent_refs,
         &model,
         Some(&gw),
-        None,
+        slot,
         gm.and_then(|m| m.reasoning_effort.as_ref()).is_some(),
         gm.and_then(|m| m.temperature).is_some(),
         gm.and_then(|m| m.top_p).is_some(),
@@ -419,13 +415,28 @@ mod tests {
     use crate::profiles::{Gateway, GatewayModel, ProbeRecord, ProtocolSlots};
 
     fn gw_with_probe(effort_failed: bool) -> Gateway {
+        gw_with_probe_fields(
+            effort_failed,
+            ProbeStatus::Never,
+            Some("grok-4"),
+            "https://example.com",
+        )
+    }
+
+    fn gw_with_probe_fields(
+        effort_failed: bool,
+        sampling: ProbeStatus,
+        model: Option<&str>,
+        url: &str,
+    ) -> Gateway {
+        let has_probe = effort_failed || sampling != ProbeStatus::Never;
         Gateway {
             id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
             name: "g".into(),
             no_auth: false,
             key_hint: None,
             slots: ProtocolSlots {
-                anthropic: Some("https://example.com".into()),
+                anthropic: Some(url.into()),
                 ..Default::default()
             },
             header_env: Default::default(),
@@ -443,14 +454,20 @@ mod tests {
             catalog_fetched_at: None,
             catalog_from_slot: None,
             slot_probes: Vec::new(),
-            last_probe: if effort_failed {
+            revision: String::new(),
+            last_probe: if has_probe {
                 vec![ProbeRecord {
                     slot: "anthropic".into(),
-                    model: None,
-                    url_fp: "x".into(),
-                    key_fp: "k".into(),
+                    model: model.map(str::to_string),
+                    url_fp: gateway_store::url_fingerprint(url),
+                    key_fp: gateway_store::key_presence_fp(false),
                     streaming: ProbeStatus::Passed,
-                    effort: ProbeStatus::Failed,
+                    effort: if effort_failed {
+                        ProbeStatus::Failed
+                    } else {
+                        ProbeStatus::Passed
+                    },
+                    sampling,
                     headers: ProbeStatus::Never,
                     basic: ProbeStatus::Passed,
                     probed_at: "t".into(),
@@ -646,8 +663,55 @@ mod tests {
             false,
         );
         assert_eq!(dto.probe_effort, "failed");
-        assert_eq!(dto.probe_temperature, "failed");
+        assert_eq!(dto.probe_temperature, "never");
         assert!(dto.probe_note.as_deref().unwrap().contains("丢弃 effort"));
+        assert!(
+            dto.inject_temperature_allowed,
+            "思考档失败不得关掉采样参数"
+        );
+    }
+
+    #[test]
+    fn sampling_failed_blocks_temperature_not_effort() {
+        let gw = gw_with_probe_fields(
+            false,
+            ProbeStatus::Failed,
+            Some("grok-4"),
+            "https://example.com",
+        );
+        let dto = surface_for(
+            "claude-code",
+            "grok-4",
+            Some(&gw),
+            Some(Slot::Anthropic),
+            true,
+            &["grok-4".into()],
+            false,
+        );
+        assert_eq!(dto.probe_temperature, "failed");
         assert!(!dto.inject_temperature_allowed);
+        assert_eq!(dto.probe_effort, "passed");
+        assert!(dto.inject_effort_allowed);
+    }
+
+    #[test]
+    fn other_model_probe_does_not_block_current() {
+        let gw = gw_with_probe_fields(
+            true,
+            ProbeStatus::Never,
+            Some("model-a"),
+            "https://example.com",
+        );
+        let dto = surface_for(
+            "claude-code",
+            "grok-4",
+            Some(&gw),
+            Some(Slot::Anthropic),
+            true,
+            &["grok-4".into()],
+            false,
+        );
+        assert_eq!(dto.probe_effort, "never");
+        assert!(dto.inject_effort_allowed);
     }
 }

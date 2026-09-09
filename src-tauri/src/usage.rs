@@ -18,7 +18,11 @@ const LIST_CAP: usize = 20;
 // v6：usage_daily 与 usage_provenance 增加 official 列（官方账号「订阅」口径）。
 // 建索引时按 provenance 落库，查询期不再反推，升版本自动重建旧索引；
 // provenance 表不在重置范围内，单独走 ALTER 补列。
-const USAGE_SCHEMA_VERSION: &str = "6";
+// v7：usage_provenance 增加 session_id 列（主键变为 agent+project_path+session_id）——
+// 官方账号登记从项目级改为会话级，旧项目级行只回填登记时刻已存在的会话（不再粘住新会话）；
+// 会话级 internal 标记（session_meta.internal，无头 AI / 定时巡检按会话 id 登记）纳入用量索引。
+// SQLite 不能 ALTER 主键，provenance 整表重建迁移、旧行保留；升版本自动重建用量索引。
+const USAGE_SCHEMA_VERSION: &str = "7";
 const SOURCE_CLI: &str = "cli";
 const SOURCE_CCODE_AI: &str = "ccode-ai";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -637,10 +641,11 @@ fn ensure_usage_schema(conn: &Connection) -> Result<(), String> {
          CREATE TABLE IF NOT EXISTS usage_meta(key TEXT PRIMARY KEY, value TEXT);
          CREATE TABLE IF NOT EXISTS usage_provenance(
            agent TEXT NOT NULL, project_path TEXT NOT NULL,
+           session_id TEXT NOT NULL DEFAULT '',
            source TEXT NOT NULL, internal INTEGER NOT NULL DEFAULT 0,
            official INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
-           PRIMARY KEY(agent, project_path));",
+           PRIMARY KEY(agent, project_path, session_id));",
     )
     .map_err(|e| format!("初始化用量表失败: {e}"))?;
     let columns = usage_columns(conn)?;
@@ -681,6 +686,24 @@ fn ensure_usage_schema(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("升级来源登记官方账号字段失败: {e}"))?;
     }
+    // v7：provenance 加 session_id 列、主键随之变化。SQLite 不能 ALTER 主键，整表重建；
+    // 旧行 session_id 置 '' 保留（项目级旧登记，命中口径见 session_provenance），历史不丢
+    if !provenance_columns.contains("session_id") {
+        conn.execute_batch(
+            "CREATE TABLE usage_provenance_v7(
+               agent TEXT NOT NULL, project_path TEXT NOT NULL,
+               session_id TEXT NOT NULL DEFAULT '',
+               source TEXT NOT NULL, internal INTEGER NOT NULL DEFAULT 0,
+               official INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL,
+               PRIMARY KEY(agent, project_path, session_id));
+             INSERT INTO usage_provenance_v7(agent, project_path, session_id, source, internal, official, created_at)
+               SELECT agent, project_path, '', source, internal, official, created_at FROM usage_provenance;
+             DROP TABLE usage_provenance;
+             ALTER TABLE usage_provenance_v7 RENAME TO usage_provenance;",
+        )
+        .map_err(|e| format!("升级来源登记会话字段失败: {e}"))?;
+    }
     let current: Option<String> = conn
         .query_row(
             "SELECT value FROM usage_meta WHERE key='schema_version'",
@@ -709,20 +732,22 @@ fn register_provenance_impl(
     conn: &Connection,
     agent: &str,
     project_path: &str,
+    session_id: &str,
     source: &str,
     internal: bool,
     official: bool,
 ) -> Result<(), String> {
     let project_path = normalize_provenance_path(project_path);
     conn.execute(
-        "INSERT INTO usage_provenance(agent, project_path, source, internal, official, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(agent, project_path) DO UPDATE SET
+        "INSERT INTO usage_provenance(agent, project_path, session_id, source, internal, official, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(agent, project_path, session_id) DO UPDATE SET
            source=excluded.source, internal=excluded.internal,
            official=excluded.official, created_at=excluded.created_at",
         params![
             agent,
             project_path,
+            session_id,
             source,
             i64::from(internal),
             i64::from(official),
@@ -781,48 +806,171 @@ pub(crate) fn normalize_provenance_path(path: &str) -> String {
 }
 
 /// Ccode 自己发起无头 AI 调用时登记精确来源；普通终端启动不调用本函数。
+/// 临时 cwd 一次运行一个目录（`ccode-ai-<uuid>`），项目级行（session_id=''）天然就是运行粒度。
 pub(crate) fn register_internal_ai_run(agent: &str, project_path: &Path) -> Result<(), String> {
     let conn = usage_db()?;
     register_provenance_impl(
         &conn,
         agent,
         &project_path.to_string_lossy(),
+        "",
         SOURCE_CCODE_AI,
         true,
         false,
     )
 }
 
-/// 官方账号（订阅制）profile 的终端启动登记：与 internal 同一机制，
-/// source 保持 cli（是用户自己的交互会话），只标 official，统计页费用栏据此显示「订阅」。
-/// 同 agent+项目再以 API profile 启动时不回写本表——official 标记只增不清，
-/// 避免一次启动把历史 official 会话的标记抹掉（与 internal 登记同语义）。
-pub(crate) fn register_official_launch(agent: &str, project_path: &Path) -> Result<(), String> {
+/// 官方账号（订阅制）profile 的终端启动登记：source 保持 cli（是用户自己的交互会话），
+/// 只标 official，统计页费用栏据此显示「订阅」。
+/// v7 起按会话级登记（session_id 取启动 hint / 恢复目标会话），项目只作归属信息——
+/// 旧的项目级登记会把同项目后来的 API 会话也标成官方，不再写入。
+/// 启动时还不知道会话 id 的 agent 这里不落行，由重建索引时按 session_meta.profile_id
+/// 解析认证方式兜底（见 session_provenance）。
+pub(crate) fn register_official_launch(
+    agent: &str,
+    project_path: &Path,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(session_id) = session_id.filter(|s| !s.trim().is_empty()) else {
+        return Ok(());
+    };
     let conn = usage_db()?;
     register_provenance_impl(
         &conn,
         agent,
         &project_path.to_string_lossy(),
+        session_id,
         SOURCE_CLI,
         false,
         true,
     )
 }
 
-fn session_provenance(conn: &Connection, agent: &str, project_path: &str) -> (String, bool, bool) {
+/// session_meta 的会话级标记：(agent, session_id) → (internal, profile_id)。
+/// internal = 无头 AI（雷达解读/定时巡检）按会话 id 的登记；profile_id = 会话关联的启动配置，
+/// 供重建索引时解析认证方式。表或列不存在（旧库未升级）按空处理
+fn session_meta_flags(conn: &Connection) -> HashMap<(String, String), (bool, Option<String>)> {
+    let mut map = HashMap::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT agent, session_id, internal, profile_id FROM session_meta
+         WHERE internal=1 OR (profile_id IS NOT NULL AND profile_id<>'')",
+    ) else {
+        return map;
+    };
+    if let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? != 0,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    }) {
+        for (agent, sid, internal, profile_id) in rows.flatten() {
+            map.insert((agent, sid), (internal, profile_id));
+        }
+    }
+    map
+}
+
+/// 官方账号（订阅制）profile id 集：重建索引时把会话档案的 profile 解析成认证方式。
+/// 测试环境不读本机真实配置（解析链语义由注入 meta_official 的单测覆盖）
+#[cfg(not(test))]
+fn official_profile_ids() -> HashSet<String> {
+    crate::profiles::ProfileStore::new()
+        .and_then(|store| store.list())
+        .map(|profiles| {
+            profiles
+                .into_iter()
+                .filter(|p| p.account_type == crate::profiles::AccountType::Official)
+                .map(|p| p.id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn official_profile_ids() -> HashSet<String> {
+    HashSet::new()
+}
+
+/// 会话的 (source, internal, official) 判定。优先级：
+/// 1. session_meta.internal：无头 AI 按会话 id 的登记，命中即内部活动（internal 优先于一切）
+/// 2. 会话级 provenance 行（session_id 非空）：官方账号启动登记的权威记录
+/// 3. 项目级 provenance 行（session_id=''）：
+///    - internal 行 = 无头 AI 的独占临时 cwd 登记，精确路径匹配即命中
+///    - official 行 = v7 前的旧登记（当时整个项目被标官方）：只回填登记时刻已存在的会话
+///      （session_created <= created_at），之后新建的会话按新口径重新判定——旧登记不再粘住新会话；
+///      会话创建时间缺失时按旧行为保留标记（历史不丢）
+/// 4. 会话档案的 profile 是官方账号 → official（覆盖启动时未知会话 id 的 agent）
+fn session_provenance(
+    conn: &Connection,
+    agent: &str,
+    project_path: &str,
+    session_id: &str,
+    session_created: Option<&str>,
+    meta_internal: bool,
+    meta_official: bool,
+) -> (String, bool, bool) {
+    if meta_internal {
+        return (SOURCE_CCODE_AI.into(), true, false);
+    }
+    if !session_id.is_empty() {
+        let hit = conn
+            .query_row(
+                "SELECT source, internal, official FROM usage_provenance
+                 WHERE agent=?1 AND session_id=?2 AND session_id<>''",
+                params![agent, session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)? != 0,
+                        row.get::<_, i64>(2)? != 0,
+                    ))
+                },
+            )
+            .ok();
+        if let Some((source, internal, official)) = hit {
+            if internal {
+                return (source, true, false);
+            }
+            if official {
+                return (source, false, true);
+            }
+        }
+    }
     let project_path = normalize_provenance_path(project_path);
-    conn.query_row(
-        "SELECT source, internal, official FROM usage_provenance WHERE agent=?1 AND project_path=?2",
-        params![agent, project_path],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? != 0,
-                row.get::<_, i64>(2)? != 0,
-            ))
-        },
-    )
-    .unwrap_or_else(|_| (SOURCE_CLI.into(), false, false))
+    let rows = conn
+        .prepare(
+            "SELECT source, internal, official, created_at FROM usage_provenance
+             WHERE agent=?1 AND project_path=?2 AND session_id=''",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![agent, project_path], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, i64>(2)? != 0,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map(|rows| rows.flatten().collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+    for (source, internal, _, _) in &rows {
+        if *internal {
+            return (source.clone(), true, false);
+        }
+    }
+    for (source, _, official, created_at) in &rows {
+        // ISO 时间戳定宽可字典序比较（同 card_claims 的 created_at 口径）
+        if *official && session_created.is_none_or(|c| c <= created_at.as_str()) {
+            return (source.clone(), false, true);
+        }
+    }
+    if meta_official {
+        return (SOURCE_CLI.into(), false, true);
+    }
+    (SOURCE_CLI.into(), false, false)
 }
 
 fn meta_get(conn: &Connection, key: &str) -> Option<String> {
@@ -912,6 +1060,8 @@ fn parse_seen_key(key: &str) -> Option<(String, String)> {
 fn rebuild_impl() -> Result<UsageBuildResult, String> {
     let conn = usage_db()?;
     prune_stale_provenance(&conn);
+    let meta_flags = session_meta_flags(&conn);
+    let official_profiles = official_profile_ids();
     let scan = crate::sessions::scan_sessions();
     let mut indexed = 0usize;
     let mut seen: HashSet<String> = HashSet::new();
@@ -931,7 +1081,20 @@ fn rebuild_impl() -> Result<UsageBuildResult, String> {
         if meta_get(&conn, &key).as_deref() == Some(marker.as_str()) && !marker.is_empty() {
             continue;
         }
-        let (source, internal, official) = session_provenance(&conn, &s.agent, &s.project_path);
+        let (meta_internal, meta_profile) = meta_flags
+            .get(&(s.agent.clone(), s.session_id.clone()))
+            .cloned()
+            .unwrap_or((false, None));
+        let meta_official = meta_profile.is_some_and(|p| official_profiles.contains(&p));
+        let (source, internal, official) = session_provenance(
+            &conn,
+            &s.agent,
+            &s.project_path,
+            &s.session_id,
+            s.created_at.as_deref(),
+            meta_internal,
+            meta_official,
+        );
         let mut events = extract_events(s);
         for event in &mut events {
             event.source.clone_from(&source);
@@ -1288,6 +1451,11 @@ type StoredUsageRow = (
 
 fn build_stats(rows: Vec<StoredUsageRow>, table: &PriceChain, rate_usd_cny: f64) -> UsageStatsDto {
     let mut cards = Bucket::default();
+    // 计费范围：官方账号（订阅制）与内部活动不按量计费，总额/趋势/榜单同一口径；
+    // 它们的 token 量单列展示（official_tokens/internal_tokens），不进费用
+    let mut billed = Bucket::default();
+    let mut official_tokens = 0u64;
+    let mut internal_tokens = 0u64;
     let mut cache_savings = 0.0;
     let mut cache_savings_any = false;
     // (agent, official)：官方账号用量与 API 用量分桶，费用栏分别显示「订阅」与估算金额
@@ -1299,6 +1467,8 @@ fn build_stats(rows: Vec<StoredUsageRow>, table: &PriceChain, rate_usd_cny: f64)
     // 按天成桶（v3.88 趋势线）：区间总数看不出「这周比上周多花多少」，
     // 而数据本来就是按天存的，聚合一层即可，不引图表库
     let mut by_day: std::collections::BTreeMap<String, Bucket> = Default::default();
+    // 每天的可计费桶：token 趋势展示全部用量，费用与总额共用同一计费范围
+    let mut by_day_billed: std::collections::BTreeMap<String, Bucket> = Default::default();
     for (_day, agent, model, project, sid, i, o, cr, cw, source, internal, workspace, official) in
         rows
     {
@@ -1309,14 +1479,22 @@ fn build_stats(rows: Vec<StoredUsageRow>, table: &PriceChain, rate_usd_cny: f64)
             cache_write: cw as u64,
         };
         cards.add(&model, &sid, acc);
-        if !official {
+        if internal {
+            internal_tokens += acc.input + acc.output;
+        } else if official {
+            official_tokens += acc.input + acc.output;
+        } else {
+            billed.add(&model, &sid, acc);
             if let Some(saved) = cache_savings_usd(&model, acc.cache_read, table) {
                 cache_savings += saved;
                 cache_savings_any = true;
             }
         }
         if !_day.is_empty() {
-            by_day.entry(_day).or_default().add(&model, &sid, acc);
+            by_day.entry(_day.clone()).or_default().add(&model, &sid, acc);
+            if !official && !internal {
+                by_day_billed.entry(_day).or_default().add(&model, &sid, acc);
+            }
         }
         by_agent
             .entry((agent, official))
@@ -1419,17 +1597,23 @@ fn build_stats(rows: Vec<StoredUsageRow>, table: &PriceChain, rate_usd_cny: f64)
     let daily: Vec<UsageDayRowDto> = by_day
         .into_iter()
         .map(|(day, b)| {
-            let (cost_usd, cost_partial) = b.cost(table);
+            let day_billed = by_day_billed.remove(&day).unwrap_or_default();
+            let (cost_usd, cost_partial) = day_billed.cost(table);
             UsageDayRowDto {
                 day,
                 input: b.tokens.input,
                 output: b.tokens.output,
-                cost_usd,
+                // 与 usage_trend 同口径：当天无可计费行记 0；有可计费行但全未计价保持 None（~）
+                cost_usd: if day_billed.by_model.is_empty() {
+                    Some(0.0)
+                } else {
+                    cost_usd
+                },
                 cost_partial,
             }
         })
         .collect();
-    let (cards_cost, cards_partial) = cards.cost(table);
+    let (cards_cost, cards_partial) = billed.cost(table);
     UsageStatsDto {
         daily,
         cards: UsageCardsDto {
@@ -1445,6 +1629,8 @@ fn build_stats(rows: Vec<StoredUsageRow>, table: &PriceChain, rate_usd_cny: f64)
             } else {
                 None
             },
+            official_tokens,
+            internal_tokens,
         },
         by_agent: agent_rows,
         by_project: project_rows,
@@ -1538,12 +1724,16 @@ pub struct UsageCardsDto {
     pub cache_read: u64,
     pub cache_write: u64,
     pub sessions: u64,
-    /// 已计价模型的份额合计；全部不明价时为 None
+    /// 计费范围（排除官方账号与内部活动）内已计价模型的份额合计；全部不明价时为 None
     pub cost_usd: Option<f64>,
-    /// 桶里还混有不明价模型的用量（费用应显示为 ≥）
+    /// 计费桶里还混有不明价模型的用量（费用应显示为 ≥）
     pub cost_partial: bool,
-    /// 已计价且非官方账号的缓存读相对全价输入省下的钱；无定价缓存为 None
+    /// 计费范围内已计价模型的缓存读相对全价输入省下的钱；无定价缓存为 None
     pub cache_savings_usd: Option<f64>,
+    /// 官方账号（订阅制）用量的 token 量（输入+输出）：单列展示，不计入费用
+    pub official_tokens: u64,
+    /// 内部活动（无头 AI / 定时巡检）的 token 量（输入+输出）：单列展示，不计入费用
+    pub internal_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2161,6 +2351,12 @@ mod tests {
         assert!(columns.contains("internal"));
         assert!(columns.contains("workspace"), "v5 起补工作区归因列");
         assert!(columns.contains("official"), "v6 起补官方账号标记列");
+        assert!(
+            table_columns(&conn, "usage_provenance")
+                .unwrap()
+                .contains("session_id"),
+            "v7 起来源登记补会话级列"
+        );
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row
                 .get::<_, i64>(0))
@@ -2175,6 +2371,11 @@ mod tests {
         assert!(meta_get(&conn, "initialized").is_none());
     }
 
+    /// 旧的纯路径查询形态：无会话 id、无创建时间、无会话级标记（等价 v7 前行为）
+    fn prov(conn: &Connection, agent: &str, project_path: &str) -> (String, bool, bool) {
+        session_provenance(conn, agent, project_path, "", None, false, false)
+    }
+
     #[test]
     fn internal_provenance_is_exact_not_tmp_path_heuristic() {
         let conn = Connection::open_in_memory().unwrap();
@@ -2183,27 +2384,28 @@ mod tests {
             &conn,
             "codex",
             "/private/tmp/ccode-ai-known",
+            "",
             SOURCE_CCODE_AI,
             true,
             false,
         )
         .unwrap();
         assert_eq!(
-            session_provenance(&conn, "codex", "/private/tmp/ccode-ai-known"),
+            prov(&conn, "codex", "/private/tmp/ccode-ai-known"),
             (SOURCE_CCODE_AI.into(), true, false)
         );
         assert_eq!(
-            session_provenance(&conn, "codex", "/tmp/user-task"),
+            prov(&conn, "codex", "/tmp/user-task"),
             (SOURCE_CLI.into(), false, false),
             "用户主动在 /tmp 运行不得被判成内部活动"
         );
         assert_eq!(
-            session_provenance(&conn, "codex", "/tmp/ccode-ai-unregistered"),
+            prov(&conn, "codex", "/tmp/ccode-ai-unregistered"),
             (SOURCE_CLI.into(), false, false),
-            "仅路径长得像 Ccode 临时任务也不是来源证据"
+            "仅路径长得像 Mesa 临时任务也不是来源证据"
         );
         assert_eq!(
-            session_provenance(&conn, "claude-code", "/private/tmp/ccode-ai-known"),
+            prov(&conn, "claude-code", "/private/tmp/ccode-ai-known"),
             (SOURCE_CLI.into(), false, false),
             "来源登记同时绑定 agent"
         );
@@ -2213,17 +2415,14 @@ mod tests {
                 &conn,
                 "kimi",
                 "/var/folders/test/ccode-ai-canonical",
+                "",
                 SOURCE_CCODE_AI,
                 true,
                 false,
             )
             .unwrap();
             assert_eq!(
-                session_provenance(
-                    &conn,
-                    "kimi",
-                    "/private/var/folders/test/ccode-ai-canonical"
-                ),
+                prov(&conn, "kimi", "/private/var/folders/test/ccode-ai-canonical"),
                 (SOURCE_CCODE_AI.into(), true, false),
                 "macOS 临时目录别名只做路径归一化，不影响来源判定"
             );
@@ -2231,23 +2430,198 @@ mod tests {
     }
 
     #[test]
-    fn official_provenance_marks_rows_and_splits_cost_buckets() {
-        // 登记 → 命中 → official 标记：与 internal 同一精确匹配口径（agent + 归一化项目路径）
+    fn provenance_migration_adds_session_column_and_keeps_rows() {
+        // v6 旧表（无 session_id、主键 agent+project_path）整表重建迁移：旧行保留为项目级登记
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_daily(day TEXT, agent TEXT, model TEXT, project_path TEXT, session_id TEXT,
+               input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER,
+               PRIMARY KEY(day, agent, model, project_path, session_id));
+             CREATE TABLE usage_meta(key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE usage_provenance(
+               agent TEXT NOT NULL, project_path TEXT NOT NULL,
+               source TEXT NOT NULL, internal INTEGER NOT NULL DEFAULT 0,
+               official INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL,
+               PRIMARY KEY(agent, project_path));
+             INSERT INTO usage_provenance VALUES('codex','/home/u/proj','cli',0,1,'2026-09-01T00:00:00Z');",
+        )
+        .unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        assert!(table_columns(&conn, "usage_provenance")
+            .unwrap()
+            .contains("session_id"));
+        let (sid, official, created): (String, i64, String) = conn
+            .query_row(
+                "SELECT session_id, official, created_at FROM usage_provenance WHERE agent='codex'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(sid, "", "旧行迁移为项目级登记（session_id=''），历史不丢");
+        assert_eq!(official, 1);
+        assert_eq!(created, "2026-09-01T00:00:00Z", "登记时间保留，供旧行命中口径使用");
+        // 新主键允许同项目并存项目级旧行与会话级新行
+        register_provenance_impl(&conn, "codex", "/home/u/proj", "sess-1", SOURCE_CLI, false, true)
+            .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_provenance WHERE agent='codex'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn cards_cost_excludes_official_and_internal_tokens_counted_separately() {
+        let table = load_pricing(None);
+        let mut rows: Vec<StoredUsageRow> = vec![
+            ws_row("/p", "s1", "gpt-5", 1_000_000, 100_000, false, ""),
+            ws_row("/p", "s3", "gpt-5", 400_000, 40_000, true, ""),
+        ];
+        {
+            let mut official = ws_row("/p", "s2", "gpt-5", 200_000, 20_000, false, "");
+            official.12 = true;
+            rows.push(official);
+        }
+        {
+            // 纯官方用量的另一天：当天无可计费行，费用记 0 而非 ~
+            let mut only_official = ws_row("/p", "s4", "gpt-5", 10, 10, false, "");
+            only_official.0 = "2026-08-02".into();
+            only_official.12 = true;
+            rows.push(only_official);
+        }
+        let stats = build_stats(rows, &table, 7.2);
+        // gpt-5：1M 输入 ×1.25 + 0.1M 输出 ×10 = 2.25，只有 s1 进计费范围
+        let expect = 1.25 + 1.0;
+        assert!(
+            (stats.cards.cost_usd.unwrap() - expect).abs() < 1e-9,
+            "总费用与趋势/榜单同一计费范围：官方账号与内部活动不计费"
+        );
+        assert!(!stats.cards.cost_partial);
+        assert_eq!(stats.cards.input, 1_600_010, "token 总量仍是全部真实用量");
+        assert_eq!(stats.cards.output, 160_010);
+        assert_eq!(stats.cards.official_tokens, 220_020, "官方用量单列展示");
+        assert_eq!(stats.cards.internal_tokens, 440_000, "内部用量单列展示");
+        let day1 = stats.daily.iter().find(|d| d.day == "2026-08-01").unwrap();
+        assert_eq!(day1.input, 1_600_000, "按天 token 含全部用量");
+        assert!(
+            (day1.cost_usd.unwrap() - expect).abs() < 1e-9,
+            "按天费用同样只含可计费范围"
+        );
+        let day2 = stats.daily.iter().find(|d| d.day == "2026-08-02").unwrap();
+        assert_eq!(day2.cost_usd, Some(0.0), "纯订阅的一天费用记 0（同 usage_trend 口径）");
+    }
+
+    #[test]
+    fn session_meta_internal_marks_usage_per_session() {
+        // 定时巡检/雷达解读按会话 id 写 session_meta.internal，用量索引必须采用：
+        // 同项目其它会话不受影响，也无需写入项目级 provenance
         let conn = Connection::open_in_memory().unwrap();
         ensure_usage_schema(&conn).unwrap();
-        register_provenance_impl(&conn, "gemini", "/home/u/proj", SOURCE_CLI, false, true).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_meta(agent TEXT, session_id TEXT, internal INTEGER NOT NULL DEFAULT 0, profile_id TEXT);
+             INSERT INTO session_meta VALUES('codex', 'watch-1', 1, NULL),
+                                            ('codex', 'interactive-1', 0, 'p1');",
+        )
+        .unwrap();
+        let flags = session_meta_flags(&conn);
+        let (internal, _) = flags
+            .get(&("codex".to_string(), "watch-1".to_string()))
+            .cloned()
+            .unwrap_or((false, None));
+        assert!(internal, "会话级 internal 登记必须被读到");
         assert_eq!(
-            session_provenance(&conn, "gemini", "/home/u/proj"),
+            session_provenance(&conn, "codex", "/home/u/proj", "watch-1", None, internal, false),
+            (SOURCE_CCODE_AI.into(), true, false),
+            "定时会话按 session 级标记归入内部活动"
+        );
+        assert_eq!(
+            session_provenance(&conn, "codex", "/home/u/proj", "interactive-1", None, false, false),
+            (SOURCE_CLI.into(), false, false),
+            "同项目的交互会话不被误标"
+        );
+        // meta_official 通道：会话档案的 profile 是官方账号 → official（internal 优先于它）
+        assert_eq!(
+            session_provenance(&conn, "codex", "/home/u/proj", "s-off", None, false, true),
+            (SOURCE_CLI.into(), false, true)
+        );
+        assert_eq!(
+            session_provenance(&conn, "codex", "/home/u/proj", "s-both", None, true, true),
+            (SOURCE_CCODE_AI.into(), true, false),
+            "internal 优先于 official"
+        );
+    }
+
+    #[test]
+    fn official_provenance_session_grained_and_legacy_cutoff() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        // 会话级登记（v7 新口径）：命中只认 session_id，不看项目路径
+        register_provenance_impl(&conn, "gemini", "/home/u/proj", "sess-official", SOURCE_CLI, false, true)
+            .unwrap();
+        assert_eq!(
+            session_provenance(&conn, "gemini", "/home/u/proj", "sess-official", None, false, false),
+            (SOURCE_CLI.into(), false, true),
+            "会话级官方登记命中"
+        );
+        assert_eq!(
+            session_provenance(&conn, "gemini", "/home/u/proj", "sess-api", None, false, false),
+            (SOURCE_CLI.into(), false, false),
+            "同项目后来的 API 会话不再被官方登记粘住"
+        );
+        // 项目级旧行（v7 前登记，session_id=''）：只回填登记时刻已存在的会话
+        conn.execute(
+            "INSERT INTO usage_provenance(agent, project_path, session_id, source, internal, official, created_at)
+             VALUES('codex', '/home/u/legacy', '', 'cli', 0, 1, '2026-09-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            session_provenance(
+                &conn, "codex", "/home/u/legacy", "s-old",
+                Some("2026-08-20T10:00:00Z"), false, false,
+            ),
+            (SOURCE_CLI.into(), false, true),
+            "登记时刻之前的旧会话保持历史标记"
+        );
+        assert_eq!(
+            session_provenance(
+                &conn, "codex", "/home/u/legacy", "s-new",
+                Some("2026-09-05T10:00:00Z"), false, false,
+            ),
+            (SOURCE_CLI.into(), false, false),
+            "登记之后新建的会话按新口径判定，旧登记不粘住新会话"
+        );
+        assert_eq!(
+            session_provenance(&conn, "codex", "/home/u/legacy", "s-unknown", None, false, false),
+            (SOURCE_CLI.into(), false, true),
+            "创建时间缺失的旧会话按旧行为保留标记（历史不丢）"
+        );
+    }
+
+    #[test]
+    fn official_provenance_marks_rows_and_splits_cost_buckets() {
+        // 项目级旧登记（v7 前行）+ 创建时间缺失的会话 → 保持历史 official 标记；
+        // 新登记走会话级（见 official_provenance_session_grained_and_legacy_cutoff）
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        register_provenance_impl(&conn, "gemini", "/home/u/proj", "", SOURCE_CLI, false, true)
+            .unwrap();
+        assert_eq!(
+            prov(&conn, "gemini", "/home/u/proj"),
             (SOURCE_CLI.into(), false, true),
             "官方账号登记：source 保持 cli，只标 official"
         );
         assert_eq!(
-            session_provenance(&conn, "gemini", "/home/u/other"),
+            prov(&conn, "gemini", "/home/u/other"),
             (SOURCE_CLI.into(), false, false),
             "未登记的项目不受影响"
         );
         assert_eq!(
-            session_provenance(&conn, "codex", "/home/u/proj"),
+            prov(&conn, "codex", "/home/u/proj"),
             (SOURCE_CLI.into(), false, false),
             "official 登记同样绑定 agent"
         );
@@ -3650,6 +4024,7 @@ mod gateway_usage_tests {
             catalog_from_slot: None,
             last_probe: vec![],
             slot_probes: vec![],
+            revision: String::new(),
         }
     }
 

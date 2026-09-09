@@ -1,0 +1,29 @@
+{
+  "question": "为什么用同一个有限样本评价结果选模型并报告性能，可能乐观？",
+  "scope": "两篇方法学论文的聚焦叙述性试跑，不是系统综述；不要求期刊格式、全文全领域覆盖或临床推断。",
+  "sources": [
+    {
+      "id": "cawley2010", "bibKey": "cawley2010selection", "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation", "authors": "Gavin C. Cawley and Nicola L. C. Talbot", "year": 2010,
+      "venue": "Journal of Machine Learning Research", "volume": "11", "pages": "2079--2107",
+      "url": "https://www.jmlr.org/papers/v11/cawley10a.html", "sourceFile": "cawley2010-fulltext.txt",
+      "locator": "Abstract (PDF p.1 / journal p.2079); Section 4, Over-fitting in Model Selection; Section 5",
+      "evidence": "有限样本评价准则有方差；对它进行优化可能产生模型选择层面的过拟合，并影响性能比较。",
+      "limit": "不能推导每个数据集都会出现相同偏差，也不证明某个具体模型的泛化性能。",
+      "methods": "比较模型选择准则、合成问题与基准数据上的选择及性能评价；本试跑不复现原文实验。"
+    },
+    {
+      "id": "varma2006", "bibKey": "varma2006bias", "title": "Bias in error estimation when using cross-validation for model selection", "authors": "Sudhir Varma and Richard Simon", "year": 2006,
+      "venue": "BMC Bioinformatics", "volume": "7", "pages": "91", "doi": "10.1186/1471-2105-7-91",
+      "url": "https://link.springer.com/article/10.1186/1471-2105-7-91", "sourceFile": "varma2006-fulltext.txt",
+      "locator": "Abstract, Results/Conclusion; Results, Implementation; nested CV methods",
+      "evidence": "作者在所研究的分类器和模拟条件中，发现调参后直接报告同一交叉验证误差可能乐观；嵌套评价显著减轻该偏差。",
+      "limit": "原文表述接近无偏，不是任意条件下严格无偏；不等于本试跑执行了嵌套交叉验证。",
+      "methods": "模拟小样本高维数据，比较 Shrunken Centroids 与 SVM 的调参与独立评价；本试跑只核对方法结论。"
+    }
+  ],
+  "claims": [
+    {"id":"C1","sourceId":"cawley2010","bibKey":"cawley2010selection","text":"有限样本上的模型选择准则也可能被过拟合。","support":"supported-with-scope"},
+    {"id":"C2","sourceId":"varma2006","bibKey":"varma2006bias","text":"应将完整模型选择过程与最终性能评价区分，原文研究中的嵌套评价减轻了乐观偏差。","support":"supported-with-scope"}
+  ],
+  "review": "本次由执行助手阅读公开来源并记录支持范围；未有第二名独立人类审阅，不宣称双人筛选或自动语义核验。"
+}

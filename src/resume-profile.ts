@@ -2,13 +2,13 @@
  * 恢复会话的 profile 挑选纯逻辑（2026-08-20，codex 内联 provider 修复；
  * 2026-09-05 起 Codex 三条渠道分开，避免官方/网关/客户端串台）。
  *
- * 背景：codex 的自定义接入是 Ccode 启动时用 `-c` 内联定义的 provider（名字就叫 "ccode"），
+ * 背景：codex 的自定义接入是 Mesa 启动时用 `-c` 内联定义的 provider（名字就叫 "ccode"），
  * 不写用户全局配置；rollout 元信息记录 model_provider="ccode"。恢复会话时 codex 要重新
  * 解析这个名字——若恢复用的配置不带 Base URL（官方账号型/其他），-c 定义不注入，
  * codex 直接报 "Model provider `ccode` not found" 拒绝启动。
  *
  * Codex 会话的 model_provider 还可能是：
- * - `openai`：ChatGPT 内置渠道（Ccode「官方账号」启动注入的也是这个）
+ * - `openai`：ChatGPT 内置渠道（Mesa「官方账号」启动注入的也是这个）
  * - 其他名字（如磁盘 `custom`）：Codex 客户端 / 全局 config.toml 自己的渠道
  *
  * 三条路认证不同。把客户端 `custom` 会话自动接到「官方账号」会强制打 api.openai.com
@@ -58,7 +58,7 @@ export function codexResumeKindLabel(
 ): string {
   switch (kind) {
     case "gateway":
-      return "Ccode 网关";
+      return "Mesa 网关";
     case "chatgpt":
       return "ChatGPT 官方";
     case "disk": {
@@ -71,10 +71,10 @@ export function codexResumeKindLabel(
 }
 
 const CODEX_CHANNEL_TIP: Record<CodexResumeKind, string> = {
-  gateway: "这条对话是 Ccode 用网关配置启动的，在本应用里继续走同一条网关。",
+  gateway: "这条对话是 Mesa 用网关配置启动的，在本应用里继续走同一条网关。",
   chatgpt:
-    "这条对话走 ChatGPT 官方渠道。在 Ccode 里继续需要已登录官方账号；没登录请改选网关，或到连接页登录。",
-  disk: "这条对话是 Codex 客户端（或全局 config.toml）自己的渠道。在客户端打开可原样继续；在 Ccode 里继续会改用网关配置，不会改成官方账号。",
+    "这条对话走 ChatGPT 官方渠道。在 Mesa 里继续需要已登录官方账号；没登录请改选网关，或到连接页登录。",
+  disk: "这条对话是 Codex 客户端（或全局 config.toml）自己的渠道。在客户端打开可原样继续；在 Mesa 里继续会改用网关配置，不会改成官方账号。",
   unknown: "",
 };
 

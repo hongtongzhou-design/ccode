@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Play, Plus, RotateCw } from "lucide-react";
+import { Play, Plus, RotateCw, Trash2 } from "lucide-react";
 import { runInboxAction, useAppStore } from "../store";
 import {
   AGENTS,
   type ProjectDto,
   type RunDto,
+  type RunEventDto,
   type TaskDto,
   type TaskOutputChangeDto,
 } from "../types";
 import {
   Checkbox,
   compactPrimaryActionClass,
-  fieldClass,
   FoldMark,
+  ghostActionClass,
   primaryActionClass,
   projectWellClass,
   rowActionClass,
@@ -21,23 +22,32 @@ import {
   SegTabs,
 } from "./PageFrame";
 import { Modal } from "./Modal";
-import { projectTaskLabel } from "../project-surface";
+import { agentBrand } from "../agent-colors";
 import ProjectSessionsSection, {
   sessionsAsideOpenClass,
 } from "./ProjectSessionsSection";
 import ScheduleSection from "./ScheduleSection";
 import { beginProjectChat } from "./AskAiModal";
+import { confirmDialog } from "./ConfirmDialog";
 import {
+  canSaveDeclaredGoal,
   canSubmitDeclaredTask,
+  continueGoalPrompt,
   declaredTaskKindsForMode,
+  GOAL_BUCKET_LABEL,
+  GOAL_BUCKET_ORDER,
+  goalTimeline,
+  goalTimelineLabel,
+  groupGoalsByBucket,
+  goalDisplayName,
   isTaskMaterialNoise,
   joinRunPath,
+  parseReviewNote,
   pathCoveredBySelection,
+  pathIsProtected,
   relativeProjectPath,
   selectedChangePaths,
   taskChangeKindLabel,
-  taskInputLabel,
-  taskOutputLabel,
   taskPathsForScope,
   taskStatusLabel,
   toggleTaskMaterialPath,
@@ -50,6 +60,13 @@ import FileTypeMark from "./FileTypeMark";
 import OfficePreviewModal from "./OfficePreviewModal";
 import { composeLaunchPrompt } from "../project-context";
 import { loadProjectContextPack } from "../project-context-load";
+import ProjectRulesPanel from "./ProjectRulesPanel";
+import {
+  goalReviewCopy,
+  goalReviewFacts,
+  groupReviewChanges,
+} from "../goal-review";
+import { goalCardMeta, goalsNeedAttention, projectNowLine } from "../project-status";
 
 function agentLabel(id: string): string {
   return AGENTS.find((agent) => agent.id === id)?.label ?? id;
@@ -68,10 +85,17 @@ function continueRun(run: RunDto) {
 export default function ProjectUserTasksView({
   project,
   embed = false,
+  sessionsCollapsed = false,
+  onOpenSessions,
+  onUrgentGoals,
 }: {
   project: ProjectDto;
   /** 嵌进无流程科研左栏：不重复项目名、不另开对话栏。 */
   embed?: boolean;
+  /** 无流程科研：对话收起后，重开按钮放在「目标」标题行，与办公页同一位置。 */
+  sessionsCollapsed?: boolean;
+  onOpenSessions?: () => void;
+  onUrgentGoals?: (urgent: boolean) => void;
 }) {
   const profiles = useAppStore((state) => state.profiles);
   const hiddenProfiles = useAppStore((state) => state.settings?.hiddenProfiles ?? []);
@@ -79,12 +103,14 @@ export default function ProjectUserTasksView({
   const setPendingTerminal = useAppStore((state) => state.setPendingTerminal);
   const [tasks, setTasks] = useState<TaskDto[]>([]);
   const [runs, setRuns] = useState<RunDto[]>([]);
+  const [events, setEvents] = useState<RunEventDto[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [reviewTask, setReviewTask] = useState<TaskDto | null>(null);
   const taskReviewReq = useAppStore((state) => state.taskReviewReq);
   const setTaskReviewReq = useAppStore((state) => state.setTaskReviewReq);
   const [error, setError] = useState<string | null>(null);
   const [startingId, setStartingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const withSessions = !embed && project.workMode === "office";
   const [configReady, setConfigReady] = useState(
@@ -100,12 +126,14 @@ export default function ProjectUserTasksView({
   const load = useCallback(async () => {
     if (!eligible) return;
     try {
-      const [nextTasks, nextRuns] = await Promise.all([
+      const [nextTasks, nextRuns, nextEvents] = await Promise.all([
         invoke<TaskDto[]>("task_list", { projectRoot: project.path }),
         invoke<RunDto[]>("run_list", { projectRoot: project.path }),
+        invoke<RunEventDto[]>("task_goal_events", { projectRoot: project.path }),
       ]);
       setTasks(visibleDeclaredTasks(nextTasks, declaredTaskKindsForMode(project.workMode)));
       setRuns(nextRuns);
+      setEvents(nextEvents);
       setError(null);
     } catch (reason) {
       setError(`任务读取失败：${String(reason)}`);
@@ -162,6 +190,14 @@ export default function ProjectUserTasksView({
     }
     return map;
   }, [runs]);
+  const buckets = useMemo(() => groupGoalsByBucket(tasks), [tasks]);
+  const reviewCopy = goalReviewCopy(project.workMode);
+  const nowLine = useMemo(() => projectNowLine(tasks), [tasks]);
+  const urgentGoals = useMemo(() => goalsNeedAttention(tasks), [tasks]);
+
+  useEffect(() => {
+    onUrgentGoals?.(urgentGoals);
+  }, [onUrgentGoals, urgentGoals]);
 
   const visibleProfiles = useMemo(
     () =>
@@ -177,7 +213,10 @@ export default function ProjectUserTasksView({
     return null;
   }
 
-  async function startTask(task: TaskDto) {
+  async function startTask(
+    task: TaskDto,
+    opts?: { reuseIsolation?: boolean; feedback?: string },
+  ) {
     const preferredAgent = task.agent ?? project.defaultAgent;
     const profile =
       visibleProfiles.find(
@@ -201,6 +240,8 @@ export default function ProjectUserTasksView({
           taskId: task.id,
           agent: profile.agent,
           profileId: profile.id,
+          reuseIsolation: opts?.reuseIsolation ?? false,
+          feedback: opts?.feedback ?? null,
         },
       });
       const pack = await loadProjectContextPack({
@@ -209,6 +250,7 @@ export default function ProjectUserTasksView({
         workMode: project.workMode,
         goal: task.description || task.name,
         writeReview: task.reviewRequired,
+        feedback: opts?.feedback,
       });
       setPendingTerminal({
         cwd: run.isolationPath,
@@ -221,7 +263,7 @@ export default function ProjectUserTasksView({
         permission: task.reviewRequired ? "write_tree" : "discuss",
         initialPrompt: composeLaunchPrompt(
           pack,
-          task.description?.trim() || task.name,
+          continueGoalPrompt(task.description?.trim() || task.name, opts?.feedback ?? ""),
         ),
         reuseKey: `task:${task.id}`,
         runId: run.id,
@@ -236,27 +278,46 @@ export default function ProjectUserTasksView({
     }
   }
 
+  async function deleteGoal(task: TaskDto) {
+    const name = goalDisplayName(task);
+    const ok = await confirmDialog(`删除目标「${name}」？不会改项目里已验收的文件。`, {
+      danger: true,
+      confirmText: "删除",
+    });
+    if (!ok) return;
+    setDeletingId(task.id);
+    try {
+      await invoke("task_delete", { id: task.id });
+      if (reviewTask?.id === task.id) setReviewTask(null);
+      setError(null);
+      await load();
+    } catch (reason) {
+      setError(`删除目标失败：${String(reason)}`);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <>
     <div className="mb-4 flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-0">
       <section className={`min-w-0 flex-1 ${projectWellClass} ${withSessions && sessionsOpen ? "lg:pr-6" : ""}`}>
         <div className="mb-3 flex items-center gap-2">
           <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-medium text-l1">
-              {embed ? "任务" : projectTaskLabel(project.workMode)}
-            </h2>
-            <p className="mt-1 text-xs text-l4">
-              说要完成什么。默认在项目副本里做，你验收后再写回。
-            </p>
+            <h2 className="text-sm font-medium text-l1">目标</h2>
+            {nowLine && (
+              <p className="mt-1 text-sm font-medium text-l1">{nowLine}</p>
+            )}
           </div>
-          {withSessions && !sessionsOpen && (
+          {((withSessions && !sessionsOpen) ||
+            (sessionsCollapsed && onOpenSessions)) && (
             <div className="shrink-0">
               <ProjectSessionsSection
                 projectPath={project.path}
                 variant="sidebar"
                 collapsed
-                onToggle={() => setSessionsOpen(true)}
-                title="项目对话"
+                onToggle={onOpenSessions ?? (() => setSessionsOpen(true))}
+                title="这个项目的对话"
               />
             </div>
           )}
@@ -269,76 +330,155 @@ export default function ProjectUserTasksView({
           </button>
         </div>
         {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
-        {tasks.length === 0 ? (
-          <p className="px-1 py-2 text-xs text-l4">还没有目标。说一句要完成什么即可。</p>
-        ) : (
-          <ul className="space-y-2">
-            {tasks.map((task) => {
-              const run = latestRunByTask.get(task.id);
-              const running = task.status === "running";
-              const canStart = !run || ["failed", "stopped"].includes(task.status);
+        {tasks.length === 0 ? null : (
+          <div className="space-y-4">
+            {GOAL_BUCKET_ORDER.map((bucket) => {
+              const rows = buckets[bucket];
+              if (rows.length === 0) return null;
               return (
-                <li key={task.id} className="rounded-md bg-raised/45 px-3 py-2">
-                  <div className="flex items-start gap-3">
-                    <span className="min-w-0 flex-1">
-                      <span className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm font-medium text-l1">{task.name}</span>
-                        <span className="rounded-full bg-strip px-2 py-0.5 text-micro text-l3">
-                          {taskStatusLabel(task.status)}
-                        </span>
-                      </span>
-                      {task.description && (
-                        <span className="mt-1 block text-xs text-l3">{task.description}</span>
-                      )}
-                      <span className="mt-1 block text-micro text-l4">
-                        {agentLabel(task.agent ?? run?.agent ?? project.defaultAgent ?? "") || "跟随项目默认"}
-                        {" · "}
-                        {taskInputLabel(task.inputPaths)}
-                        {" · "}
-                        {taskOutputLabel(task.outputPaths, task.reviewRequired)}
-                      </span>
-                    </span>
-                    {running && run && (
-                      <button type="button" className={secondaryActionClass} onClick={() => continueRun(run)}>
-                        继续
-                      </button>
-                    )}
-                    {canStart && (
-                      <button
-                        type="button"
-                        className={secondaryActionClass}
-                        disabled={startingId === task.id}
-                        onClick={() => void startTask(task)}
-                      >
-                        <Play size={12} aria-hidden="true" />
-                        {startingId === task.id ? "准备中…" : run ? "重试" : "开始"}
-                      </button>
-                    )}
-                    {task.status === "pending_review" && run && (
-                      <button
-                        type="button"
-                        className={primaryActionClass}
-                        onClick={() => setReviewTask(task)}
-                      >
-                        验收
-                      </button>
-                    )}
-                  </div>
-                </li>
+                <div key={bucket}>
+                  <h3 className="mb-2 text-micro font-medium text-l4">
+                    {bucket === "review"
+                      ? reviewCopy.bucketReview
+                      : GOAL_BUCKET_LABEL[bucket]}
+                  </h3>
+                  <ul className="space-y-2">
+                    {rows.map((task) => {
+                      const run = latestRunByTask.get(task.id);
+                      const running = task.status === "running";
+                      const taskRuns = runs.filter(
+                        (item) => item.taskId === task.id && !item.internal,
+                      );
+                      const timeline = goalTimelineLabel(
+                        goalTimeline({
+                          status: task.status,
+                          runs: taskRuns,
+                          events: events.filter((event) =>
+                            taskRuns.some((item) => item.id === event.runId),
+                          ),
+                          acceptedLabel: reviewCopy.timelineAccepted,
+                        }),
+                      );
+                      const canStart =
+                        task.status === "pending" ||
+                        task.status === "failed" ||
+                        task.status === "stopped";
+                      const canRevise =
+                        !!run &&
+                        (task.status === "pending_review" || task.status === "completed");
+                      return (
+                        <li key={task.id} className="group rounded-md bg-raised/45 px-3 py-2">
+                          <div className="flex items-start gap-3">
+                            <span className="min-w-0 flex-1">
+                              <span className="flex flex-wrap items-center gap-2">
+                                <span className="text-sm font-medium text-l1">
+                                  {goalDisplayName(task)}
+                                </span>
+                                <span className="rounded-full bg-strip px-2 py-0.5 text-micro text-l3">
+                                  {taskStatusLabel(task.status)}
+                                </span>
+                              </span>
+                              {task.description &&
+                                task.description.trim() !== goalDisplayName(task) && (
+                                <span className="mt-1 block text-xs text-l3">{task.description}</span>
+                              )}
+                              {timeline && (
+                                <span className="mt-1 block text-micro text-l4">{timeline}</span>
+                              )}
+                              <span className="mt-1 block text-micro text-l4">
+                                {goalCardMeta({
+                                  agentLabel:
+                                    agentLabel(
+                                      task.agent ?? run?.agent ?? project.defaultAgent ?? "",
+                                    ) || "跟随项目默认",
+                                  outputPaths: task.adoptedPaths?.length
+                                    ? task.adoptedPaths
+                                    : task.outputPaths,
+                                  reviewRequired: task.reviewRequired,
+                                  workMode: project.workMode,
+                                })}
+                              </span>
+                            </span>
+                            {running && run && (
+                              <button type="button" className={secondaryActionClass} onClick={() => continueRun(run)}>
+                                继续
+                              </button>
+                            )}
+                            {canStart && (
+                              <button
+                                type="button"
+                                className={secondaryActionClass}
+                                disabled={startingId === task.id}
+                                onClick={() => void startTask(task)}
+                              >
+                                <Play size={12} aria-hidden="true" />
+                                {startingId === task.id ? "准备中…" : run ? "重试" : "开始"}
+                              </button>
+                            )}
+                            {canRevise && task.status === "completed" && (
+                              <button
+                                type="button"
+                                className={secondaryActionClass}
+                                onClick={() => setReviewTask(task)}
+                              >
+                                再来一版
+                              </button>
+                            )}
+                            {task.status === "pending_review" && run && (
+                              <button
+                                type="button"
+                                className={primaryActionClass}
+                                onClick={() => setReviewTask(task)}
+                              >
+                                {reviewCopy.cardAction}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className={ghostActionClass}
+                              disabled={deletingId === task.id || task.status === "running"}
+                              title={
+                                task.status === "running"
+                                  ? "先停掉正在跑的 Agent，再删"
+                                  : "删除这个目标"
+                              }
+                              onClick={() => void deleteGoal(task)}
+                            >
+                              <Trash2 size={12} aria-hidden="true" />
+                              {deletingId === task.id ? "删除中…" : "删除"}
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
               );
             })}
-          </ul>
+          </div>
         )}
+        <div className="mt-4">
+          <ProjectRulesPanel
+            projectPath={project.path}
+            workMode={project.workMode}
+            compact
+            onError={setError}
+          />
+        </div>
       </section>
       {withSessions && sessionsOpen && (
-        <aside className={sessionsAsideOpenClass}>
+        <aside
+          className={`${sessionsAsideOpenClass} ccode-project-sessions-rail ${
+            sessionsOpen ? "ccode-project-sessions-rail-open" : ""
+          }`}
+        >
           <div className="flex min-w-0 flex-col gap-4">
             <ProjectSessionsSection
               projectPath={project.path}
               variant="sidebar"
               collapsed={false}
               onToggle={() => setSessionsOpen(false)}
-              title="项目对话"
+              title="这个项目的对话"
               onNewChat={(event) =>
                 beginProjectChat(
                   {
@@ -386,22 +526,40 @@ export default function ProjectUserTasksView({
           project={project}
           profiles={visibleProfiles}
           onClose={() => setCreateOpen(false)}
-          onCreated={async (task) => {
+          onCreated={async (task, start) => {
             setCreateOpen(false);
             await load();
-            await startTask(task);
+            if (start) await startTask(task);
           }}
           onError={setError}
         />
       )}
       {reviewTask && (
         <ReviewOutputsModal
+          workMode={project.workMode}
           task={tasks.find((task) => task.id === reviewTask.id) ?? reviewTask}
           run={latestRunByTask.get(reviewTask.id) ?? null}
+          runCount={
+            runs.filter((item) => item.taskId === reviewTask.id && !item.internal).length
+          }
+          previousFeedback={parseReviewNote(
+            events.filter(
+              (event) =>
+                event.eventType === "task.review_notes" &&
+                runs.some(
+                  (item) => item.id === event.runId && item.taskId === reviewTask.id,
+                ),
+            ).slice(-1)[0]?.payload,
+          )}
           onClose={() => setReviewTask(null)}
           onAdopted={() => {
             setReviewTask(null);
             void load();
+          }}
+          onContinue={async (feedback) => {
+            const current = tasks.find((item) => item.id === reviewTask.id) ?? reviewTask;
+            setReviewTask(null);
+            await startTask(current, { reuseIsolation: true, feedback });
           }}
           onError={setError}
         />
@@ -416,18 +574,6 @@ const MATERIAL_SCOPES: { id: TaskMaterialScope; label: string }[] = [
   { id: "none", label: "不带入" },
 ];
 
-function materialHint(scope: TaskMaterialScope, permission: TaskPermission): string {
-  if (scope === "none") {
-    return permission === "write_tree"
-      ? "空副本里写。验收通过后，新文件才进项目。"
-      : "不带项目文件，只讨论。";
-  }
-  if (scope === "whole") {
-    return "复制整个项目（不含 .git / .ccode）。不同步骤仍应尽量缩小范围。";
-  }
-  return "Agent 只能看到勾选的文件或目录。另一步可以勾另一批资料、换另一个 Agent。";
-}
-
 function CreateTaskModal({
   project,
   profiles,
@@ -438,7 +584,7 @@ function CreateTaskModal({
   project: ProjectDto;
   profiles: ReturnType<typeof useAppStore.getState>["profiles"];
   onClose: () => void;
-  onCreated: (task: TaskDto) => Promise<void>;
+  onCreated: (task: TaskDto, start: boolean) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [name, setName] = useState("");
@@ -452,12 +598,16 @@ function CreateTaskModal({
   const [taskAgent, setTaskAgent] = useState(
     project.defaultAgent ?? configuredAgents[0]?.id ?? "",
   );
+  const detectedAgents = useAppStore((s) => s.agents);
+  const discussUnsupported = permission === "discuss" && !detectedAgents.find((a) => a.id === taskAgent)?.readonlySupported;
   const agentProfiles = profiles.filter((profile) => profile.agent === taskAgent);
   const [taskProfile, setTaskProfile] = useState(
     project.defaultProfiles?.[taskAgent] ?? agentProfiles[0]?.id ?? "",
   );
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const setPage = useAppStore((s) => s.setPage);
   useEffect(() => {
     if (!taskAgent && configuredAgents[0]) setTaskAgent(configuredAgents[0].id);
   }, [configuredAgents, taskAgent]);
@@ -467,6 +617,13 @@ function CreateTaskModal({
     }
   }, [agentProfiles, project.defaultProfiles, taskAgent, taskProfile]);
 
+  const copy = goalReviewCopy(project.workMode);
+  const canSave = canSaveDeclaredGoal({
+    name,
+    scope,
+    selectedPaths,
+    permission,
+  });
   const canSubmit = canSubmitDeclaredTask({
     name,
     scope,
@@ -475,11 +632,15 @@ function CreateTaskModal({
     permission,
   });
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  async function createGoal(start: boolean) {
     const paths = taskPathsForScope(scope, selectedPaths, permission);
     if (paths.error) {
       setFormError(paths.error);
+      return;
+    }
+    if (start && discussUnsupported) { setFormError("所选 Agent 不支持只读/计划模式，请更换 Agent 或明确选择可写权限。"); return; }
+    if (start && !taskProfile) {
+      setFormError("开始前请选择 Agent 和配置。");
       return;
     }
     setBusy(true);
@@ -498,7 +659,7 @@ function CreateTaskModal({
           profileId: taskProfile || null,
         },
       });
-      await onCreated(task);
+      await onCreated(task, start);
     } catch (reason) {
       const message = `创建任务失败：${String(reason)}`;
       setFormError(message);
@@ -508,12 +669,14 @@ function CreateTaskModal({
     }
   }
 
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    await createGoal(true);
+  }
+
   return (
-    <Modal open title="新建目标" onClose={onClose} size="lg">
+    <Modal open title="新建目标" onClose={onClose} size={moreOpen ? "lg" : "md"}>
       <form onSubmit={submit} className="space-y-3">
-        <p className="text-xs text-l3">
-          说要完成什么。怎么做由 Agent 自己决定；改动验收后才进项目。
-        </p>
         <label className="block text-xs text-l3">
           要完成什么
           <textarea
@@ -523,89 +686,149 @@ function CreateTaskModal({
               setName(event.target.value);
               setDescription(event.target.value);
             }}
-            placeholder="例如：根据项目里的文献，写一篇综述并保存到论文/综述.md"
+            placeholder={
+              project.workMode === "office"
+                ? "例如：按公司模板写本周周报，保存到文档/周报.md"
+                : "例如：根据项目里的文献，写一篇综述并保存到论文/综述.md"
+            }
             required
             autoFocus
           />
         </label>
-        <div>
-          <p className="mb-1 text-xs text-l3">资料</p>
-          <SegTabs items={MATERIAL_SCOPES} value={scope} onChange={setScope} />
-          <p className="mt-1.5 text-micro text-l4">{materialHint(scope, permission)}</p>
-          {scope === "selected" && (
-            <TaskMaterialsPicker
-              projectPath={project.path}
-              selected={selectedPaths}
-              onChange={setSelectedPaths}
-            />
-          )}
-        </div>
-        <div>
-          <p className="mb-1 text-xs text-l3">权限</p>
-          <SegTabs
-            items={[
-              { id: "write_tree" as const, label: "写入并验收" },
-              { id: "discuss" as const, label: "只讨论" },
-            ]}
-            value={permission}
-            onChange={setPermission}
-          />
-          <p className="mt-1.5 text-micro text-l4">
-            {permission === "write_tree"
-              ? "改动只发生在独立副本。你勾选后才写回项目，已有文件不会被悄悄覆盖。"
-              : "只讨论，不改项目文件。"}
-          </p>
-        </div>
-        <label className="block text-xs text-l3">
-          Agent
-          <select
-            className={`${fieldClass} mt-1 text-l1`}
-            value={taskAgent}
-            onChange={(event) => setTaskAgent(event.target.value)}
-          >
-            {configuredAgents.length === 0 ? (
-              <option value="">先到连接页配置 Agent</option>
-            ) : (
-              configuredAgents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.label}
-                  {agent.id === project.defaultAgent ? "（项目默认）" : ""}
-                </option>
-              ))
+        <button
+          type="button"
+          className="flex items-center gap-1 text-xs text-l3 hover:text-l1"
+          onClick={() => setMoreOpen((open) => !open)}
+          aria-expanded={moreOpen}
+        >
+          <FoldMark open={moreOpen} />
+          资料和 Agent
+        </button>
+        {moreOpen && (
+          <div className="space-y-3">
+            <div>
+              <p className="mb-1 text-xs text-l3">资料</p>
+              <SegTabs items={MATERIAL_SCOPES} value={scope} onChange={setScope} />
+              {scope === "selected" && (
+                <TaskMaterialsPicker
+                  projectPath={project.path}
+                  selected={selectedPaths}
+                  onChange={setSelectedPaths}
+                />
+              )}
+            </div>
+            <div>
+              <p className="mb-1 text-xs text-l3">权限</p>
+              {discussUnsupported && <p className="mb-2 text-xs text-warn-text">所选 Agent 不支持只读/计划模式，不能以“只讨论”启动。</p>}
+              <SegTabs
+                items={[
+                  { id: "write_tree" as const, label: copy.writeTab },
+                  { id: "discuss" as const, label: "只讨论" },
+                ]}
+                value={permission}
+                onChange={setPermission}
+              />
+            </div>
+            <div>
+              <p className="mb-1 text-xs text-l3">Agent</p>
+              {configuredAgents.length === 0 ? (
+                <p className="text-xs text-l4">
+                  还没有可用连接。
+                  <button
+                    type="button"
+                    className="ml-1 text-l2 hover:text-l1 hover:underline"
+                    onClick={() => {
+                      onClose();
+                      setPage("profiles");
+                    }}
+                  >
+                    去连接页
+                  </button>
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1">
+                  {configuredAgents.map((agent) => {
+                    const on = taskAgent === agent.id;
+                    return (
+                      <button
+                        key={agent.id}
+                        type="button"
+                        className={`inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-xs ${
+                          on ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
+                        }`}
+                        onClick={() => setTaskAgent(agent.id)}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="size-1.5 shrink-0 rounded-full"
+                          style={{ background: agentBrand(agent.id) }}
+                        />
+                        {agent.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {configuredAgents.length > 0 && (
+              <div>
+                <p className="mb-1 text-xs text-l3">连接</p>
+                {agentProfiles.length === 0 ? (
+                  <p className="text-xs text-l4">
+                    这家还没有连接。
+                    <button
+                      type="button"
+                      className="ml-1 text-l2 hover:text-l1 hover:underline"
+                      onClick={() => {
+                        onClose();
+                        setPage("profiles");
+                      }}
+                    >
+                      去连接页
+                    </button>
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-1">
+                    {agentProfiles.map((profile) => {
+                      const on = taskProfile === profile.id;
+                      return (
+                        <button
+                          key={profile.id}
+                          type="button"
+                          className={`inline-flex h-7 items-center rounded-full px-2.5 text-xs ${
+                            on ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
+                          }`}
+                          onClick={() => setTaskProfile(profile.id)}
+                        >
+                          {profile.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             )}
-          </select>
-        </label>
-        <label className="block text-xs text-l3">
-          配置
-          <select
-            className={`${fieldClass} mt-1 text-l1`}
-            value={taskProfile}
-            onChange={(event) => setTaskProfile(event.target.value)}
-            disabled={agentProfiles.length === 0}
-          >
-            {agentProfiles.length === 0 ? (
-              <option value="">先配置连接</option>
-            ) : (
-              agentProfiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}
-                  {profile.id === project.defaultProfiles?.[taskAgent] ? "（项目默认）" : ""}
-                </option>
-              ))
-            )}
-          </select>
-        </label>
+          </div>
+        )}
         {formError && <p className="text-xs text-err-text">{formError}</p>}
         <div className="flex justify-end gap-2">
           <button type="button" className={rowActionClass} onClick={onClose}>
             取消
           </button>
           <button
+            type="button"
+            className={secondaryActionClass}
+            disabled={busy || !canSave}
+            onClick={() => void createGoal(false)}
+          >
+            {busy ? "记下…" : "记下"}
+          </button>
+          <button
             type="submit"
             className={primaryActionClass}
             disabled={busy || !canSubmit}
           >
-            {busy ? "正在准备…" : "开始这一步"}
+            {busy ? "正在准备…" : "开始"}
           </button>
         </div>
       </form>
@@ -738,23 +961,34 @@ function TaskMaterialsPicker({
 }
 
 function ReviewOutputsModal({
+  workMode,
   task,
   run,
+  runCount,
+  previousFeedback,
   onClose,
   onAdopted,
+  onContinue,
   onError,
 }: {
+  workMode?: string | null;
   task: TaskDto;
   run: RunDto | null;
+  runCount: number;
+  previousFeedback?: string | null;
   onClose: () => void;
   onAdopted: () => void;
+  onContinue: (feedback: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
+  const copy = goalReviewCopy(workMode);
   const [changes, setChanges] = useState<TaskOutputChangeDto[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState("");
+  const [protectedPaths, setProtectedPaths] = useState<string[]>([]);
 
   useEffect(() => {
     if (!previewPath) return;
@@ -769,6 +1003,26 @@ function ReviewOutputsModal({
   }, [previewPath]);
 
   useEffect(() => {
+    if (!task.projectRoot) {
+      setProtectedPaths([]);
+      return;
+    }
+    let stale = false;
+    invoke<{ config: { protectedPaths?: string[] } }>("read_project_config", {
+      path: task.projectRoot,
+    })
+      .then((read) => {
+        if (!stale) setProtectedPaths(read.config.protectedPaths ?? []);
+      })
+      .catch(() => {
+        if (!stale) setProtectedPaths([]);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [task.projectRoot]);
+
+  useEffect(() => {
     if (!run) {
       setLoading(false);
       return;
@@ -779,7 +1033,13 @@ function ReviewOutputsModal({
       .then((rows) => {
         if (stale) return;
         setChanges(rows);
-        setSelected(new Set(rows.map((row) => row.path)));
+        setSelected(
+          new Set(
+            rows
+              .filter((row) => !pathIsProtected(row.path, protectedPaths))
+              .map((row) => row.path),
+          ),
+        );
       })
       .catch((reason) => {
         if (!stale) onError(`读取变更失败：${String(reason)}`);
@@ -790,7 +1050,7 @@ function ReviewOutputsModal({
     return () => {
       stale = true;
     };
-  }, [onError, run]);
+  }, [onError, protectedPaths, run]);
 
   async function adopt() {
     if (!run) return;
@@ -798,7 +1058,10 @@ function ReviewOutputsModal({
     try {
       await invoke("task_adopt_outputs", {
         runId: run.id,
-        paths: selectedChangePaths(changes, selected),
+        paths: selectedChangePaths(changes, selected).filter(
+          (path) => !pathIsProtected(path, protectedPaths),
+        ),
+        note: feedback.trim() || null,
       });
       onAdopted();
     } catch (reason) {
@@ -808,67 +1071,123 @@ function ReviewOutputsModal({
     }
   }
 
+  const selectable = changes.filter((change) => !pathIsProtected(change.path, protectedPaths));
   const selectedCount = selected.size;
   const previewAbs = previewPath && run ? joinRunPath(run.isolationPath, previewPath) : null;
+  const groups = groupReviewChanges(workMode, changes);
+  const previewIndex = previewPath
+    ? changes.findIndex((change) => change.path === previewPath)
+    : -1;
 
   return (
     <>
-    <Modal open title={`验收 · ${task.name}`} onClose={onClose} size="md">
+    <Modal open title={`${copy.modalTitle} · ${task.name}`} onClose={onClose} size="md">
       <div className="space-y-3 text-xs">
+        <ul className="space-y-0.5 text-l3">
+          {goalReviewFacts({
+            workMode,
+            agentLabel: agentLabel(run?.agent ?? task.agent ?? ""),
+            runCount,
+            changes,
+            feedback: previousFeedback,
+          }).map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
         {loading ? (
           <p className="text-l4">比较独立副本与项目…</p>
         ) : changes.length === 0 ? (
-          <p className="text-l3">没有新增或修改的文件。可以直接完成任务，项目不会被改写。</p>
+          <p className="text-l3">{copy.empty}</p>
         ) : (
           <>
             <div className="flex items-center gap-2">
-              <p className="min-w-0 flex-1 text-l4">勾选要带回项目的文件。未勾选的留在独立副本，删除不会同步。</p>
+              <p className="min-w-0 flex-1 text-xs text-l2">
+                <span className="font-medium">{copy.pickLabel}</span>
+                <span className="ml-1.5 font-normal text-l4">{copy.hint}</span>
+              </p>
               <button
                 type="button"
                 className={rowActionClass}
                 onClick={() =>
                   setSelected(
-                    selectedCount === changes.length
+                    selectedCount === selectable.length
                       ? new Set()
-                      : new Set(changes.map((change) => change.path)),
+                      : new Set(selectable.map((change) => change.path)),
                   )
                 }
               >
-                {selectedCount === changes.length ? "全不选" : "全选"}
+                {selectedCount === selectable.length ? "全不选" : "全选"}
               </button>
             </div>
-            <ul className="max-h-72 space-y-1 overflow-auto">
-              {changes.map((change) => (
-                <li key={change.path} className="flex items-center gap-2 rounded-md px-1 py-1 hover:bg-hover">
-                  <Checkbox
-                    checked={selected.has(change.path)}
-                    onChange={(checked) => {
-                      const next = new Set(selected);
-                      if (checked) next.add(change.path);
-                      else next.delete(change.path);
-                      setSelected(next);
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="min-w-0 flex-1 truncate text-left text-l2 hover:underline"
-                    onClick={() => setPreviewPath(change.path)}
-                    title={change.path}
-                  >
-                    {change.path}
-                  </button>
-                  <span className="shrink-0 text-micro text-l4">
-                    {taskChangeKindLabel(change.kind)}
-                  </span>
-                </li>
+            <div className="max-h-72 space-y-3 overflow-auto">
+              {groups.map((group) => (
+                <div key={group.id}>
+                  <p className="mb-1 text-micro font-medium text-l4">
+                    {group.label}
+                    <span className="ml-1 font-normal">{group.items.length}</span>
+                  </p>
+                  <ul className="space-y-1">
+                    {group.items.map((change) => (
+                      <li key={change.path} className="flex items-center gap-2 rounded-md px-1 py-1 hover:bg-hover">
+                        <Checkbox
+                          checked={selected.has(change.path)}
+                          disabled={pathIsProtected(change.path, protectedPaths)}
+                          onChange={(checked) => {
+                            if (pathIsProtected(change.path, protectedPaths)) return;
+                            const next = new Set(selected);
+                            if (checked) next.add(change.path);
+                            else next.delete(change.path);
+                            setSelected(next);
+                          }}
+                        />
+                        <FileTypeMark path={change.path} />
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 truncate text-left text-l2 hover:underline"
+                          onClick={() => setPreviewPath(change.path)}
+                          title={change.path}
+                        >
+                          {change.path}
+                        </button>
+                        <span className="shrink-0 text-micro text-l4">
+                          {pathIsProtected(change.path, protectedPaths)
+                            ? "保持原样"
+                            : taskChangeKindLabel(change.kind)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ))}
-            </ul>
+            </div>
           </>
         )}
-        <div className="flex justify-end gap-2">
+        <label className="block text-xs text-l2">
+          <span className="font-medium">意见</span>
+          <span className="ml-1.5 font-normal text-l4">不满意再出一版</span>
+          <textarea
+            className="mt-1 min-h-16 w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-sm text-l1 outline-none placeholder:text-l4 focus:border-l4"
+            value={feedback}
+            onChange={(event) => setFeedback(event.target.value)}
+            placeholder={copy.continuePlaceholder}
+          />
+        </label>
+        {selectedCount > 0 && (
+          <p className="text-micro text-l4">{copy.rememberLine}</p>
+        )}
+        <div className="flex flex-wrap justify-end gap-2">
           <button type="button" className={rowActionClass} onClick={onClose}>
             稍后
           </button>
+          <button
+            type="button"
+            className={secondaryActionClass}
+            disabled={busy || loading || !run || !feedback.trim()}
+            onClick={() => void onContinue(feedback.trim())}
+          >
+            {copy.continueLabel}
+          </button>
+          {task.status !== "completed" && (
           <button
             type="button"
             className={primaryActionClass}
@@ -878,9 +1197,10 @@ function ReviewOutputsModal({
             {busy
               ? "写入中…"
               : changes.length === 0 || selectedCount === 0
-                ? "不带回文件，完成任务"
-                : `采纳 ${selectedCount} 个文件`}
+                ? copy.acceptEmpty
+                : copy.acceptSome(selectedCount)}
           </button>
+          )}
         </div>
       </div>
     </Modal>
@@ -889,6 +1209,16 @@ function ReviewOutputsModal({
           path={previewAbs}
           root={run.isolationPath}
           onClose={() => setPreviewPath(null)}
+          hasPrevious={previewIndex > 0}
+          hasNext={previewIndex >= 0 && previewIndex < changes.length - 1}
+          onPrevious={() => {
+            if (previewIndex > 0) setPreviewPath(changes[previewIndex - 1].path);
+          }}
+          onNext={() => {
+            if (previewIndex >= 0 && previewIndex < changes.length - 1) {
+              setPreviewPath(changes[previewIndex + 1].path);
+            }
+          }}
         />
       )}
     </>

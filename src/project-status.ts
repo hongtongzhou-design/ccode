@@ -6,6 +6,7 @@ import { pathWithin, samePath } from "./path-utils.ts";
 import { sessionExcludedFromProjectList } from "./session-filter.ts";
 import { deriveCodingKind, officeDocKind, type OfficeDocKind } from "./work-mode.ts";
 import { namedSessionTitle } from "./workbench-hero.ts";
+import { goalBucket, goalDisplayName } from "./project-tasks.ts";
 
 export function codingStatusLine(input: {
   worktrees: readonly {
@@ -327,6 +328,7 @@ export function filterProjectSessions<
   T extends {
     projectPath: string;
     pinned?: boolean;
+    archived?: boolean;
     internal?: boolean;
     source?: string;
     title?: string | null;
@@ -339,9 +341,9 @@ export function filterProjectSessions<
   opts?: { limit?: number; isWindows?: boolean },
 ): T[] {
   const isWindows = opts?.isWindows ?? false;
-  const limit = opts?.limit ?? 40;
   const matched: T[] = [];
   for (const session of sessions) {
+    if (session.archived) continue;
     if (sessionExcludedFromProjectList(session)) continue;
     if (samePath(session.projectPath, projectPath, isWindows)) {
       matched.push(session);
@@ -359,7 +361,8 @@ export function filterProjectSessions<
   }
   const pinned = matched.filter((s) => s.pinned);
   const rest = matched.filter((s) => !s.pinned);
-  return [...pinned, ...rest].slice(0, limit);
+  const ranked = [...pinned, ...rest];
+  return opts?.limit != null ? ranked.slice(0, opts.limit) : ranked;
 }
 
 export function filterPortsForRepo<T extends { cwd: string | null }>(
@@ -372,4 +375,92 @@ export function filterPortsForRepo<T extends { cwd: string | null }>(
     if (!p.cwd) return false;
     return roots.some((root) => pathWithin(p.cwd!, root, isWindows));
   });
+}
+
+export type ProjectNowTask = {
+  name: string;
+  status: string;
+  description?: string | null;
+};
+
+/** 进行中 / 待验收 / 没做完：雷达应让路。未开始不算。 */
+export function goalsNeedAttention(
+  tasks: readonly { status: string }[],
+): boolean {
+  return tasks.some((task) => {
+    const bucket = goalBucket(task.status);
+    return bucket === "review" || bucket === "running" || bucket === "stuck";
+  });
+}
+
+/** 任务页头部一行：项目现在怎样。不出现 Run。 */
+export function projectNowLine(tasks: readonly ProjectNowTask[]): string | null {
+  if (tasks.length === 0) return null;
+  const order = ["review", "running", "stuck", "open", "done"] as const;
+  const buckets: Record<string, ProjectNowTask[]> = {
+    review: [],
+    running: [],
+    stuck: [],
+    open: [],
+    done: [],
+  };
+  for (const task of tasks) {
+    buckets[goalBucket(task.status)].push(task);
+  }
+  const parts: string[] = [];
+  for (const bucket of order) {
+    for (const task of buckets[bucket]) {
+      const name = goalDisplayName(task);
+      if (!name) continue;
+      if (bucket === "review") parts.push(`${name}待验收`);
+      else if (bucket === "running") parts.push(`${name}进行中`);
+      else if (bucket === "done") parts.push(`${name}已接受`);
+      else if (bucket === "stuck") parts.push(`${name}没做完`);
+      else parts.push(`${name}未开始`);
+      if (parts.length >= 4) {
+        return `项目现在：${parts.join(" · ")}`;
+      }
+    }
+  }
+  return parts.length ? `项目现在：${parts.join(" · ")}` : null;
+}
+
+export type AcceptedGoalStatus = {
+  name: string;
+  outputs?: readonly string[];
+  note?: string | null;
+};
+
+export function formatAcceptedStatusLine(goal: AcceptedGoalStatus): string {
+  const name = goal.name.trim();
+  const outputs = (goal.outputs ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item && item !== ".");
+  const note = goal.note?.trim() ?? "";
+  let line = name;
+  if (outputs.length) line += ` → ${outputs.join("、")}`;
+  if (name) line += "（已接受）";
+  if (note) line += `；意见：${note}`;
+  return line ? `- ${line}` : "";
+}
+
+export function goalCardMeta(input: {
+  agentLabel?: string | null;
+  outputPaths?: readonly string[];
+  reviewRequired: boolean;
+  workMode?: string | null;
+}): string {
+  const bits: string[] = [];
+  const agent = input.agentLabel?.trim();
+  if (agent) bits.push(agent);
+  if (!input.reviewRequired) {
+    bits.push("只讨论");
+    return bits.join(" · ");
+  }
+  const outputs = (input.outputPaths ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item && item !== ".");
+  if (outputs.length) bits.push(outputs.join("、"));
+  else bits.push(input.workMode === "office" ? "验收后写入文档" : "验收后写入项目");
+  return bits.join(" · ");
 }

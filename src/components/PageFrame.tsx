@@ -99,6 +99,10 @@ export const searchFieldClass =
 export const hoverRevealClass =
   "opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 focus-visible:opacity-100";
 
+/** 行内 28px 图标按钮：文件行 / 雷达条目 / 筛选工具 */
+export const iconActionClass =
+  "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-50";
+
 /** 行内悬浮操作钮（v3.93）：自带「锚点上方」应用内 tooltip——原生 title 渲染在光标下方，
  *  与胶囊动作栏视觉脱节；点击先收 tooltip 再透传事件（⋯ 要取按钮锚点定位菜单）。
  *  点击区保持 h-7 w-7（≥28px 硬约束）。 */

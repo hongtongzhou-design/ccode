@@ -806,6 +806,17 @@ export default function ScheduleSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [waitingDraft, projectRoot]);
 
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(timer);
+  }, [open, projectRoot]);
+
+  async function cancelSchedule(s: ScheduleDto) {
+    try { await invoke("cancel_schedule_run", { id: s.id }); }
+    catch (reason) { setError(String(reason)); }
+  }
+
   async function toggleEnabled(s: ScheduleDto) {
     try {
       await invoke("update_schedule", {
@@ -921,7 +932,7 @@ export default function ScheduleSection({
       {isCard ? (
         <div className="mb-2 flex items-center gap-2">
           <h2 className="text-xs font-medium text-l2">
-            定时任务{count > 0 ? `（${count}）` : ""}
+            定时巡检{count > 0 ? `（${count}）` : ""}
           </h2>
           {addBtn}
         </div>
@@ -934,7 +945,7 @@ export default function ScheduleSection({
             aria-expanded={open}
           >
             <FoldMark open={open} boxed />
-            ◔ 定时任务{count > 0 ? `（${count}）` : ""}
+            ◔ 定时巡检{count > 0 ? `（${count}）` : ""}
           </button>
           {addBtn}
         </div>
@@ -942,11 +953,12 @@ export default function ScheduleSection({
       {(isCard || open) && (
         <div className={isCard ? "" : "mt-1 rounded-md bg-strip p-2"}>
           {error && <p className="py-1 text-xs text-err-text">{error}</p>}
-          {schedules !== null && schedules.length === 0 && drafts.length === 0 && (
+          {schedules !== null &&
+            schedules.length === 0 &&
+            drafts.length === 0 &&
+            !isCard && (
             <p className="text-xs text-l4">
-              {isCard
-                ? "还没有定时任务。"
-                : "还没有定时任务。点「＋ 定时巡检」建一个。"}
+              后台跑，不进正在进行。点「＋ 定时巡检」在这个项目里建。
             </p>
           )}
           {drafts.length > 0 && (
@@ -1025,6 +1037,7 @@ export default function ScheduleSection({
                       {s.name}
                     </span>
                     <span className="min-w-0 flex-1" />
+                    {s.runningRunId && <button type="button" className={actionBtn} onClick={() => void cancelSchedule(s)}>停止运行</button>}
                     {s.lastRunAt && (
                       <span
                         className="shrink-0 text-xs text-l4"

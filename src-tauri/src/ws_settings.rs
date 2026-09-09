@@ -226,7 +226,7 @@ pub struct RunScriptInput {
 }
 
 /// 新建 settings.toml 时的头注释：标明本文件在三层合并中的层级
-const SETTINGS_HEADER: &str = "# Ccode 项目层设置：ws_settings 三层合并的仓库层\n\
+const SETTINGS_HEADER: &str = "# Mesa 项目层设置：ws_settings 三层合并的仓库层\n\
      # 用户层 ~/.config/ccode/settings.toml，本机层 .ccode/settings.local.toml（优先级更高）\n";
 
 /// toml_edit 补丁式 upsert：同名覆盖、其余键原样保留；文件不存在则创建（含头注释）。
@@ -429,7 +429,7 @@ test = { command = "local test" }
         .unwrap();
         let text = fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap();
         assert!(
-            text.starts_with("# Ccode 项目层设置"),
+            text.starts_with("# Mesa 项目层设置"),
             "新建文件必须带头注释: {text}"
         );
         // 合并链路确实吃项目层：merged_settings 能读到刚写入的脚本
@@ -446,7 +446,7 @@ test = { command = "local test" }
             .unwrap();
         let text2 = fs::read_to_string(repo.join(".ccode").join("settings.toml")).unwrap();
         assert!(
-            text2.starts_with("# Ccode 项目层设置"),
+            text2.starts_with("# Mesa 项目层设置"),
             "往返后头注释不得丢失: {text2}"
         );
         std::fs::remove_dir_all(&dir).ok();

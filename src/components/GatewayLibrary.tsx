@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
-import { AGENTS } from "../types";
+import { AGENTS, AGENT_PROTOCOLS } from "../types";
+import { mergeGatewayCatalog } from "../gateway-catalog";
 import { Checkbox, fieldClass, FoldMark, primaryActionClass, secondaryActionClass } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import { policyFieldHint, policyFieldMode } from "../combo-field";
 import { firstFilledCatalogSlot } from "../gateway-slot";
+import { bindingImpactLine } from "../binding-impact";
 import type {
   BindingInput,
   ComboSurfaceDto,
@@ -66,6 +68,8 @@ export default function GatewayLibrary({
 }) {
   const gateways = useAppStore((s) => s.gateways);
   const profiles = useAppStore((s) => s.profiles);
+  const defaultProfiles = useAppStore((s) => s.settings?.defaultProfiles);
+  const activeGlobalProfiles = useAppStore((s) => s.settings?.activeGlobalProfiles);
   const loadGateways = useAppStore((s) => s.loadGateways);
   const saveGateway = useAppStore((s) => s.saveGateway);
   const removeGateway = useAppStore((s) => s.removeGateway);
@@ -90,6 +94,8 @@ export default function GatewayLibrary({
   const [probingSlot, setProbingSlot] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
   const [bindAgent, setBindAgent] = useState("");
+  const [bindProtocol, setBindProtocol] = useState("");
+  const [bindModels, setBindModels] = useState<string[]>([]);
   const [monthUsage, setMonthUsage] = useState<GatewayUsageRow[]>([]);
   const modelSurfaceGen = useRef(0);
 
@@ -248,6 +254,7 @@ export default function GatewayLibrary({
       headerEnv,
       models,
       apiKey: apiKey.trim() || null,
+      expectedRevision: editing === "new" || editing === null ? null : editing.revision ?? null,
     };
     const id = editing === "new" || editing === null ? null : editing.id;
     try {
@@ -311,6 +318,13 @@ export default function GatewayLibrary({
 
   async function fetchCatalog() {
     if (editing === null || editing === "new") return;
+    const dirtySlots = SLOT_LABELS.some(
+      (s) => (slots[s.key] ?? "").trim() !== (editing.slots[s.key] ?? "").trim(),
+    );
+    if (dirtySlots || apiKey.trim()) {
+      setError("请先保存端点和密钥再获取目录；测的是已保存的网关");
+      return;
+    }
     setFetchingCatalog(true);
     setError(null);
     try {
@@ -320,10 +334,10 @@ export default function GatewayLibrary({
       });
       const list = await invoke<Gateway[]>("list_gateways");
       const fresh = list.find((g) => g.id === saved.id) ?? saved;
-      setModels(fresh.models.map((m) => ({ ...m })));
-      setEditing(fresh);
+      setModels(mergeGatewayCatalog(models, fresh.models.map((m) => ({ ...m }))));
+      setEditing({ ...editing, ...fresh, revision: fresh.revision });
       setNotice(
-        `已获取模型目录${saved.catalogFromSlot ? `（${saved.catalogFromSlot} 槽）` : ""}`,
+        `已获取模型目录${saved.catalogFromSlot ? `（${saved.catalogFromSlot} 槽）` : ""}；未保存的逐模型策略已保留`,
       );
       await loadGateways();
     } catch (e) {
@@ -413,19 +427,28 @@ export default function GatewayLibrary({
 
   async function bindToAgent() {
     if (editing === null || editing === "new" || !bindAgent) return;
+    const selected = bindModels.filter(Boolean);
+    if (!selected.length) {
+      setError("请勾选这条绑定要使用的模型，并确认第一个为默认");
+      return;
+    }
+    const proto = AGENT_PROTOCOLS[bindAgent];
     const input: BindingInput = {
       agent: bindAgent,
-      name: editing.name,
+      name: `${editing.name} · ${AGENTS.find((a) => a.id === bindAgent)?.label ?? bindAgent}`,
       gatewayId: editing.id,
       kind: "api",
-      protocol: null,
-      models: models.map((m) => m.id),
+      protocol: proto ? (bindProtocol || proto.default) : null,
+      models: selected,
       extraEnv: {},
     };
     try {
       await bindGateway(input);
-      setNotice(`已绑定到 ${AGENTS.find((a) => a.id === bindAgent)?.label ?? bindAgent}`);
+      setNotice(
+        `已添加 ${AGENTS.find((a) => a.id === bindAgent)?.label ?? bindAgent} 配置，默认模型 ${selected[0]}。不改 Mesa 启动预选，也不写 CLI 全局文件。`,
+      );
       setBindAgent("");
+      setBindProtocol("");
       await useAppStore.getState().loadAll();
     } catch (e) {
       setError(String(e));
@@ -437,9 +460,7 @@ export default function GatewayLibrary({
     return profiles.filter((p) => p.gatewayId === editing.id);
   }, [editing, profiles]);
 
-  const unboundAgents = AGENTS.filter(
-    (a) => !boundAgents.some((p) => p.agent === a.id),
-  );
+  const catalogModels = models.filter((m) => m.status !== "stale");
 
   function usageLine(g: Gateway): string | null {
     const row = monthUsage.find((r) => r.bucket === "gateway" && r.gatewayId === g.id);
@@ -599,34 +620,75 @@ export default function GatewayLibrary({
             </label>
             {editing !== "new" && (
               <div className="rounded-md border border-hairline p-2 text-sm">
-                <p className="mb-1 text-xs font-medium text-l2">绑定到 Agent</p>
+                <p className="mb-1 text-xs font-medium text-l2">添加 Agent 配置</p>
+                <p className="mb-2 text-micro text-l4">
+                  选 Agent、协议和模型。这只在 Mesa 里生成一条配置，不写外部 CLI 文件。
+                </p>
                 <ul className="mb-2 text-micro text-l3">
-                  {boundAgents.length === 0 && <li>还没有 Agent 绑定</li>}
+                  {boundAgents.length === 0 && <li>还没有 Agent 配置</li>}
                   {boundAgents.map((p) => (
                     <li key={p.id}>
-                      {AGENTS.find((a) => a.id === p.agent)?.label ?? p.agent}
+                      {bindingImpactLine({
+                        accountType: p.accountType,
+                        gatewayName: editing.name,
+                        agent: p.agent,
+                        protocol: p.protocol,
+                        defaultModel: p.models[0] ?? null,
+                        mesaLaunchDefault: defaultProfiles?.[p.agent] === p.id,
+                        cliGlobalWritten: activeGlobalProfiles?.[p.agent] === p.id,
+                      })}
                     </li>
                   ))}
                 </ul>
-                {unboundAgents.length > 0 && (
-                  <div className="flex gap-2">
-                    <select
-                      className={fieldClass}
-                      value={bindAgent}
-                      onChange={(e) => setBindAgent(e.target.value)}
-                    >
-                      <option value="">选择 Agent…</option>
-                      {unboundAgents.map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.label}
-                        </option>
+                <div className="space-y-2">
+                  <select
+                    className={fieldClass}
+                    value={bindAgent}
+                    onChange={(e) => {
+                      const agent = e.target.value;
+                      setBindAgent(agent);
+                      setBindProtocol(AGENT_PROTOCOLS[agent]?.default ?? "");
+                      setBindModels(catalogModels.map((m) => m.id).slice(0, 1));
+                    }}
+                  >
+                    <option value="">选择 Agent…</option>
+                    {AGENTS.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.label}
+                        {boundAgents.some((p) => p.agent === a.id) ? "（已有绑定，将再加一条）" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {bindAgent && AGENT_PROTOCOLS[bindAgent] && (
+                    <select className={fieldClass} value={bindProtocol} onChange={(e) => setBindProtocol(e.target.value)}>
+                      {AGENT_PROTOCOLS[bindAgent].options.map((p) => (
+                        <option key={p} value={p}>{p}</option>
                       ))}
                     </select>
-                    <button type="button" className={secondaryActionClass} onClick={() => void bindToAgent()}>
-                      绑定
-                    </button>
-                  </div>
-                )}
+                  )}
+                  {bindAgent && (
+                    <ul className="max-h-32 space-y-1 overflow-auto text-micro">
+                      {catalogModels.map((m) => {
+                        const on = bindModels.includes(m.id);
+                        return (
+                          <li key={m.id}>
+                            <label className="flex items-center gap-1">
+                              <Checkbox checked={on} onChange={(checked) => {
+                                setBindModels((cur) => checked
+                                  ? (cur.includes(m.id) ? cur : [...cur, m.id])
+                                  : cur.filter((id) => id !== m.id));
+                              }} />
+                              <span>{m.id}{on && bindModels[0] === m.id ? "（默认）" : ""}</span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <button type="button" className={secondaryActionClass} disabled={!bindAgent} onClick={() => void bindToAgent()}>
+                    添加 Agent 配置
+                  </button>
+                </div>
               </div>
             )}
             {models.length > 0 && (
@@ -805,7 +867,7 @@ export default function GatewayLibrary({
             )}
             <div className="flex gap-2 pt-2">
               <button type="button" className={primaryActionClass} disabled={saving} onClick={() => void save()}>
-                保存
+                保存网关
               </button>
               <button type="button" className={secondaryActionClass} onClick={() => setEditing(null)}>
                 取消
@@ -824,7 +886,7 @@ export default function GatewayLibrary({
                   <span className="min-w-0 flex-1">
                     <span className="font-medium text-l1">{g.name}</span>
                     <span className="ml-2 text-l3">
-                      {n} 个绑定
+                      {n} 条 Agent 配置
                       {filled.length ? ` · ${filled.join("、")}` : " · 未填槽"}
                       {g.keyHint ? ` · ${g.keyHint}` : ""}
                     </span>

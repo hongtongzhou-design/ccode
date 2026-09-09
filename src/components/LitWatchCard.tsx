@@ -1,8 +1,28 @@
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import {
+  Bookmark,
+  BookmarkPlus,
+  Clock,
+  Download,
+  ExternalLink,
+  ListFilter,
+  Play,
+  RefreshCw,
+  Rss,
+} from "lucide-react";
 import ContextMenu from "./ContextMenu";
 import { Modal } from "./Modal";
 
@@ -16,6 +36,7 @@ import {
   fieldClass,
   ghostActionClass,
   hoverRevealClass,
+  iconActionClass,
   projectWellClass,
   rowActionClass,
   searchFieldClass,
@@ -34,6 +55,8 @@ import {
   includedLineFor,
   isRead,
   loadLitDismissed,
+  readLitWatchBodyOpen,
+  writeLitWatchBodyOpen,
   entryPassesFilter,
   litWatchFilterActive,
   litWatchFilterLabel,
@@ -45,6 +68,8 @@ import {
   normalizeTitle,
   parseWatchExplain,
   watchExplainPrompt,
+  watchEntryScanLine,
+  sourceDisplayName,
 } from "../lit-watch";
 import type {
   AddIncludedResultDto,
@@ -71,6 +96,36 @@ import type {
 function absResourcePath(projectRoot: string, path: string): string {
   if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) return path;
   return `${projectRoot}/${path}`;
+}
+
+function HeadIcon({
+  label,
+  disabled,
+  mark,
+  onClick,
+  children,
+}: {
+  label: string;
+  disabled?: boolean;
+  mark?: boolean;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="relative flex h-7 w-7 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-50"
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+      {mark && (
+        <span className="absolute right-1 top-1 size-1.5 rounded-full bg-cta" />
+      )}
+    </button>
+  );
 }
 
 function sourceUrl(url: string): string {
@@ -181,8 +236,39 @@ function WatchExplainBody({
   );
 }
 
-/** 新命中条目行：双行（pill + 标题 + 来源 + 日期 / 摘要截断两行点击展开），
- *  主按钮「→ 精读」常驻，◈ 解读 / ↓ 全文 / ⋯ hover 才现 */
+function RelevancePills({ entry }: { entry: WatchEntryDto }) {
+  return (
+    <span className="flex shrink-0 items-center gap-1">
+      {entry.relevance === "推荐" ? (
+        <span className="rounded-full bg-cta-pill px-1.5 py-px text-micro text-cta-pill-text">
+          推荐
+        </span>
+      ) : (
+        <span className="rounded-full border border-field bg-canvas px-1.5 py-px text-micro text-l3">
+          {entry.relevance}
+        </span>
+      )}
+      {entry.metrics?.impactFactor && (
+        <span className="rounded-full bg-canvas px-1.5 py-px text-micro text-l4">
+          IF {entry.metrics.impactFactor}
+        </span>
+      )}
+      {entry.metrics?.casQuartile != null && (
+        <span className="rounded-full bg-canvas px-1.5 py-px text-micro text-l4">
+          {entry.metrics.casQuartile}区
+        </span>
+      )}
+      {entry.metrics?.top && (
+        <span className="rounded-full bg-canvas px-1.5 py-px text-micro text-l4">
+          TOP
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** 新命中默认对齐精读清单密度：标题截断一行 + 中文一句话/期刊/日期；
+ *  英文摘要点开才见。精读图标常驻，解读 / 全文 / ⋯ hover 或展开才现 */
 function WatchEntryRow({
   entry,
   explain,
@@ -215,74 +301,61 @@ function WatchEntryRow({
     if (startOpen) setExpanded(true);
   }, [startOpen]);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  // 有中文一句话时标题行显示它，英文原标题进 hover tooltip
-  const titleRef = useRef<HTMLSpanElement>(null);
-  const { tip, show, hide } = useHoverTip(titleRef);
-  // 期刊 pill 剥出版商尾巴（「(Wiley)」等）给标题让位；剥过时 hover 显示原始全称
-  // 全文分流：免费直链 →「↓ 全文」可下载；出版商落地页/DOI → 直接给「↗ 来源」；无链接 → 不显示
   const fulltext = fulltextLinkFor(entry.url);
   const pdfRef = useRef<HTMLButtonElement>(null);
   const pdfTip = useHoverTip(pdfRef, true);
-  const actionBtn = `${rowActionClass} shrink-0 whitespace-nowrap`;
+  const open = expanded || !!explain;
+  const scan = watchEntryScanLine(entry);
+  const source = sourceDisplayName((entry.journal ?? entry.source).trim());
+  const when = entry.date ? relTime(entry.date) : "";
+  const zh = entry.zhSummary.trim();
+  const abs = entry.abstractFirst.trim();
+  const authors = entry.authors.trim();
+  const expandedMeta = [authors, source, when].filter(Boolean).join(" · ");
   return (
-    <li className="group rounded-md px-2.5 hover:bg-hover">
-      <div className="flex min-h-10 items-center gap-2">
+    <li className="group rounded-md px-2 py-1.5 hover:bg-hover">
+      <div className="flex min-w-0 items-center gap-2">
         <button
           type="button"
-          className="min-w-0 flex-1 truncate text-left text-sm text-l2"
+          className={`min-w-0 flex-1 text-left text-sm text-l2 ${
+            expanded ? "whitespace-normal" : "truncate"
+          }`}
           onClick={() => setExpanded((v) => !v)}
           title={entry.title}
         >
-          <span
-            ref={titleRef}
-            onMouseEnter={entry.zhSummary ? show : undefined}
-            onMouseLeave={entry.zhSummary ? hide : undefined}
-          >
-            {entry.zhSummary || entry.title}
-          </span>
+          {entry.title}
         </button>
-        {entry.zhSummary && <HoverTip tip={tip} text={entry.title} />}
-        <span className="flex shrink-0 items-center gap-1">
-          {entry.relevance === "推荐" ? (
-            <span className="rounded-full bg-cta-pill px-1.5 py-px text-micro text-cta-pill-text">
-              推荐
-            </span>
-          ) : (
-            <span className="rounded-full border border-field bg-canvas px-1.5 py-px text-micro text-l3">
-              {entry.relevance}
-            </span>
-          )}
-          {entry.metrics?.impactFactor && (
-            <span className="rounded-full bg-canvas px-1.5 py-px text-micro text-l4">
-              IF {entry.metrics.impactFactor}
-            </span>
-          )}
-        </span>
-        {entry.date && (
-          <span className="w-14 shrink-0 text-right text-micro text-l4">
-            {relTime(entry.date)}
-          </span>
-        )}
-        <span className="flex shrink-0 items-center gap-1">
-          <span className="hidden gap-1 group-hover:flex group-focus-within:flex">
+        <RelevancePills entry={entry} />
+        <span className="flex shrink-0 items-center">
+          <span
+            className={`items-center ${
+              open
+                ? "flex"
+                : "hidden group-hover:flex group-focus-within:flex"
+            }`}
+          >
             <button
               type="button"
-              className={actionBtn}
+              className={iconActionClass}
+              title={explain ? "收起解读" : "解读"}
+              aria-label={explain ? "收起解读" : "解读"}
               onClick={explain ? onCloseExplain : onExplain}
             >
-              ◈ 解读
+              ◈
             </button>
             {fulltext.kind === "pdf" && (
               <button
                 ref={pdfRef}
                 type="button"
-                className={actionBtn}
+                className={iconActionClass}
                 disabled={downloading}
                 onMouseEnter={pdfTip.show}
                 onMouseLeave={pdfTip.hide}
                 onClick={onDownload}
+                title={downloading ? "下载中…" : "下载全文"}
+                aria-label={downloading ? "下载中…" : "下载全文"}
               >
-                {downloading ? "↓ 下载中…" : "↓ 全文"}
+                <Download size={13} strokeWidth={1.8} />
               </button>
             )}
             {fulltext.kind === "pdf" && (
@@ -291,17 +364,19 @@ function WatchEntryRow({
             {fulltext.kind === "source" && (
               <button
                 type="button"
-                className={actionBtn}
-                title="没有免费全文直链，打开来源页面获取"
+                className={iconActionClass}
+                title="没有免费全文直链，打开来源页面"
+                aria-label="打开来源"
                 onClick={() => void openUrl(sourceUrl(entry.url))}
               >
-                ↗ 来源
+                <ExternalLink size={13} strokeWidth={1.8} />
               </button>
             )}
             <button
               type="button"
-              className={actionBtn}
+              className={iconActionClass}
               aria-label={`更多操作：${entry.title}`}
+              title="更多"
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 setMenu({ x: rect.right, y: rect.bottom + 4 });
@@ -312,21 +387,44 @@ function WatchEntryRow({
           </span>
           <button
             type="button"
-            className={actionBtn}
+            className={iconActionClass}
             disabled={included}
+            title={included ? "已在精读清单" : "加入精读"}
+            aria-label={included ? "已在精读清单" : "加入精读"}
             onClick={onAddIncluded}
           >
-            {included ? "已在清单" : "→ 精读"}
+            {included ? (
+              <Bookmark size={13} strokeWidth={1.8} />
+            ) : (
+              <BookmarkPlus size={13} strokeWidth={1.8} />
+            )}
           </button>
         </span>
       </div>
-      {entry.abstractFirst && (
-        <p
-          className={`mt-1 cursor-pointer text-xs leading-5 text-l3 ${expanded ? "" : "line-clamp-2"}`}
-          onClick={() => setExpanded((v) => !v)}
+      {!expanded && (scan || when) && (
+        <button
+          type="button"
+          className="mt-0.5 flex w-full min-w-0 items-center gap-2 text-left"
+          onClick={() => setExpanded(true)}
         >
-          {entry.abstractFirst}
-        </p>
+          {scan && (
+            <span className="min-w-0 flex-1 truncate text-micro text-l4">
+              {scan}
+            </span>
+          )}
+          {when && (
+            <span className="ml-auto shrink-0 text-micro text-l4">{when}</span>
+          )}
+        </button>
+      )}
+      {expanded && (zh || abs || expandedMeta) && (
+        <div className="mt-1 space-y-1">
+          {zh && <p className="text-xs leading-5 text-l3">{zh}</p>}
+          {abs && <p className="text-xs leading-5 text-l3">{abs}</p>}
+          {expandedMeta && (
+            <p className="text-micro text-l4">{expandedMeta}</p>
+          )}
+        </div>
       )}
       {explain && (
         <div className="mt-1 rounded-md bg-inset p-2 text-xs leading-5 text-l2">
@@ -982,6 +1080,7 @@ export default function LitWatchCard({
   onConfigChanged,
   focusToken,
   focusEntryId,
+  preferCollapsed = false,
 }: {
   projectRoot: string;
   cfg: ProjectConfigDto;
@@ -992,6 +1091,8 @@ export default function LitWatchCard({
   onConfigChanged: () => void;
   /** 收件箱跳转时切回「新命中」页签。 */
   focusToken?: number | null;
+  /** 有进行中/待验收目标时默认收起，把「项目现在」让出来。 */
+  preferCollapsed?: boolean;
   /** 收件箱点的那一篇：展开这一条 */
   focusEntryId?: string | null;
 }) {
@@ -1038,7 +1139,9 @@ export default function LitWatchCard({
     (s) => s.setWorkspaceReviewRequest,
   );
   const [runMenu, setRunMenu] = useState<{ x: number; y: number } | null>(null);
-  const [bodyOpen, setBodyOpen] = useState(true);
+  const [bodyOpen, setBodyOpen] = useState(() =>
+    preferCollapsed ? false : readLitWatchBodyOpen(projectRoot),
+  );
   const [hitQuery, setHitQuery] = useState("");
   const [showAllHits, setShowAllHits] = useState(false);
 
@@ -1058,12 +1161,21 @@ export default function LitWatchCard({
     [],
   );
 
+  const setRadarOpen = useCallback((open: boolean) => {
+    setBodyOpen(open);
+    writeLitWatchBodyOpen(projectRoot, open);
+  }, [projectRoot]);
+
+  useEffect(() => {
+    setBodyOpen(preferCollapsed ? false : readLitWatchBodyOpen(projectRoot));
+  }, [projectRoot, preferCollapsed]);
+
   useEffect(() => {
     if (focusToken == null) return;
     setTab("new");
-    setBodyOpen(true);
+    setRadarOpen(true);
     if (focusEntryId) setExpandedId(focusEntryId);
-  }, [focusToken, focusEntryId]);
+  }, [focusToken, focusEntryId, setRadarOpen]);
 
   async function load() {
     const [inbox, subList, includedList, scheduleList, notes] =
@@ -1424,7 +1536,7 @@ export default function LitWatchCard({
         <button
           type="button"
           className="flex min-w-0 items-center gap-2 text-left"
-          onClick={() => setBodyOpen((v) => !v)}
+          onClick={() => setRadarOpen(!bodyOpen)}
           aria-expanded={bodyOpen}
         >
           <FoldMark open={bodyOpen} boxed />
@@ -1439,84 +1551,60 @@ export default function LitWatchCard({
           </span>
         )}
         {bodyOpen && (
-          <>
-          <input
-            type="search"
-            value={hitQuery}
-            onChange={(e) => setHitQuery(e.target.value)}
-            placeholder="搜索新命中"
-            className={`${searchFieldClass} ml-auto w-44`}
-            aria-label="搜索新命中"
-          />
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
           {metricsStatus && (
-            <button
-              type="button"
-              className={ghostActionClass}
-              disabled={metricsDownloading}
-              title={
-                metricsStatus.available
-                  ? metricsTooltip(metricsStatus, metricsUpdate, relTime)
-                  : "从第三方仓库 ShowJCR 下载 JCR2025 + 中科院分区表（版权归原数据方，仅供个人科研参考），命中条目即可显示期刊徽章"
+            <HeadIcon
+              label={
+                metricsDownloading
+                  ? "正在下载期刊指标表"
+                  : metricsStatus.available
+                    ? metricsTooltip(metricsStatus, metricsUpdate, relTime)
+                    : "下载期刊指标表"
               }
+              disabled={metricsDownloading}
+              mark={!!metricsUpdate?.hasUpdate}
               onClick={() => void downloadMetrics()}
             >
-              {metricsDownloading
-                ? "下载中…"
-                : metricsStatus.available
-                  ? metricsUpdate?.hasUpdate
-                    ? "↻ 期刊指标表（有新表）"
-                    : "↻ 期刊指标表"
-                  : "↓ 期刊指标表"}
-            </button>
+              {metricsStatus.available ? (
+                <RefreshCw size={13} strokeWidth={1.8} />
+              ) : (
+                <Download size={13} strokeWidth={1.8} />
+              )}
+            </HeadIcon>
           )}
           {radarSchedules.length > 0 && (
-            <button
-              type="button"
-              className={ghostActionClass}
+            <HeadIcon
+              label={running ? "运行中…" : "立即跑"}
               disabled={running}
-              onClick={(e) => {
+              onClick={(event) => {
                 if (radarSchedules.length === 1) void runNow();
                 else {
-                  const rect = e.currentTarget.getBoundingClientRect();
+                  const rect = event.currentTarget.getBoundingClientRect();
                   setRunMenu({ x: rect.right, y: rect.bottom + 4 });
                 }
               }}
             >
-              {running ? "◔ 运行中…" : "⟳ 立即跑"}
-            </button>
+              <Play size={13} strokeWidth={1.8} />
+            </HeadIcon>
           )}
-          <button
-            type="button"
-            className={ghostActionClass}
-            onClick={() => setSubsOpen(true)}
-          >
-            订阅
-          </button>
-          <button
-            type="button"
-            className={ghostActionClass}
-            title={
+          <HeadIcon label="订阅" onClick={() => setSubsOpen(true)}>
+            <Rss size={13} strokeWidth={1.8} />
+          </HeadIcon>
+          <HeadIcon
+            label={
               filterOn
                 ? `当前筛选：${litWatchFilterLabel(filter)}（点我修改）`
-                : "按期刊指标筛选新命中与推送（IF / 中科院分区 / TOP）"
+                : "按期刊指标筛选新命中"
             }
+            mark={filterOn}
             onClick={() => setFilterOpen(true)}
           >
-            筛选
-            {filterOn && (
-              <span className="ml-0.5 inline-block size-1.5 rounded-full bg-cta align-middle" />
-            )}
-          </button>
-          <button
-            type="button"
-            className={ghostActionClass}
-            onClick={onOpenSchedules}
-          >
-            ◔ 定时
-          </button>
+            <ListFilter size={13} strokeWidth={1.8} />
+          </HeadIcon>
+          <HeadIcon label="定时巡检" onClick={onOpenSchedules}>
+            <Clock size={13} strokeWidth={1.8} />
+          </HeadIcon>
         </div>
-          </>
         )}
       </div>
       {bodyOpen &&
@@ -1603,17 +1691,26 @@ export default function LitWatchCard({
                     </button>
                   </p>
                 )}
-                {searchedHits.length > 0 && (
-                  <SegTabs
-                    className="mt-2"
-                    items={[
-                      { id: "day" as const, label: "按日期" },
-                      { id: "keyword" as const, label: "按关键词" },
-                    ]}
-                    value={groupBy}
-                    onChange={setGroupBy}
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {searchedHits.length > 0 && (
+                    <SegTabs
+                      items={[
+                        { id: "day" as const, label: "按日期" },
+                        { id: "keyword" as const, label: "按关键词" },
+                      ]}
+                      value={groupBy}
+                      onChange={setGroupBy}
+                    />
+                  )}
+                  <input
+                    type="search"
+                    value={hitQuery}
+                    onChange={(e) => setHitQuery(e.target.value)}
+                    placeholder="搜索"
+                    className={`${searchFieldClass} ml-auto w-36`}
+                    aria-label="搜索新命中"
                   />
-                )}
+                </div>
                 {searchedHits.length === 0 && (
                   <p className="mt-2 text-xs text-l4">
                     {qHit ? "没有匹配" : "暂无新命中"}
@@ -1745,7 +1842,7 @@ export default function LitWatchCard({
               <LoadingRows compact />
             ) : included.length === 0 ? (
               <p className="mt-2 px-2 text-xs text-l4">
-                还没有精读条目。在「新命中」里点「→ 精读」加进来。
+                还没有精读条目。在「新命中」里点书签加进来。
               </p>
             ) : (
               <IncludedList

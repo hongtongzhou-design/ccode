@@ -37,6 +37,31 @@ export interface StepFlow {
   currentKey: string | null;
 }
 
+function isPaperPdfPath(path: string): boolean {
+  return path.replace(/\\/g, "/").toLowerCase().endsWith(".pdf");
+}
+
+/**
+ * 「开读这一篇」只给示例课题的精读步（检索步 `seedComplete` + 当前步挂 lit-notes + 已有 PDF）。
+ * 普通模板即使登记了文献，流程线也只显示「开始」——不得按「有 PDF」给所有步骤挂这个按钮。
+ */
+export function demoReadPaperResource<T extends { type: string; path: string }>(args: {
+  steps: Array<{ name: string; seedComplete?: boolean; skills: string[] }>;
+  focusStepName?: string | null;
+  resources: T[];
+}): T | undefined {
+  if (!args.focusStepName) return undefined;
+  if (!args.steps.some((s) => s.seedComplete)) return undefined;
+  const focus = args.steps.find((s) => s.name === args.focusStepName);
+  if (!focus?.skills.includes("lit-notes")) return undefined;
+  return args.resources.find((r) => r.type === "paper" && isPaperPdfPath(r.path));
+}
+
+/** 可选分区已经标明「可选」，标题里再写「（可选）」是重复。 */
+export function stripOptionalTitlePrefix(title: string): string {
+  return title.replace(/^（可选）\s*/, "");
+}
+
 export function buildStepFlow(args: {
   step: ProjectStepDto;
   /** 本步骤的人工事项派生状态（已按步骤过滤） */
@@ -103,7 +128,7 @@ export function buildStepFlow(args: {
       key: `human:${h.title}`,
       kind: "human",
       section: h.optional ? "optional" : "main",
-      label: h.title,
+      label: h.optional ? stripOptionalTitlePrefix(h.title) : h.title,
       hint: undefined,
       done: h.done,
       human: h,
@@ -124,7 +149,7 @@ export function buildStepFlow(args: {
       key: `human:${h.title}`,
       kind: "human",
       section: h.optional ? "optional" : "main",
-      label: h.title,
+      label: h.optional ? stripOptionalTitlePrefix(h.title) : h.title,
       hint: undefined,
       done: h.done,
       human: h,
@@ -139,7 +164,7 @@ export function buildStepFlow(args: {
       key: `human:${h.title}`,
       kind: "human",
       section: "main",
-      label: h.title,
+      label: h.optional ? stripOptionalTitlePrefix(h.title) : h.title,
       hint: undefined,
       done: h.done,
       human: h,

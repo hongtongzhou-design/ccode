@@ -34,7 +34,7 @@ pub fn capabilities(kind: RuntimeKind) -> RuntimeCapabilities {
     let can_resume = matches!(kind, RuntimeKind::LocalCli);
     RuntimeCapabilities {
         can_resume,
-        can_stop: !matches!(kind, RuntimeKind::Headless),
+        can_stop: true,
         streams_output: !matches!(kind, RuntimeKind::Headless),
         can_review: true,
         resume_reason: (!can_resume)
@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn capabilities_keep_runtime_boundaries() {
         assert!(capabilities(RuntimeKind::LocalCli).can_resume);
-        assert!(!capabilities(RuntimeKind::Headless).can_stop);
+        assert!(capabilities(RuntimeKind::Headless).can_stop);
         assert!(!capabilities(RuntimeKind::Custom).can_resume);
         assert!(capabilities(RuntimeKind::Custom).can_review);
     }

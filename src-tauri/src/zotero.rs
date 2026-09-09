@@ -386,7 +386,7 @@ fn bib_key(item: &ZoteroItemDto) -> String {
 /// 生成 BibTeX 全文。缺字段一律标「待补」而不是编造——与 lit-notes 技能同一口径。
 pub fn render_bibtex(items: &[ZoteroItemDto]) -> String {
     let mut used: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut out = String::from("% 由 Ccode 从 Zotero 导入生成；缺失字段标「待补」，未编造\n\n");
+    let mut out = String::from("% 由 Mesa 从 Zotero 导入生成；缺失字段标「待补」，未编造\n\n");
     for item in items {
         let base = bib_key(item);
         let n = used.entry(base.clone()).or_insert(0);

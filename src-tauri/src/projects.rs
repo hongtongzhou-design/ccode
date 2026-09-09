@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -88,7 +89,7 @@ pub struct DecisionDto {
     /// 问题（短句；不带问号更好渲染成一行）
     pub q: String,
     /// 可选答案，首项即推荐值（「全部用推荐值」按首项一键应用）；
-    /// 空 options 的条目在解析期丢弃——没有选项的题应该写成 discussion_seeds
+    /// 空 options 保留为需人填写依据的决策，不提供推荐值；讨论种子不算已答决策。
     pub options: Vec<String>,
 }
 
@@ -170,6 +171,10 @@ pub struct ProjectConfigDto {
     /// 它们决定后面每一步，摆在某个步骤的决策项里属层级错配（用户实测反馈）。
     /// 每条一行「问题：答案」，随 TASK.md 下发给每一步。引擎不认识内容，只做透传。
     pub settings: Vec<String>,
+    /// 人在规则编辑器里保存过完整列表。未置位时启动仍补工作方式默认规则。
+    pub rules_owned: bool,
+    /// 验收写回时拒绝覆盖的相对路径（目录或文件）。
+    pub protected_paths: Vec<String>,
     pub artifact_dir: String,
     pub resources: Vec<ResourceDto>,
     pub steps: Vec<StepDto>,
@@ -209,6 +214,8 @@ impl Default for ProjectConfigDto {
         Self {
             topic: None,
             settings: Vec::new(),
+            rules_owned: false,
+            protected_paths: Vec::new(),
             artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
             resources: Vec::new(),
             steps: Vec::new(),
@@ -534,7 +541,7 @@ fn is_registered_at(conn: &Connection, path: &Path) -> bool {
 
 // ===== 项目目录删除（工作区页右键「删除项目目录…」） =====
 // 与「移除注册」相反：删全部工作区 + 目录本身 + 注册记录。主目录走系统回收站（可反悔），
-// 工作区 worktree/分支是 git 元数据只能彻底删。防护宁严勿宽：必须是 Ccode 项目、
+// 工作区 worktree/分支是 git 元数据只能彻底删。防护宁严勿宽：必须是 Mesa 项目、
 // 拒绝主目录/文档目录/浅层路径/系统目录。
 
 /// 目录删除防护：拒绝 home/document_dir 本身、少于两级的浅层路径（防误传 ~/Documents
@@ -626,12 +633,12 @@ fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, Str
     if !dir.is_dir() {
         return Err("目标不是目录，拒绝删除".to_string());
     }
-    // Ccode 项目判定：档案卡、注册记录、工作区记录三者有其一
+    // Mesa 项目判定：档案卡、注册记录、工作区记录三者有其一
     let has_card = config_path(&dir).exists();
     let has_workspaces = !crate::workspaces::workspaces_of_repo(conn, &dir)?.is_empty();
     if !has_card && !is_registered_at(conn, &dir) && !has_workspaces {
         return Err(
-            "该目录不是 Ccode 项目（无 .ccode/project.toml、注册或工作区记录），拒绝删除"
+            "该目录不是 Mesa 项目（无 .ccode/project.toml、注册或工作区记录），拒绝删除"
                 .to_string(),
         );
     }
@@ -654,7 +661,7 @@ fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, Str
     }
 }
 
-/// 清除 Ccode 痕迹（中间档：保留项目文件夹与用户的全部文件，其余 Ccode 痕迹清掉）：
+/// 清除 Mesa 痕迹（中间档：保留项目文件夹与用户的全部文件，其余 Mesa 痕迹清掉）：
 /// 全部工作区（worktree + 分支 + 记录，彻底删——同删除项目目录口径）→ `.ccode/` 移入系统
 /// 回收站（可反悔）→ 摘注册记录。**不自动 git rm/提交**：.ccode 若被 git 跟踪过，删除会显在
 /// 改动面板，由用户自行提交（自动提交用户仓库违反既有纪律；摘要文案里提示）。
@@ -668,7 +675,7 @@ fn purge_project_traces_impl(conn: &Connection, path: &Path) -> Result<String, S
     let registered = is_registered_at(conn, &dir);
     let has_workspaces = !crate::workspaces::workspaces_of_repo(conn, &dir)?.is_empty();
     if !has_ccode && !registered && !has_workspaces {
-        return Err("该目录没有 Ccode 痕迹（无 .ccode、注册或工作区记录）".to_string());
+        return Err("该目录没有 Mesa 痕迹（无 .ccode、注册或工作区记录）".to_string());
     }
     // 工作区任一删除失败即中止（已删的不回滚），错误信息由 workspaces 层说明已删哪些
     let deleted = crate::workspaces::delete_workspaces_for_repo(conn, &dir)?;
@@ -710,11 +717,11 @@ fn config_path(project: &Path) -> PathBuf {
 /// 档案卡文件头。Git 客户端把未跟踪的 `.ccode/` 当普通改动，丢弃后
 /// `work_mode` 丢失，已添加项目按科研重分类。写入时缺则补、已有不重复。
 const PROJECT_TOML_HEADER: &str = "\
-# Ccode 项目档案卡（工作方式 / 研究流程 / 资源清单）。\n\
+# Mesa 项目档案卡（工作方式 / 研究流程 / 资源清单）。\n\
 # 删掉此文件后，已添加的项目会按「科研」重新分类。请勿在 Git 客户端里丢弃未跟踪的 .ccode/。\n";
 
 fn with_project_toml_header(text: String) -> String {
-    if text.contains("Ccode 项目档案卡") {
+    if text.contains("Mesa 项目档案卡") || text.contains("Ccode 项目档案卡") {
         return text;
     }
     if text.is_empty() {
@@ -841,6 +848,57 @@ fn normalize_resource_type(kind: &str) -> String {
     }
 }
 
+fn normalize_protected_paths(raw: &[String]) -> Vec<String> {
+    let mut unique = Vec::new();
+    for path in raw {
+        let path = path.trim().replace('\\', "/");
+        let path = path.trim_matches('/').to_string();
+        if path.is_empty() || path == "." {
+            continue;
+        }
+        if path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            continue;
+        }
+        if !unique.contains(&path) {
+            unique.push(path);
+        }
+    }
+    unique.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    let mut kept = Vec::new();
+    for path in unique {
+        if kept.iter().any(|parent: &String| {
+            path == *parent || path.starts_with(&format!("{parent}/"))
+        }) {
+            continue;
+        }
+        kept.push(path);
+    }
+    kept
+}
+
+/// 保护路径命中判定：按文件系统默认语义折叠大小写（macOS 默认 APFS / Windows NTFS
+/// 都大小写不敏感，仅改大小写的路径在盘上是同一个文件），防止 `raw/` 绕过 `RAW/` 保护。
+pub(crate) fn path_is_protected(relative: &str, protected: &[String]) -> bool {
+    let path = relative.replace('\\', "/");
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        return false;
+    }
+    let key = crate::paths::path_key_folded(path);
+    protected.iter().any(|item| {
+        let parent = item.replace('\\', "/");
+        let parent = parent.trim_matches('/');
+        if parent.is_empty() {
+            return false;
+        }
+        let parent = crate::paths::path_key_folded(parent);
+        key == parent || key.starts_with(&format!("{parent}/"))
+    })
+}
+
 fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
     let mut warnings = Vec::new();
     let value: toml::Value = match toml::from_str(text) {
@@ -877,6 +935,26 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                 .collect();
         }
         Some(_) => warnings.push("settings 不是字符串数组，已忽略".to_string()),
+    }
+    match value.get("rules_owned") {
+        None => {}
+        Some(toml::Value::Boolean(b)) => config.rules_owned = *b,
+        Some(_) => warnings.push("rules_owned 不是布尔值，已忽略".to_string()),
+    }
+    match value.get("protected_paths") {
+        None => {}
+        Some(toml::Value::Array(arr)) => {
+            if arr.iter().any(|v| v.as_str().is_none()) {
+                warnings.push("protected_paths 含非字符串项，已忽略这些项".to_string());
+            }
+            config.protected_paths = normalize_protected_paths(
+                &arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        Some(_) => warnings.push("protected_paths 不是字符串数组，已忽略".to_string()),
     }
     match value.get("artifact_dir") {
         None => {}
@@ -1085,8 +1163,7 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                             .map(|d| d.trim().to_string())
                             .filter(|d| !d.is_empty())
                             .collect(),
-                        // 决策项：q 与 options 都要非空——没有选项的题该写成 discussion_seeds，
-                        // 留个空壳在这儿只会渲染出一行点不动的问句
+                        // 空选项是需人工填写的依据；不能在持久化后静默删除硬暂停条件。
                         decisions: s
                             .decisions
                             .into_iter()
@@ -1099,7 +1176,7 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
                                     .filter(|o| !o.is_empty())
                                     .collect(),
                             })
-                            .filter(|d| !d.q.is_empty() && !d.options.is_empty())
+                            .filter(|d| !d.q.is_empty())
                             .collect(),
                         asks_lit_source: s.asks_lit_source,
                         seed_complete: s.seed_complete,
@@ -1262,6 +1339,42 @@ pub(crate) fn read_config_at(project: &Path) -> ProjectConfigReadDto {
     }
 }
 
+/// 验收写回/验收合并专用的保护路径读取（fail-closed）：`read_config_at` 的容错口径
+/// 是「坏字段进 warnings、按空配置继续展示」，但写回主仓前不能按「没有保护」继续——
+/// project.toml 存在却读不出/解析失败、或 protected_paths 键类型不对（含数组里混
+/// 非字符串项）时，保护清单不可信，必须拒绝本次写回，由用户先修复档案卡。
+pub(crate) fn protected_paths_at(project: &Path) -> Result<Vec<String>, String> {
+    let path = config_path(project);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(&path).map_err(|e| {
+        format!("读取 project.toml 失败，无法确认保护路径，已拒绝本次写回: {e}")
+    })?;
+    let value: toml::Value = toml::from_str(&text).map_err(|e| {
+        format!("project.toml 解析失败，无法确认保护路径，已拒绝本次写回: {e}")
+    })?;
+    match value.get("protected_paths") {
+        None => Ok(Vec::new()),
+        Some(toml::Value::Array(arr)) => {
+            let mut raw = Vec::with_capacity(arr.len());
+            for item in arr {
+                match item.as_str() {
+                    Some(s) => raw.push(s.to_string()),
+                    None => {
+                        return Err(
+                            "protected_paths 含非字符串项，无法确认保护路径，已拒绝本次写回"
+                                .into(),
+                        )
+                    }
+                }
+            }
+            Ok(normalize_protected_paths(&raw))
+        }
+        Some(_) => Err("protected_paths 不是字符串数组，无法确认保护路径，已拒绝本次写回".into()),
+    }
+}
+
 /// RX3a 对话步骤化：workspace_name → 步骤名映射（会话列表按步骤标注/搜索/分组用）。
 /// 读不到配置返回空映射，与 read_project_config 的容错风格一致（宁缺勿阻断）。
 pub(crate) fn step_names_at(project: &Path) -> std::collections::HashMap<String, String> {
@@ -1307,6 +1420,21 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
             arr.push(*x);
         }
         doc["settings"] = value(arr);
+    }
+    if config.rules_owned {
+        doc["rules_owned"] = value(true);
+    } else {
+        doc.remove("rules_owned");
+    }
+    let protected_paths = normalize_protected_paths(&config.protected_paths);
+    if protected_paths.is_empty() {
+        doc.remove("protected_paths");
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for path in &protected_paths {
+            arr.push(path.as_str());
+        }
+        doc["protected_paths"] = value(arr);
     }
     let artifact_dir = if config.artifact_dir.trim().is_empty() {
         DEFAULT_ARTIFACT_DIR
@@ -1495,7 +1623,7 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
                 }
                 t["discussion_seeds"] = value(seeds);
             }
-            // 决策项：空数组省略不写（同上）；options 恒非空（解析期已丢弃空条目）
+            // 决策项：空数组省略；options 可为空，表示必须手写依据而非选择推荐值。
             if !s.decisions.is_empty() {
                 let mut ds = ArrayOfTables::new();
                 for d in &s.decisions {
@@ -1525,6 +1653,87 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
         doc["steps"] = Item::ArrayOfTables(arr);
     }
     Ok(with_project_toml_header(doc.to_string()))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AcceptedGoalStatusDto {
+    pub name: String,
+    pub outputs: Vec<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProjectStatusDto {
+    pub accepted: Vec<AcceptedGoalStatusDto>,
+}
+
+fn project_status_path(root: &Path) -> PathBuf {
+    root.join(".ccode").join("project-status.json")
+}
+
+pub(crate) fn read_project_status_at(root: &Path) -> ProjectStatusDto {
+    let path = project_status_path(root);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return ProjectStatusDto::default(),
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+pub(crate) fn record_accepted_goal_at(
+    root: &Path,
+    name: &str,
+    outputs: &[String],
+    note: &str,
+) -> Result<(), String> {
+    let mut status = read_project_status_at(root);
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    status.accepted.retain(|item| item.name != name);
+    status.accepted.insert(
+        0,
+        AcceptedGoalStatusDto {
+            name: name.to_string(),
+            outputs: outputs
+                .iter()
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty() && item != ".")
+                .collect(),
+            note: note.trim().to_string(),
+        },
+    );
+    status.accepted.truncate(20);
+    let dir = root.join(".ccode");
+    fs::create_dir_all(&dir).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
+    let text = serde_json::to_string_pretty(&status).map_err(|e| e.to_string())?;
+    crate::profiles::atomic_write(&project_status_path(root), &text)
+}
+
+pub(crate) fn remove_accepted_goal_at(root: &Path, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    let mut status = read_project_status_at(root);
+    let before = status.accepted.len();
+    status.accepted.retain(|item| item.name != name);
+    if status.accepted.len() == before {
+        return Ok(());
+    }
+    let dir = root.join(".ccode");
+    fs::create_dir_all(&dir).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
+    let text = serde_json::to_string_pretty(&status).map_err(|e| e.to_string())?;
+    crate::profiles::atomic_write(&project_status_path(root), &text)
+}
+
+#[tauri::command]
+pub fn read_project_status(path: String) -> Result<ProjectStatusDto, String> {
+    let root = PathBuf::from(crate::sessions::expand_tilde(&path));
+    Ok(read_project_status_at(&root))
 }
 
 pub(crate) fn write_config_at(project: &Path, config: &ProjectConfigDto) -> Result<(), String> {
@@ -1587,6 +1796,12 @@ pub struct TaskDraftDto {
     pub rel_path: String,
     /// 草稿全文；不存在为 null
     pub text: Option<String>,
+    /// 完整 UTF-8 内容的 SHA-256；文件不存在为 null，保存必须带回同一版本
+    pub revision: Option<String>,
+}
+
+fn draft_revision(text: Option<&str>) -> Option<String> {
+    text.map(|t| format!("{:x}", Sha256::digest(t.as_bytes())))
 }
 
 /// 读步骤任务书草稿（list 口径无门槛：非项目/无草稿返回 text=null）
@@ -1606,9 +1821,11 @@ pub async fn read_task_draft(
             .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
         let rel = draft_rel_path(&step.name, &step.workspace_name);
         let text = fs::read_to_string(root.join(&rel)).ok();
+        let revision = draft_revision(text.as_deref());
         Ok(TaskDraftDto {
             rel_path: rel,
             text,
+            revision,
         })
     })
     .await
@@ -1817,7 +2034,7 @@ pub(crate) fn ensure_task_project_root(project_root: &Path) -> Result<PathBuf, S
     }
     let conn = db()?;
     if !is_registered_at(&conn, &root) && !config_path(&root).exists() {
-        return Err("该目录不是 Ccode 项目（未注册且无 .ccode/project.toml）".into());
+        return Err("该目录不是 Mesa 项目（未注册且无 .ccode/project.toml）".into());
     }
     Ok(root)
 }
@@ -2002,20 +2219,20 @@ fn discover_at(project: &Path) -> Result<Vec<DiscoveredResourceDto>, String> {
 
 fn gitignore_text(work_mode: &str, artifact_dir: &str) -> String {
     if work_mode == "coding" {
-        return "# Ccode 生成：系统垃圾与过程文件不进 git\n\
+        return "# Mesa 生成：系统垃圾与过程文件不进 git\n\
              .DS_Store\n\
              \n\
-             # Ccode 过程文件\n\
+             # Mesa 过程文件\n\
              .ccode/handoff-*.md\n\
              /output/\n"
             .into();
     }
     format!(
-        "# Ccode 生成：产物与系统垃圾不进 git\n\
+        "# Mesa 生成：产物与系统垃圾不进 git\n\
          /{artifact_dir}/\n\
          .DS_Store\n\
          \n\
-         # Ccode 接力简报：过程文件，不进版本库\n\
+         # Mesa 接力简报：过程文件，不进版本库\n\
          .ccode/handoff-*.md\n\
          \n\
          # 文献 PDF 等大文件登记为资源引用，不进 git\n\
@@ -2080,12 +2297,12 @@ fn ensure_git_at_mode(project: &Path, work_mode: &str) -> Result<EnsureGitDto, S
     })
 }
 
-// ===== 开步自动提交：只把 .ccode 与 .gitignore 两个 Ccode 自有路径提交进主仓库 =====
+// ===== 开步自动提交：只把 .ccode 与 .gitignore 两个 Mesa 自有路径提交进主仓库 =====
 // 背景：git init 后档案卡（.ccode/project.toml）与 .gitignore 长期未跟踪，
 // 工作区评审合并会被「主仓库有未提交改动」拦截。此命令只碰这两个路径，
 // 用户其他文件（PDF 等）绝不纳入——commit 同样带 pathspec，防止扫进用户已暂存的内容。
 
-/// 开步自动提交只处理的两个 Ccode 自有路径（literal pathspec，无 glob 展开）
+/// 开步自动提交只处理的两个 Mesa 自有路径（literal pathspec，无 glob 展开）
 const BOOTSTRAP_PATHS: [&str; 2] = [".ccode", ".gitignore"];
 
 fn commit_bootstrap_at(repo: &Path) -> Result<BootstrapCommitDto, String> {
@@ -2150,7 +2367,7 @@ fn commit_bootstrap_at(repo: &Path) -> Result<BootstrapCommitDto, String> {
     };
     let mut args: Vec<&str> = vec!["-c", "commit.gpgsign=false", "--literal-pathspecs"];
     if !configured("user.name") {
-        args.extend(["-c", "user.name=Ccode"]);
+        args.extend(["-c", "user.name=Mesa"]);
     }
     if !configured("user.email") {
         args.extend(["-c", "user.email=ccode@localhost"]);
@@ -2159,7 +2376,7 @@ fn commit_bootstrap_at(repo: &Path) -> Result<BootstrapCommitDto, String> {
     args.extend([
         "commit",
         "-m",
-        "Ccode: 项目档案卡与 gitignore 自动提交",
+        "Mesa: 项目档案卡与 gitignore 自动提交",
         "--",
     ]);
     args.extend(existing.iter().copied());
@@ -2199,12 +2416,12 @@ fn commit_demo_seed_at(repo: &Path) -> Result<(), String> {
     };
     let mut args: Vec<&str> = vec!["-c", "commit.gpgsign=false", "--literal-pathspecs"];
     if !configured("user.name") {
-        args.extend(["-c", "user.name=Ccode"]);
+        args.extend(["-c", "user.name=Mesa"]);
     }
     if !configured("user.email") {
         args.extend(["-c", "user.email=ccode@localhost"]);
     }
-    args.extend(["commit", "-m", "Ccode: 示例课题检索步演示产物", "--"]);
+    args.extend(["commit", "-m", "Mesa: 示例课题检索步演示产物", "--"]);
     args.extend(existing.iter().copied());
     crate::workspaces::run_git(repo, &args, T)?;
     Ok(())
@@ -2346,7 +2563,7 @@ pub async fn delete_project_dir(path: String) -> Result<String, String> {
     .map_err(|e| format!("删除项目目录失败: {e}"))?
 }
 
-/// 清除 Ccode 痕迹（保留文件夹）：全部工作区 + `.ccode/`（回收站）+ 注册记录。
+/// 清除 Mesa 痕迹（保留文件夹）：全部工作区 + `.ccode/`（回收站）+ 注册记录。
 /// 返回中文成功摘要（如「已清除：2 个工作区、档案卡与简报（回收站）、注册记录」）。
 #[tauri::command]
 pub async fn purge_project_traces(path: String) -> Result<String, String> {
@@ -2356,7 +2573,7 @@ pub async fn purge_project_traces(path: String) -> Result<String, String> {
         purge_project_traces_impl(&conn, &project)
     })
     .await
-    .map_err(|e| format!("清除 Ccode 痕迹失败: {e}"))?
+    .map_err(|e| format!("清除 Mesa 痕迹失败: {e}"))?
 }
 
 #[tauri::command]
@@ -2490,7 +2707,7 @@ pub async fn ensure_git_repo(
     .map_err(|e| format!("git 初始化失败: {e}"))?
 }
 
-/// 一键开步前置：把 .ccode 与 .gitignore 两个 Ccode 自有路径提交进主仓库。
+/// 一键开步前置：把 .ccode 与 .gitignore 两个 Mesa 自有路径提交进主仓库。
 /// 幂等：无改动返回 committed=false；非仓库报错（前端开步流程已先走 ensure_git_repo）。
 #[tauri::command]
 pub async fn commit_project_bootstrap(repo_path: String) -> Result<BootstrapCommitDto, String> {
@@ -2678,30 +2895,57 @@ pub async fn fuse_card_into_draft(
     .map_err(|e| format!("融合进任务书失败: {e}"))?
 }
 
+fn write_task_draft_at(
+    root: &Path,
+    step_name: &str,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<TaskDraftDto, String> {
+    let cfg = read_config_at(root).config;
+    let step = cfg
+        .steps
+        .iter()
+        .find(|s| s.name == step_name)
+        .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
+    let rel = draft_rel_path(&step.name, &step.workspace_name);
+    let path = root.join(&rel);
+    let current = fs::read_to_string(&path).ok();
+    let current_rev = draft_revision(current.as_deref());
+    if current_rev.as_deref() != expected_revision {
+        return Err(
+            "任务书已被 Agent 或其他程序修改，未覆盖磁盘内容。请先保留本次编辑，再重新打开对比。"
+                .into(),
+        );
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建草稿目录失败: {e}"))?;
+    }
+    crate::profiles::atomic_write(&path, content)?;
+    Ok(TaskDraftDto {
+        rel_path: rel,
+        text: Some(content.to_string()),
+        revision: draft_revision(Some(content)),
+    })
+}
+
 /// 整份覆盖写任务书草稿（融合稿确认落盘用；读-改-原子写同 drafts 口径：路径单一出处
-/// draft_rel_path，atomic_write，父目录缺失自动建）
+/// draft_rel_path，atomic_write，父目录缺失自动建）。保存必须携带读取时的 revision。
 #[tauri::command]
 pub async fn write_task_draft(
     project_root: String,
     step_name: String,
     content: String,
-) -> Result<String, String> {
+    expected_revision: Option<String>,
+) -> Result<TaskDraftDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root =
             ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
-        let cfg = read_config_at(&root).config;
-        let step = cfg
-            .steps
-            .iter()
-            .find(|s| s.name == step_name)
-            .ok_or_else(|| format!("步骤不存在: {step_name}"))?;
-        let rel = draft_rel_path(&step.name, &step.workspace_name);
-        let path = root.join(&rel);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("创建草稿目录失败: {e}"))?;
-        }
-        crate::profiles::atomic_write(&path, &content)?;
-        Ok(rel)
+        write_task_draft_at(
+            &root,
+            &step_name,
+            &content,
+            expected_revision.as_deref(),
+        )
     })
     .await
     .map_err(|e| format!("写入任务书草稿失败: {e}"))?
@@ -2743,7 +2987,7 @@ const DEMO_README: &str = r#"# 示例课题（演示）
 15 分钟走完「开读一篇文献」：检索步已经筛完，点「开读这一篇」进入笔记｜PDF｜终端三栏。
 划一段写进笔记，看左边大圆下一步是「综述大纲」。完整五步留给你自己的课题。
 
-- `papers/included.md`：一篇演示纳入文献；
+- `papers/included.md` / `papers/included.json`：同一篇演示纳入文献与稳定 ID；演示 PDF 不可作为真实全文证据；
 - `papers/Liraglutide-and-Cardiovascular-Outcomes-in-Type-2-Diabetes.pdf`：可划词的一页摘要（演示文件，不是真论文）；
 - `references.bib`：LEADER / SUSTAIN-6 两条真实引文。
 
@@ -2752,7 +2996,12 @@ const DEMO_README: &str = r#"# 示例课题（演示）
 
 const DEMO_INCLUDED: &str = "Liraglutide and Cardiovascular Outcomes in Type 2 Diabetes — Marso SP, 2016 — N Engl J Med — https://doi.org/10.1056/NEJMoa1603827\n";
 
-const DEMO_SCREENING: &str = "# 筛选记录（演示）\n\n检索主题假设：GLP-1 受体激动剂的心血管结局。\n\n本课题是 Ccode 示例，检索步已预置完成，不必再跑 OpenAlex。\n纳入 1 篇：Marso 2016 LEADER（见 papers/included.md）。\n";
+const DEMO_INCLUDED_JSON: &str = r#"[
+  {"id":"leader-2016-demo","title":"Liraglutide and Cardiovascular Outcomes in Type 2 Diabetes","decision":"included","reason":"演示纳入，仅用于阅读操作；演示 PDF 不是真实全文，不可作为科研证据","fulltextStatus":"demo-only"}
+]
+"#;
+
+const DEMO_SCREENING: &str = "# 筛选记录（演示）\n\n检索主题假设：GLP-1 受体激动剂的心血管结局。\n\n本课题是 Mesa 示例，检索步已预置完成，不必再跑 OpenAlex。\n纳入 1 篇：Marso 2016 LEADER（见 papers/included.md）。\n";
 
 const DEMO_TO_FETCH: &str = "# 待获取全文（演示）\n\n（无付费文献）\n";
 
@@ -2840,6 +3089,8 @@ struct ReviewTemplateFile {
     steps: Vec<StepDto>,
     #[serde(default, rename = "projectSettings")]
     project_settings: Vec<String>,
+    #[serde(default, rename = "projectRules")]
+    project_rules: Vec<String>,
 }
 
 const REVIEW_TEMPLATE_JSON: &str = include_str!("../resources/pipeline-review.json");
@@ -2860,7 +3111,17 @@ fn demo_project_config() -> ProjectConfigDto {
     }
     ProjectConfigDto {
         topic: Some("GLP-1 受体激动剂的心血管结局（演示课题）".into()),
-        settings: file.project_settings,
+        settings: {
+            let mut lines = file.project_rules;
+            lines.extend(
+                file.project_settings
+                    .into_iter()
+                    .filter(|line| !setting_is_placeholder(line)),
+            );
+            lines
+        },
+        rules_owned: false,
+        protected_paths: Vec::new(),
         artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
         resources: vec![
             ResourceDto {
@@ -2892,9 +3153,10 @@ fn demo_project_config() -> ProjectConfigDto {
 /// 让新用户点开第一步就理解草稿的用途（对话是过程，草稿是下一步任务书的积累区）。
 const DEMO_STEP_DRAFT: &str = "结论：先精读演示里这一篇 LEADER 试验摘要，再决定要不要开工「文献精读与笔记」。\n\n\
 - 请用「开读这一篇」进三栏（笔记｜PDF｜终端），划一段写进笔记；\n\
-- 检索步已预置完成，不必先跑 OpenAlex；\n\
+- 检索步已预置完成，不必先跑 OpenAlex；演示 PDF 不是真实全文，只用于阅读操作，不据此形成科研结论；\n\
+- 若交付精读笔记，notes/index.json 沿用 papers/included.json 的 id，填写 notePath/bibKey/fulltextStatus（demo-only）/reviewStatus（pending）；\n\
 - 下一步大圆是「综述大纲」。\n\n\
-—— 这是 Ccode 预置的示范草稿。你自己的草稿由「评审沉淀 / ◈ 提炼接力」追加到这里（.ccode/drafts/）。";
+—— 这是 Mesa 预置的示范草稿。你自己的草稿由「评审沉淀 / ◈ 提炼接力」追加到这里（.ccode/drafts/）。";
 
 /// 预置演示任务卡 + 第一步示范任务书草稿（best-effort：播种失败不阻断示例课题创建；
 /// 幂等由 create_demo_at 顶部的早退保证——已注册直接返回、已存在目录只注册不补建）。
@@ -2950,6 +3212,7 @@ fn create_demo_at(base: &Path, conn: &Connection) -> Result<ProjectDto, String> 
     fs::write(dir.join(DEMO_PDF_REL), build_demo_pdf())
         .map_err(|e| format!("写入示例 PDF 失败: {e}"))?;
     crate::profiles::atomic_write(&dir.join("papers/included.md"), DEMO_INCLUDED)?;
+    crate::profiles::atomic_write(&dir.join("papers/included.json"), DEMO_INCLUDED_JSON)?;
     crate::profiles::atomic_write(&dir.join("papers/screening.md"), DEMO_SCREENING)?;
     crate::profiles::atomic_write(&dir.join("papers/to-fetch.md"), DEMO_TO_FETCH)?;
     crate::profiles::atomic_write(&dir.join("papers/to-fetch.ris"), DEMO_TO_FETCH_RIS)?;
@@ -3175,7 +3438,7 @@ pub async fn pdf_owner_project(pdf_path: String) -> Result<Option<ProjectDto>, S
 
 /// 首次创建 inbox.md 时的文件头（注明来源与用途）
 const INBOX_HEADER: &str = "# 文献摘录收件箱\n\n\
-     > 由 Ccode「整理为笔记」从 PDF 选段自动追加；整理进结构化笔记后可清理对应条目。\n";
+     > 由 Mesa「整理为笔记」从 PDF 选段自动追加；整理进结构化笔记后可清理对应条目。\n";
 
 /// 追加语义 + 白名单（同步函数供测试）：
 /// 目标固定为工作区根内 notes/inbox.md（不接受外部传入子路径），单次追加 ≤ 64 KB；
@@ -3341,7 +3604,7 @@ pub async fn save_pipeline_template(
 ) -> Result<PipelineTemplateDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // 与 profiles/settings 共用同一把读-改-写锁，防并发保存互相覆盖
-        let _g = crate::profiles::store_lock();
+        let _g = crate::profiles::store_lock()?;
         save_template_at(&templates_path()?, &name, &description, steps)
     })
     .await
@@ -3351,7 +3614,7 @@ pub async fn save_pipeline_template(
 #[tauri::command]
 pub async fn delete_pipeline_template(id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let _g = crate::profiles::store_lock();
+        let _g = crate::profiles::store_lock()?;
         delete_template_at(&templates_path()?, &id)
     })
     .await
@@ -3434,7 +3697,7 @@ pub(crate) fn merge_project_settings(existing: &mut Vec<String>, candidates: &[S
             if setting_is_placeholder(&existing[index]) && !setting_is_placeholder(candidate) {
                 existing[index] = candidate.to_string();
             }
-        } else {
+        } else if !setting_is_placeholder(candidate) {
             existing.push(candidate.to_string());
         }
     }
@@ -3552,6 +3815,7 @@ pub(crate) fn apply_pipeline_template_at(
         }
     }
 
+    cfg.settings.retain(|line| !setting_is_placeholder(line));
     merge_project_settings(&mut cfg.settings, &project_settings);
     let has_topic = topic
         .as_deref()
@@ -3756,6 +4020,8 @@ mod tests {
         ProjectConfigDto {
             topic: None,
             settings: Vec::new(),
+            rules_owned: false,
+            protected_paths: Vec::new(),
             artifact_dir: "outputs".into(),
             resources: vec![
                 ResourceDto {
@@ -4026,6 +4292,8 @@ type = "paper"
         let config = ProjectConfigDto {
             topic: None,
             settings: Vec::new(),
+            rules_owned: false,
+            protected_paths: Vec::new(),
             artifact_dir: "new-out".into(),
             resources: vec![ResourceDto {
                 name: "新资源".into(),
@@ -4107,6 +4375,104 @@ type = "paper"
         let (config, warnings) = parse_config("topic = 42\n");
         assert_eq!(config.topic, None);
         assert_eq!(warnings.len(), 1, "坏 topic 要报告: {warnings:?}");
+    }
+
+    #[test]
+    fn protected_paths_and_rules_owned_round_trip() {
+        let text = r#"settings = ["只写中文"]
+rules_owned = true
+protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
+"#;
+        let (config, warnings) = parse_config(text);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(config.rules_owned);
+        assert_eq!(config.protected_paths, vec!["数据/raw".to_string()]);
+        assert!(!path_is_protected("论文/综述.md", &config.protected_paths));
+        assert!(path_is_protected("数据/raw/a.csv", &config.protected_paths));
+        let rendered = render_config(Some(text), &config).unwrap();
+        let (back, _) = parse_config(&rendered);
+        assert_eq!(back.protected_paths, config.protected_paths);
+        assert!(back.rules_owned);
+        let cleared = ProjectConfigDto {
+            rules_owned: false,
+            protected_paths: Vec::new(),
+            ..config
+        };
+        let rendered = render_config(Some(&rendered), &cleared).unwrap();
+        assert!(!rendered.contains("rules_owned"));
+        assert!(!rendered.contains("protected_paths"));
+    }
+
+    #[test]
+    fn path_is_protected_matches_case_insensitively() {
+        // 保护 RAW/ 时，macOS 默认 APFS 上 raw/a.txt 在盘上是同一个文件，必须拦
+        let protected = vec!["RAW".to_string()];
+        assert!(path_is_protected("raw/a.txt", &protected));
+        assert!(path_is_protected("Raw", &protected));
+        assert!(!path_is_protected("rawish/a.txt", &protected));
+        assert!(!path_is_protected("raw", &[]));
+    }
+
+    #[test]
+    fn parse_config_warns_on_non_string_protected_path_items() {
+        let (config, warnings) = parse_config("protected_paths = [\"raw\", 42]\n");
+        assert_eq!(config.protected_paths, vec!["raw".to_string()]);
+        assert_eq!(warnings.len(), 1, "混入非字符串项要报告: {warnings:?}");
+    }
+
+    #[test]
+    fn protected_paths_at_fail_closed_on_broken_config() {
+        // 档案卡不存在 = 没配保护，正常放行
+        let dir = temp_dir("protected-ok");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(protected_paths_at(&root).unwrap(), Vec::<String>::new());
+
+        // 正常配置读出保护清单
+        std::fs::create_dir_all(root.join(".ccode")).unwrap();
+        write(
+            &root.join(".ccode/project.toml"),
+            "protected_paths = [\"数据/raw\"]\n",
+        );
+        assert_eq!(
+            protected_paths_at(&root).unwrap(),
+            vec!["数据/raw".to_string()]
+        );
+
+        // 整份解析失败 / 键类型不对 / 数组混入非字符串：保护清单不可信，一律拒绝
+        write(&root.join(".ccode/project.toml"), "protected_paths = [\"raw\"\n");
+        let err = protected_paths_at(&root).unwrap_err();
+        assert!(err.contains("无法确认保护路径"), "{err}");
+        write(&root.join(".ccode/project.toml"), "protected_paths = \"raw\"\n");
+        assert!(protected_paths_at(&root).is_err());
+        write(
+            &root.join(".ccode/project.toml"),
+            "protected_paths = [\"raw\", 42]\n",
+        );
+        assert!(protected_paths_at(&root).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn project_status_records_accepted_goals() {
+        let dir = temp_dir("project-status");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        record_accepted_goal_at(&root, "研究综述", &["论文/综述.md".into()], "引用太少")
+            .unwrap();
+        record_accepted_goal_at(&root, "研究综述", &["论文/综述.md".into()], "已补")
+            .unwrap();
+        record_accepted_goal_at(&root, "数据清洗", &["data/clean.csv".into()], "")
+            .unwrap();
+        let status = read_project_status_at(&root);
+        assert_eq!(status.accepted[0].name, "数据清洗");
+        assert_eq!(status.accepted[1].name, "研究综述");
+        assert_eq!(status.accepted[1].note, "已补");
+        remove_accepted_goal_at(&root, "研究综述").unwrap();
+        let status = read_project_status_at(&root);
+        assert_eq!(status.accepted.len(), 1);
+        assert_eq!(status.accepted[0].name, "数据清洗");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ===== 步骤资源绑定（resources 字段与 validate_step） =====
@@ -4565,7 +4931,7 @@ resources = ["ghost.pdf"]
             r.paths
         );
 
-        // HEAD 树里只有 Ccode 自有路径
+        // HEAD 树里只有 Mesa 自有路径
         let tree = git_ok(&project, &["ls-tree", "-r", "--name-only", "HEAD"]);
         assert!(
             tree.contains(".gitignore") && tree.contains(".ccode/project.toml"),
@@ -4927,7 +5293,7 @@ resources = ["ghost.pdf"]
         let raw = fs::read_to_string(config_path(&root)).unwrap();
         assert!(raw.contains("work_mode = \"coding\""), "{raw}");
         assert!(
-            raw.contains("Ccode 项目档案卡"),
+            raw.contains("Mesa 项目档案卡"),
             "新建档案卡必须带勿删文件头: {raw}"
         );
         assert_eq!(read_config_at(&root).config.work_mode, "coding");
@@ -4947,24 +5313,34 @@ resources = ["ghost.pdf"]
             ..ProjectConfigDto::default()
         };
         let first = render_config(None, &config).unwrap();
-        assert!(first.contains("Ccode 项目档案卡"), "{first}");
+        assert!(first.contains("Mesa 项目档案卡"), "{first}");
         assert!(first.contains("按「科研」重新分类"), "{first}");
         assert!(first.contains("work_mode = \"coding\""), "{first}");
-        assert_eq!(first.matches("Ccode 项目档案卡").count(), 1);
+        assert_eq!(first.matches("Mesa 项目档案卡").count(), 1);
         let second = render_config(Some(&first), &config).unwrap();
         assert_eq!(
-            second.matches("Ccode 项目档案卡").count(),
+            second.matches("Mesa 项目档案卡").count(),
             1,
             "已有文件头不得重复: {second}"
         );
         let custom = "# 用户手写注释\nartifact_dir = \"out\"\n";
         let mixed = render_config(Some(custom), &config).unwrap();
-        assert!(mixed.contains("Ccode 项目档案卡"), "{mixed}");
+        assert!(mixed.contains("Mesa 项目档案卡"), "{mixed}");
         assert!(mixed.contains("# 用户手写注释"), "{mixed}");
-        assert_eq!(mixed.matches("Ccode 项目档案卡").count(), 1);
+        assert_eq!(mixed.matches("Mesa 项目档案卡").count(), 1);
         let tasks = render_tasks(Some(custom), &[]).unwrap();
-        assert!(tasks.contains("Ccode 项目档案卡"), "{tasks}");
+        assert!(tasks.contains("Mesa 项目档案卡"), "{tasks}");
         assert!(tasks.contains("# 用户手写注释"), "{tasks}");
+        let legacy = "# Ccode 项目档案卡（工作方式 / 研究流程 / 资源清单）。\nwork_mode = \"coding\"\n";
+        let kept = render_config(Some(legacy), &config).unwrap();
+        assert!(
+            kept.contains("Ccode 项目档案卡"),
+            "旧文件头必须保留: {kept}"
+        );
+        assert!(
+            !kept.contains("Mesa 项目档案卡"),
+            "旧文件头不得再插 Mesa 头: {kept}"
+        );
     }
 
     // ===== pipeline_opt_out（「不使用研究流程」显式标记） =====
@@ -5219,7 +5595,7 @@ resources = ["ghost.pdf"]
         write(&plain.join("a.txt"), "x");
         // 无 .ccode/project.toml 且未注册 → 写门槛拒绝（查询真实注册表，随机路径必未注册）
         let err = ensure_task_project_root(&plain).unwrap_err();
-        assert!(err.contains("不是 Ccode 项目"), "{err}");
+        assert!(err.contains("不是 Mesa 项目"), "{err}");
         assert!(!config_path(&plain).exists(), "拒绝后不得留下档案卡");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -5274,6 +5650,9 @@ resources = ["ghost.pdf"]
         assert!(root.join("notes").is_dir());
         assert!(root.join("references.bib").exists());
         assert!(root.join("README.md").exists());
+        let included: serde_json::Value = serde_json::from_str(&fs::read_to_string(root.join("papers/included.json")).unwrap()).unwrap();
+        assert_eq!(included[0]["id"], "leader-2016-demo");
+        assert_eq!(included[0]["fulltextStatus"], "demo-only");
         let pdf = fs::read(root.join(DEMO_PDF_REL)).unwrap();
         assert!(
             pdf.starts_with(b"%PDF-") && pdf.ends_with(b"%%EOF\n"),
@@ -5328,8 +5707,10 @@ resources = ["ghost.pdf"]
 
         // 幂等：二次调用返回同一项目，且不覆盖用户改过的内容
         write(&root.join("README.md"), "user edit");
+        write(&root.join("papers/included.json"), "user supplied records");
         let p2 = create_demo_at(&base, &conn).unwrap();
         assert_eq!(p2.path, p.path);
+        assert_eq!(fs::read_to_string(root.join("papers/included.json")).unwrap(), "user supplied records");
         assert_eq!(
             fs::read_to_string(root.join("README.md")).unwrap(),
             "user edit"
@@ -5381,7 +5762,7 @@ resources = ["ghost.pdf"]
         let plain = dir.join("plain");
         write(&plain.join("a.txt"), "x");
         let err = delete_project_dir_impl(&conn, &plain).unwrap_err();
-        assert!(err.contains("不是 Ccode 项目"), "{err}");
+        assert!(err.contains("不是 Mesa 项目"), "{err}");
         assert!(plain.join("a.txt").exists());
         // 不存在的路径
         let err2 = delete_project_dir_impl(&conn, &dir.join("missing")).unwrap_err();
@@ -5394,7 +5775,7 @@ resources = ["ghost.pdf"]
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ===== 清除 Ccode 痕迹（purge_project_traces，中间档：保留文件夹与用户文件） =====
+    // ===== 清除 Mesa 痕迹（purge_project_traces，中间档：保留文件夹与用户文件） =====
 
     #[test]
     fn purge_traces_removes_ccode_registration_and_workspace_but_keeps_user_files() {
@@ -5444,7 +5825,7 @@ resources = ["ghost.pdf"]
         let plain = dir.join("plain");
         write(&plain.join("a.txt"), "x");
         let err = purge_project_traces_impl(&conn, &plain).unwrap_err();
-        assert!(err.contains("没有 Ccode 痕迹"), "{err}");
+        assert!(err.contains("没有 Mesa 痕迹"), "{err}");
         assert!(plain.join("a.txt").exists());
         // 防护：home 本身拒绝（复用 guard_project_dir 口径）
         let home = dirs::home_dir().unwrap();
@@ -5686,7 +6067,7 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
         );
         assert_eq!(existing[0], "目标篇幅：6000-8000 词");
         assert_eq!(existing[1], "读者与文风：偏入门科普");
-        assert_eq!(existing[2], "去向：（投期刊 / 课程作业）");
+        assert_eq!(existing.len(), 2);
     }
 
     #[test]
@@ -5716,6 +6097,21 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
     }
 
     #[test]
+    fn review_quality_gate_survives_template_serialization() {
+        let dir = temp_dir("review-quality-gate");
+        let cfg = demo_project_config();
+        write_config_at(&dir, &cfg).unwrap();
+        let restored = read_config_at(&dir).config;
+        let draft = restored.steps.iter().find(|s| s.workspace_name == "draft").unwrap();
+        assert_eq!(draft.decision_mode, "hard_pause");
+        assert_eq!(draft.decisions.len(), 1);
+        assert!(draft.decisions[0].options.is_empty());
+        assert!(draft.decisions[0].q.contains("已评阅证据"));
+        assert!(restored.steps[1].inputs.iter().any(|s| s == "papers/included.json"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn decisions_parse_render_roundtrip() {
         let dir = temp_dir("decisions");
         let root = dir.join("proj");
@@ -5729,10 +6125,10 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
                     [[steps.decisions]]\nq = \"没有选项的题\"\noptions = []\n";
         write(&config_path(&root), text);
         let (cfg, warnings) = parse_config(text);
-        // 只留 q 与 options 都非空的条目；选项两端空白剔除、空项丢弃
+        // 非空问题都保留；无选项表示需手写依据，空问题仍丢弃。
         assert_eq!(
             cfg.steps[0].decisions.len(),
-            1,
+            2,
             "{:?}",
             cfg.steps[0].decisions
         );
@@ -5741,7 +6137,9 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
             cfg.steps[0].decisions[0].options,
             vec!["领域全景铺开", "聚焦某个子问题"]
         );
-        // 开放题仍走 discussion_seeds，两者互不影响
+        assert_eq!(cfg.steps[0].decisions[1].q, "没有选项的题");
+        assert!(cfg.steps[0].decisions[1].options.is_empty());
+        // 讨论种子与待填依据互不影响
         assert_eq!(
             cfg.steps[0].discussion_seeds,
             vec!["范式锚点：借哪篇的结构？"]
@@ -6087,14 +6485,41 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
             &config_path(&root),
             "[[steps]]\nname = \"检索筛选\"\nworkspace_name = \"lit\"\n",
         );
-        // 融合确认落盘走 command 内的同一段逻辑：这里直接测草稿路径 + 原子写结果
-        let rel = draft_rel_path("检索筛选", "lit");
-        let path = root.join(&rel);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        crate::profiles::atomic_write(&path, "# 任务书草稿：检索筛选\n").unwrap();
+        let saved = write_task_draft_at(&root, "检索筛选", "# 任务书草稿：检索筛选\n", None).unwrap();
+        let path = root.join(&saved.rel_path);
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "# 任务书草稿：检索筛选\n"
+        );
+        assert!(saved.revision.is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_task_draft_rejects_stale_revision_and_keeps_disk() {
+        let dir = temp_dir("writedraft-rev");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "[[steps]]\nname = \"检索筛选\"\nworkspace_name = \"lit\"\n",
+        );
+        let first = write_task_draft_at(&root, "检索筛选", "v1\n", None).unwrap();
+        let err = write_task_draft_at(&root, "检索筛选", "v2\n", Some("deadbeef")).unwrap_err();
+        assert!(err.contains("未覆盖"), "{err}");
+        assert_eq!(
+            fs::read_to_string(root.join(&first.rel_path)).unwrap(),
+            "v1\n"
+        );
+        let second = write_task_draft_at(
+            &root,
+            "检索筛选",
+            "v2\n",
+            first.revision.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(&second.rel_path)).unwrap(),
+            "v2\n"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

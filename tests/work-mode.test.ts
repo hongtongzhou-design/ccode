@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   codingFactChips,
+  codingDivergenceBar,
+  codingDivergenceTip,
   deriveCodingKind,
   isOfficeInProgress,
   isOfficePreviewable,
@@ -11,6 +13,7 @@ import {
   projectChatReuseKey,
   lockWorkModeFromConfig,
   normalizeWorkMode,
+  headerShowsTopic,
   officeDocKind,
   officeDocMatchesQuery,
   officePreviewMode,
@@ -27,6 +30,15 @@ test("缺省与非法值都归科研", () => {
   assert.equal(normalizeWorkMode("coding"), "coding");
   assert.equal(normalizeWorkMode("office"), "office");
   assert.equal(WORK_MODE_LABEL.research, "科研");
+});
+
+test("顶栏课题主题：科研项目都展示（含无流程科研），编程/办公/未添加不展示", () => {
+  // 有流程与无流程科研同一判定：可见性只看注册态与工作方式，不看 pipelineOptOut
+  assert.equal(headerShowsTopic({ registered: true, workMode: "research" }), true);
+  assert.equal(headerShowsTopic({ registered: true, workMode: undefined }), true);
+  assert.equal(headerShowsTopic({ registered: true, workMode: "coding" }), false);
+  assert.equal(headerShowsTopic({ registered: true, workMode: "office" }), false);
+  assert.equal(headerShowsTopic({ registered: false, workMode: "research" }), false);
 });
 
 test("项目栏按科研/编程/办公分段，未添加沉底，空组不出现", () => {
@@ -247,15 +259,10 @@ test("编程事实芯片：干净已推送不占位，只亮异常", () => {
     [
       {
         key: "dirty",
-        label: "1 个未提交",
+        label: "1",
+        mark: "dirty",
         tone: "warn",
-        tip: "有未提交的改动",
-      },
-      {
-        key: "remote",
-        label: "已推送",
-        tone: "muted",
-        tip: "该分支已推到 GitHub",
+        tip: "1 个未提交",
       },
     ],
   );
@@ -271,22 +278,11 @@ test("编程事实芯片：干净已推送不占位，只亮异常", () => {
     }),
     [
       {
-        key: "ahead",
-        label: "待合入 2",
-        tone: "ok",
-        tip: "比基准 main 多 2 个提交，可以合并",
-      },
-      {
-        key: "behind",
-        label: "落后基准 1",
-        tone: "warn",
-        tip: "基准 main 有 1 个新提交",
-      },
-      {
         key: "remote",
-        label: "未推送 3",
+        label: "3",
+        mark: "unpushed",
         tone: "warn",
-        tip: "比 GitHub 上该分支多 3 个提交",
+        tip: "未推送：比 GitHub 上该分支多 3 个提交",
       },
     ],
   );
@@ -298,8 +294,8 @@ test("编程事实芯片：干净已推送不占位，只亮异常", () => {
       unpushed: 0,
       hasUpstream: false,
       baseBranch: "main",
-    })[0]?.label,
-    "无上游",
+    })[0]?.mark,
+    "noUpstream",
   );
   assert.deepEqual(
     codingFactChips({
@@ -315,10 +311,29 @@ test("编程事实芯片：干净已推送不占位，只亮异常", () => {
     [
       {
         key: "upstreamBehind",
-        label: "远程有更新 2",
+        label: "2",
+        mark: "upstreamBehind",
         tone: "warn",
         tip: "GitHub 上该分支有 2 个新提交，可拉取",
       },
     ],
+  );
+});
+
+test("分支领先落后用状态条比例，两侧按较大值对齐", () => {
+  assert.equal(codingDivergenceBar(0, 0), null);
+  assert.deepEqual(codingDivergenceBar(2, 1), {
+    ahead: 2,
+    behind: 1,
+    aheadShare: 1,
+    behindShare: 0.5,
+  });
+  assert.equal(
+    codingDivergenceTip(2, 1, "main"),
+    "比基准 main 多 2 个提交，落后 1 个",
+  );
+  assert.equal(
+    codingDivergenceTip(3, 0, "main"),
+    "待合入：比基准 main 多 3 个提交",
   );
 });

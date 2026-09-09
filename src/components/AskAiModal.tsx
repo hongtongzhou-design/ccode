@@ -19,6 +19,7 @@ import { projectChatReuseKey } from "../work-mode";
 import { Modal } from "./Modal";
 import { composeLaunchPrompt } from "../project-context";
 import { loadProjectContextPack } from "../project-context-load";
+import { goalReviewCopy } from "../goal-review";
 import { invoke } from "@tauri-apps/api/core";
 import type { RunDto, TaskDto } from "../types";
 
@@ -308,18 +309,15 @@ export default function AskAiModal() {
               className="mb-3 text-xs text-l3"
               checked={writeReview}
               onChange={setWriteReview}
-              label="验收后写入（改动先放副本，你勾选再进项目）"
+              label={goalReviewCopy(file.workMode).chatWriteReview}
             />
           )}
           <Checkbox
             className="mb-3 text-xs text-l3"
             checked={useDefault}
             onChange={setUseDefault}
-            label="设为默认，下次问 AI 直接用这套"
+            label="设为默认"
           />
-          <p className="mb-3 text-micro text-l4">
-            以后要重选，按 ⌘ / Ctrl 再点「问 AI」。
-          </p>
           <div className="flex items-center justify-end gap-2">
             <button
               type="button"

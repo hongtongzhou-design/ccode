@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Inbox } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -347,17 +348,17 @@ function App() {
   }, [settings]);
 
   useEffect(() => {
-    loadAll().catch((e) => console.error(e));
-    loadSessions().catch((e) => console.error(e));
+    loadAll().catch((e) => toast(`连接加载失败：${String(e)}`, "warning"));
+    loadSessions().catch((e) => toast(`会话加载失败：${String(e)}`, "warning"));
     loadProjects().catch(() => toast("项目列表加载失败，可稍后重试", "warning"));
     loadRecentRepos().catch(() => toast("最近目录加载失败，可稍后重试", "warning"));
     // 设置（含主题）在启动时加载并应用
     loadSettings()
-      .catch((e) => console.error(e))
-      .finally(() => {
-        // 等设置读完再检查：出网代理若配了会带上。开发模式内部直接标 dev，不打 GitHub。
+      .then(() => {
+        // 设置失败时不绕过原代理策略出网；修复设置后再由用户检查更新。
         checkAppUpdate().catch(() => toast("应用更新检查失败，可稍后重试", "warning"));
-      });
+      })
+      .catch((e) => toast(`设置加载失败：${String(e)}`, "warning"));
     // 依赖体检（git/node/安装渠道）：缺 git 时收件箱常驻「依赖」条目；失败静默不阻塞首屏
     useAppStore.getState().refreshDepCheck();
   }, [loadAll, loadSessions, loadProjects, loadRecentRepos, loadSettings, checkAppUpdate]);
@@ -459,7 +460,7 @@ function App() {
                     aria-hidden="true"
                   />
                   <span className="min-w-0 truncate">
-                    {contextLabel?.project ?? "Ccode"}
+                    {contextLabel?.project ?? "Mesa"}
                   </span>
                   {contextLabel?.step && (
                     <>
@@ -503,13 +504,9 @@ function App() {
                     className="flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
                     title="待处理"
                   >
-                    <span
-                      className={`size-1.5 shrink-0 rounded-full ${inboxGroups[0].items[0].dot}`}
-                    />
+                    <Inbox size={13} strokeWidth={1.8} className="shrink-0" aria-hidden="true" />
+                    <span className="hidden sm:inline">待处理</span>
                     {inboxCount}
-                    <span className="text-l4">
-                      {titleInboxCat !== null ? "▴" : "▾"}
-                    </span>
                   </button>
                   {titleInboxCat !== null && (
                     <ul className="absolute right-0 top-full z-40 mt-1.5 max-h-80 w-[360px] max-w-[80vw] space-y-2 overflow-auto rounded-md border border-field ccode-float-surface p-1">
@@ -607,17 +604,13 @@ function App() {
             type="button"
             onClick={cycleNavState}
             title={collapsed ? "展开侧栏" : "收起为图标"}
-            className={`ccode-brand-bar flex h-12 shrink-0 select-none items-center text-left text-l1 ${
-              collapsed ? "justify-center text-sm" : "px-3"
+            className={`ccode-brand-bar flex h-11 shrink-0 select-none items-end pb-1.5 text-left ${
+              collapsed ? "justify-center" : "px-3.5"
             }`}
           >
-            {collapsed ? (
-              <span className="text-lg font-semibold">C</span>
-            ) : (
-              <span className="block min-w-0 text-lg font-semibold tracking-wide">
-                Ccode
-              </span>
-            )}
+            <span className="ccode-brand-mark">
+              {collapsed ? "M" : "Mesa"}
+            </span>
           </button>
 
           <nav className="ccode-app-nav min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-2">

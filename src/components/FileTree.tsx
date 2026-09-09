@@ -354,6 +354,11 @@ function FileTree({
       try {
         const entries = await invoke<DirEntryDto[]>("list_dir", { path, showHidden });
         setCache((prev) => ({ ...prev, [path]: entries }));
+        if (entries.length >= 2000 && treeRootAtStart === rootRef.current) {
+          setError("此目录达到 2000 项展示上限，部分文件未列出。请用搜索查找或进入更小的子目录。");
+          setErrorPath(path);
+          return;
+        }
         if (
           treeRootAtStart === rootRef.current &&
           (path === treeRootAtStart || errorPathRef.current === path)

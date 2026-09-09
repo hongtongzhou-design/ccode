@@ -67,7 +67,7 @@ export default function CommandPalette({
             {
               cmd: {
                 id: "app-update",
-                title: `安装 Ccode v${appUpdate.version}`,
+                title: `安装 Mesa v${appUpdate.version}`,
                 group: "快速操作",
                 keywords: ["update", "更新", "升级", "安装", "gengxin"],
               },

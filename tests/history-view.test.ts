@@ -58,7 +58,7 @@ test("非 ccode 分支的 merge → 合并：分支名；解析不到分支名�
   );
 });
 
-test("Ccode: 前缀 → 自动保存：去掉结尾「（自动）提交」避免语义重复", () => {
+test("Ccode/Mesa: 前缀 → 自动保存：去掉结尾「（自动）提交」避免语义重复", () => {
   const item = translateHistoryEntry(
     entry({
       message: "Ccode: 项目档案卡与 gitignore 自动提交",
@@ -72,6 +72,13 @@ test("Ccode: 前缀 → 自动保存：去掉结尾「（自动）提交」避�
   assert.equal(item.icon, "⚙");
   assert.equal(item.title, "自动保存：项目档案卡与 gitignore");
   assert.equal(item.stats, "2 个文件 +5 −0");
+  assert.equal(
+    translateHistoryEntry(
+      entry({ message: "Mesa: 项目档案卡与 gitignore 自动提交" }),
+      {},
+    ).title,
+    "自动保存：项目档案卡与 gitignore",
+  );
   // 去掉前缀后为空 → 兜底文案
   assert.equal(
     translateHistoryEntry(entry({ message: "Ccode: 提交" }), {}).title,

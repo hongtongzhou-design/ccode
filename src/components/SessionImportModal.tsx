@@ -54,7 +54,7 @@ export default function SessionImportModal({
     setReport(null);
     const path = await open({
       multiple: false,
-      filters: [{ name: "Ccode 会话包", extensions: ["zip"] }],
+      filters: [{ name: "Mesa 会话包", extensions: ["zip"] }],
     });
     if (!path || Array.isArray(path)) return;
     setBusy(true);
@@ -262,7 +262,7 @@ export default function SessionImportModal({
                   )}
                   {bindings.length === 0 && (
                     <p className="mt-1 text-micro text-l4">
-                      没有带端点的 Codex 连接，导入后仍可在 Ccode 终端恢复。
+                      没有带端点的 Codex 连接，导入后仍可在 Mesa 终端恢复。
                     </p>
                   )}
                 </div>

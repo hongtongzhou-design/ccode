@@ -3,28 +3,31 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  AppWindow,
   File,
   FileSpreadsheet,
   FileText,
+  FolderOpen,
   Image,
+  MessageSquare,
   Presentation,
   type LucideIcon,
 } from "lucide-react";
 import OfficePreviewModal from "./OfficePreviewModal";
 import {
   compactPrimaryActionClass,
-  ghostActionClass,
+  iconActionClass,
   projectWellClass,
   rowActionClass,
   searchFieldClass,
 } from "./PageFrame";
+import FileKindFilters from "./FileKindFilters";
 import { useAppStore } from "../store";
 import { abbrevHome } from "../path-utils";
 import { IS_WINDOWS } from "../hotkeys";
 import { absTime, relTime } from "../rel-time";
 import { fileTypeIcon } from "../file-icons";
 import {
-  OFFICE_FILTERS,
   officeDocKind,
   officeFileInProgress,
   officeFileReuseKey,
@@ -33,6 +36,7 @@ import {
   officeRecentKey,
   type OfficeDocKind,
 } from "../work-mode";
+import type { ProjectFileFilter } from "../project-files";
 import { beginAskAi, beginProjectChat } from "./AskAiModal";
 import {
   countTouchedSince,
@@ -141,9 +145,7 @@ export default function OfficeProjectView({
   const sessions = useAppStore((s) => s.sessions);
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
   const [docs, setDocs] = useState<OfficeDocDto[]>([]);
-  const [filter, setFilter] = useState<(typeof OFFICE_FILTERS)[number]["id"]>(
-    "all",
-  );
+  const [filter, setFilter] = useState<ProjectFileFilter>("all");
   const [query, setQuery] = useState("");
   const [preview, setPreview] = useState<OfficeDocDto | null>(null);
   const [recentMap, setRecentMap] = useState<Record<string, string>>(() =>
@@ -322,15 +324,15 @@ export default function OfficeProjectView({
               <span className="text-micro text-l4">{statusLine}</span>
             </p>
           </div>
-          <div className="ccode-mobile-sessions-trigger">
+          {!sessionsOpen && (
             <ProjectSessionsSection
               projectPath={repoPath}
               variant="sidebar"
               collapsed
               onToggle={() => setSessionsOpen(true)}
-              title="项目对话"
+              title="这个项目的对话"
             />
-          </div>
+          )}
         </div>
       </section>
 
@@ -343,36 +345,16 @@ export default function OfficeProjectView({
                 type="search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="搜索文件名或路径"
+                placeholder="搜索"
                 className={`${searchFieldClass} ml-auto w-44`}
                 aria-label="搜索文档"
               />
             )}
-            <div
-              className={`flex flex-wrap gap-1 ${docs.length > 0 ? "" : "ml-auto"}`}
-              role="radiogroup"
-              aria-label="文档类型"
-            >
-              {OFFICE_FILTERS.map((f) => (
-                <button
-                  key={f.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={filter === f.id}
-                  className={`${rowActionClass} ${
-                    filter === f.id ? "border-cta-bd text-l1" : ""
-                  }`}
-                  onClick={() => setFilter(f.id)}
-                >
-                  {f.label}
-                  {kindCounts[f.id] > 0 && (
-                    <span className="ml-1 text-micro text-l4">
-                      {kindCounts[f.id]}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
+            <FileKindFilters
+              filter={filter}
+              counts={kindCounts}
+              onChange={setFilter}
+            />
           </div>
 
           {showContinue && (
@@ -424,7 +406,7 @@ export default function OfficeProjectView({
                   sessionMentionsFile(s, d.name),
                 );
                 return (
-                  <li className="group flex min-h-10 min-w-0 items-center gap-2 rounded-md px-1.5 hover:bg-hover">
+                  <li className="group relative flex min-h-10 min-w-0 items-center gap-2 rounded-md px-1.5 hover:bg-hover">
                     <OfficeFileMark path={d.path} />
                     <button
                       type="button"
@@ -443,18 +425,21 @@ export default function OfficeProjectView({
                     >
                       {relTime(d.modified)}
                     </span>
-                    <span className="hidden shrink-0 items-center group-hover:flex group-focus-within:flex">
+                    <span className="absolute inset-y-0 right-1 hidden items-center bg-hover pl-1 group-hover:flex group-focus-within:flex">
                       <button
                         type="button"
-                        className={`${ghostActionClass} whitespace-nowrap`}
-                        title="⌘ / Ctrl + 点可重选 Agent 和配置"
+                        className={iconActionClass}
+                        title="问 AI · ⌘ / Ctrl + 点可重选"
+                        aria-label="问 AI"
                         onClick={(e) => askAi(d, e)}
                       >
-                        问 AI
+                        <MessageSquare size={13} strokeWidth={1.8} />
                       </button>
                       <button
                         type="button"
-                        className={`${ghostActionClass} whitespace-nowrap`}
+                        className={iconActionClass}
+                        title="系统打开"
+                        aria-label="系统打开"
                         onClick={() => {
                           touchRecent(d.path);
                           void invoke("open_in_system", {
@@ -463,11 +448,13 @@ export default function OfficeProjectView({
                           }).catch((e) => onError(String(e)));
                         }}
                       >
-                        系统打开
+                        <AppWindow size={13} strokeWidth={1.8} />
                       </button>
                       <button
                         type="button"
-                        className={`${ghostActionClass} whitespace-nowrap`}
+                        className={iconActionClass}
+                        title="显示"
+                        aria-label="显示"
                         onClick={() => {
                           touchRecent(d.path);
                           void revealItemInDir(d.path).catch((e) =>
@@ -475,7 +462,7 @@ export default function OfficeProjectView({
                           );
                         }}
                       >
-                        显示
+                        <FolderOpen size={13} strokeWidth={1.8} />
                       </button>
                     </span>
                   </li>
@@ -498,7 +485,7 @@ export default function OfficeProjectView({
               variant="sidebar"
               collapsed={false}
               onToggle={() => setSessionsOpen(false)}
-              title="项目对话"
+              title="这个项目的对话"
               onNewChat={startProjectChat}
               empty={
                 <div className="flex flex-col gap-2">

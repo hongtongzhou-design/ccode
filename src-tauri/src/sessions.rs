@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -105,10 +105,10 @@ pub struct SessionMetaDto {
     /// 进行中：源文件 mtime（opencode 为 time_updated）在最近 60 秒内
     #[serde(default)]
     pub live: bool,
-    /// 会话来源；普通 CLI 为 cli，Ccode 无头 AI 为 ccode-ai。
+    /// 会话来源；普通 CLI 为 cli，Mesa 无头 AI 为 ccode-ai。
     #[serde(default = "default_session_source")]
     pub source: String,
-    /// 内部 AI：provenance 命中，或 Ccode 自建 `ccode-ai-<uuid>` 临时 cwd（登记被清后的会话）。
+    /// 内部 AI：provenance 命中，或 Mesa 自建 `ccode-ai-<uuid>` 临时 cwd（登记被清后的会话）。
     /// 用量统计仍只认 provenance 表，不按路径改写。
     #[serde(default)]
     pub internal: bool,
@@ -123,12 +123,12 @@ pub struct SessionMetaDto {
     /// task_id 命中所属项目档案卡 [[tasks]] 时由后端回填的卡片名；卡片已删容忍为 None
     #[serde(default)]
     pub task_name: Option<String>,
-    /// Codex rollout 元信息的 model_provider（"ccode" = Ccode 启动时 -c 内联定义的 provider，
+    /// Codex rollout 元信息的 model_provider（"ccode" = Mesa 启动时 -c 内联定义的 provider，
     /// 不写用户全局配置——恢复时必须挑带 Base URL 的配置重新注入定义，否则 codex 报
     /// "Model provider `ccode` not found"）；其他 agent 或无记录为 None
     #[serde(default)]
     pub provider: Option<String>,
-    /// Ccode profile used to start this session when known; historical/external sessions may be null.
+    /// Mesa profile used to start this session when known; historical/external sessions may be null.
     #[serde(default)]
     pub profile_id: Option<String>,
 }
@@ -176,6 +176,29 @@ fn default_session_source() -> String {
     "cli".into()
 }
 
+/// Grok 等会把用户话包在 `<user_query>` 里；列表和回放只显示里面的话。
+fn unwrap_prompt_tags(text: &str) -> String {
+    const OPEN: &str = "<user_query>";
+    const CLOSE: &str = "</user_query>";
+    let mut s = text.to_string();
+    loop {
+        let lower = s.to_ascii_lowercase();
+        let Some(start) = lower.find(OPEN) else {
+            break;
+        };
+        let inner_at = start + OPEN.len();
+        if let Some(rel) = lower[inner_at..].find(CLOSE) {
+            let inner = s[inner_at..inner_at + rel].trim().to_string();
+            let after = inner_at + rel + CLOSE.len();
+            s = format!("{}{}{}", &s[..start], inner, &s[after..]);
+        } else {
+            s = format!("{}{}", &s[..start], &s[inner_at..]);
+            break;
+        }
+    }
+    s.trim().to_string()
+}
+
 /// 列表标题：折叠空白后截断到约 60 字符，避免多行 prompt 撑高列表。
 fn truncate_title(text: &str) -> String {
     const MAX: usize = 60;
@@ -218,7 +241,7 @@ fn is_generic_greeting(text: &str) -> bool {
 }
 
 fn usable_title(text: &str) -> Option<String> {
-    let title = truncate_title(text);
+    let title = truncate_title(&unwrap_prompt_tags(text));
     let lower = title.trim().to_ascii_lowercase();
     let generic = matches!(
         lower.as_str(),
@@ -1252,7 +1275,7 @@ fn gemini_file_meta(
 }
 
 /// Gemini 偶尔会为同一个 sessionId 留下多个 chats/*.jsonl（例如重启/恢复时重写启动记录）。
-/// 会话主键在 Ccode 中是 agent + session_id，因此列表只能保留最新落盘文件作为代表。
+/// 会话主键在 Mesa 中是 agent + session_id，因此列表只能保留最新落盘文件作为代表。
 fn dedupe_gemini_sessions(metas: Vec<SessionMetaDto>) -> Vec<SessionMetaDto> {
     let mut latest: HashMap<String, SessionMetaDto> = HashMap::new();
     for meta in metas {
@@ -2410,7 +2433,8 @@ fn grok_content_text(update: &Value) -> Option<String> {
         Value::Object(_) => get_str(content, "text")?.to_string(),
         _ => return None,
     };
-    if text.trim().is_empty() {
+    let text = unwrap_prompt_tags(&text);
+    if text.is_empty() {
         None
     } else {
         Some(text)
@@ -2603,7 +2627,8 @@ fn grok_history_text(content: &Value) -> Option<String> {
             .join(""),
         _ => String::new(),
     };
-    (!text.trim().is_empty()).then_some(text)
+    let text = unwrap_prompt_tags(&text);
+    (!text.is_empty()).then_some(text)
 }
 
 fn parse_grok_history(lines: &[String]) -> Vec<ChatMessageDto> {
@@ -4649,15 +4674,16 @@ pub(crate) fn register_session_claim(claim_id: &str, agent: &str, cwd: &str) {
     );
 }
 
-pub(crate) fn rewrite_session_profile_ids(rewrites: &[(String, String)]) {
-    let Ok(conn) = open_db() else { return };
+pub(crate) fn rewrite_session_profile_ids(rewrites: &[(String, String)]) -> Result<(), String> {
+    let conn = open_db()?;
     for (from, to) in rewrites {
-        let _ = conn.execute(
+        conn.execute(
             "UPDATE session_meta SET profile_id=?1 WHERE profile_id=?2",
             params![to, from],
-        );
+        ).map_err(|e| e.to_string())?;
     }
     invalidate_scan_cache();
+    Ok(())
 }
 
 pub(crate) fn set_session_profile(
@@ -4797,6 +4823,8 @@ pub async fn get_session_conversation(agent: String, file_path: String) -> Vec<C
 }
 
 const CONVERSATION_PAGE_BYTES: u64 = 192 * 1024;
+/// 一页解析不出对话时继续往前扫的上限（Codex 工具行经常 >192KB，空窗必须连跳）。
+const CONVERSATION_PAGE_SCAN_LIMIT: u64 = CONVERSATION_PAGE_BYTES * 24;
 const OPENCODE_PAGE_MESSAGES: usize = 80;
 
 pub(crate) fn parse_session_lines(agent: &str, lines: &[String]) -> Vec<ChatMessageDto> {
@@ -4818,33 +4846,64 @@ pub(crate) fn parse_session_lines(agent: &str, lines: &[String]) -> Vec<ChatMess
     }
 }
 
-fn plain_conversation_page(
-    agent: &str,
-    path: &Path,
-    before: Option<u64>,
-    around: Option<u64>,
-) -> Result<ConversationPageDto, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = fs::File::open(path).map_err(|e| format!("读取会话失败: {e}"))?;
-    let len = file
-        .metadata()
-        .map_err(|e| format!("读取会话信息失败: {e}"))?
-        .len();
-    let (start, end) = if let Some(at) = around {
-        let half = CONVERSATION_PAGE_BYTES / 2;
-        let mut s = at.saturating_sub(half);
-        let mut e = at.saturating_add(half).min(len);
-        if e.saturating_sub(s) < CONVERSATION_PAGE_BYTES {
-            s = e.saturating_sub(CONVERSATION_PAGE_BYTES);
+/// `[0, pos)` 里最后一个换行的偏移；没有则 None。
+fn jsonl_last_newline_before(file: &mut fs::File, pos: u64) -> Result<Option<u64>, String> {
+    if pos == 0 {
+        return Ok(None);
+    }
+    const CHUNK: u64 = 64 * 1024;
+    let mut from = pos;
+    loop {
+        let start = from.saturating_sub(CHUNK);
+        let len = (from - start) as usize;
+        file.seek(SeekFrom::Start(start))
+            .map_err(|e| format!("定位会话失败: {e}"))?;
+        let mut buf = vec![0u8; len];
+        file.read_exact(&mut buf)
+            .map_err(|e| format!("读取会话失败: {e}"))?;
+        if let Some(index) = buf.iter().rposition(|&byte| byte == b'\n') {
+            return Ok(Some(start + index as u64));
         }
-        if e.saturating_sub(s) < CONVERSATION_PAGE_BYTES {
-            e = (s + CONVERSATION_PAGE_BYTES).min(len);
+        if start == 0 {
+            return Ok(None);
         }
-        (s, e)
-    } else {
-        let end = before.unwrap_or(len).min(len);
-        (end.saturating_sub(CONVERSATION_PAGE_BYTES), end)
-    };
+        from = start;
+    }
+}
+
+/// 含 `pos` 的那条 JSONL 的起点（`pos` 为行界时即 `pos` 本身）。
+fn jsonl_line_start(file: &mut fs::File, pos: u64) -> Result<u64, String> {
+    Ok(jsonl_last_newline_before(file, pos)?
+        .map(|offset| offset + 1)
+        .unwrap_or(0))
+}
+
+/// 以 `end` 为排他终点的上一条 JSONL 起点。用来整行跳过超过窗口的记录。
+fn jsonl_prev_record_start(file: &mut fs::File, end: u64) -> Result<u64, String> {
+    if end == 0 {
+        return Ok(0);
+    }
+    jsonl_line_start(file, end - 1)
+}
+
+struct JsonlWindow {
+    lines: Vec<String>,
+    /// 下一页的 `before`；None = 已经到文件头
+    cursor: Option<u64>,
+}
+
+fn read_jsonl_window(
+    file: &mut fs::File,
+    start: u64,
+    end: u64,
+) -> Result<JsonlWindow, String> {
+    let end = end.max(start);
+    if end == 0 || start == end {
+        return Ok(JsonlWindow {
+            lines: Vec::new(),
+            cursor: None,
+        });
+    }
     let mut previous = None;
     if start > 0 {
         file.seek(SeekFrom::Start(start - 1))
@@ -4859,18 +4918,107 @@ fn plain_conversation_page(
     let mut bytes = vec![0u8; (end - start) as usize];
     file.read_exact(&mut bytes)
         .map_err(|e| format!("读取会话失败: {e}"))?;
-    let (from, cursor) = if start == 0 || previous == Some(b'\n') {
-        (0usize, (start > 0).then_some(start))
-    } else if let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
-        let aligned = start + index as u64 + 1;
-        (index + 1, Some(aligned))
+
+    let (from, page_start) = if start == 0 || previous == Some(b'\n') {
+        (0usize, start)
+    } else if let Some(index) = bytes.iter().position(|&byte| byte == b'\n') {
+        (index + 1, start + index as u64 + 1)
     } else {
-        (bytes.len(), Some(start)) // 单行超过窗口时 cursor 仍前进，避免分页死循环
+        // 整窗落在一行中间：本页无完整记录，cursor 跳到该行起点
+        let rec = jsonl_line_start(file, start)?;
+        return Ok(JsonlWindow {
+            lines: Vec::new(),
+            cursor: (rec < end).then_some(rec),
+        });
     };
+
+    if page_start >= end {
+        // 窗内唯一换行就是终点：那是超长行的行尾，整行跳过
+        let rec = jsonl_prev_record_start(file, end)?;
+        return Ok(JsonlWindow {
+            lines: Vec::new(),
+            cursor: (rec < end).then_some(rec),
+        });
+    }
+
     let lines = to_lines(&String::from_utf8_lossy(&bytes[from..]));
-    let mut messages = parse_session_lines(agent, &lines);
-    redact_conversation(&mut messages);
-    Ok(ConversationPageDto { messages, cursor })
+    let cursor = if page_start == 0 {
+        None
+    } else {
+        let rec_start = jsonl_prev_record_start(file, page_start)?;
+        let rec_len = page_start.saturating_sub(rec_start);
+        // 紧邻的上一条已经比窗口大：一次跳过整行，避免 cursor 钉在行尾死循环
+        let next = if rec_len > CONVERSATION_PAGE_BYTES {
+            rec_start
+        } else {
+            page_start
+        };
+        (next < end).then_some(next)
+    };
+    Ok(JsonlWindow { lines, cursor })
+}
+
+fn plain_conversation_page(
+    agent: &str,
+    path: &Path,
+    before: Option<u64>,
+    around: Option<u64>,
+) -> Result<ConversationPageDto, String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("读取会话失败: {e}"))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("读取会话信息失败: {e}"))?
+        .len();
+    if let Some(at) = around {
+        let half = CONVERSATION_PAGE_BYTES / 2;
+        let mut start = at.saturating_sub(half);
+        let mut end = at.saturating_add(half).min(len);
+        if end.saturating_sub(start) < CONVERSATION_PAGE_BYTES {
+            start = end.saturating_sub(CONVERSATION_PAGE_BYTES);
+        }
+        if end.saturating_sub(start) < CONVERSATION_PAGE_BYTES {
+            end = (start + CONVERSATION_PAGE_BYTES).min(len);
+        }
+        let win = read_jsonl_window(&mut file, start, end)?;
+        let mut messages = parse_session_lines(agent, &win.lines);
+        redact_conversation(&mut messages);
+        return Ok(ConversationPageDto {
+            messages,
+            cursor: win.cursor,
+        });
+    }
+
+    let mut end = before.unwrap_or(len).min(len);
+    let mut lines: Vec<String> = Vec::new();
+    let mut scanned = 0u64;
+    loop {
+        let start = end.saturating_sub(CONVERSATION_PAGE_BYTES);
+        let win = read_jsonl_window(&mut file, start, end)?;
+        let mut combined = win.lines;
+        combined.append(&mut lines);
+        lines = combined;
+        scanned = scanned.saturating_add(CONVERSATION_PAGE_BYTES);
+        let mut messages = parse_session_lines(agent, &lines);
+        if !messages.is_empty()
+            || win.cursor.is_none()
+            || scanned >= CONVERSATION_PAGE_SCAN_LIMIT
+        {
+            redact_conversation(&mut messages);
+            return Ok(ConversationPageDto {
+                messages,
+                cursor: win.cursor,
+            });
+        }
+        let next = win.cursor.unwrap();
+        if next >= end {
+            redact_conversation(&mut messages);
+            return Ok(ConversationPageDto {
+                messages,
+                cursor: None,
+            });
+        }
+        end = next;
+    }
 }
 
 fn opencode_conversation_page(
@@ -5684,7 +5832,7 @@ fn session_data_dirs() -> Vec<(PathBuf, bool)> {
     dirs
 }
 
-/// 相对给定 home 的各 CLI 会话数据目录（不含 Ccode pin 快照）。
+/// 相对给定 home 的各 CLI 会话数据目录（不含 Mesa pin 快照）。
 /// 导入白名单与删除白名单同源；测试可注入假 home。
 pub(crate) fn session_data_dirs_at(home: &Path) -> Vec<(PathBuf, bool)> {
     vec![
@@ -6249,6 +6397,11 @@ mod tests {
             usable_title("你好，帮我看看这个 bug").as_deref(),
             Some("你好，帮我看看这个 bug")
         );
+        assert_eq!(
+            usable_title("<user_query>\n把文献综述的第二章压缩到 800 字\n</user_query>").as_deref(),
+            Some("把文献综述的第二章压缩到 800 字")
+        );
+        assert_eq!(usable_title("<user_query>你好</user_query>"), None);
     }
 
     #[test]
@@ -6496,6 +6649,16 @@ mod tests {
     }
 
     #[test]
+    fn grok_parse_unwraps_user_query_in_chunks() {
+        let lines = s(&[
+            r#"{"timestamp":1,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"<user_query>\n你好\n</user_query>"}}}}"#,
+        ]);
+        let msgs = parse_grok(&lines);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].blocks[0].text, "你好");
+    }
+
+    #[test]
     fn grok_parse_merges_streaming_chunks_and_tool_calls_split_runs() {
         let lines = s(&[
             r#"{"timestamp":1,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"我来"}}}}"#,
@@ -6531,6 +6694,21 @@ mod tests {
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].blocks[0].text, "第一问");
         assert_eq!(messages[3].blocks[0].text, "第二答");
+    }
+
+    #[test]
+    fn grok_history_unwraps_user_query_tags() {
+        let lines = s(&[
+            r#"{"type":"user","prompt_index":0,"content":"<user_query>\n你好\n</user_query>"}"#,
+            r#"{"type":"assistant","content":"你好，需要我做什么？"}"#,
+        ]);
+        let messages = parse_grok_history(&lines);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].blocks[0].text, "你好");
+        assert!(
+            !messages[0].blocks[0].text.contains("user_query"),
+            "回放不得露出 <user_query>"
+        );
     }
 
     #[test]
@@ -6693,6 +6871,87 @@ mod tests {
                 .iter()
                 .any(|m| m.blocks[0].text.contains("消息 0100")),
             "around 窗口应包含命中那一条"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn claude_user_line(text: &str) -> String {
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{text}\"}},\"timestamp\":\"2026-07-01T00:00:00Z\"}}\n"
+        )
+    }
+
+    #[test]
+    fn plain_conversation_page_skips_oversized_jsonl_line() {
+        // Codex 工具行经常 >192KB：旧分页会把 cursor 钉在超长行尾，加载更早死循环。
+        let dir = std::env::temp_dir().join(format!("ccode-huge-line-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("huge.jsonl");
+        let huge = "H".repeat(300_000);
+        let mut content = String::new();
+        content.push_str(&claude_user_line("early-msg"));
+        content.push_str(&claude_user_line(&huge));
+        content.push_str(&claude_user_line("late-msg"));
+        std::fs::write(&file, &content).unwrap();
+
+        let latest = plain_conversation_page("claude-code", &file, None, None).unwrap();
+        assert!(
+            latest
+                .messages
+                .iter()
+                .any(|m| m.blocks[0].text.contains("late-msg")),
+            "尾页应有最后一条短消息: {:?}",
+            latest.messages.iter().map(|m| &m.blocks[0].text).collect::<Vec<_>>()
+        );
+        assert!(
+            latest
+                .messages
+                .iter()
+                .all(|m| !m.blocks[0].text.contains(&huge)),
+            "超长行不应整页塞进回放"
+        );
+        let cursor = latest.cursor.expect("尾页后面还有更早内容");
+        let older = plain_conversation_page("claude-code", &file, Some(cursor), None).unwrap();
+        assert_ne!(older.cursor, latest.cursor, "cursor 必须前进，不能钉在超长行尾");
+        assert!(
+            older
+                .messages
+                .iter()
+                .any(|m| m.blocks[0].text.contains("early-msg")),
+            "一次加载更早应跳过超长行读到更早消息: {:?}",
+            older.messages.iter().map(|m| &m.blocks[0].text).collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plain_conversation_page_skips_empty_event_windows() {
+        let dir = std::env::temp_dir().join(format!("ccode-empty-win-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("events.jsonl");
+        let mut content = String::new();
+        content.push_str(&claude_user_line("early-msg"));
+        let filler = "{\"type\":\"ignore\",\"payload\":{}}\n";
+        while content.len() < 250_000 {
+            content.push_str(filler);
+        }
+        content.push_str(&claude_user_line("late-msg"));
+        std::fs::write(&file, &content).unwrap();
+
+        let latest = plain_conversation_page("claude-code", &file, None, None).unwrap();
+        assert!(latest
+            .messages
+            .iter()
+            .any(|m| m.blocks[0].text.contains("late-msg")));
+        let cursor = latest.cursor.expect("中间有填充行，应还能往前");
+        let older = plain_conversation_page("claude-code", &file, Some(cursor), None).unwrap();
+        assert!(
+            older
+                .messages
+                .iter()
+                .any(|m| m.blocks[0].text.contains("early-msg")),
+            "空窗（无对话行）应在同一次请求里连跳: {:?}",
+            older.messages.iter().map(|m| &m.blocks[0].text).collect::<Vec<_>>()
         );
         std::fs::remove_dir_all(&dir).ok();
     }

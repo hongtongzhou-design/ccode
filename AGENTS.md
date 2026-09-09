@@ -11,8 +11,9 @@
 
 ## 项目简介
 
-Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）——底层是九个 Agent CLI 的统一控制台（启动器 + 配置中心 +
-会话监控台），表面是科研流水线（读文献→整数据→做图→写论文）：AI 负责干活，Ccode 负责管活，人负责拍板。
+Mesa 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）——底层是九个 Agent CLI 的统一控制台（启动器 + 配置中心 +
+会话监控台），表面是科研流水线（读文献→整数据→做图→写论文）：AI 负责干活，Mesa 负责管活，人负责拍板。
+展示名 **Mesa**；内部身份仍是 `ccode`（bundle ID `com.ccode.dev`、项目 `.ccode/`、`~/ccode/`、Codex provider `ccode`/`ccode-<短id>`）。禁止把内部路径/安装身份跟着展示名一起改。
 为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 管理多套 API 配置
 （端点/密钥/模型），内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览。
 
@@ -29,7 +30,7 @@ Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）—�
 
 **已确认的产品决策**（用户拍板，勿擅自更改）：
 
-- 应用名 **Ccode**；九个 agent 全部支持（CodeBuddy Code、Cursor CLI、Grok Build 见 matrix §7/§8/§9；grok：MCP 只读不分发、技能强制 copy；「设为全局默认」2026-09-01 起支持，写 ~/.grok/config.toml）
+- 应用展示名 **Mesa**（内部身份仍 `ccode`，见上）；九个 agent 全部支持（CodeBuddy Code、Cursor CLI、Grok Build 见 matrix §7/§8/§9；grok：MCP 只读不分发、技能强制 copy；「设为全局默认」2026-09-01 起支持，写 ~/.grok/config.toml）
 - 配置切换**双模式**：默认启动注入环境变量（零污染），另提供「设为全局默认」（写配置文件，先备份）
 - 终端为内嵌形态，且**与结构化会话视图联动**（同一会话双栏观看）
 - 项目列表**从各 agent 历史会话自动聚合并分类**，辅以手动添加
@@ -39,11 +40,13 @@ Ccode 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）—�
 
 ## 构建与运行
 
+> **审计收口硬约束（2026-09-08）**：配置读改写持进程锁＋OS 文件锁，失败不得无锁继续；拆层迁移以 pending 恢复日志最终删除为完成，私有临时文件创建即 0600。PTY 全局锁内禁止阻塞写入，诊断输出不得同步落库卡回显。新建/恢复都兑现 discuss 权限，缺能力拒绝；原生退出负责进程回收。生产 CSP 不得因调试置空，Vite 脚本显式选择 `vite.config.ts`。细则与未验收范围见 safety.md / terminal.md / `docs/audit-remediation.md`。
+
 ```bash
 # Rust 不在默认 PATH，每个新 shell 都要先 export
 export PATH="$HOME/.cargo/bin:$PATH"
 
-npm run tauri:dev      # 开发（独立 Ccode Dev 窗口；前端 HMR + Rust 改动自动重启）
+npm run tauri:dev      # 开发（独立 Mesa Dev 窗口；前端 HMR + Rust 改动自动重启）
 npm run build          # 前端构建（tsc + vite）
 npm test               # 前端测试（node --test，CI test job 同步执行）
 cd src-tauri && cargo build / cargo test
@@ -52,9 +55,9 @@ npm run tauri build    # 打包
 
 环境：Node 22 + npm（无 pnpm）；Rust stable（minimal profile）；crates 走 rsproxy 镜像（`~/.cargo/config.toml`）。
 
-开发预览必须使用 `npm run tauri:dev`：独立产品名 **Ccode Dev**、窗口标题 **Ccode Dev - 热更新**、bundle ID
-`com.ccode.dev.hmr`（`src-tauri/tauri.dev.conf.json`）。界面验证必须按该窗口标题或明确 `.app` 绝对路径定位，禁止用模糊应用名 `Ccode`。
-**界面核验不得混入旧打包前端**：`/Applications/Ccode.app`、`target/release`、普通 `com.ccode.dev` 与历史 `target/debug/bundle`
+开发预览必须使用 `npm run tauri:dev`：独立产品名 **Mesa Dev**、窗口标题 **Mesa Dev - 热更新**、bundle ID
+`com.ccode.dev.hmr`（`src-tauri/tauri.dev.conf.json`）。界面验证必须按该窗口标题或明确 `.app` 绝对路径定位，禁止用模糊应用名 `Mesa` / 旧名 `Ccode`。
+**界面核验不得混入旧打包前端**：`/Applications/Ccode.app`、`/Applications/Mesa.app`、`target/release`、普通 `com.ccode.dev` 与历史 `target/debug/bundle`
 均不可作为验收依据；只能验收 `tauri dev --config src-tauri/tauri.dev.conf.json` 启动、连接 17575 的热更新窗口。无法唯一确认窗口归属时停止界面操作，改报“未验收”，不得拿旧窗口截图或状态代替。
 
 ## 本机环境档案（踩坑记录，新会话必读）
@@ -92,7 +95,7 @@ npm run tauri build    # 打包
   **双 clone 并行开发的第二实例**：已入库 `src-tauri/tauri.dev.17576.conf.json`（`npm run tauri:dev:17576`，devUrl
   127.0.0.1:17576，窗口标题带「 :17576」后缀；identifier 与主实例相同、共享配置目录）。验收三锚点缺一不可：
   用户指定的**仓库路径**（两个 clone 内容相同，开工先 `git rev-parse --show-toplevel` 自报并与用户指定路径对照）+
-  **窗口标题**（17575 实例 = 「Ccode Dev - 热更新」，17576 实例 = 「Ccode Dev - 热更新 :17576」）+ **devUrl 端口**。
+  **窗口标题**（17575 实例 = 「Mesa Dev - 热更新」，17576 实例 = 「Mesa Dev - 热更新 :17576」）+ **devUrl 端口**。
   用户指定了哪个实例就只核验哪个，其余窗口不算数；还要第三实例时照此加 conf 文件（端口连续顺延），不即兴改配置。
 - **git 提交**：常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
 - **git 分支纪律**：未经用户明确指令，禁止 checkout/switch/merge/rebase/stash/删分支等任何改动 HEAD 或分支指向的操作；
@@ -117,6 +120,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线）、
                              # ScheduleSection（定时任务：有流程在项目设置抽屉；无流程主区雷达下；编程/办公右侧会话栏）、
                              # LitWatchCard（「◔ 文献雷达」卡片：新命中/精读清单双页签 + 近 8 周趋势 + →精读/◈解读/↓全文 +
+                             #   新命中默认两行对齐精读清单密度（摘要点开才见）+
                              #   期刊徽章（IF/中科院分区/TOP，数据源 journal_metrics.rs）+ 新命中按日期/按关键词分组切换 +
                              #   卡头期刊指标表入口常驻（未装=↓下载 / 已装=↻重下即更新）+ 卡头「筛选」弹层
                              #   （litWatchFilter：IF/分区/TOP 三条件，被筛掉条目「查看全部」临时态），挂项目详情工作段 TaskCardsSection 之后）、
@@ -128,7 +132,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # TemplatePickModal（科研项目注册成功后的研究流程模板选择层：顶部课题主题 +
                              # 六套内置模板 + 「不使用研究流程」（写 pipeline_opt_out 标记；只读文献走这条）/
                              # 「稍后再选」（不留痕，已填主题仍落盘）两出口）、
-                             # CodingProjectView / OfficeProjectView（编程左工作树右会话可收 / 办公左文档右对话+定时同款可收）、
+                             # CodingProjectView / OfficeProjectView（编程左工作树右会话可收；工作树事后分组、行内图标动作 / 办公左文档右对话+定时同款可收）、
                              # FuseDraftModal（「◈ 融合进任务书」预览编辑弹层：AI 融合稿可改后确认才写草稿）、
                              # TerminalStatusBar（终端底部常驻状态栏：未启动只留状态点 + 📂 目录胶囊；
                              #   进程起来后才有模型/思考档可点切 + git 芯片/保存/推送 + 时长/token） 等
@@ -141,7 +145,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   components/HoverTip.tsx      # 应用内 tooltip 共享件（v3.93 提取自 ProjectGroup）：useHoverTip + HoverTip，
                              # portal 到 body（免疫祖先 opacity/transform 的 fixed 包含块问题）、滚动/缩放即关、
                              # up 参数支持锚点上方弹出（行内动作栏 tooltip 专用）；PageFrame 的 RowAction 内置上方 tooltip
-  pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES（六套，含 v3.97「LaTeX 论文」）
+  pipeline-presets.ts        # 内置流水线模板 PIPELINE_TEMPLATES（六套，含 v3.97「LaTeX 论文」）；
+                             #   每套 projectRules 纪律不同，settingsForTemplateApply 不落空表格
   lit-project.ts             # 文献-only 项目：建议添加目录 / 家目录禁入 / 无流程时 inbox 落点
   task-md.ts                 # TASK.md 拼装纯函数（项目根/产物目录绝对路径）；pipeline-start 再导出
   pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）；
@@ -150,7 +155,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   workspace-resume.ts        # 「去终端」resume 挑选纯逻辑（workspace 名 + 仓库路径匹配，排除归档/内部/live，
                              # tests/workspace-resume.test.ts）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
-  mcp-presets.ts             # MCP 内置预设表（加预设 = 加一条；密钥一律 ${VAR} 引用）
+  mcp-presets.ts             # MCP 内置预设表（加预设 = 加一条；密钥一律 ${VAR} 引用；
+                             #   remote 填 url/headers，stdio 填 command/args，`{home}` 打开表单时展开为家目录；
+                             #   需本机安装的用 setup 步骤引导，不代装）
   mcp-display.ts             # MCP 页展示纯逻辑：协议徽章固定识别色（stdio 紫/remote 蓝）+ 命令路径智能缩略
                              # （家目录折 ~、段数>3 且 >28 字符才砍中段留首尾）+ 收编条目判定与删除影响面
                              # （isAdoptedMcp/mcpDeleteImpact/mcpOriginLabel，tests/mcp-display.test.ts）+
@@ -158,25 +165,30 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 命令路径告警徽标 mcpCmdPathBadge（relative/missing）与收编解析附注 mcpPathResolveNote
   run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
   run-model.ts               # Project→Task→Run 前端镜像：inferTaskKind / 工作台白名单 isWorkbenchSurfaceRun
-                             # （登录/无头/空闲 shell 不进「正在进行」；阅读标签还开着则进；tests/run-model.test.ts）
+                             # （登录/无头/空闲 shell 不进「正在进行」；阅读标签还开着则进）/
+                             # pickRecoverableRun 找回可恢复 Run（排除 internal/login/watch/reader——阅读关掉就离开，
+                             # 不进找回链）/ isRunProcessLive 活进程判定（保留标签不算运行中）（tests/run-model.test.ts）
   project-tasks.ts           # 人声明任务：资料范围（不带入/勾选/整个项目）/ 嵌套路径剪枝 /
-                             # 声明步骤过滤（不含会话自动登记）/ 审核回流文案（tests/project-tasks.test.ts）
+                             # 声明步骤过滤（不含会话自动登记）/ 审核回流文案 /
+                             # 保护文件夹勾选（验收写回保持原样，不是另存副本；tests/project-tasks.test.ts）
   project-agents.ts          # 项目 Agents 名册：每家默认配置 / 项目默认 / 声明步骤归属
                              # （不自动分派；tests/project-agents.test.ts）
-  project-context.ts         # 项目环境包：名称/规则/顶层文件地图/当前目标（启动注入）
+  project-context.ts         # 项目环境包：名称/规则/顶层文件地图/当前目标（启动注入）；
+                             #   空表格不进规则，有流程用模板纪律、无流程用工作方式默认条
                              # （tests/project-context.test.ts）
   coding-lanes.ts            # 编程车道覆盖层：有树无行按分支现算、theme 分组、空闲/Agent
                              # （tests/coding-lanes.test.ts）
   agent-caps.ts              # 能力表前端消费：定时任务禁选未验证无头、grok 无沙箱附注
                              # （tests/agent-caps.test.ts）
   work-mode.ts               # 项目工作方式（科研/编程/办公）与编程状态归类、办公文档类型/预览形态；
-                             # 文件行「进行中」只认 officeFileReuseKey 对上的活标签（仓级仍 isOfficeInProgress）
-                             # （lockWorkModeFromConfig / codingFactChips / groupByWorkMode 项目栏分段；
-                             #   tests/work-mode.test.ts）
+                             # 文件行「进行中」只认 officeFileReuseKey 对上的活标签（仓级仍 isOfficeInProgress）；
+                             # 顶栏课题主题可见性 headerShowsTopic（科研项目含无流程都展示，身份四件套之一）
+                             # （lockWorkModeFromConfig / codingFactChips / codingDivergenceBar /
+                             #   groupByWorkMode 项目栏分段；tests/work-mode.test.ts）
   session-title.ts           # 会话列表展示标题清洗（去 URL/绝对路径/中断/resume/未命名，取首句；不写回源文件）
                              # （tests/session-title.test.ts）
   project-status.ts          # 项目页状态行 / 工作区要你管排序 / 笔记过滤 / 办公继续上次与问 AI 建议
-                             # / 本项目会话过滤（filterProjectSessions，排除无头 AI / 问 AI / 阅读注入）
+                             # / 本项目会话过滤（filterProjectSessions，排除无头 AI / 问 AI / 阅读注入 / 已归档；默认全部列出）
                              # （tests/project-status.test.ts）
   mac-titlebar.ts            # macOS Overlay 顶栏左边距：窗口态红绿灯让 78px，全屏取消
                              # （macOverlayPadClass / useMacFullscreen；tests/mac-titlebar.test.ts）
@@ -184,16 +196,21 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 展开路径 persist（默认全收起，跟随上次；tests/folder-groups.test.ts）
   project-rail.ts            # 运行页左栏项目区：活标签已添加项目 ∪ 科研活跃工作区 ∪ 当前项
                              # （attributeRailCwd / buildProjectRailSections；tests/project-rail.test.ts）
-  workbench-hero.ts          # 工作台主卡纯逻辑：当前工作按运行标签归属（注册名优先）、
-                             # 步骤取流水线第一个未合并步、「继续工作」有标签则聚焦否则进项目/真进入；
-                             # pickWorkbenchNow = 正在进行列表（大卡 + 紧凑行）；
+  workbench-hero.ts          # 工作台主卡纯逻辑：当前工作按运行标签归属（注册名优先；隔离目标副本按
+                             # runId/taskId 归属表归回真实项目，不按 cwd 拆卡；同名项目按 contextPath 路径选，名字只作唯一命中回落）、
+                             # 步骤取流水线第一个未合并步、「继续工作」有标签则聚焦，否则按 runId 找回原 Run，再回落进项目/真进入；
+                             # pickWorkbenchNow = 正在进行列表（大卡 + 紧凑行）；runningCount 只算活进程
+                             # （isRunProcessLive，已退出/未启动的保留标签留在 runs 里可继续但不冒充「正在工作」）；
+                             # 副行优先待验收/进行中目标；最近对话先按可见范围过滤（归档/内部无头/问 AI/阅读注入不列，
+                             # 与 filterProjectSessions 同口径）再与项目侧栏同一套清洗，未命名不列；
                              # workbenchRecentRows = 已添加项目 ∪ 会话扫仓库（办公/新建无会话也列出），
                              # 与最近对话默认最多 10 条（tests/workbench-hero.test.ts）
   lit-watch.ts               # 文献雷达纯逻辑：日分组/关键词分组（groupEntriesByKeyword，取 keywordsHit 首词、
                              # 未分类恒末）/趋势/直链转换/全文可得性分流（fulltextLinkFor：arxiv abs 与 .pdf 直链=可下载，
                              # DOI/落地页=来源，不再摆禁用下载钮）/已读判定/漂移提醒/雷达筛选（entryPassesFilter
                              # 与 lit_watch.rs 双端镜像，指标未知放行不误伤；快筛解读 watchExplainPrompt /
-                             # parseWatchExplain 五节学术口径，tests/lit-watch.test.ts）
+                             # parseWatchExplain 五节学术口径；卡片展开按项目记忆（默认收起）；
+                             # tests/lit-watch.test.ts）
   md-image-hydrate.ts        # md 阅读/聊天图片占位水合：每次 layout 扫 data-md-src，本地图缓存
   reader.ts                  # 沉浸阅读区纯逻辑：分栏钳制与像素换算/圈选命中与 canvas 映射/截图注入格式/
                              # glossary 表格契约（与 reader.rs 双端镜像，改动需同步）/段落边界提取/术语匹配/
@@ -210,7 +227,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/卡片 kind（idea 想法卡 / draft 讨论卡）过滤
                              # （tests/task-cards.test.ts）
   step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链
-                             # （v3.97 起 after 档一律进主干，可选项带徽标但不抢当前节点；tests/step-flow.test.ts）
+                             # （v3.97 起 after 档一律进主干，可选项带徽标但不抢当前节点；
+                             #   demoReadPaperResource：「开读这一篇」仅示例课题精读步，普通模板只显示「开始」；
+                             #   tests/step-flow.test.ts）
   skill-conflicts.ts         # 技能接口对账纯逻辑：产物冲突（skillOutputConflicts，outputs 两两相交）+
                              # 跨步骤链路（skillChainWarnings：inputs 找供给/outputs 对账预期产物，
                              # 支持 * 通配与目录/文件互含，推断接口打标；tests/skill-conflicts.test.ts）
@@ -252,7 +271,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # pickQuickChatHistory 用 store 会话列表现算；sidebarLaunchesDirect
                              # 侧栏记住选择后直达；pickRememberedProfileId 直达只认记住的那条
                              # （tests/quick-chat.test.ts）
-  confirm-dialog.ts          # 确认框键盘语义：Esc 取消，Enter 激活当前焦点钮（tests/confirm-dialog.test.ts）
+  confirm-dialog.ts          # 确认框键盘语义：Esc 取消，Enter 激活当前焦点钮；设为全局挡路可 focusCancel（tests/confirm-dialog.test.ts）
   custom-runtime.ts          # 自定义运行时默认 cwd：仅空目录/scratch 启用（tests/custom-runtime.test.ts）
   gateway-slot.ts            # Agent→协议槽与目录刷新优先槽（与 slot_for_agent 双端镜像，tests/gateway-slot.test.ts）
   command-palette.ts         # 命令面板过滤纯逻辑
@@ -260,6 +279,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   hotkeys.ts                 # 快捷键组合串纯逻辑
   themes.ts                  # 主题清单单一出处 + isLightTheme() 亮暗判定单一出处（禁另造判定；
                              #   custom / custom-light 不进十四套清单）
+  theme-swatch.ts            # 设置页主题色卡预览色：从 App.css 源文本抽 rail/canvas/cta/l1，
+                             #   禁止临时切 data-theme 再 getComputedStyle（tests/theme-swatch.test.ts）
   custom-theme.ts            # 自定义主题：三色种子派生全套令牌 + 另存色卡列表
                              # （tests/custom-theme.test.ts）
   profile-copy.ts            # profile 跨 agent 复制纯逻辑
@@ -331,7 +352,7 @@ src-tauri/src/
                              #   协议维度门控 channel_status_for（kimi effort 仅 kimi 协议通道，非 kimi 协议绑定按 unknown 计）；
                              #   混注提示覆盖思考与采样两种不一致（换模不重注）；
                              # policy_channel_note 通道形态说明（qwen 仅设为全局 / grok overlay 边界）随 DTO 下发
-  drift.rs                   # 全局配置漂移：只比对 Ccode 写入键的子集，无关字段不算漂移
+  drift.rs                   # 全局配置漂移：只比对 Mesa 写入键的子集，无关字段不算漂移
   gateway_store.rs           # 网关/绑定落盘与迁移；每槽体检摘要 latest-per-slot
   provider_id.rs             # provider 名 ccode-<网关短id> 单一出处；LEGACY="ccode" 仅旧 rollout
   tray.rs                    # 系统托盘：按 Agent 列绑定一键设为全局；选中态 dry-run 子集比对；不改启动栏默认
@@ -346,19 +367,11 @@ src-tauri/src/
                              #   （backups/<agent>/original/ 永久快照，首次 apply 时落、不参与轮换，
                              #   has_original_backup/restore_original_backup）；
                              # codex 轻量注册 codex_register_client_provider：只写 config.toml provider 定义块
-                             #   （patch_codex_config_register；认证 = 块内静态 http_headers.Authorization——
-                             #   2026-09-02 本机 0.151.0 实测：无 auth.json/env_key/requires_openai_auth 时 codex
-                             #   照常发请求且只带静态头，auth.json 里另一把 key 不被顶用；**不写 auth.json**——
-                             #   单槽共享凭证是客户端自身登录态，旧写法会顶掉登录；代价 = 密钥明文落 config.toml），
-                             #   顶层 model_provider/model 不动、不记 active_global——
-                             #   供桌面客户端按 rollout 记录的 provider 名查定义续聊（matrix §2：不设默认不接管请求）；
-                             #   逆操作 codex_unregister_client_provider 只删定义块（块不在则拒写不造空备份），
-                             #   块内密钥随块一并删除即完成清理；
-                             #   codex_client_registered_profiles 供连接页菜单「注册 ⇄ 移除注册」同位状态化；
-                             #   注册（静态头）与「设为全局」（requires_openai_auth）两条认证路线互斥，
-                             #   写任一条时清对方的键（http_headers ⇄ requires_openai_auth）；
-                             # codex provider 带 requires_openai_auth=true（auth.json 直供密钥，外部终端零 export；
-                             #   旧写入遗留的 env_key 行随下次写入清除）；
+                             #   （顶层 model_provider/model 不动、不记 active_global）；认证与「设为全局」
+                             #   共用 experimental_bearer_token（ChatGPT 自带 Codex 的 ModelProviderInfo 认这个字段），
+                             #   **不写 auth.json**，也不写 http_headers（MCP 字段，写在 provider 上客户端加载失败报 not found）；
+                             #   requires_openai_auth = false；写块时清掉旧 env_key / http_headers；
+                             #   逆操作只删定义块；codex_client_registered_profiles 供连接页菜单同位状态化；
                              # gemini 双文件：.env 之外必须加写 settings.json 的 selectedType=gemini-api-key
                              #   （v3.147 审计：缺它 gemini ≥0.46 headless auth 报错起不来，JSONC 容错读），
                              #   并登记 modelConfigs.modelDefinitions 让自定义模型进 /model 选择器
@@ -371,7 +384,7 @@ src-tauri/src/
                              #   [models].default 与请求策略全局默认（通用键只设不删，防误清用户手写值）；
                              #   绑定设了「API 后端」或权威层确知上下文时逐模型写 [model.<id>] 段
                              #   （api_backend/context_window/name；段键 = 目录模型 id 自动加引号）——api_backend
-                             #   在 Ccode 侧的唯一通道（overlay 白名单不放行 [model.*]）
+                             #   在 Mesa 侧的唯一通道（overlay 白名单不放行 [model.*]）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
                              # update_step_skills（步骤推荐技能读-改-原子写）、append_pipeline_steps（从模板追加：重名跳过、全跳过不落盘、
                              # 追加成功自动清 pipeline_opt_out）、set_pipeline_opt_out（「不使用研究流程」显式标记读-改-原子写）、
@@ -380,7 +393,7 @@ src-tauri/src/
                              # 任务卡 kind（idea/draft，旧卡按 step 推断）、fuse_card_into_draft（想法卡会话 ×
                              # 当前步骤草稿 → AI 融合稿，出站 redact_and_cap 不写盘）+ write_task_draft（确认后整份落盘）、
                              # update_lit_watch_filter（雷达筛选读-改-原子写，全空归一 None）、
-                             # 项目移除三档（移除注册 / purge_project_traces 清除 Ccode 痕迹保留文件夹 / delete_project_dir）
+                             # 项目移除三档（移除注册 / purge_project_traces 清除 Mesa 痕迹保留文件夹 / delete_project_dir）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用；
                              # pty_report_terminal_colors = Windows 底色告知（win32-input-mode 记录逐条投递，
                              #   条间 2ms；ConPTY 双向吞 OSC 的实测结论见 conventions/terminal.md，别改回 OSC）
@@ -394,12 +407,14 @@ src-tauri/src/
                              # 无头 AI 按 session id 标 session_meta.internal（雷达解读/定时巡检不进本项目会话，
                              # 禁止把项目路径写入 usage_provenance.internal）
   session_transfer.rs        # 会话包导出/导入（.ccode-sessions.zip，八家不含 opencode）：原文打包装、导入时改写 cwd 并按 B 机
-                             #   目录重建落位；zip-slip/大小/后缀/白名单；同 id 跳过不覆盖；Ccode 元数据写 app.db；
+                             #   目录重建落位；zip-slip/大小/后缀/白名单；同 id 跳过不覆盖；Mesa 元数据写 app.db；
                              #   kimi 新版 wd_<basename>_<sha256[:12]> + session_index.jsonl；grok URL 编码 cwd
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor/grok 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content；apps 表是创建时快照，
                              #   list 时现算补齐注册表新 agent 的缺键（否则一键应用永远漏新 agent，不写盘）；内置技能种子（seed_builtin_skills：
-                             # include_str! 内嵌 src-tauri/resources/skills/ 18 个技能，启动幂等播种，不覆盖/不复活用户改动）、
+                             # include_str! 内嵌 src-tauri/resources/skills/ 18 个技能，启动幂等播种，不覆盖/不复活用户改动；
+                             #   删除内置技能先落逐技能墓碑 .builtin-skill-tombstones（删除失败也不留「删了没记」），
+                             #   种子版本升级补播跳过墓碑项——墓碑机制前的老删除靠 skill-backups 同名备份回填墓碑）、
                              # 内置技能更新（check_builtin_skill_updates 种子逐字节比对 + apply_builtin_skill_update
                              # 覆盖前备份 SKILL.md.bak-<yyyymmdd> 后原子写入）、技能接口契约（frontmatter inputs/outputs
                              # 解析进 SkillDto，list 时现算；外部技能未声明时 infer_interface_from_body 正文推断兜底、
@@ -415,14 +430,21 @@ src-tauri/src/
                              #   删除弹层（SkillsPage DeleteSkillModal）列影响面 + 内置不复活警告 + 导入来源，
                              #   delete_impl 先备份库目录进 skill-backups（留 5 份）再卸载；纯逻辑在 src/skill-delete.ts
                              #   （tests/skill-delete.test.ts）
+  mcp_blender.rs             # Blender 官方 MCP 本机安装探测（只读：Blender 版本/插件文件/uv/仓库/TCP 9876）
   mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §10）：统一模型→八家映射（grok 只读）、读-改-写一个键/段 + 备份 +
                              # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）、stdio 裸命令名 resolve_binary
                              #   绝对化 + node shim 深化、相对路径命令拒写（跨 agent 必挂，报错引导改绝对路径）；
-                             #   全局启用开关（enabled 字段：停用=移除各 agent 条目但保留 apps 映射，重开按原样重投）+
+                             #   全局启用开关（enabled 字段：停用=移除各 agent 条目但保留 apps 映射，重开按原样重投；
+                             #   停用期间编辑/拨开单 agent 开关只更新清单记意图，不动 agent 配置）+
                              #   连通性检测 check_mcp_server（stdio 拉起 initialize 握手 / remote POST 探活，每次尝试 8s 上限；
                              #   stdio 帧格式自适应：先发规范的 NDJSON 换行帧，server 秒退/首帧非法/超时再换
                              #   Content-Length 头帧重试一次，回包读取器两种帧都认；
-                             #   env/header 的 $VAR 引用检测时按宿主环境展开）；
+                             #   env/header 的 $VAR 引用检测时按宿主环境展开（scan_env_refs 整值+内嵌同口径）；
+                             #   结果带 status 细分闭集 handshake/reachable/auth/not_found/error——401/403/404 判失败）；
+                             #   明文密钥安全闸（审计收口 2026-09-08）：保存/粘贴导入/分发一律拒绝，只接受 $VAR 引用，
+                             #   历史明文条目不删不崩但编辑/分发被拦至改成引用，移除方向不拦；
+                             #   重命名受保护迁移（新名写好后移除各 agent 旧名条目）；
+                             #   codex stdio env 改名引用（TARGET=${SOURCE}）明确拒写；
                              #   origin 来源标记（ccode/imported:<agent>/imported:json，空串=未知按收编对待；
                              #   收编条目删除默认仅从清单移除 keep_agent_configs，不动 agent 配置）；
                              #   外部状态同步 mcp_distribution_status 五态（off/ok/modified/missing/disabled_externally，只读、
@@ -440,7 +462,12 @@ src-tauri/src/
   usage.rs                   # 用量统计（§6.11）：usage 事件提取、usage_daily 按天聚合、任务成本归因、订阅口径、
                              # session_usage 单会话聚合（终端状态栏 token 段，先增量索引再按 session_id 汇总）；
                              # usage_trend / top_sessions：花费折线与最贵会话均跟随页顶范围，官方账号与 internal 不计费不进榜，
-                             # 自定义标题出站前过 redact_sensitive_text；
+                             # 自定义标题出站前过 redact_sensitive_text；总额卡与折线/榜单同一计费范围，
+                             # 官方/internal 的 token 量单列展示不计费（v3.255）；
+                             # provenance v7 起按会话级登记（official 用启动 hint/恢复目标写 session_id 行，
+                             #   启动时不知 id 的 agent 由重建索引按 session_meta.profile_id 解析认证方式兜底；
+                             #   旧项目级行只回填 created_at 之前已存在的会话，不粘住新会话）；
+                             #   session_meta.internal（无头 AI/定时巡检按会话 id 登记）纳入用量索引；
                              # 定价链 PriceChain 三层：用户 pricing.json > 公共能力库 cost > 内置表 BUILTIN_PRICING
                              #   （高层任意前缀命中即胜、同层最长前缀优先——用户写短前缀即覆盖低层细分代；
                              #   内置表口径 2026-08-31 各官方页，跨代改价给新代加更长前缀、旧价留给老会话归属）
@@ -453,13 +480,13 @@ src-tauri/src/
                              # 见 docs/conventions/terminal.md）；
                              # hidden_profiles = 软停用（自动路径跳过、手动可用；v3.142 起不再是纯展示偏好）；
                              # active_global_profiles = 「设为全局」追踪（agent→profile id，record/clear_active_global
-                             # 维护、不走 patch、clear_profile_refs 同步清引用；只代表「上次由 Ccode 写入」非绝对生效态）；
+                             # 维护、不走 patch、clear_profile_refs 同步清引用；只代表「上次由 Mesa 写入」非绝对生效态）；
                              # outbound_proxy = 出网代理（只注入官方账号启动与组头登录，网关启动不走；
                              #   extra_env 同名键覆盖；校验 http(s)/socks5，空串清除）
   hooks.rs                   # 精确注意力标记（七家 hooks 桥接）：BRIDGE_SPECS 每 agent 一张桥接规格（claude/qwen/
                              # codebuddy/gemini/kimi/grok/codex；cursor 无「等待确认」等价事件、opencode 无 shell hooks
                              #   形态，两家未接入），写各家 hooks 配置（备份留 10 份 + 原子写 + marker 合并/移除 +
-                             #   损坏拒写；grok 整文件归 Ccode、外来文件拒覆盖），机制调研录 matrix §12；
+                             #   损坏拒写；grok 整文件归 Mesa、外来文件拒覆盖），机制调研录 matrix §12；
                              # 事件日志解析双信封（snake_case/camelCase）+ 事件名去下划线小写归一 + grok Stop 只认
                              #   reason=end_turn + 会话归属双键匹配（session_id==文件主名 或 transcript_path==完整路径），
                              #   10 分钟 TTL 回落尾部推断不变；settings 字段 hooks_attention: map<agent,bool>
@@ -499,6 +526,7 @@ src-tauri/src/
                              # 旧条目装表即生效）；download_journal_metrics（jsDelivr→raw 回落、.tmp 原子落盘、完清缓存）+
                              # journal_metrics_status（含 downloadedAt：两份 CSV 取较新 mtime）+ check_journal_metrics_update
                              # （GitHub commits API 按数据目录查最近 commit，与本地 mtime 比对出 hasUpdate，前端静默失败）
+  research_quality.rs        # 科研复现运行记录与验收决定：独立输出 ~/ccode/reproductions/；验收写 .ccode/research-acceptance.json，不替代 Git 合并
   reader.rs                  # 沉浸阅读区后端（v3.96）：ensure_paper_note 建档 notes/<slug>.md（精读八小节对齐 lit-notes 技能口径 + 机管「译段」「我的想法」两节，已存在不覆盖；
                              # 建档前先扫 notes/ 头部「来源行」配对已有精读笔记，命中即复用不另建，空模板 slug 笔记顺带清回收站；
                              # pdf_for_note 笔记→配对 PDF（来源行锚点优先；无锚点回落笔记 stem × type=paper 资源 stem
@@ -558,10 +586,11 @@ src-tauri/src/
 已按主题迁入 `docs/conventions/`，改动对应领域前必读对应文件，日常会话不必加载。
 
 - **密钥绝不回显/进 shell**：存 0600 `keys.json`（键=网关 id），只在拉起瞬间注入子进程 env；绑定/网关 JSON 只存尾号 key_hint；
-  `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Ccode` 必须显式设置。
+  `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Mesa` 必须显式设置。
 - **会话文本出站前必须在 Rust 层脱敏**：标题/摘要、结构化回放、AI 摘要、Markdown 导出均不得把已保存密钥或常见密钥前缀
   送到 React；只作用于 DTO/导出副本，不得回写会话源文件；前端遮盖不是安全边界。
 - **gitignored 科研产物写项目根**：文献 PDF、清洗后数据、渲染 PDF/docx 不进 git，必须落在项目根 `papers/`、产物目录或 `output/`，禁止只写在工作区。人工导入 `papers/` 与 PDF 强制项目根；合并成功后把工作区未跟踪的这三类目录拷到主仓（已有不覆盖）。TASK.md 必须给出项目根绝对路径。
+- **Codex 全局写入不碰 `~/.codex/auth.json`**（v3.249 / v3.250）：「设为全局」与「注册到客户端」都只写 `config.toml` 的 provider 块，认证用 `experimental_bearer_token`（ChatGPT 自带 Codex 认这个字段）。禁止写 `http_headers`（MCP 字段，写在 provider 上客户端加载失败报 Model provider not found）。禁止退回 `requires_openai_auth=true` + 改 auth.json。
 - **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、hooks 精确注意力开关（七家，见 hooks.rs）、会话删除、工作树文件删除、**会话导入**——
   工作树文件删除走系统回收站（trash crate）可反悔；五类均有备份/白名单防护口径，见 `docs/conventions/safety.md`）。
 - **二进制解析统一走 `agents::resolve_binary`**：先 which（继承 PATH），miss 时按平台候选目录兜底；新增 CLI/工具调用点一律
@@ -592,7 +621,7 @@ src-tauri/src/
 | 流水线与项目域 | `docs/conventions/pipeline.md` | 工作区创建/漂移/归档/删除、流水线开步/模板/编辑器、接力与提炼接力、任务卡、人工事项与讨论种子、agent 人工请求（help-wanted）、收件箱分类胶囊、示例课题、白话双层 |
 | 编程 Git / GitHub | `docs/conventions/coding-git.md` | **改编程页 git 前必读**：工作树 vs 主仓 vs GitHub Desktop、从基准开工、远程身份、PR 环、不做任意 git 命令框 |
 | 多 Agent 工作台对象 | `docs/conventions/agent-workbench.md` | **改工作台/并行/无头/Runtime 前必读（v3.221 定稿；第 0–3 期核心路径已落地）**：Project→Task→Run、编程车道、RuntimeKind、禁止自动拆工；定时任务默认隔离 worktree；非 Git 项目失败 |
-| 步骤工作面板 | `docs/conventions/step-panel.md` | **新增步骤/模板前必读**：七条硬规则（顺序即语义、空节点不出现、同一事实只说一次、孤立按钮、主路径唯一不设门控、角色标注）、问题该在什么时刻与层级出现（项目层/决策项/按需问/种子/人工事项五选一）、文案与术语、新增模板检查清单 |
+| 步骤工作面板 | `docs/conventions/step-panel.md` | **新增步骤/模板前必读**：七条硬规则（顺序即语义、空节点不出现、同一事实只说一次、孤立按钮、主路径唯一、显式决策契约门控、角色标注）、问题该在什么时刻与层级出现（项目层/决策项/按需问/种子/人工事项五选一）、文案与术语、新增模板检查清单 |
 | 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
 | 网关与绑定（配置模型层） | `docs/conventions/profiles.md` | **改配置/注入/设为全局/模型能力/托盘前必读（已落地）**：网关×绑定拆层、binding id 复用、provider 派生名、relay 缓存键、求交器、体检与通道表不对称、迁移合并 |
 
@@ -647,13 +676,15 @@ src-tauri/src/
 
 ## 模型配置约定（2026-09-05）
 
-- Claude Code 启动必须用 `--settings` 覆盖本次连接的模型选择，避免用户级 `settings.json.env` 覆盖 Ccode；不得写 `CLAUDE_CODE_SUBAGENT_MODEL`，以保留 Task 参数、frontmatter 和主模型继承链。
+- Claude Code 启动必须用 `--settings` 覆盖本次连接的模型选择，避免用户级 `settings.json.env` 覆盖 Mesa；不得写 `CLAUDE_CODE_SUBAGENT_MODEL`，以保留 Task 参数、frontmatter 和主模型继承链。
 - Anthropic 兼容槽只接受基础 URL；保存时拒绝以 `/messages` 结尾的完整资源地址。
 - CodeBuddy 的 `reasoning_effort` 通过当前 CLI 的 `--effort` 启动参数注入；Grok 的模型/思考档通过 `-m`/`--reasoning-effort` 注入。
 - Grok 的 `api_backend`、`context_window` 不得通过受限 `GROK_CONFIG` 猜测注入；若绑定声明非 `chat_completions`，必须先在 Grok `[model.<id>]` 配置中登记，否则启动和无头调用均 fail-closed。
 - 配置页查询模型能力必须带 `gatewayId`，网关级能力声明优先于公共/内置能力库；写 Grok 逐模型上下文时只使用显式声明值，不使用通用估值。
 
-- **项目页三视图（2026-09-06）**：项目页顶栏是当前项目身份（名称、工作方式、课题主题、路径），添加项目在左侧列表 +。已注册项目使用「科研任务 / 工作任务 / 编程任务 + 文件 + Agents」项目内页签。任务页是该工作方式的主面（有流程科研=步骤/工作区，无流程科研=人声明任务 + 雷达 + 右侧对话/定时巡检，办公=人声明任务，编程=工作树）。文献/笔记/数据只在「文件」页。文件页：点文件才弹出右侧预览；预览有上下切换，窗口预览时方向键也换文件；搜索与分类筛选；可切窗口预览。Agents 页是这个项目的 Agent 名册（谁在干活、默认给谁、正在负责哪些步骤），不是连接页的模型配置表单；配置用当前项点选切换，不用下拉。不自动分派，密钥仍在连接页。侧栏「定时巡检」是全局计划/历史汇总，后台巡检不进入工作台交互活。
+- **项目页三视图（2026-09-06）**：项目页顶栏是当前项目身份（名称、工作方式、课题主题、路径），添加项目在左侧列表 +。已注册项目使用「科研任务 / 工作任务 / 编程任务 + 文件 + Agents」项目内页签。任务页是该工作方式的主面（有流程科研=步骤/工作区，无流程科研=目标 + 现在模块（文献雷达，折叠头+图标工具）+ 右侧对话/定时巡检，办公=人声明任务，编程=工作树）。文献/笔记/数据/图像只在「文件」页，任务页不预留空块。无流程科研收起对话后，重开按钮在「目标」标题行。文件页：点文件才弹出右侧预览；预览有上下切换，窗口预览时方向键也换文件；顶栏类型图标（空类型不占位）+ 搜索 + 刷新；行悬停图标（问 AI / 显示 / 沉浸阅读），不挤文件名；可切窗口预览。规则面板无说明句，「保持原样」默认收起。办公文档筛选与文件页同一套图标。本项目对话未命名显示「对话」，超过 8 条收进「更早」。有进行中/待验收目标时雷达默认收起。Agents 页是这个项目的 Agent 名册（点配置名换该项目绑定、＋新对话默认、正在负责哪些目标），点目标回任务页；不是连接页的模型配置表单。没有目标时不逐家重复空状态。不自动分派，密钥仍在连接页。编程工作树 ⋯ 可事后分组。对话页是各项目 Agent 做过的记录；定时巡检在项目内创建（科研：项目设置或右侧栏；工作/编程：对话右侧），侧栏页只汇总，后台不进正在进行、不进本项目对话。
 - **绑定与网关命名（2026-09-06）**：Gateway.name 是共享端点/网关名称，Binding.name 是单个 Agent 配置名称，必须分开存储；旧 Binding 缺 name 时展示回退 Gateway.name。修改 profile 名称只更新 Binding.name，不得改共享 Gateway.name 或其他 Binding。相同 Agent + 网关允许不同模型选择，完全相同的模型/协议/附加环境变量仍拒绝重复。
-- **目标与验收（2026-09-06）**：无流程科研和工作的「新建目标」写一句话即可；默认把整个项目复制进隔离副本，人验收后写回。可选用指定资料或不带入。＋新对话默认直接改项目根；开聊可选「验收后写入」。列表只显示 `user:` 声明目标。有流程科研走步骤/工作区，编程走工作树。禁止自动拆任务、智能路由、创建时空目录。失败/停止在原目标上重试；修改意见也走同一目标继续。
-- **确认框与自动路径（2026-09-06）**：`confirmDialog` 默认焦点在确认钮，Enter 激活当前焦点按钮（焦点在取消则取消）。快速开聊直达只接受记住的那条 profile，失效退回弹层。Custom Runtime 不是隔离工作树任务；写盘必须离开主仓只约束 pipeline/coding/watch。网关目录按槽刷新。交互 `pty_write`（含选段问 AI）失败必须可见。
+- **模型越强，产品越管环境和验收（2026-09-07）**：不跟 Codex/Claude 比「我也能执行」。闲聊用＋新对话（项目根直接改）；成稿用新建目标（隔离 + 人验收 + 项目记住）。Agent 弱时科研步骤仍可当护栏；Agent 强时把引导撤掉。禁止靠更强编排/自动拆任务来对抗更强模型。
+- **有流程科研的决定、复现与验收（2026-09-08）**：硬暂停认决定状态，不认非空文字。状态闭集为批准指定范围／仅允许准备／待补证据／不批准，与说明分开写；旧纯文本不自动批准，不用关键词猜授权。批准绑定当时报告指纹，指纹变了要重确认。复现只认脚本约定（`MESA_REPRODUCE` 或 `reproduce` 子命令），输出必须独立于输入项目，落 `~/ccode/reproductions/`，界面只读本次运行输出。科研验收决定（接受／有条件接受／退回）写 `.ccode/research-acceptance.json`，不替代也不禁止 Git 合并。运行结束、计算检查、人工验收三层状态不得合成一个绿灯。不得把报告里的「通过」自动当成质量通过。
+- **目标与验收（2026-09-06）**：无流程科研和工作的「新建目标」写一句话即可，可先记下再开始；默认把整个项目复制进隔离副本，人验收后写回。可选用指定资料或不带入。＋新对话默认直接改项目根；开聊可选「验收后写入」。列表只显示 `user:` 声明目标，按尚未开始 / 进行中 / 待验收 / 已完成分组，时间线是生成→意见→下一版→已接受。验收不满意写意见，同一目标沿用上一版隔离目录再跑。文件页待验收文件打标。Context Pack 带工作环境、项目规则、保护路径、已验收产出与意见、未完成目标。验收接受写入 `.ccode/project-status.json`。任务页头部「项目现在」。项目规则可编辑（未改过补工作方式默认条）；保护路径勾选文件夹，验收写回时这些文件夹保持项目原样（不是另存一份、不是审核后再合并），不在 CLI 做沙箱。科研目标验收按文献/笔记/数据/论文分组并可预览；工作目标按文档/表格/幻灯分组并可预览；编程验收仍是工作树改动面板、合进基准、PR，不套目标验收弹层。有流程科研走步骤/工作区。禁止自动拆任务、智能路由、创建时空目录、人设 Agent 槽。
+- **确认框与自动路径（2026-09-06）**：`confirmDialog` 默认焦点在确认钮，Enter 激活当前焦点按钮（焦点在取消则取消）。「设为全局」本机有 cc-switch 时挡路（Codex 另认 live custom/catalog），焦点在取消（`focusCancel`）。快速开聊直达只接受记住的那条 profile，失效退回弹层。Custom Runtime 不是隔离工作树任务；写盘必须离开主仓只约束 pipeline/coding/watch。网关目录按槽刷新。交互 `pty_write`（含选段问 AI）失败必须可见。

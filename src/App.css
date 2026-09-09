@@ -530,9 +530,14 @@ body {
   isolation: isolate;
 }
 
-/* 项目页内容井：落在 canvas→strip 之间。浅色纯 strip 会漂成白纸，62% 画布又贴底看不出层；
-   40% 画布 / 60% strip 再抬半档，色相仍跟画布。禁改回 bg-strip / bg-raised。 */
+/* 项目页内容井。浅色纯 strip 漂成白纸（v3.210），混 40% 画布才跟色相（v3.216）。
+   深色同一配方几乎贴死画布，工作树卡看不见层——改走 inset（卡片档）。
+   浅色仍禁 bg-strip / bg-raised。 */
 .ccode-well {
+  background: var(--color-inset);
+}
+
+[data-theme$="-light"] .ccode-well {
   background: color-mix(in srgb, var(--color-canvas) 40%, var(--color-strip));
 }
 
@@ -541,9 +546,18 @@ body {
   background: var(--color-rail);
 }
 
-/* 品牌区与侧栏同底不画线（Codex 式：侧栏只有全高竖分界 + 底部栏一根横线，分区间靠留白） */
+/* 品牌区与侧栏同底不画线（Codex 式：侧栏只有全高竖分界 + 底部栏一根横线，分区间靠留白）。
+   字标不走按钮 text-*（全站 button { font: inherit } 会吞掉）；四字 Mesa 不用 tracking-wide。 */
 .ccode-brand-bar {
   transition: background-color 150ms var(--ccode-motion-ease);
+}
+
+.ccode-brand-mark {
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--color-l1);
 }
 
 /* 侧栏 nav 不可用 scrollbar-gutter：经典滚动条（系统"始终显示"）下 stable 会在 56px

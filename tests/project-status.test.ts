@@ -19,6 +19,10 @@ import {
   sortWorkspacesByAttention,
   startOfYesterdayMs,
   workspaceAttentionRank,
+  projectNowLine,
+  goalsNeedAttention,
+  goalCardMeta,
+  formatAcceptedStatusLine,
 } from "../src/project-status.ts";
 
 test("编程状态行：工作树数 + 待合并 + 需同步", () => {
@@ -185,21 +189,37 @@ test("端口按仓库根过滤，前缀路径不算", () => {
   );
 });
 
-test("本项目会话：工作树路径算进去，置顶提前，截断上限", () => {
+test("本项目会话：工作树路径算进去，置顶提前，默认全部列出", () => {
   const rows = filterProjectSessions(
     [
       { projectPath: "/other", pinned: true, id: "x" },
       { projectPath: "/repo", pinned: false, id: "a" },
       { projectPath: "/repo/wt", pinned: true, id: "b" },
       { projectPath: "/repo", pinned: false, id: "c" },
+      { projectPath: "/repo", pinned: false, archived: true, id: "old" },
     ],
     "/repo",
     ["/repo/wt"],
-    { limit: 2 },
   );
   assert.deepEqual(
     rows.map((r) => r.id),
-    ["b", "a"],
+    ["b", "a", "c"],
+  );
+});
+
+test("本项目会话可选截断上限", () => {
+  const rows = filterProjectSessions(
+    [
+      { projectPath: "/repo", pinned: false, id: "a" },
+      { projectPath: "/repo", pinned: false, id: "c" },
+    ],
+    "/repo",
+    [],
+    { limit: 1 },
+  );
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    ["a"],
   );
 });
 
@@ -236,5 +256,58 @@ test("本项目会话不收雷达解读和无头 AI", () => {
   assert.deepEqual(
     rows.map((r) => r.id),
     ["real"],
+  );
+});
+
+test("goalsNeedAttention only for review running stuck", () => {
+  assert.equal(goalsNeedAttention([]), false);
+  assert.equal(goalsNeedAttention([{ status: "pending" }]), false);
+  assert.equal(goalsNeedAttention([{ status: "completed" }]), false);
+  assert.equal(goalsNeedAttention([{ status: "pending_review" }]), true);
+  assert.equal(goalsNeedAttention([{ status: "running" }]), true);
+  assert.equal(goalsNeedAttention([{ status: "failed" }]), true);
+});
+
+test("projectNowLine puts review and unfinished before accepted", () => {
+  assert.equal(projectNowLine([]), null);
+  assert.equal(
+    projectNowLine([
+      { name: "研究综述", status: "completed" },
+      { name: "设计实验", status: "pending" },
+      { name: "整理数据", status: "pending_review" },
+    ]),
+    "项目现在：整理数据待验收 · 设计实验未开始 · 研究综述已接受",
+  );
+});
+
+test("goalCardMeta hides whole-project input noise", () => {
+  assert.equal(
+    goalCardMeta({
+      agentLabel: "Codex",
+      outputPaths: ["."],
+      reviewRequired: true,
+      workMode: "office",
+    }),
+    "Codex · 验收后写入文档",
+  );
+  assert.equal(
+    goalCardMeta({
+      agentLabel: "Codex",
+      outputPaths: ["周报.md"],
+      reviewRequired: true,
+      workMode: "office",
+    }),
+    "Codex · 周报.md",
+  );
+});
+
+test("formatAcceptedStatusLine keeps the verdict and note", () => {
+  assert.match(
+    formatAcceptedStatusLine({
+      name: "研究综述",
+      outputs: ["论文/综述.md"],
+      note: "引用太少",
+    }),
+    /已接受/,
   );
 });

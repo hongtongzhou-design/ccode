@@ -1,5 +1,5 @@
 /** 「快速开聊」随手聊历史纯逻辑（tests/quick-chat.test.ts）。
- *  只排除「点了也没法恢复」的——归档 / Ccode 内部无头会话 / 源文件已不在的 /
+ *  只排除「点了也没法恢复」的——归档 / Mesa 内部无头会话 / 源文件已不在的 /
  *  进程仍活着的（live，resume 同会话会被 CLI 拒：active writer 冲突）。 */
 import type { SessionMetaDto } from "./types";
 import { pathKey } from "./path-utils.ts";
@@ -41,7 +41,7 @@ function recoverable(s: SessionMetaDto): boolean {
 }
 
 /** 默认随手聊目录：家目录下 `ccode/scratch`（与 ensure_scratch_dir 同口径）。
- *  未添加到项目的编码仓库（例如 Ccode 源码目录）不算随手聊。 */
+ *  未添加到项目的编码仓库（例如 Mesa 源码目录）不算随手聊。 */
 export function isScratchCwd(path: string, isWindows = false): boolean {
   const k = pathKey(path, isWindows);
   return k.endsWith("/ccode/scratch") || k.includes("/ccode/scratch/");

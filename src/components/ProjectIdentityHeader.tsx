@@ -8,7 +8,7 @@ import {
 } from "./PageFrame";
 import { abbrevHome } from "../path-utils";
 import { IS_WINDOWS } from "../hotkeys";
-import { normalizeWorkMode, WORK_MODE_LABEL } from "../work-mode";
+import { normalizeWorkMode, WORK_MODE_LABEL, headerShowsTopic } from "../work-mode";
 import type { ProjectConfigDto, ProjectConfigReadDto, ProjectDto } from "../types";
 
 export type ProjectChromeAction =
@@ -92,7 +92,10 @@ export default function ProjectIdentityHeader({
     workMode === "research" &&
     !!cfg?.pipelineOptOut &&
     (cfg.steps?.length ?? 0) === 0;
-  const showTopic = registered && workMode === "research" && !liteResearch;
+  const showTopic = headerShowsTopic({
+    registered,
+    workMode: project?.workMode,
+  });
   const showMenu = registered && workMode === "research" && !liteResearch;
   const topicText = cfg?.topic?.trim() ?? "";
 
@@ -248,10 +251,10 @@ export default function ProjectIdentityHeader({
             <button
               type="button"
               className={inlineActionClass}
-              title="添加到 Ccode"
+              title="添加到 Mesa"
               onClick={() => onRegisterProject(repoPath)}
             >
-              添加到 Ccode
+              添加到 Mesa
             </button>
           )}
           {showMenu && (
@@ -317,9 +320,9 @@ export default function ProjectIdentityHeader({
               onSelect: () => onChromeAction("history"),
             },
             {
-              label: "从 Ccode 移除",
+              label: "从 Mesa 移除",
               title:
-                "只把项目从 Ccode 列表里摘掉，不动磁盘文件；清除痕迹与删除目录在左侧项目栏右键菜单里",
+                "只把项目从 Mesa 列表里摘掉，不动磁盘文件；清除痕迹与删除目录在左侧项目栏右键菜单里",
               onSelect: () => void removeRegistration(),
             },
           ]}

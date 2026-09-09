@@ -34,13 +34,38 @@ impl ProfileDumpDto {
             account_type: p.account_type,
             no_auth: p.no_auth,
             protocol: p.protocol.clone(),
-            base_url: p.base_url.clone(),
+            // base_url 可能带 userinfo（http://user:pass@gateway），密码不属于快照
+            base_url: p.base_url.as_deref().map(strip_url_userinfo),
             models: p.models.clone(),
             request_policy: p.request_policy.clone(),
             key_hint: p.key_hint.clone(),
             has_key: p.has_key,
             last_used_at: p.last_used_at.clone(),
         }
+    }
+}
+
+/// 剥掉 URL 的 userinfo（http://user:pass@host:8080 → http://***@host:8080），保留
+/// scheme/host/port 供诊断；`***` 标记表示「配置过凭证」。非 URL / 无 userinfo 原样返回。
+/// 结构化剥离而非前缀匹配：代理密码形如 `hunter2`，不命中任何密钥前缀，通用脱敏拦不住。
+fn strip_url_userinfo(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let (scheme, rest) = raw.split_at(scheme_end + 3);
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, suffix) = rest.split_at(authority_end);
+    // userinfo 以最后一个 @ 收尾（密码里可含 @），其后是 host[:port]
+    let Some(at) = authority.rfind('@') else {
+        return raw.to_string();
+    };
+    format!("{scheme}***@{}{}", &authority[at + 1..], suffix)
+}
+
+/// 应用设置进快照前的结构化清洗：出网代理可能带 userinfo 密码，剥掉只留地址。
+fn sanitize_settings_for_dump(s: &mut crate::settings::AppSettingsDto) {
+    if let Some(proxy) = s.outbound_proxy.take() {
+        s.outbound_proxy = Some(strip_url_userinfo(&proxy));
     }
 }
 
@@ -73,7 +98,8 @@ struct EffectiveConfigDumpDto {
 }
 
 fn collect_dump(project_root: Option<String>) -> Result<EffectiveConfigDumpDto, String> {
-    let settings = crate::settings::current_with_defaults();
+    let mut settings = crate::settings::current_with_defaults();
+    sanitize_settings_for_dump(&mut settings);
     let profiles = match crate::profiles::ProfileStore::existing() {
         Some(store) => store.list()?.iter().map(ProfileDumpDto::from).collect(),
         None => Vec::new(),
@@ -271,5 +297,73 @@ mod tests {
         assert_eq!(ws["sources"]["setup"], "repo");
         assert_eq!(ws["merged"]["setup"], "make setup");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn strip_url_userinfo_keeps_scheme_host_port() {
+        assert_eq!(
+            strip_url_userinfo("http://user:hunter2@127.0.0.1:7890"),
+            "http://***@127.0.0.1:7890"
+        );
+        assert_eq!(
+            strip_url_userinfo("socks5h://alice@proxy.local:1080"),
+            "socks5h://***@proxy.local:1080"
+        );
+        // 密码里含 @：以最后一个 @ 收尾
+        assert_eq!(
+            strip_url_userinfo("http://u:p@ss@host:8080/"),
+            "http://***@host:8080/"
+        );
+        // 无 userinfo / 非 URL 原样保留
+        assert_eq!(
+            strip_url_userinfo("http://127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(strip_url_userinfo("not a url"), "not a url");
+    }
+
+    #[test]
+    fn profile_dump_strips_base_url_userinfo() {
+        let dump = dump_with(vec![ProfileDumpDto::from(&sample_profile(
+            "https://gwuser:gwpass@api.example.com:8443/v1",
+        ))]);
+        let text = render_dump(&dump).unwrap();
+        assert!(!text.contains("gwpass"), "base_url 密码不得进快照: {text}");
+        assert!(!text.contains("gwuser"), "base_url 用户名也剥掉: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["profiles"][0]["baseUrl"],
+            "https://***@api.example.com:8443/v1",
+            "保留 scheme/host/port 供诊断"
+        );
+    }
+
+    #[test]
+    fn settings_dump_strips_outbound_proxy_userinfo() {
+        let mut settings = crate::settings::AppSettingsDto {
+            outbound_proxy: Some("http://proxyuser:proxypass@127.0.0.1:7890".into()),
+            ..Default::default()
+        };
+        sanitize_settings_for_dump(&mut settings);
+        assert_eq!(
+            settings.outbound_proxy.as_deref(),
+            Some("http://***@127.0.0.1:7890")
+        );
+        let dump = EffectiveConfigDumpDto {
+            app_settings: settings,
+            ..dump_with(vec![])
+        };
+        let text = render_dump(&dump).unwrap();
+        assert!(
+            !text.contains("proxypass"),
+            "代理密码不得进快照（通用前缀脱敏拦不住此类密码）: {text}"
+        );
+        // 无 userinfo 的代理地址不受影响
+        let mut plain = crate::settings::AppSettingsDto {
+            outbound_proxy: Some("socks5://127.0.0.1:7891".into()),
+            ..Default::default()
+        };
+        sanitize_settings_for_dump(&mut plain);
+        assert_eq!(plain.outbound_proxy.as_deref(), Some("socks5://127.0.0.1:7891"));
     }
 }

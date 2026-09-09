@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AGENTS } from "../types";
+import { IS_WINDOWS } from "../hotkeys";
 import type {
   AgentCapabilitiesDto,
   McpCommandFixCandidate,
@@ -13,6 +15,7 @@ import ContextMenu from "../components/ContextMenu";
 import { Modal } from "../components/Modal";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { mcpKindBadgeStyle, shortenCommand } from "../mcp-display";
+import type { McpHealthView } from "../mcp-display";
 import {
   isAdoptedMcp,
   mcpCmdPathBadge,
@@ -37,7 +40,16 @@ import {
   Toggle,
   hoverRevealClass,
 } from "../components/PageFrame";
-import { MCP_PRESETS, type McpPreset } from "../mcp-presets";
+import {
+  applyBlenderMcpProbe,
+  applyMcpPreset,
+  MCP_PRESETS,
+  writableMcpAgentIds,
+  type AppliedMcpPreset,
+  type BlenderMcpProbe,
+  type McpPreset,
+  type ResolvedMcpSetup,
+} from "../mcp-presets";
 
 /** MCP 列表五列网格模板（表头与数据行共用，保证列严格对齐）：
  *  名称 | 类型 | 配置 | 分发 | 行内操作+启用开关（2026-08-25 设计评审：宽屏下左右信息不再跨整页） */
@@ -52,7 +64,7 @@ function HealthDot({
   at,
   onCheck,
 }: {
-  health: McpHealthDto | "checking" | undefined;
+  health: McpHealthView | "checking" | undefined;
   at?: string | null;
   onCheck: () => void;
 }) {
@@ -132,13 +144,19 @@ function formFrom(s: McpServerDto): Form {
 }
 
 /** 预设 → 添加表单（键值对克隆，避免编辑时改到预设常量） */
-function formFromPreset(p: McpPreset): Form {
+function formFromApplied(p: AppliedMcpPreset): Form {
   return {
     ...EMPTY_FORM,
     name: p.name,
     kind: p.kind,
-    url: p.url ?? "",
-    headers: (p.headers ?? []).map((x) => ({ ...x })),
+    command: p.command,
+    argsText: p.args.join(" "),
+    url: p.url,
+    headers: p.headers.map((x) => ({ ...x })),
+    timeoutText:
+      p.startupTimeoutMs != null
+        ? String(Math.round(p.startupTimeoutMs / 1000))
+        : "",
   };
 }
 
@@ -212,7 +230,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
     form: Form;
     /** 从预设打开时的顶部提示（密钥要求等） */
     note?: string;
+    setup?: ResolvedMcpSetup;
+    setupChecking?: boolean;
+    /** 从「预设 ▾」打开：新建保存时自动分发到能写 MCP 的 Agent */
+    fromPreset?: boolean;
   } | null>(null);
+  const [homeDir, setHomeDir] = useState("");
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
   const applyingRef = useRef<Set<string>>(new Set());
@@ -315,10 +338,77 @@ export default function McpPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (visible) void load();
   }, [visible, load]);
+  useEffect(() => {
+    if (!visible || homeDir) return;
+    void invoke<string>("home_dir")
+      .then(setHomeDir)
+      .catch(() => {});
+  }, [visible, homeDir]);
 
   function toast(text: string) {
     setNotice(text);
     setTimeout(() => setNotice(null), 4000);
+  }
+
+  async function refreshBlenderProbe() {
+    setModal((m) =>
+      m?.setup
+        ? {
+            ...m,
+            setupChecking: true,
+            setup: applyBlenderMcpProbe(m.setup, null, true),
+          }
+        : m,
+    );
+    try {
+      const probe = await invoke<BlenderMcpProbe>("probe_blender_mcp_setup");
+      setModal((m) =>
+        m?.setup?.steps.some((s) => s.id)
+          ? {
+              ...m,
+              setupChecking: false,
+              setup: applyBlenderMcpProbe(m.setup, probe),
+            }
+          : m,
+      );
+    } catch (e) {
+      setModal((m) =>
+        m
+          ? {
+              ...m,
+              setupChecking: false,
+              setup: m.setup
+                ? { ...m.setup, progress: `检测失败：${String(e)}` }
+                : m.setup,
+            }
+          : m,
+      );
+    }
+  }
+
+  async function openPreset(p: McpPreset) {
+    let home = homeDir;
+    if (!home) {
+      try {
+        home = await invoke<string>("home_dir");
+        setHomeDir(home);
+      } catch {
+        home = "";
+      }
+    }
+    const applied = applyMcpPreset(p, home, IS_WINDOWS);
+    const needsProbe = applied.setup?.steps.some((s) => s.id);
+    setModal({
+      id: null,
+      form: formFromApplied(applied),
+      note: applied.setup ? undefined : applied.note,
+      setup: needsProbe
+        ? applyBlenderMcpProbe(applied.setup!, null, true)
+        : applied.setup ?? undefined,
+      setupChecking: !!needsProbe,
+      fromPreset: true,
+    });
+    if (needsProbe) void refreshBlenderProbe();
   }
 
   // $VAR 引用分发预检（只读 command，非阻断警告）：同一组缺失变量同一会话只提示一次，
@@ -339,7 +429,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
     return ok;
   }
 
-  async function save(allowPlaintext = false) {
+  async function save() {
     if (!modal) return;
     setSaving(true);
     setError(null);
@@ -374,31 +464,53 @@ export default function McpPage({ visible }: { visible: boolean }) {
         setSaving(false);
         return;
       }
-      setServers(
-        await invoke<McpServerDto[]>("save_mcp_server", {
-          server,
-          allowPlaintext,
-        }),
-      );
-      setModal(null);
-      toast("已保存");
-    } catch (e) {
-      const msg = String(e);
-      // 明文密钥拦截：列出嫌疑键，确认后可重试放行（建议改 $VAR 引用）
-      if (msg.startsWith("PLAINDETECT:") && !allowPlaintext) {
-        const keys = msg.slice("PLAINDETECT:".length);
-        if (
-          await confirmDialog(
-            `检测到疑似明文密钥：${keys}。密钥会以明文写进清单与各 agent 配置文件，建议改用 $VAR 引用环境变量。仍要保存明文吗？`,
-            { danger: true },
-          )
-        ) {
-          setSaving(false);
-          return save(true);
+      let list = await invoke<McpServerDto[]>("save_mcp_server", {
+        server,
+        // 参数已废弃（后端对明文密钥一律拒绝，不再确认放行），保留仅为兼容命令签名
+        allowPlaintext: false,
+      });
+      const isNewPreset = !modal.id && modal.fromPreset;
+      const saved = list.find((s) => s.name === server.name);
+      if (isNewPreset && saved) {
+        const targets = writableMcpAgentIds(
+          AGENTS.map((a) => a.id),
+          caps,
+        );
+        const failedIds: string[] = [];
+        for (const agent of targets) {
+          try {
+            list = await invoke<McpServerDto[]>("set_mcp_server_app", {
+              id: saved.id,
+              agent,
+              enabled: true,
+              force: false,
+            });
+          } catch {
+            failedIds.push(agent);
+          }
         }
+        setDistStatus((prev) => {
+          const next = { ...prev };
+          delete next[saved.id];
+          return next;
+        });
+        const nameOf = (id: string) =>
+          AGENTS.find((a) => a.id === id)?.label ?? id;
+        toast(
+          targets.length === 0
+            ? "已保存。到列表里打开要用的 Agent 开关。"
+            : failedIds.length === 0
+              ? `已添加并启用到 ${targets.map(nameOf).join("、")}。新开的对话即可用。`
+              : `已添加；未写入：${failedIds.map(nameOf).join("、")}。其余已启用。`,
+        );
       } else {
-        setError(msg);
+        toast("已保存");
       }
+      setServers(list);
+      setModal(null);
+    } catch (e) {
+      // 明文密钥已由后端一律拒绝（报文里含改引用引导），直接展示
+      setError(String(e));
     } finally {
       setSaving(false);
     }
@@ -419,7 +531,13 @@ export default function McpPage({ visible }: { visible: boolean }) {
     } catch (e) {
       setHealth((prev) => ({
         ...prev,
-        [s.id]: { ok: false, latencyMs: 0, error: String(e), detail: null },
+        [s.id]: {
+          ok: false,
+          latencyMs: 0,
+          error: String(e),
+          detail: null,
+          status: "error",
+        },
       }));
     }
   }
@@ -730,13 +848,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
 
   async function onPasteConfirm() {
     if (!pastePreview) return;
-    // 有疑似明文密钥时先确认（建议 $VAR 引用）
+    // 明文密钥不再支持确认放行（后端一律拒收）：预览阶段直接提示改引用
     if (pastePreview.suspects.length > 0) {
-      const ok = await confirmDialog(
-        `检测到疑似明文密钥：${pastePreview.suspects.join("、")}。会明文写进清单与各 agent 配置文件，建议改用 $VAR 引用。仍要导入吗？`,
-        { danger: true },
+      setError(
+        `检测到疑似明文密钥：${pastePreview.suspects.join("、")}。为防密钥落盘泄露，只接受 $VAR / \${VAR} 环境变量引用形式，请改用引用后重试`,
       );
-      if (!ok) return;
+      return;
     }
     setSaving(true);
     setError(null);
@@ -745,7 +862,8 @@ export default function McpPage({ visible }: { visible: boolean }) {
         [string[], string[], number, number]
       >("import_mcp_json", {
         text: pasteText,
-        allowPlaintext: pastePreview.suspects.length > 0,
+        // 参数已废弃（后端对明文密钥一律拒绝），保留仅为兼容命令签名
+        allowPlaintext: false,
       });
       setPasteOpen(false);
       setPasteText("");
@@ -793,40 +911,22 @@ export default function McpPage({ visible }: { visible: boolean }) {
   }
 
   /** 应用修复：走现有保存链路（origin/apps/last_check 由后端保留），保存即重投已分发 agent */
-  async function applyCommandFix(
-    s: McpServerDto,
-    fix: McpCommandFixCandidate,
-    allowPlaintext = false,
-  ) {
+  async function applyCommandFix(s: McpServerDto, fix: McpCommandFixCandidate) {
     setFixing(true);
     setError(null);
     try {
       setServers(
         await invoke<McpServerDto[]>("save_mcp_server", {
           server: { ...s, command: fix.command, cwd: fix.cwd },
-          allowPlaintext,
+          allowPlaintext: false, // 已废弃参数，见 save()
         }),
       );
       setFixTarget(null);
       await load();
       toast(`「${s.name}」的命令已修复为绝对路径`);
     } catch (e) {
-      const msg = String(e);
-      // 与编辑保存同口径：疑似明文密钥确认后放行重试
-      if (msg.startsWith("PLAINDETECT:") && !allowPlaintext) {
-        const keys = msg.slice("PLAINDETECT:".length);
-        if (
-          await confirmDialog(
-            `检测到疑似明文密钥：${keys}。密钥会以明文写进清单与各 agent 配置文件，建议改用 $VAR 引用。仍要保存吗？`,
-            { danger: true },
-          )
-        ) {
-          setFixing(false);
-          return applyCommandFix(s, fix, true);
-        }
-      } else {
-        setError(msg);
-      }
+      // 明文密钥已由后端一律拒绝（报文里含改引用引导），直接展示
+      setError(String(e));
     } finally {
       setFixing(false);
     }
@@ -1140,7 +1240,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                               <span className="flex min-w-0 items-center gap-1 text-xs text-l3">
                                 {/* 分发状态徽标（v3.88 三态点扩为五态）：开关表达清单分发意图
                                     （apps 映射），点/徽标表达磁盘事实（mcp_distribution_status
-                                    只读探测）。全局停用时条目是 Ccode 自己移除的，
+                                    只读探测）。全局停用时条目是 Mesa 自己移除的，
                                     不标「外部已删除」误导 */}
                                 {on &&
                                   s.enabled &&
@@ -1221,8 +1321,91 @@ export default function McpPage({ visible }: { visible: boolean }) {
           open
           title={modal.id ? "编辑 MCP" : "添加 MCP"}
           onClose={() => setModal(null)}
-          size="md"
+          size={modal.setup ? "lg" : "md"}
         >
+            {modal.setup && (
+              <div className="-mt-2 mb-3 space-y-2">
+                <p className="text-xs leading-5 text-l4">{modal.setup.intro}</p>
+                <div className="flex items-baseline justify-between gap-2">
+                  <p className="text-xs leading-5 text-l3">
+                    {modal.setup.progress ??
+                      (modal.setupChecking ? "正在检测本机…" : null)}
+                  </p>
+                  {modal.setup.steps.some((s) => s.id) && (
+                    <button
+                      type="button"
+                      className="shrink-0 text-micro text-l4 hover:text-l1"
+                      disabled={modal.setupChecking}
+                      onClick={() => void refreshBlenderProbe()}
+                    >
+                      {modal.setupChecking ? "检测中…" : "重新检测"}
+                    </button>
+                  )}
+                </div>
+                <ol className="space-y-1.5">
+                  {modal.setup.steps.map((s, i) => {
+                    const done = s.status === "done";
+                    const warn = s.status === "warn";
+                    return (
+                    <li key={i} className="flex gap-2 text-xs leading-5 text-l3">
+                      <span
+                        className={`w-4 shrink-0 ${
+                          done ? "text-ok-text" : "text-l4"
+                        }`}
+                      >
+                        {done ? "✓" : `${i + 1}.`}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div
+                          className={
+                            done ? "text-l4" : warn ? "text-warn-text" : undefined
+                          }
+                        >
+                          {s.label}
+                          {!done && s.href && (
+                            <button
+                              type="button"
+                              className="ml-1.5 text-cta hover:underline"
+                              onClick={() => void openUrl(s.href!)}
+                            >
+                              打开
+                            </button>
+                          )}
+                        </div>
+                        {s.detail && (
+                          <div className="mt-0.5 break-all font-mono text-micro text-l4">
+                            {s.detail}
+                          </div>
+                        )}
+                        {!done && s.command && (
+                          <div className="mt-0.5 flex items-start gap-1.5">
+                            <code className="min-w-0 flex-1 break-all font-mono text-micro text-l2">
+                              {s.command}
+                            </code>
+                            <button
+                              type="button"
+                              className="shrink-0 text-micro text-l4 hover:text-l1"
+                              onClick={() =>
+                                void navigator.clipboard
+                                  .writeText(s.command!)
+                                  .then(
+                                    () => toast("已复制"),
+                                    () => toast("复制失败"),
+                                  )
+                              }
+                            >
+                              复制
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                    );
+                  })}
+                </ol>
+                <p className="text-xs leading-5 text-l4">{modal.setup.after}</p>
+              </div>
+            )}
             {modal.note && (
               <p className="-mt-2 mb-3 text-xs leading-5 text-l4">
                 {modal.note}
@@ -1361,7 +1544,11 @@ export default function McpPage({ visible }: { visible: boolean }) {
                   disabled={saving}
                   onClick={() => void save()}
                 >
-                  {saving ? "保存中…" : "保存"}
+                  {saving
+                    ? "保存中…"
+                    : modal.fromPreset && !modal.id
+                      ? "添加并启用"
+                      : "保存"}
                 </button>
               </div>
             </div>
@@ -1481,8 +1668,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
           items={MCP_PRESETS.map((p) => ({
             label: p.label,
             title: p.note,
-            onSelect: () =>
-              setModal({ id: null, form: formFromPreset(p), note: p.note }),
+            onSelect: () => void openPreset(p),
           }))}
         />
       )}
@@ -1490,7 +1676,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
       {discoverOpen && (
         <Modal open title="收编现有配置" onClose={() => setDiscoverOpen(false)} size="md">
             <p className="mb-3 text-xs leading-5 text-l4">
-              这些 MCP 在 CLI 里已有、但不在 Ccode 清单中。收编后统一管理。
+              这些 MCP 在 CLI 里已有、但不在 Mesa 清单中。收编后统一管理。
             </p>
             {discovered.length === 0 ? (
               <p className="py-4 text-center text-sm text-l4">
@@ -1593,7 +1779,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 {pastePreview.suspects.length > 0 && (
                   <p className="mt-1 text-micro text-warn-text">
                     疑似明文密钥：{pastePreview.suspects.join("、")}
-                    （建议改用 $VAR 引用）
+                    （明文不可导入，请改用 $VAR 引用后再试）
                   </p>
                 )}
               </div>

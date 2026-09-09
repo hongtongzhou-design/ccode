@@ -878,7 +878,7 @@ function GitPanel({
           <div className="p-2"><LoadingRows compact /></div>
         ) : !status.isRepo ? (
           <p className="p-3 text-sm text-l4">
-            该目录不是 git 仓库，无改动可显示
+            不是 git 仓库
             <span className="block text-xs text-l4" title={cwd}>
               {cwd}
             </span>
@@ -887,11 +887,7 @@ function GitPanel({
           <div className="p-3">
             <EmptyState
               title="没有未提交的改动"
-              detail={
-                inWs
-                  ? "这个任务的改动都已提交，可以继续下一步。"
-                  : "所有改动都已提交，工作区很干净。"
-              }
+              detail={inWs ? "可以继续下一步。" : "工作区很干净。"}
             />
           </div>
         ) : (
@@ -992,8 +988,8 @@ function GitPanel({
             <div className="mb-2 flex items-center justify-between text-xs text-l3">
               <span>
                 {inWs
-                  ? `已选择全部 ${selectedFiles.length} 个未提交文件`
-                  : `已选择 ${selectedFiles.length} / ${files.length} 个文件`}
+                  ? `${selectedFiles.length} 个文件`
+                  : `${selectedFiles.length} / ${files.length}`}
               </span>
               {!inWs && (
                 <span className="flex items-center gap-2">
@@ -1018,7 +1014,7 @@ function GitPanel({
                 // Enter / ⌘Enter 都是「快速提交」（按钮上标注 ⌘Enter 是熟手提示）
                 if (e.key === "Enter" && canCommit) void doCommit(false);
               }}
-              placeholder="改动说明（可选，留空自动生成）"
+              placeholder="说明（可空）"
               disabled={running !== null || aiBusy}
               className="w-full rounded-sm border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4 disabled:opacity-50"
             />
@@ -1044,11 +1040,7 @@ function GitPanel({
                   : "border-field bg-inset text-l4"
               }`}
             >
-              {running === "commit"
-                ? "提交中…"
-                : message.trim()
-                  ? "提交（⌘Enter）"
-                  : "快速提交（⌘Enter）"}
+              {running === "commit" ? "提交中…" : "提交"}
             </button>
             <button
               onClick={() => void doCommit(true)}

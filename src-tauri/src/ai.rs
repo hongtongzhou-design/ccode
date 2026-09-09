@@ -5,7 +5,6 @@ use crate::agents;
 use crate::profiles::{self, Profile, ProfileStore};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
 const AI_TIMEOUT: Duration = Duration::from_secs(120);
@@ -281,88 +280,27 @@ fn run_capture_for(
     expected_host: Option<&str>,
     cmd: &mut crate::process::BackgroundCommand,
     timeout: Duration,
+    run_id: Option<&str>,
 ) -> Result<String, String> {
-    // stdin 置空：GUI 环境无控制终端，子进程若读 stdin 会永久挂起
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("启动 agent 失败: {e}"))?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let out_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stdout.take() {
-            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-        }
-        buf
-    });
-    let err_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stderr.take() {
-            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-        }
-        buf
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let out =
-                    String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
-                let err =
-                    String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
-                if let Some(agent) = agent {
-                    remember_headless_session(agent, &out, &err);
-                }
-                if status.success() {
-                    let text = out.trim().to_string();
-                    if text.is_empty() {
-                        return Err("AI 返回为空（无文本输出）".into());
-                    }
-                    return Ok(text);
-                }
-                let detail = if err.trim().is_empty() { out } else { err };
-                return Err(summarize_headless_error(detail.trim(), expected_host));
-            }
-            Ok(None) => {
-                if std::time::Instant::now() > deadline {
-                    // 连带杀子孙：Windows 上 shim 深化失败会回落 `cmd /d /c call`，
-                    // 只杀 cmd.exe 会留下仍持有管道写端的 agent 进程，join 永久阻塞
-                    crate::pty::kill_process_tree(child.id());
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let out = String::from_utf8_lossy(&crate::process::join_with_timeout(
-                        out_handle,
-                        Duration::from_secs(2),
-                    ))
-                    .into_owned();
-                    let err = String::from_utf8_lossy(&crate::process::join_with_timeout(
-                        err_handle,
-                        Duration::from_secs(2),
-                    ))
-                    .into_owned();
-                    if let Some(agent) = agent {
-                        remember_headless_session(agent, &out, &err);
-                    }
-                    let summarized =
-                        summarize_headless_error(format!("{out}\n{err}").trim(), expected_host);
-                    return Err(format!(
-                        "AI 调用超时（{}s）。{summarized}",
-                        timeout.as_secs()
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                // try_wait 失败时子进程状态未知：必须 kill + 等读线程收尾，不允许泄漏
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = out_handle.join();
-                let _ = err_handle.join();
-                return Err(format!("等待 agent 失败: {e}"));
-            }
-        }
+    let captured = crate::process::capture_command_for(cmd, timeout, 8 * 1024 * 1024, run_id)?;
+    if captured.cancelled { return Err("任务已取消".into()); }
+    let out = String::from_utf8_lossy(&captured.stdout);
+    let err = String::from_utf8_lossy(&captured.stderr);
+    if let Some(agent) = agent { remember_headless_session(agent, &out, &err); }
+    if captured.timed_out {
+        let detail = summarize_headless_error(format!("{out}\n{err}").trim(), expected_host);
+        return Err(format!("AI 调用超时（{}s）。{detail}", timeout.as_secs()));
     }
+    if captured.truncated {
+        return Err("AI 输出超过 8 MB 安全上限，结果未采用；请缩小任务范围".into());
+    }
+    if captured.status.is_some_and(|status| status.success()) {
+        let text = out.trim().to_string();
+        if text.is_empty() { return Err("AI 返回为空（无文本输出）".into()); }
+        return Ok(text);
+    }
+    let detail = if err.trim().is_empty() { out } else { err };
+    Err(summarize_headless_error(detail.trim(), expected_host))
 }
 
 pub(crate) fn ai_prompt_impl(
@@ -372,7 +310,7 @@ pub(crate) fn ai_prompt_impl(
     prompt: String,
 ) -> Result<String, String> {
     // 设置页的按功能/全局专用 profile 作为显式 id 之外的默认（每次现读，改动即时生效）
-    let settings = crate::settings::read_current();
+    let settings = crate::settings::read_current_checked()?;
     let fn_profile = fn_key.and_then(|k| {
         settings
             .ai_profiles
@@ -396,6 +334,7 @@ pub(crate) fn ai_prompt_impl(
         .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
     // 密钥只在调用瞬间读出注入子进程，与终端启动同一约束
     let key = profiles::get_key_for_profile(&profile)?;
+    agents::ensure_launch_credentials(&profile, key.as_deref())?;
     let mut profile = profile;
     let selected = profile.models.first().cloned();
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
@@ -442,7 +381,12 @@ pub(crate) fn ai_prompt_impl(
         false,
         "discuss",
     );
-    if let Ok(r) = &run {
+    let run = match run {
+        Ok(run) => run,
+        Err(error) => { let _ = fs::remove_dir_all(&cwd); return Err(error); }
+    };
+    {
+        let r = &run;
         if let Err(error) = crate::runs::claim_start(&r.id)
             .and_then(|_| crate::runs::mark_started(&r.id))
         {
@@ -457,22 +401,11 @@ pub(crate) fn ai_prompt_impl(
             return Err(error);
         }
     }
-    let result = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, AI_TIMEOUT);
-    if let Ok(r) = run {
-        let status = if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
-        };
-        let _ = crate::runs::close_run_with_result(
-            &r.id,
-            None,
-            status,
-            None,
-            (result.is_err()).then_some("无头 Agent 执行失败"),
-        );
-    }
+    let result = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, AI_TIMEOUT, Some(&run.id));
+    let status = if result.is_ok() { "completed" } else if result.as_ref().err().is_some_and(|e| e.contains("已取消")) { "stopped" } else { "failed" };
+    let closed = crate::runs::close_run_with_result(&run.id, None, status, None, (result.is_err()).then_some("无头 Agent 执行失败"));
     let _ = fs::remove_dir_all(&cwd);
+    closed.map_err(|e| format!("Agent 已退出，但运行状态保存失败：{e}"))?;
     result
 }
 
@@ -539,6 +472,7 @@ pub(crate) fn run_agent_task(
     let binary_path = agents::resolve_binary(binary)
         .ok_or_else(|| format!("未找到 {binary}（PATH 与常见安装目录均无）"))?;
     let key = profiles::get_key_for_profile(&profile)?;
+    agents::ensure_launch_credentials(&profile, key.as_deref())?;
     let mut profile = profile.clone();
     let selected = profile.models.first().cloned();
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
@@ -584,16 +518,20 @@ pub(crate) fn run_agent_task(
         )?
     };
     crate::runs::claim_start(&run.id)?;
-    crate::runs::mark_started(&run.id)?;
-    let out = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, timeout);
-    let status = if out.is_ok() { "completed" } else { "failed" };
-    let _ = crate::runs::close_run_with_result(
+    if let Err(error) = crate::runs::mark_started(&run.id) {
+        let _ = crate::runs::close_run_with_result(&run.id, None, "failed", None, Some("无头运行登记失败"));
+        return Err(error);
+    }
+    let out = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, timeout, Some(&run.id));
+    let status = if out.is_ok() { "completed" } else if out.as_ref().err().is_some_and(|e| e.contains("已取消")) { "stopped" } else { "failed" };
+    let closed = crate::runs::close_run_with_result(
         &run.id,
         None,
         status,
         None,
         (out.is_err()).then_some("定时/无头 Agent 执行失败"),
     );
+    closed.map_err(|e| format!("Agent 已退出，但运行状态保存失败：{e}"))?;
     out.map(|text| (text, run.id))
 }
 
@@ -1150,6 +1088,19 @@ mod tests {
             model_sync_note: None,
             provider_override: None,
         }
+    }
+
+    #[test]
+    fn headless_credentials_require_key_unless_explicitly_exempt() {
+        let mut p = profile("api", "codex", None);
+        assert!(agents::ensure_launch_credentials(&p, None).is_err());
+        assert!(agents::ensure_launch_credentials(&p, Some(" ")).is_err());
+        assert!(agents::ensure_launch_credentials(&p, Some("synthetic-test-key")).is_ok());
+        p.no_auth = true;
+        assert!(agents::ensure_launch_credentials(&p, None).is_ok());
+        p.no_auth = false;
+        p.account_type = AccountType::Official;
+        assert!(agents::ensure_launch_credentials(&p, None).is_ok());
     }
 
     #[test]

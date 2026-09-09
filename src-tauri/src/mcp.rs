@@ -1,6 +1,6 @@
 //! MCP server 清单与一键分发（规格单一出处 = docs/agent-integration-matrix.md §10，勿凭印象改字段）。
 //!
-//! 统一模型（Ccode 自有清单 <config>/ccode/mcp-servers.json）→ 各家配置文件的映射层。
+//! 统一模型（Mesa 自有清单 <config>/ccode/mcp-servers.json）→ 各家配置文件的映射层。
 //! 分发纪律（红线，见 §10.4）：
 //! - 只写用户级配置（项目级在 claude/qwen/cursor/codebuddy 有审批闸，gemini/qwen 未信任目录忽略）；
 //! - 目标文件多是混合状态文件，一律读-改-写一个键/段 + 写前备份 + 原子写，绝不整文件覆盖；
@@ -286,6 +286,88 @@ fn env_ref(value: &str) -> Option<&str> {
     }
     v.strip_prefix('$')
         .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// 扫描值里的全部 $VAR / ${VAR} 引用，返回 (字节区间, 变量名)——整值与
+/// "Bearer ${X}" 这类内嵌都算，分发转写与探测宿主展开共用这一套引用口径。
+/// `$` 后非变量字符（含 `${` 无闭合、孤立 `$`）按字面处理；
+/// `$`/`{`/`}`/变量名字符全是 ASCII，字节区间不会切断多字节字符
+fn scan_env_refs(value: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'{') {
+            if let Some(rel) = value[i + 2..].find('}') {
+                let name = &value[i + 2..i + 2 + rel];
+                if !name.is_empty() {
+                    out.push((i..i + 2 + rel + 1, name.to_string()));
+                }
+                i += 2 + rel + 1;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if end > start {
+            out.push((i..end, value[start..end].to_string()));
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 值里的全部引用变量名（scan_env_refs 的名字投影）
+fn extract_env_refs(value: &str) -> Vec<String> {
+    scan_env_refs(value).into_iter().map(|(_, n)| n).collect()
+}
+
+/// 探测注入前的宿主展开：值里所有 $VAR/${VAR} 引用（含 "Bearer ${X}" 内嵌）按宿主
+/// 环境展开；任一引用未设置（空值算未设置，与 mcp_missing_env_refs 预检同口径）→
+/// Err(缺失变量名清单)，调用方整条不注入并附提示——比把字面 "${X}" 发给 server 诚实
+fn expand_host_value(value: &str) -> Result<String, Vec<String>> {
+    let spans = scan_env_refs(value);
+    if spans.is_empty() {
+        return Ok(value.to_string());
+    }
+    let mut missing: Vec<String> = Vec::new();
+    let mut resolved: HashMap<String, String> = HashMap::new();
+    for (_, name) in &spans {
+        match std::env::var(name) {
+            Ok(v) if !v.is_empty() => {
+                resolved.insert(name.clone(), v);
+            }
+            _ => {
+                if !missing.contains(name) {
+                    missing.push(name.clone());
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(missing);
+    }
+    // 单趟重建：按扫描出的区间拼接，避免先替 $A 再替 $AB 互相污染
+    let mut out = String::with_capacity(value.len());
+    let mut cursor = 0;
+    for (range, name) in spans {
+        out.push_str(&value[cursor..range.start]);
+        out.push_str(&resolved[&name]);
+        cursor = range.end;
+    }
+    out.push_str(&value[cursor..]);
+    Ok(out)
 }
 
 fn pairs_to_map(pairs: &[McpEnvPair]) -> HashMap<String, String> {
@@ -636,6 +718,14 @@ fn entry_toml(server: &McpServerDto) -> Result<toml_edit::Table, String> {
                 continue;
             }
             if let Some(name) = env_ref(&p.value) {
+                // codex 无通用插值（matrix §10.3）：env_vars 只是同名转发白名单，
+                // 改名引用（键 TARGET_TOKEN 引用 $SOURCE_TOKEN）表达不了——静默丢键名
+                // 会让 server 读到空变量，明确拒写并给出修法
+                if name != key {
+                    return Err(format!(
+                        "codex 不支持环境变量改名引用：「{key}」引用了 ${name}，但它的 env_vars 只能同名转发。请把键名改成 {name}，或填字面值"
+                    ));
+                }
                 env_vars.push(name); // codex 无插值：引用 → env_vars 白名单转发
             } else {
                 env[key] = toml_edit::value(p.value.as_str());
@@ -877,7 +967,7 @@ fn write_json_entry(
             }
         }
         // codebuddy 的 disabledMcpServers 是与条目并列的禁用名单：分发/移除时把本条目
-        // 从名单里清掉（只动自己名下这一项，其余名字保留）——否则外部禁用后，Ccode 重新
+        // 从名单里清掉（只动自己名下这一项，其余名字保留）——否则外部禁用后，Mesa 重新
         // 分发重写了条目却仍被名单压着禁用，与 codex 重写即恢复启用的语义不一致
         if agent == "codebuddy" {
             if let Some(list) = obj
@@ -943,6 +1033,14 @@ fn write_codex_entry(name: &str, entry: Option<toml_edit::Table>) -> Result<(), 
 
 /// 写/删一个 agent 侧条目（entry=None 即删除）
 fn apply_to_agent(agent: &str, server: &McpServerDto, install: bool) -> Result<(), String> {
+    // 分发闸（与 save_impl 明文拦截同口径）：明文密钥不写入任何 agent 配置；
+    // 移除方向（install=false）不拦——减少暴露面的操作永远放行
+    if install {
+        let suspects = suspect_plaintext_keys(server);
+        if !suspects.is_empty() {
+            return Err(plaintext_reject_error(&suspects));
+        }
+    }
     // 只读能力的 agent（grok：TOML [mcp_servers] 与 model 同文件，自带 `grok mcp add`
     // CLI 做读改写，首版不硬造 TOML 原子写管线）按能力表带原因拒绝
     if let Some(crate::agent_specs::McpWriteCap::ReadOnly(reason)) =
@@ -1251,6 +1349,15 @@ fn suspect_plaintext_keys(server: &McpServerDto) -> Vec<String> {
     out
 }
 
+/// 明文密钥拒绝文案（保存/粘贴导入/分发同一口径，审计收口 2026-09-08：
+/// 不再有「仍要保存」确认放行，密钥只接受 $VAR 引用形式，不落任何明文）
+fn plaintext_reject_error(suspects: &[String]) -> String {
+    format!(
+        "检测到疑似明文密钥：{}。为防止密钥落盘泄露，只接受 $VAR / ${{VAR}} 环境变量引用形式（如 ${{MY_TOKEN}}），请改用引用后重试",
+        suspects.join("、")
+    )
+}
+
 /// 外部修改检测：agent 配置里的当前条目 vs 我们此刻会写出的条目（一致才允许静默移除）
 fn entry_modified_externally(agent: &str, server: &McpServerDto) -> Result<bool, String> {
     let entries = agent_entries(agent)?;
@@ -1258,11 +1365,16 @@ fn entry_modified_externally(agent: &str, server: &McpServerDto) -> Result<bool,
         return Ok(false); // 已不在 = 没什么可保护的
     };
     let expected = if agent == "codex" {
-        toml_to_json(&toml_edit::Item::Table(entry_toml(server)?))
+        entry_toml(server).map(|t| toml_to_json(&toml_edit::Item::Table(t)))
     } else {
-        entry_json(server, agent)?
+        entry_json(server, agent)
     };
-    Ok(current != expected)
+    match expected {
+        Ok(e) => Ok(current != e),
+        // 清单内容按当前口径已构建不出分发产物（如历史遗留的 codex 改名引用、
+        // kimi 不支持的 env 引用）：按「被改过」保护处理——移除需 force 确认，不静默删
+        Err(_) => Ok(true),
+    }
 }
 
 /// 条目级禁用语义只认实证过的三家（matrix §10.1/§10.2 + 2026-09-03 codex 本机实测
@@ -1325,18 +1437,25 @@ pub async fn save_mcp_server(
 }
 
 fn save_impl(mut server: McpServerDto, allow_plaintext: bool) -> Result<Vec<McpServerDto>, String> {
+    // allow_plaintext 已废弃（审计收口 2026-09-08）：明文密钥不再允许「仍要保存」放行，
+    // 参数保留仅为兼容旧前端的调用形
+    let _ = allow_plaintext;
     server.name = server.name.trim().to_string();
     validate_server_name(&server.name)?;
     if server.kind != "stdio" && server.kind != "remote" {
         return Err("类型必须是 stdio 或 remote".into());
     }
-    // 明文密钥拦截：引用形式（$VAR）才允许静默通过；PLAINDETECT 前缀供前端识别后确认重试
+    // 明文密钥一律拒存：清单与各 agent 配置都不落明文（分发侧由 apply_to_agent 同闸拦）。
+    // 兼容既有数据：清单里的历史明文条目不删不崩、照常列出，但再次编辑会被本闸拦住并
+    // 引导改成引用——改成引用前 Mesa 不再把它写到任何地方，移除/删除方向不受影响
     let suspects = suspect_plaintext_keys(&server);
-    if !allow_plaintext && !suspects.is_empty() {
-        return Err(format!("PLAINDETECT:{}", suspects.join("、")));
+    if !suspects.is_empty() {
+        return Err(plaintext_reject_error(&suspects));
     }
     let mut list = read_store()?;
     let is_new = server.id.is_empty();
+    // 重命名检测：编辑路径记下旧名，新名条目重投完成后把旧名条目从各 agent 移除
+    let mut old_name: Option<String> = None;
     if is_new {
         if list.iter().any(|s| s.name == server.name) {
             return Err(format!("已存在同名 server: {}", server.name));
@@ -1354,6 +1473,9 @@ fn save_impl(mut server: McpServerDto, allow_plaintext: bool) -> Result<Vec<McpS
         {
             return Err(format!("已存在同名 server: {}", server.name));
         }
+        if list[pos].name != server.name {
+            old_name = Some(list[pos].name.clone());
+        }
         server.apps = list[pos].apps.clone(); // 分发开关以开关命令为准，编辑不夹带
         server.enabled = list[pos].enabled; // 全局启用开关同理（set_mcp_server_enabled 管辖）
         server.origin = list[pos].origin.clone(); // 来源标记同理（整结构替换不能丢）
@@ -1361,10 +1483,28 @@ fn save_impl(mut server: McpServerDto, allow_plaintext: bool) -> Result<Vec<McpS
         list[pos] = server.clone();
     }
     // 先重投放到已开启的 agent（内容跟随最新清单），全成功才落库——
-    // 顺序反过来会留下「清单说已分发但 agent 侧没写成」的假状态
-    for (agent, on) in server.apps.clone() {
-        if on {
-            apply_to_agent(&agent, &server, true)?;
+    // 顺序反过来会留下「清单说已分发但 agent 侧没写成」的假状态。
+    // 全局停用（enabled=false）的条目只更新清单、不动任何 agent 配置：
+    // 停用语义 = 条目已从各 agent 移除、apps 仅记意图，重开总开关才按原样重投——
+    // 否则「界面显示停用、一次普通编辑又悄悄写回」
+    if server.enabled {
+        for (agent, on) in server.apps.clone() {
+            if on {
+                apply_to_agent(&agent, &server, true)?;
+            }
+        }
+        // 重命名是受保护迁移：新名条目全部写好后，再把旧名条目从各 agent 配置移除
+        //（同一套 读-改-写 + 备份 + 原子写 + 读回校验口径；旧名条目本就是 Mesa 按清单
+        //  写的，编辑重投本就整结构覆盖，移除旧名不另做 EXTMOD 预检——权属口径一致；
+        //  任一步失败都不落库，清单保持旧名，重试可续）
+        if let Some(old) = old_name {
+            for (agent, on) in server.apps.clone() {
+                if on {
+                    let mut prev = server.clone();
+                    prev.name = old.clone();
+                    apply_to_agent(&agent, &prev, false)?;
+                }
+            }
         }
     }
     write_store(&list)?;
@@ -1380,23 +1520,34 @@ pub async fn set_mcp_server_app(
     enabled: bool,
     force: bool,
 ) -> Result<Vec<McpServerDto>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::agent_specs::agent_spec(&agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
-        let mut list = read_store()?;
-        let Some(pos) = list.iter().position(|s| s.id == id) else {
-            return Err("该 server 不存在（可能已删除）".into());
-        };
-        let server = list[pos].clone();
-        if !enabled && !force && entry_modified_externally(&agent, &server)? {
+    tauri::async_runtime::spawn_blocking(move || set_app_impl(&id, &agent, enabled, force))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn set_app_impl(
+    id: &str,
+    agent: &str,
+    enabled: bool,
+    force: bool,
+) -> Result<Vec<McpServerDto>, String> {
+    crate::agent_specs::agent_spec(agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
+    let mut list = read_store()?;
+    let Some(pos) = list.iter().position(|s| s.id == id) else {
+        return Err("该 server 不存在（可能已删除）".into());
+    };
+    let server = list[pos].clone();
+    // 全局停用中的条目拨开某 agent 开关：只记分发意图（apps 映射），不写 agent 配置——
+    // 重开总开关时 set_mcp_server_enabled 按 apps 原样重投；拨关（移除方向）不受影响
+    if !(enabled && !server.enabled) {
+        if !enabled && !force && entry_modified_externally(agent, &server)? {
             return Err(format!("EXTMOD:{agent}"));
         }
-        apply_to_agent(&agent, &server, enabled)?;
-        list[pos].apps.insert(agent, enabled);
-        write_store(&list)?;
-        Ok(list)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        apply_to_agent(agent, &server, enabled)?;
+    }
+    list[pos].apps.insert(agent.to_string(), enabled);
+    write_store(&list)?;
+    Ok(list)
 }
 
 /// 全局启用开关（v3.93）：禁用 = 从所有已分发 agent 移除条目但保留 apps 映射
@@ -1408,41 +1559,43 @@ pub async fn set_mcp_server_enabled(
     enabled: bool,
     force: bool,
 ) -> Result<Vec<McpServerDto>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut list = read_store()?;
-        let Some(pos) = list.iter().position(|s| s.id == id) else {
-            return Err("该 server 不存在（可能已删除）".into());
-        };
-        let server = list[pos].clone();
-        let targets: Vec<String> = server
-            .apps
+    tauri::async_runtime::spawn_blocking(move || set_enabled_impl(&id, enabled, force))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn set_enabled_impl(id: &str, enabled: bool, force: bool) -> Result<Vec<McpServerDto>, String> {
+    let mut list = read_store()?;
+    let Some(pos) = list.iter().position(|s| s.id == id) else {
+        return Err("该 server 不存在（可能已删除）".into());
+    };
+    let server = list[pos].clone();
+    let targets: Vec<String> = server
+        .apps
+        .iter()
+        .filter(|(_, on)| **on)
+        .map(|(a, _)| a.clone())
+        .collect();
+    if !enabled && !force {
+        let modified: Vec<String> = targets
             .iter()
-            .filter(|(_, on)| **on)
-            .map(|(a, _)| a.clone())
+            .filter_map(|a| {
+                entry_modified_externally(a, &server)
+                    .ok()
+                    .filter(|m| *m)
+                    .map(|_| a.clone())
+            })
             .collect();
-        if !enabled && !force {
-            let modified: Vec<String> = targets
-                .iter()
-                .filter_map(|a| {
-                    entry_modified_externally(a, &server)
-                        .ok()
-                        .filter(|m| *m)
-                        .map(|_| a.clone())
-                })
-                .collect();
-            if !modified.is_empty() {
-                return Err(format!("EXTMOD:{}", modified.join("、")));
-            }
+        if !modified.is_empty() {
+            return Err(format!("EXTMOD:{}", modified.join("、")));
         }
-        for agent in &targets {
-            apply_to_agent(agent, &server, enabled)?;
-        }
-        list[pos].enabled = enabled;
-        write_store(&list)?;
-        Ok(list)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    }
+    for agent in &targets {
+        apply_to_agent(agent, &server, enabled)?;
+    }
+    list[pos].enabled = enabled;
+    write_store(&list)?;
+    Ok(list)
 }
 
 /// 删除分流：keep_agent_configs=true = 收编条目的安全出口，只从清单移除，
@@ -1502,7 +1655,7 @@ fn delete_impl(
     Ok(list)
 }
 
-/// 各 agent 用户级配置里现有的 server 名（含非 Ccode 管理的；前端用于漂移/现状展示）
+/// 各 agent 用户级配置里现有的 server 名（含非 Mesa 管理的；前端用于漂移/现状展示）
 #[tauri::command]
 pub async fn mcp_agent_status() -> HashMap<String, Result<Vec<String>, String>> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -1528,7 +1681,7 @@ pub struct DiscoveredMcpDto {
     pub relative_command: bool,
 }
 
-/// 扫描各家用户级配置，列出不在 Ccode 清单里的 server（「发现未纳管」同套路）
+/// 扫描各家用户级配置，列出不在 Mesa 清单里的 server（「发现未纳管」同套路）
 #[tauri::command]
 pub async fn discover_mcp_servers() -> Result<Vec<DiscoveredMcpDto>, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -1589,7 +1742,7 @@ fn resolve_on_import(server: &mut McpServerDto, agent: Option<&str>) -> (usize, 
     }
 }
 
-/// 收编：把某 agent 配置里的既有 server 读进 Ccode 清单，并标记已分发到该 agent
+/// 收编：把某 agent 配置里的既有 server 读进 Mesa 清单，并标记已分发到该 agent
 #[tauri::command]
 pub async fn import_mcp_from_agent(
     agent: String,
@@ -1692,26 +1845,33 @@ pub async fn parse_mcp_json(
     .map_err(|e| e.to_string())?
 }
 
-/// 粘贴 JSON 导入：确认预览后落库。同名跳过。明文密钥需 allow_plaintext 确认。
+/// 粘贴 JSON 导入：确认预览后落库。同名跳过。明文密钥一律拒绝（只接受 $VAR 引用）。
 /// 返回 (新增, 跳过, 相对路径已解析数, 相对路径未解析数)
 #[tauri::command]
 pub async fn import_mcp_json(
     text: String,
     allow_plaintext: bool,
 ) -> Result<(Vec<String>, Vec<String>, usize, usize), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let (parsed, skipped, suspects, counts) = parse_pasted(&text)?;
-        if !allow_plaintext && !suspects.is_empty() {
-            return Err(format!("PLAINDETECT:{}", suspects.join("、")));
-        }
-        let mut list = read_store()?;
-        let added: Vec<String> = parsed.iter().map(|s| s.name.clone()).collect();
-        list.extend(parsed);
-        write_store(&list)?;
-        Ok((added, skipped, counts.0, counts.1))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || import_json_impl(&text, allow_plaintext))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn import_json_impl(
+    text: &str,
+    allow_plaintext: bool,
+) -> Result<(Vec<String>, Vec<String>, usize, usize), String> {
+    // allow_plaintext 已废弃（审计收口 2026-09-08）：与 save_impl 同口径一律拒绝
+    let _ = allow_plaintext;
+    let (parsed, skipped, suspects, counts) = parse_pasted(text)?;
+    if !suspects.is_empty() {
+        return Err(plaintext_reject_error(&suspects));
+    }
+    let mut list = read_store()?;
+    let added: Vec<String> = parsed.iter().map(|s| s.name.clone()).collect();
+    list.extend(parsed);
+    write_store(&list)?;
+    Ok((added, skipped, counts.0, counts.1))
 }
 
 fn s_get(v: &serde_json::Value, k: &str) -> String {
@@ -1872,7 +2032,7 @@ mod tests {
     #[test]
     fn mapping_kimi_stdio_shape_args_array_no_empty_cwd() {
         // 回归：kimi 的 stdio 条目必须是 command + args 数组；cwd 为空时绝不落键
-        //（外部编辑器曾把启动参数写进 cwd 导致 spawn ENOENT，Ccode 写出的形状必须干净）
+        //（外部编辑器曾把启动参数写进 cwd 导致 spawn ENOENT，Mesa 写出的形状必须干净）
         let mut s = stdio_server();
         s.cwd = String::new();
         s.env = vec![]; // 本测试只看 command/args/cwd 形状（kimi 的 env 引用拒写有独立用例覆盖）
@@ -1890,11 +2050,24 @@ mod tests {
 
     #[test]
     fn mapping_codex_toml_ref_channels() {
-        let t = entry_toml(&stdio_server()).unwrap();
+        // codex 只支持同名转发：夹具的 TOKEN=${MY_TOKEN} 是改名引用（拒写有独立用例），
+        // 这里换同名引用验证 env_vars 白名单通道
+        let mut s = stdio_server();
+        s.env = vec![
+            McpEnvPair {
+                key: "DEBUG".into(),
+                value: "1".into(),
+            },
+            McpEnvPair {
+                key: "MY_TOKEN".into(),
+                value: "${MY_TOKEN}".into(),
+            },
+        ];
+        let t = entry_toml(&s).unwrap();
         assert_eq!(t["command"].as_str(), Some("ccode-test-nonexistent-bin"));
         assert_eq!(t["env"]["DEBUG"].as_str(), Some("1"));
         // 引用进 env_vars 白名单，不落 env 明文
-        assert!(t["env"].get("TOKEN").is_none());
+        assert!(t["env"].get("MY_TOKEN").is_none());
         assert_eq!(t["env_vars"][0].as_str(), Some("MY_TOKEN"));
         let rt = entry_toml(&remote_server()).unwrap();
         assert_eq!(rt["bearer_token_env_var"].as_str(), Some("MCP_TOKEN"));
@@ -2122,7 +2295,7 @@ mod tests {
     #[test]
     fn origin_written_on_create_adopt_and_paste() {
         let fx = Fixture::new();
-        // 路径一：Ccode 新建（save 唯一入口，前端传值被忽略）
+        // 路径一：Mesa 新建（save 唯一入口，前端传值被忽略）
         let mut s = stdio_server();
         s.id = String::new();
         s.origin = "bogus-from-frontend".into();
@@ -2379,6 +2552,11 @@ done
         }
         let fx = Fixture::new();
         let mut s = stdio_server();
+        // codex 只支持同名转发：夹具的 TOKEN=${MY_TOKEN} 是改名引用会被拒写，换同名
+        s.env = vec![McpEnvPair {
+            key: "MY_TOKEN".into(),
+            value: "${MY_TOKEN}".into(),
+        }];
         s.apps.insert("codex".into(), true);
         s.apps.insert("codebuddy".into(), true);
         write_store(&[s.clone()]).unwrap();
@@ -2505,6 +2683,7 @@ done
                 latency_ms: 8_123,
                 error: Some("8 秒未响应 initialize（超时）".into()),
                 detail: None,
+                status: "error".into(),
             },
         );
         record_last_checks(&results);
@@ -2528,7 +2707,8 @@ done
 
     #[test]
     fn missing_env_refs_collects_unset_only() {
-        // 必定未设置的变量名；PATH 全平台必设；字面值与内嵌引用（Bearer $X 非整值）不算
+        // 必定未设置的变量名；PATH 全平台必设；纯字面值不算；内嵌引用（Bearer ${X}）
+        // 与整值引用同一口径都算（与探测注入的宿主展开一致），同名去重
         let pairs = vec![
             McpEnvPair {
                 key: "A".into(),
@@ -2549,7 +2729,7 @@ done
             McpEnvPair {
                 key: "E".into(),
                 value: "Bearer ${CCODE_TEST_DEFINITELY_MISSING_VAR}".into(),
-            },
+            }, // 内嵌同样检出，去重后仍是一条
         ];
         let missing = missing_env_refs_impl(&pairs);
         assert_eq!(
@@ -2725,6 +2905,348 @@ done
             assert_eq!(command_path_status("node"), Some("ok"));
         }
     }
+
+    // ===== 审计收口回归（2026-09-08）：明文密钥 / 停用编辑 / 重命名迁移 / codex 改名引用 / 探测展开 / 体检状态细分 =====
+
+    /// 合成测试令牌（命中 sk- 前缀探测，非真实密钥）
+    fn synthetic_sk() -> String {
+        format!("sk-{}", "ccodetest".repeat(4))
+    }
+
+    #[test]
+    fn plaintext_save_rejected_even_with_allow_flag() {
+        let fx = Fixture::new();
+        let marker = synthetic_sk();
+        let mut s = remote_server();
+        s.id = String::new();
+        s.apps.insert("cursor".into(), true);
+        s.headers = vec![McpEnvPair {
+            key: "Authorization".into(),
+            value: format!("Bearer {marker}"),
+        }];
+        assert!(!suspect_plaintext_keys(&s).is_empty());
+        // allow_plaintext=true 也不再放行：不落清单、不写 agent 配置
+        let err = save_impl(s, true).unwrap_err();
+        assert!(err.contains("明文"), "{err}");
+        assert!(err.contains("${"), "{err} 应引导改用引用形式");
+        assert!(read_store().unwrap().is_empty(), "清单不落");
+        assert!(
+            !fx.dir.join(".cursor").join("mcp.json").exists(),
+            "agent 配置不写"
+        );
+    }
+
+    #[test]
+    fn plaintext_paste_import_rejected_even_with_allow_flag() {
+        let _fx = Fixture::new();
+        let marker = synthetic_sk();
+        let text = format!(
+            r#"{{"mcpServers": {{"leaky": {{"url": "https://x/mcp", "headers": {{"Authorization": "Bearer {marker}"}}}}}}}}"#
+        );
+        let err = import_json_impl(&text, true).unwrap_err();
+        assert!(err.contains("明文"), "{err}");
+        assert!(read_store().unwrap().is_empty(), "清单不落");
+    }
+
+    #[test]
+    fn plaintext_legacy_entry_kept_but_never_redistributed() {
+        let fx = Fixture::new();
+        // 模拟历史清单（旧版「仍要保存」放行的产物）：不删不崩、照常列出
+        let marker = synthetic_sk();
+        let mut s = remote_server();
+        s.headers = vec![McpEnvPair {
+            key: "Authorization".into(),
+            value: format!("Bearer {marker}"),
+        }];
+        s.apps.insert("cursor".into(), true);
+        write_store(&[s.clone()]).unwrap();
+        // 编辑被拦并引导改引用，清单保持原样
+        let err = save_impl(s.clone(), false).unwrap_err();
+        assert!(err.contains("明文"), "{err}");
+        assert_eq!(read_store().unwrap().len(), 1, "既有条目不被动");
+        // 分发闸：拨开开关 / 重投都被拦，明文不进入任何 agent 配置
+        let err = apply_to_agent("cursor", &s, true).unwrap_err();
+        assert!(err.contains("明文"), "{err}");
+        assert!(agent_entries("cursor").unwrap().is_empty());
+        // 移除方向永远放行：删除可正常清掉这条历史数据
+        let list = delete_impl(&s.id, false, false).unwrap();
+        assert!(list.is_empty());
+        let leaked = std::fs::read_to_string(fx.dir.join(".cursor").join("mcp.json"))
+            .map(|t| t.contains(&marker))
+            .unwrap_or(false);
+        assert!(!leaked, "任何时刻明文都不落 agent 配置");
+    }
+
+    #[test]
+    fn disabled_entry_edit_only_updates_manifest() {
+        let fx = Fixture::new();
+        let mut s = remote_server();
+        s.id = String::new();
+        s.apps.insert("cursor".into(), true);
+        let saved = save_impl(s, false).unwrap().remove(0);
+        assert_eq!(agent_entries("cursor").unwrap().len(), 1);
+        // 全局停用：条目从 agent 移除、apps 意图保留
+        let list = set_enabled_impl(&saved.id, false, false).unwrap();
+        assert!(!list[0].enabled);
+        assert!(agent_entries("cursor").unwrap().is_empty(), "停用即移除");
+        // 编辑停用条目：只更新清单，不写回 agent（审计点：界面停用、编辑却悄悄写回）
+        let mut edited = list[0].clone();
+        edited.url = "https://example.com/edited".into();
+        let list = save_impl(edited, false).unwrap();
+        assert!(!list[0].enabled);
+        assert_eq!(list[0].url, "https://example.com/edited");
+        assert!(
+            agent_entries("cursor").unwrap().is_empty(),
+            "停用条目的编辑不得触碰 agent 配置"
+        );
+        // 停用中拨开另一个 agent 的开关：只记意图，同样不落盘
+        let list = set_app_impl(&saved.id, "kimi", true, false).unwrap();
+        assert_eq!(list[0].apps.get("kimi"), Some(&true));
+        assert!(
+            !fx.dir.join(".kimi-code").join("mcp.json").exists(),
+            "停用中拨开开关只记意图"
+        );
+        // 重开总开关：按 apps 原样重投，且内容是编辑后的最新清单
+        let list = set_enabled_impl(&saved.id, true, false).unwrap();
+        assert!(list[0].enabled);
+        let entries = agent_entries("cursor").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].1["url"],
+            "https://example.com/edited",
+            "重投用最新清单内容"
+        );
+        assert_eq!(agent_entries("kimi").unwrap().len(), 1, "kimi 意图一并重投");
+    }
+
+    #[test]
+    fn rename_migrates_agent_entries() {
+        let _fx = Fixture::new();
+        let mut s = remote_server();
+        s.id = String::new();
+        s.apps.insert("cursor".into(), true);
+        let mut saved = save_impl(s, false).unwrap().remove(0);
+        saved.name = "renamed-api".into();
+        let list = save_impl(saved.clone(), false).unwrap();
+        assert_eq!(list[0].name, "renamed-api");
+        let names: Vec<String> = agent_entries("cursor")
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["renamed-api".to_string()],
+            "旧名条目必须随改名移除: {names:?}"
+        );
+        // 删除新名后 agent 侧清空：不会有旧名残留复活
+        delete_impl(&saved.id, false, false).unwrap();
+        assert!(agent_entries("cursor").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rename_while_disabled_defers_agent_changes_to_reenable() {
+        let _fx = Fixture::new();
+        let mut s = remote_server();
+        s.id = String::new();
+        s.apps.insert("cursor".into(), true);
+        let saved = save_impl(s, false).unwrap().remove(0);
+        let list = set_enabled_impl(&saved.id, false, false).unwrap();
+        assert!(agent_entries("cursor").unwrap().is_empty());
+        // 停用中改名：agent 侧不动；重开后以新名写入、旧名不出现
+        let mut renamed = list[0].clone();
+        renamed.name = "renamed-api".into();
+        let list = save_impl(renamed, false).unwrap();
+        assert!(
+            agent_entries("cursor").unwrap().is_empty(),
+            "停用中改名不动 agent 配置"
+        );
+        set_enabled_impl(&list[0].id, true, false).unwrap();
+        let names: Vec<String> = agent_entries("cursor")
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, vec!["renamed-api".to_string()], "{names:?}");
+    }
+
+    #[test]
+    fn codex_env_alias_rejected_with_guidance() {
+        // 改名引用（TARGET_TOKEN=${SOURCE_TOKEN}）codex 表达不了：明确拒写并点名两个键名
+        let mut s = stdio_server();
+        s.env = vec![McpEnvPair {
+            key: "TARGET_TOKEN".into(),
+            value: "${SOURCE_TOKEN}".into(),
+        }];
+        let err = entry_toml(&s).unwrap_err();
+        assert!(err.contains("TARGET_TOKEN"), "{err}");
+        assert!(err.contains("SOURCE_TOKEN"), "{err}");
+        // 同名转发仍然放行
+        s.env = vec![McpEnvPair {
+            key: "SOURCE_TOKEN".into(),
+            value: "${SOURCE_TOKEN}".into(),
+        }];
+        let t = entry_toml(&s).unwrap();
+        assert_eq!(t["env_vars"][0].as_str(), Some("SOURCE_TOKEN"));
+        // remote 的 env_http_headers 是 Header→VAR 映射，键名本就不同，不受影响
+        let mut r = remote_server();
+        r.headers = vec![McpEnvPair {
+            key: "X-Key".into(),
+            value: "${MY_KEY}".into(),
+        }];
+        let t = entry_toml(&r).unwrap();
+        assert_eq!(t["env_http_headers"]["X-Key"].as_str(), Some("MY_KEY"));
+    }
+
+    #[test]
+    fn unbuildable_expected_entry_counts_as_modified() {
+        // codex 路径有环境变量搬迁口，设了就跳过（thread_local HOME 压不住它）
+        if std::env::var_os("CODEX_HOME").is_some() {
+            return;
+        }
+        let fx = Fixture::new();
+        // 磁盘上有同名条目，但清单内容按当前口径已构建不出分发产物
+        //（历史遗留的 codex 改名引用）→ 按「被改过」保护，移除需 force 确认
+        let codex_path = fx.dir.join(".codex").join("config.toml");
+        std::fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
+        std::fs::write(&codex_path, "[mcp_servers.legacy]\ncommand = \"npx\"\n").unwrap();
+        let mut s = stdio_server();
+        s.name = "legacy".into();
+        s.env = vec![McpEnvPair {
+            key: "TARGET".into(),
+            value: "${SOURCE}".into(),
+        }];
+        assert_eq!(
+            entry_modified_externally("codex", &s).unwrap(),
+            true,
+            "构建不出预期产物按被改过保护，不静默删"
+        );
+    }
+
+    #[test]
+    fn env_refs_scanned_embedded_and_whole() {
+        let names =
+            |v: &str| scan_env_refs(v).into_iter().map(|(_, n)| n).collect::<Vec<_>>();
+        assert_eq!(names("${A} and $B"), vec!["A", "B"]);
+        assert_eq!(names("Bearer ${CCODE_X}"), vec!["CCODE_X"]);
+        assert_eq!(names("$A$B"), vec!["A", "B"], "相邻两个引用各自成界");
+        assert!(names("plain").is_empty());
+        assert!(names("100$").is_empty(), "孤立 $ 按字面");
+        assert!(names("${}").is_empty(), "空引用名按字面");
+        assert!(names("${A").is_empty(), "未闭合按字面");
+        // 多字节字符不被字节扫描切断
+        assert_eq!(names("前缀 ${变量名_AI} 后缀"), vec!["变量名_AI"]);
+    }
+
+    #[test]
+    fn probe_expands_embedded_refs_from_host_env() {
+        std::env::set_var("CCODE_TEST_PROBE_TOKEN", "tok-123");
+        let mut envs = vec![];
+        let mut missing = vec![];
+        inject_pair(
+            &mut envs,
+            &mut missing,
+            "Authorization",
+            "Bearer ${CCODE_TEST_PROBE_TOKEN}",
+        );
+        assert_eq!(
+            envs,
+            vec![("Authorization".to_string(), "Bearer tok-123".to_string())],
+            "内嵌引用按宿主环境展开（不再字面发送 Bearer ${{...}}）"
+        );
+        assert!(missing.is_empty());
+        // $VAR 简写内嵌也展开
+        let mut envs = vec![];
+        inject_pair(
+            &mut envs,
+            &mut missing,
+            "X-Key",
+            "prefix-$CCODE_TEST_PROBE_TOKEN-suffix",
+        );
+        assert_eq!(envs[0].1, "prefix-tok-123-suffix");
+        // 整值引用行为不变
+        let mut envs = vec![];
+        inject_pair(&mut envs, &mut missing, "K", "$CCODE_TEST_PROBE_TOKEN");
+        assert_eq!(envs[0].1, "tok-123");
+        std::env::remove_var("CCODE_TEST_PROBE_TOKEN");
+        // 未设置的引用：整条不注入 + 记缺失（不再把字面 "${X}" 发给 server）
+        let mut envs = vec![];
+        let mut missing = vec![];
+        inject_pair(
+            &mut envs,
+            &mut missing,
+            "Authorization",
+            "Bearer ${CCODE_TEST_DEFINITELY_MISSING_VAR}",
+        );
+        assert!(envs.is_empty());
+        assert_eq!(missing, vec!["CCODE_TEST_DEFINITELY_MISSING_VAR"]);
+        // 纯字面值原样通过
+        let mut envs = vec![];
+        let mut missing = vec![];
+        inject_pair(&mut envs, &mut missing, "X-Plain", "literal-value");
+        assert_eq!(envs[0].1, "literal-value");
+        assert!(missing.is_empty());
+    }
+
+    /// 本地一次性 HTTP 假 server：读掉请求后回指定状态行（体检状态分类用，无墙钟断言）
+    fn http_fixture_server(status_line: &str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let line = status_line.to_string();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut s, _)) = listener.accept() {
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut b = [0u8; 8192];
+                let _ = s.read(&mut b);
+                let _ = s.write_all(
+                    format!("{line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                );
+            }
+        });
+        (format!("http://{addr}/mcp"), handle)
+    }
+
+    #[test]
+    fn remote_check_classifies_status() {
+        let check = |status_line: &str| {
+            let (url, handle) = http_fixture_server(status_line);
+            let mut server = remote_server();
+            server.url = url;
+            server.headers = vec![]; // 不依赖宿主环境变量
+            let r = tauri::async_runtime::block_on(check_remote(&server));
+            handle.join().unwrap();
+            r
+        };
+        // 2xx = 握手成功
+        let r = check("HTTP/1.1 200 OK");
+        assert!(r.ok, "{:?}", r.error);
+        assert_eq!(r.status, "handshake");
+        assert_eq!(r.detail.as_deref(), Some("HTTP 200 OK"));
+        // 401/403 = 认证失败（不再算「连通正常」）
+        let r = check("HTTP/1.1 401 Unauthorized");
+        assert!(!r.ok);
+        assert_eq!(r.status, "auth");
+        assert!(r.error.as_deref().unwrap().contains("401"), "{:?}", r.error);
+        assert!(r.error.as_deref().unwrap().contains("认证失败"));
+        let r = check("HTTP/1.1 403 Forbidden");
+        assert!(!r.ok);
+        assert_eq!(r.status, "auth");
+        // 404 = 路径错误
+        let r = check("HTTP/1.1 404 Not Found");
+        assert!(!r.ok);
+        assert_eq!(r.status, "not_found");
+        assert!(r.error.as_deref().unwrap().contains("路径不存在"));
+        // 其他 4xx = 地址可达但握手未确认（不算连通正常，也不算失败）
+        let r = check("HTTP/1.1 405 Method Not Allowed");
+        assert!(r.ok);
+        assert_eq!(r.status, "reachable");
+        // 5xx = 失败
+        let r = check("HTTP/1.1 500 Internal Server Error");
+        assert!(!r.ok);
+        assert_eq!(r.status, "error");
+    }
 }
 
 /// 分发状态五态闭集（MCP 页开关旁徽标用；开关本身仍表达清单分发意图 apps，
@@ -2799,40 +3321,52 @@ pub struct McpHealthDto {
     pub error: Option<String>,
     /// 成功时的附加信息：stdio = serverInfo.name@version；remote = HTTP 状态行
     pub detail: Option<String>,
+    /// 状态细分（闭集，前端 mcpHealthText 同源）：
+    /// `handshake` = MCP initialize 握手成功（stdio 应答 / remote 2xx）；
+    /// `reachable` = 地址可达但握手未确认（remote 3xx/其他 4xx，传输层通）；
+    /// `auth` = 认证失败（401/403）；`not_found` = 路径错误（404）；
+    /// `error` = 其余失败（5xx/网络/超时/stdio 拉起失败）
+    pub status: String,
 }
 
-fn health_ok(started: std::time::Instant, detail: Option<String>) -> McpHealthDto {
+fn health_ok(started: std::time::Instant, detail: Option<String>, status: &str) -> McpHealthDto {
     McpHealthDto {
         ok: true,
         latency_ms: started.elapsed().as_millis() as u64,
         error: None,
         detail,
+        status: status.into(),
     }
 }
 
-fn health_fail(started: std::time::Instant, error: String) -> McpHealthDto {
+fn health_fail(started: std::time::Instant, error: String, status: &str) -> McpHealthDto {
     McpHealthDto {
         ok: false,
         latency_ms: started.elapsed().as_millis() as u64,
         error: Some(error),
         detail: None,
+        status: status.into(),
     }
 }
 
-/// env/header 值注入前的宿主展开：整值引用（$VAR/${VAR}，env_ref 同口径）查宿主环境，
-/// 字面值原样；引用未设置的变量返回 Err(变量名)（检测照常跑，失败时附加提示）
+/// env/header 值注入前的宿主展开：所有 $VAR/${VAR} 引用（含 "Bearer ${X}" 内嵌，
+/// 与分发/预检同一套引用口径）查宿主环境；字面值原样；任一引用未设置则整条不注入，
+/// 缺失变量名进 missing（检测照常跑，失败文案附加提示）
 fn inject_pair(
     envs: &mut Vec<(String, String)>,
     missing: &mut Vec<String>,
     key: &str,
     value: &str,
 ) {
-    match env_ref(value) {
-        Some(var) => match std::env::var(var) {
-            Ok(v) => envs.push((key.to_string(), v)),
-            Err(_) => missing.push(var.to_string()),
-        },
-        None => envs.push((key.to_string(), value.to_string())),
+    match expand_host_value(value) {
+        Ok(v) => envs.push((key.to_string(), v)),
+        Err(vars) => {
+            for v in vars {
+                if !missing.contains(&v) {
+                    missing.push(v);
+                }
+            }
+        }
     }
 }
 
@@ -2916,6 +3450,7 @@ fn check_stdio(server: &McpServerDto) -> McpHealthDto {
                 StdioFrame::Ndjson.label(),
                 StdioFrame::ContentLength.label(),
             ),
+            "error",
         ),
     }
 }
@@ -2940,7 +3475,7 @@ fn check_stdio_attempt(
         .env_remove("NO_COLOR")
         .env("TERM", "xterm-256color")
         .env("COLORTERM", "truecolor")
-        .env("TERM_PROGRAM", "Ccode");
+        .env("TERM_PROGRAM", "Mesa");
     if !server.cwd.trim().is_empty() {
         command.current_dir(server.cwd.trim());
     }
@@ -2956,12 +3491,14 @@ fn check_stdio_attempt(
             return StdioAttempt::Done(health_fail(
                 started,
                 append_missing_hint(format!("命令不存在或路径失效：{cmd}"), &missing),
+                "error",
             ));
         }
         Err(e) => {
             return StdioAttempt::Done(health_fail(
                 started,
                 append_missing_hint(format!("命令启动失败（{cmd}）：{e}"), &missing),
+                "error",
             ));
         }
     };
@@ -2987,6 +3524,7 @@ fn check_stdio_attempt(
                 format!("写入 initialize 失败（进程可能已退出）：{e}"),
                 &missing,
             ),
+            "error",
         ));
     }
     // 响应读取搬进线程，主线程 recv_timeout 实现等待上限（CI 不挂死兜底）；
@@ -3067,6 +3605,7 @@ fn check_stdio_attempt(
                     return StdioAttempt::Done(health_fail(
                         started,
                         append_missing_hint(format!("server 拒绝 initialize：{err}"), &missing),
+                        "error",
                     ));
                 }
                 let info = v.pointer("/result/serverInfo");
@@ -3080,7 +3619,7 @@ fn check_stdio_attempt(
                             .unwrap_or_default()
                     )
                 });
-                StdioAttempt::Done(health_ok(started, detail.filter(|d| !d.is_empty())))
+                StdioAttempt::Done(health_ok(started, detail.filter(|d| !d.is_empty()), "handshake"))
             }
             Err(e) => StdioAttempt::FrameMismatch(append_missing_hint(
                 with_stderr(format!("响应不是合法 JSON-RPC 帧：{e}")),
@@ -3104,8 +3643,9 @@ fn check_stdio_attempt(
 }
 
 /// remote 检测：POST initialize（MCP streamable HTTP 口径，Accept 双类型）。
-/// 2xx/3xx/4xx 都算「服务在线」（4xx 多为鉴权/协商问题，传输层本身是通的），
-/// 5xx 与网络错误才算异常。
+/// 状态细分（McpHealthDto.status）：2xx = 握手成功；401/403 = 认证失败、404 = 路径错误
+///（这两种按「连通正常」报是假阳性，必须判失败并点名原因）；3xx 与其他 4xx =
+/// 地址可达但握手未确认（传输层本身是通的，多为协商问题）；5xx 与网络错误 = 失败。
 async fn check_remote(server: &McpServerDto) -> McpHealthDto {
     let started = std::time::Instant::now();
     let client = match reqwest::Client::builder()
@@ -3113,7 +3653,7 @@ async fn check_remote(server: &McpServerDto) -> McpHealthDto {
         .build()
     {
         Ok(c) => c,
-        Err(e) => return health_fail(started, format!("HTTP 客户端初始化失败：{e}")),
+        Err(e) => return health_fail(started, format!("HTTP 客户端初始化失败：{e}"), "error"),
     };
     let mut req = client
         .post(server.url.trim())
@@ -3134,10 +3674,29 @@ async fn check_remote(server: &McpServerDto) -> McpHealthDto {
         Ok(resp) => {
             let status = resp.status();
             let detail = format!("HTTP {status}");
-            if status.is_server_error() {
-                health_fail(started, append_missing_hint(detail, &missing))
+            let code = status.as_u16();
+            if status.is_success() {
+                health_ok(started, Some(detail), "handshake")
+            } else if code == 401 || code == 403 {
+                health_fail(
+                    started,
+                    append_missing_hint(
+                        format!("认证失败（{detail}）：密钥未设置、未注入或被服务端拒绝"),
+                        &missing,
+                    ),
+                    "auth",
+                )
+            } else if code == 404 {
+                health_fail(
+                    started,
+                    format!("路径不存在（{detail}）：请确认 URL 指向 MCP 端点"),
+                    "not_found",
+                )
+            } else if status.is_server_error() {
+                health_fail(started, append_missing_hint(detail, &missing), "error")
             } else {
-                health_ok(started, Some(detail))
+                // 3xx/其他 4xx：传输层是通的，但 MCP 握手未确认，不算「连通正常」
+                health_ok(started, Some(detail), "reachable")
             }
         }
         Err(e) => {
@@ -3148,7 +3707,7 @@ async fn check_remote(server: &McpServerDto) -> McpHealthDto {
             } else {
                 format!("请求失败：{e}")
             };
-            health_fail(started, append_missing_hint(why, &missing))
+            health_fail(started, append_missing_hint(why, &missing), "error")
         }
     }
 }
@@ -3161,7 +3720,11 @@ async fn check_one(server: &McpServerDto) -> McpHealthDto {
         let s = server.clone();
         match tauri::async_runtime::spawn_blocking(move || check_stdio(&s)).await {
             Ok(h) => h,
-            Err(e) => health_fail(std::time::Instant::now(), format!("检测任务失败: {e}")),
+            Err(e) => health_fail(
+                std::time::Instant::now(),
+                format!("检测任务失败: {e}"),
+                "error",
+            ),
         }
     }
 }
@@ -3244,7 +3807,7 @@ pub async fn check_all_mcp_servers() -> Result<HashMap<String, McpHealthDto>, St
     Ok(results)
 }
 
-/// $VAR 引用分发预检（只读）：提取 env/header 值里的整值引用（env_ref 同口径），
+/// $VAR 引用分发预检（只读）：提取 env/header 值里的引用（整值与内嵌，与探测注入同口径），
 /// 查宿主环境返回未设置（空值算未设置）的变量名清单，去重排序。
 /// 前端在保存/拨开分发开关前调用，缺失时给非阻断警告（GUI 应用读不到 shell rc 的 export）
 #[tauri::command]
@@ -3257,12 +3820,12 @@ pub async fn mcp_missing_env_refs(pairs: Vec<McpEnvPair>) -> Vec<String> {
 fn missing_env_refs_impl(pairs: &[McpEnvPair]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for p in pairs {
-        let Some(var) = env_ref(&p.value) else {
-            continue;
-        };
-        let set = std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false);
-        if !set && !out.iter().any(|x| x == var) {
-            out.push(var.to_string());
+        // 与探测注入同一套引用口径（extract_env_refs）：整值与 "Bearer ${X}" 内嵌都算
+        for var in extract_env_refs(&p.value) {
+            let set = std::env::var(&var).map(|v| !v.is_empty()).unwrap_or(false);
+            if !set && !out.iter().any(|x| x == &var) {
+                out.push(var);
+            }
         }
     }
     out.sort();
@@ -3272,7 +3835,7 @@ fn missing_env_refs_impl(pairs: &[McpEnvPair]) -> Vec<String> {
 // ===== 命令路径健康探测与一键修复（只读探测 + 相对路径解析，2026-09-03） =====
 
 /// 单条 stdio 命令的路径健康判定（闭集 ok/relative/missing）：
-/// - `relative`：./ ../ 相对路径——基准是来源 agent 的运行语境，Ccode 内嵌终端拉起必挂；
+/// - `relative`：./ ../ 相对路径——基准是来源 agent 的运行语境，Mesa 内嵌终端拉起必挂；
 /// - `missing`：绝对路径但磁盘上不存在（app 卸载/版本升级后路径失效），
 ///   或裸命令名连 resolve_binary 候选目录都解析不到；
 /// - `ok`：绝对路径存在，或裸命令名可解析（裸名合法，分发时才绝对化，不误报）。

@@ -21,11 +21,14 @@ import {
   pdfUrlFor,
   relevanceRank,
   sourceDisplayName,
+  watchEntryScanLine,
   staleLitHint,
   UNCATEGORIZED_KEYWORD,
   weeklyBuckets,
   parseWatchExplain,
   watchExplainPrompt,
+  litWatchBodyOpenKey,
+  parseLitWatchBodyOpen,
 } from "../src/lit-watch.ts";
 import type { WatchEntryDto } from "../src/lit-watch.ts";
 import type { ScheduleDto } from "../src/types.ts";
@@ -500,6 +503,30 @@ test("sourceDisplayName：剥出版商括号尾巴", () => {
   assert.equal(sourceDisplayName("(Wiley)"), "(Wiley)");
 });
 
+test("watchEntryScanLine：中文一句话 · 期刊，不含英文摘要", () => {
+  assert.equal(
+    watchEntryScanLine(
+      entry({
+        zhSummary: "镁电池正极仍缺合适材料",
+        journal: "Nature Energy (Wiley)",
+        source: "arxiv",
+        abstractFirst: "Magnesium-ion batteries are promising.",
+      }),
+    ),
+    "镁电池正极仍缺合适材料 · Nature Energy",
+  );
+  assert.equal(
+    watchEntryScanLine(
+      entry({ zhSummary: "", journal: null, source: "arxiv" }),
+    ),
+    "arxiv",
+  );
+  assert.equal(
+    watchEntryScanLine(entry({ zhSummary: "  ", journal: null, source: "" })),
+    "",
+  );
+});
+
 test("fulltextLinkFor：全文可得性分流", () => {
   // arXiv abs 页 → pdf 直链（可免费下载）
   assert.deepEqual(fulltextLinkFor("https://arxiv.org/abs/2401.12345"), {
@@ -662,4 +689,14 @@ test("parseWatchExplain：按小标题拆节，前言丢掉，对不上回落 nu
   assert.ok(ok[0].body.includes("络合问题"));
   assert.equal(ok[4].heading, "适用研究方向");
   assert.equal(parseWatchExplain("1. 做了什么\n2. 为什么重要"), null);
+});
+
+test("雷达展开按项目记忆，无记录默认收起", () => {
+  assert.equal(
+    litWatchBodyOpenKey("/tmp/proj/"),
+    "ccode.litWatch.bodyOpen./tmp/proj",
+  );
+  assert.equal(parseLitWatchBodyOpen(null), false);
+  assert.equal(parseLitWatchBodyOpen("0"), false);
+  assert.equal(parseLitWatchBodyOpen("1"), true);
 });

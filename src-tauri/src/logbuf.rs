@@ -49,10 +49,13 @@ pub fn get_app_log(limit: usize) -> Vec<LogEntryDto> {
         Err(_) => return Vec::new(),
     };
     let limit = limit.min(CAP);
-    q.iter()
-        .skip(q.len().saturating_sub(limit))
-        .cloned()
-        .collect()
+    let entries: Vec<_> = q.iter().skip(q.len().saturating_sub(limit)).cloned().collect();
+    drop(q);
+    entries.into_iter().map(|mut entry| {
+        entry.source = crate::sessions::redact_sensitive_text(&entry.source);
+        entry.message = crate::sessions::redact_sensitive_text(&entry.message);
+        entry
+    }).collect()
 }
 
 #[tauri::command]
@@ -88,7 +91,7 @@ pub fn export_app_log() -> Result<String, String> {
 pub fn log_event(level: String, source: String, message: String) {
     record(&level, &source, &message);
     #[cfg(debug_assertions)]
-    eprintln!("[{level}] {source}: {message}");
+    eprintln!("[{level}] {}: {}", crate::sessions::redact_sensitive_text(&source), crate::sessions::redact_sensitive_text(&message));
 }
 
 #[cfg(test)]
@@ -98,6 +101,9 @@ mod tests {
     // 缓冲是全局单例，相关断言合并到一个测试里串行跑，避免并行互相干扰
     #[test]
     fn ring_buffer_caps_normalizes_and_truncates() {
+        clear_app_log();
+        record("error", "test", "key sk-syntheticlogsecret123456");
+        assert!(!get_app_log(1)[0].message.contains("sk-syntheticlogsecret"));
         clear_app_log();
         for i in 0..(CAP + 20) {
             record("info", "test", &format!("m{i}"));

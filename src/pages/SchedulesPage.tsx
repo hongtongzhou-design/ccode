@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Clock3, ExternalLink, Play, RotateCw } from "lucide-react";
 import { useAppStore } from "../store";
-import type { ProjectDto, ScheduleDto } from "../types";
+import type { ProjectDto, ScheduleDto, SchedulerRunDonePayload } from "../types";
 import {
   frequencyLabel,
+  reconcileRunningSchedules,
   scheduleStatusMark,
   summaryPreview,
 } from "../schedule-tasks";
@@ -36,6 +38,8 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState<Set<string>>(new Set());
   const [historyOpen, setHistoryOpen] = useState<Set<string>>(new Set());
+  /** 上一轮列表里后端报告在跑（runningRunId）的任务 id：对账用的前快照 */
+  const backendRunningRef = useRef<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -46,6 +50,14 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
       ]);
       setSchedules(nextSchedules);
       setProjects(nextProjects);
+      // 挂载/刷新同步真实运行状态：后端 runningRunId 为准，与本地「运行中」集合对账
+      const nextRunning = new Set(
+        nextSchedules.filter((s) => s.runningRunId).map((s) => s.id),
+      );
+      setRunning((current) =>
+        reconcileRunningSchedules(current, backendRunningRef.current, nextRunning),
+      );
+      backendRunningRef.current = nextRunning;
       setError(null);
     } catch (reason) {
       setError(`定时巡检读取失败：${String(reason)}`);
@@ -57,6 +69,24 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (visible) void load();
   }, [load, visible]);
+
+  // 运行完成经 scheduler-run-done 事件到达（App.tsx 另有全局监听负责 OS 通知）：
+  // 解除「运行中…」并重拉列表拿最新历史
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<SchedulerRunDonePayload>("scheduler-run-done", (e) => {
+      setRunning((current) => {
+        if (!current.has(e.payload.scheduleId)) return current;
+        const next = new Set(current);
+        next.delete(e.payload.scheduleId);
+        return next;
+      });
+      void load();
+    })
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    return () => unlisten?.();
+  }, [load]);
 
   async function toggle(schedule: ScheduleDto) {
     try {
@@ -75,7 +105,7 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
     setError(null);
     try {
       await invoke("run_schedule_now", { id: schedule.id });
-      window.setTimeout(() => void load(), 1200);
+      // 拉起失败会立即 reject；成功拉起后结果走 scheduler-run-done 事件
     } catch (reason) {
       setError(`启动巡检失败：${String(reason)}`);
       setRunning((current) => {
@@ -99,6 +129,8 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
     const mark = scheduleStatusMark(schedule.lastStatus);
     const history = schedule.history ?? [];
     const open = historyOpen.has(schedule.id);
+    // 本地点击态 ∪ 后端实报（runningRunId）：自动 tick 跑起来的也显示「运行中…」
+    const isRunning = running.has(schedule.id) || Boolean(schedule.runningRunId);
     return (
       <li
         key={schedule.id}
@@ -142,11 +174,11 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
             <button
               type="button"
               className={rowActionClass}
-              disabled={running.has(schedule.id)}
+              disabled={isRunning}
               onClick={() => void runNow(schedule)}
             >
               <Play size={12} aria-hidden="true" />
-              {running.has(schedule.id) ? "运行中…" : "立即运行"}
+              {isRunning ? "运行中…" : "立即运行"}
             </button>
             <button
               type="button"
@@ -214,7 +246,7 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
     <PageFrame width="fluid" className="pb-12">
       <PageHeader
         title="定时巡检"
-        meta={`${active.length} 个启用 · ${paused.length} 个暂停`}
+        meta={`${active.length} 个启用 · ${paused.length} 个暂停 · 后台跑，不进正在进行`}
         actions={
           <button type="button" className={secondaryActionClass} onClick={() => void load()}>
             <RotateCw size={13} aria-hidden="true" />
@@ -235,7 +267,7 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
       ) : schedules.length === 0 ? (
         <EmptyState
           title="还没有定时巡检"
-          detail="定时巡检在项目内创建；创建后会在这里统一查看计划和执行历史。"
+          detail="在项目里创建。这里只看所有项目的计划和历史。"
           action={
             <button type="button" className={primaryActionClass} onClick={() => setPage("workspaces")}>
               去项目创建

@@ -1,7 +1,9 @@
 import {
-  taskInputLabel,
+  goalDisplayName,
+  taskStatusLabel,
   visibleDeclaredTasks,
 } from "./project-tasks.ts";
+import { goalReviewCopy } from "./goal-review.ts";
 
 export type AgentCatalogItem = { id: string; label: string };
 
@@ -19,6 +21,7 @@ export type ProjectAgentTaskRef = {
   kind: string;
   agent: string | null;
   inputPaths: readonly string[];
+  description?: string | null;
   declared?: boolean;
 };
 
@@ -26,7 +29,7 @@ export type ProjectAgentWork = {
   id: string;
   name: string;
   status: string;
-  materials: string;
+  statusLabel: string;
 };
 
 export type ProjectAgentRow = {
@@ -42,12 +45,18 @@ function profileLine(profile: ProjectAgentProfile): string {
   return `${profile.name} · ${profile.models[0] || "CLI 默认"}`;
 }
 
-function asWork(task: ProjectAgentTaskRef): ProjectAgentWork {
+function asWork(
+  task: ProjectAgentTaskRef,
+  workMode?: string | null,
+): ProjectAgentWork {
+  const copy = goalReviewCopy(workMode);
+  const statusLabel =
+    task.status === "pending_review" ? copy.bucketReview : taskStatusLabel(task.status);
   return {
     id: task.id,
-    name: task.name,
+    name: goalDisplayName(task),
     status: task.status,
-    materials: taskInputLabel(task.inputPaths),
+    statusLabel,
   };
 }
 
@@ -68,6 +77,7 @@ export function buildProjectAgentRoster(input: {
   defaultProfiles: Record<string, string> | null | undefined;
   tasks: readonly ProjectAgentTaskRef[];
   taskKinds: ReadonlySet<string>;
+  workMode?: string | null;
 }): { rows: ProjectAgentRow[]; unassigned: ProjectAgentWork[] } {
   const defaults = input.defaultProfiles ?? {};
   const projectDefault = input.defaultAgent?.trim() || "";
@@ -106,11 +116,11 @@ export function buildProjectAgentRoster(input: {
   for (const task of declared) {
     const agentId = resolvedTaskAgentId(task, projectDefault);
     if (!agentId) {
-      unassigned.push(asWork(task));
+      unassigned.push(asWork(task, input.workMode));
       continue;
     }
     const list = worksByAgent.get(agentId) ?? [];
-    list.push(asWork(task));
+    list.push(asWork(task, input.workMode));
     worksByAgent.set(agentId, list);
   }
 
@@ -136,9 +146,22 @@ export function buildProjectAgentRoster(input: {
 }
 
 export function projectAgentsHint(workMode: string | null | undefined): string {
-  if (workMode === "coding") return "谁给这个项目干活。工作树里选 Agent。";
-  if (workMode === "office") return "谁在这个项目里干活。分派在目标里做。";
-  return "谁在这个项目里干活。分派在目标或开步时做。";
+  if (workMode === "coding") {
+    return "这个项目能用谁。点配置名只改这个项目的默认，不改 Mesa 启动栏。工作树里选谁干。";
+  }
+  if (workMode === "office") {
+    return "这个项目能用谁。点配置名只改这个项目的默认，不改 Mesa 启动栏。目标里指定谁写。";
+  }
+  return "这个项目能用谁。点配置名只改这个项目的默认，不改 Mesa 启动栏。目标或开步时指定谁干。";
+}
+
+/** 名册上不逐家重复空状态；整页没有目标时才说一次。 */
+export function projectAgentsEmptyWorkHint(
+  workMode: string | null | undefined,
+): string {
+  if (workMode === "coding") return "在工作树里选谁开工。";
+  if (workMode === "office") return "新建目标时指定谁写文档。";
+  return "新建目标或开步时指定谁干。";
 }
 
 export function currentProfileLine(

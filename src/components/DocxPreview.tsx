@@ -1,3 +1,4 @@
+import { sanitizeDocumentHtml } from "../document-html";
 import { memo, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import PreviewErrorState from "./PreviewErrorState";
@@ -29,7 +30,7 @@ function basename(p: string): string {
 /**
  * docx 阅读版式预览（RX4a）：mammoth 把 docx 转成 HTML，复用 RX2a 的 .md-body 排版样式区。
  * 字节经 read_docx_bytes 加载（与 PDF 同一套白名单约束，50MB 上限由后端拒绝并给出提示）。
- * 渲染源是白名单根内的本地文件（可信内容），与 MarkdownView 同样不引入 sanitize 重库。
+ * 白名单只限制文件读取；mammoth 输出仍须清洗，不能执行文档中的脚本或事件。
  * 图片由 mammoth 默认转成 data URI 内嵌；本组件整体被动态 import，mammoth 不进主包。
  */
 function DocxPreview({
@@ -64,7 +65,7 @@ function DocxPreview({
         });
         if (cancelled) return;
         setWarnings(result.messages.length);
-        setHtml(result.value);
+        setHtml(sanitizeDocumentHtml(result.value));
       } catch (e) {
         if (!cancelled) setError(String(e));
       }

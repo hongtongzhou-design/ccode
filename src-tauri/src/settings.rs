@@ -238,10 +238,10 @@ pub struct AppSettingsDto {
     /// 手动指定仍可用。**不删数据、不改任何启动行为**——已选中它的标签照常工作，配置页照常列出。
     /// 存在设置里而不是 profiles.json：这是使用偏好，不是配置属性。
     pub hidden_profiles: Option<Vec<String>>,
-    /// 「设为全局」追踪：agent id → 上次由 Ccode 成功写入该 agent 全局配置的 profile id。
+    /// 「设为全局」追踪：agent id → 上次由 Mesa 成功写入该 agent 全局配置的 profile id。
     /// apply_profile_global 写成功后记录，restore_global_backup 后清除（恢复后全局内容
-    /// 不再是任何 profile 的快照）。只代表「上次由 Ccode 写入」，不是绝对生效态——
-    /// 在 Ccode 之外手改配置文件会失真，UI 文案照此口径（「全局生效」徽标 title 已注明）。
+    /// 不再是任何 profile 的快照）。只代表「上次由 Mesa 写入」，不是绝对生效态——
+    /// 在 Mesa 之外手改配置文件会失真，UI 文案照此口径（「全局生效」徽标 title 已注明）。
     /// 由 record_active_global/clear_active_global 维护，不走 update_settings patch
     pub active_global_profiles: Option<BTreeMap<String, String>>,
     /// 会话页「⇗ 外部恢复」使用的终端应用（KNOWN_EXTERNAL_TERMINALS）；None/auto = 自动探测
@@ -354,15 +354,23 @@ fn settings_path() -> Result<PathBuf, String> {
         .join("settings.json"))
 }
 
-/// 文件缺失/损坏 → 全 None（由调用方合并默认值）
+/// 缺失用默认；损坏/不可读必须保留原件，禁止下一次保存静默重置。
+fn read_checked(path: &Path) -> Result<AppSettingsDto, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("设置文件损坏，原文件已保留，请修复后重试：{}：{e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AppSettingsDto::default()),
+        Err(e) => Err(format!("读取设置失败：{e}")),
+    }
+}
 fn read_from(path: &Path) -> AppSettingsDto {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    match read_checked(path) {
+        Ok(settings) => settings,
+        Err(error) => { crate::logbuf::record("error", "settings", &error); AppSettingsDto::default() }
+    }
 }
 
 fn write_to(path: &Path, settings: &AppSettingsDto) -> Result<(), String> {
+    read_checked(path)?;
     let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     crate::profiles::atomic_write(path, &text)
 }
@@ -614,9 +622,9 @@ pub(crate) fn clear_profile_refs(id: &str) {
 }
 
 /// 迁移合并时把被丢弃的 binding id 改写成保留 id。调用方须已持 store_lock。
-pub(crate) fn rewrite_profile_refs(rewrites: &[(String, String)]) {
-    let Ok(path) = settings_path() else { return };
-    let mut cur = read_from(&path);
+pub(crate) fn rewrite_profile_refs(rewrites: &[(String, String)]) -> Result<(), String> {
+    let path = settings_path()?;
+    let mut cur = read_checked(&path)?;
     let mut touched = false;
     let subst = |v: &mut String, touched: &mut bool| {
         if let Some((_, to)) = rewrites.iter().find(|(from, _)| from == v) {
@@ -644,15 +652,16 @@ pub(crate) fn rewrite_profile_refs(rewrites: &[(String, String)]) {
         }
     }
     if touched {
-        let _ = write_to(&path, &cur);
+        write_to(&path, &cur)?;
     }
+    Ok(())
 }
 
 // ===== 「设为全局」追踪（active_global_profiles；见字段注释的口径说明） =====
 
 /// 记录/清除的共用内核（测试可注入路径）：Some(id) 记录或覆盖，None 清除；空 map 归一 None
 fn set_active_global_at(path: &Path, agent: &str, profile_id: Option<&str>) -> Result<(), String> {
-    let mut cur = read_from(path);
+    let mut cur = read_checked(path)?;
     let mut map = cur.active_global_profiles.unwrap_or_default();
     match profile_id {
         Some(id) => {
@@ -668,6 +677,7 @@ fn set_active_global_at(path: &Path, agent: &str, profile_id: Option<&str>) -> R
 
 /// 「设为全局」写成功后记录（agent → profile id）；失败只记日志不影响主流程
 pub(crate) fn record_active_global(agent: &str, profile_id: &str) {
+    let _guard = match crate::profiles::store_lock() { Ok(g) => g, Err(e) => { crate::logbuf::record("error", "settings", &e); return; } };
     if let Ok(path) = settings_path() {
         if let Err(e) = set_active_global_at(&path, agent, Some(profile_id)) {
             crate::logbuf::record(
@@ -681,11 +691,16 @@ pub(crate) fn record_active_global(agent: &str, profile_id: &str) {
 
 /// 恢复备份后全局内容不再是任何 profile 的快照，清除该 agent 的追踪标记
 pub(crate) fn clear_active_global(agent: &str) {
+    let _guard = match crate::profiles::store_lock() { Ok(g) => g, Err(e) => { crate::logbuf::record("error", "settings", &e); return; } };
     if let Ok(path) = settings_path() {
         if let Err(e) = set_active_global_at(&path, agent, None) {
             crate::logbuf::record("error", "settings", &format!("清除全局生效标记失败: {e}"));
         }
     }
+}
+
+pub(crate) fn read_current_checked() -> Result<AppSettingsDto, String> {
+    read_checked(&settings_path()?)
 }
 
 pub(crate) fn read_current() -> AppSettingsDto {
@@ -719,7 +734,7 @@ pub(crate) fn set_hooks_attention_entry(
     agent: &str,
     enabled: bool,
 ) -> Result<AppSettingsDto, String> {
-    let _g = crate::profiles::store_lock();
+    let _g = crate::profiles::store_lock()?;
     set_hooks_attention_entry_at(&settings_path()?, agent, enabled)
 }
 
@@ -728,7 +743,7 @@ fn set_hooks_attention_entry_at(
     agent: &str,
     enabled: bool,
 ) -> Result<AppSettingsDto, String> {
-    let mut cur = read_from(path);
+    let mut cur = read_checked(path)?;
     let mut map = cur.hooks_attention.unwrap_or_default();
     if cur.claude_hooks_attention == Some(true) && !map.contains_key("claude-code") {
         map.insert("claude-code".to_string(), true);
@@ -743,20 +758,20 @@ fn set_hooks_attention_entry_at(
 // ===== Tauri commands =====
 
 #[tauri::command]
-pub async fn get_settings() -> AppSettingsDto {
-    with_defaults(read_current())
+pub async fn get_settings() -> Result<AppSettingsDto, String> {
+    Ok(with_defaults(read_checked(&settings_path()?)?))
 }
 
 #[tauri::command]
 pub async fn update_settings(patch: AppSettingsDto) -> Result<AppSettingsDto, String> {
     // 与 profiles 共用同一把读-改-写锁，防并发 patch 互相覆盖；
     // 本函数持锁期间不再获取其他锁，与全局写入（GLOBAL_CONFIG_MUTEX 内不调 profiles）锁序一致
-    let _g = crate::profiles::store_lock();
+    let _g = crate::profiles::store_lock()?;
     let path = settings_path()?;
     if let Some(ref proxy) = patch.outbound_proxy {
         validate_outbound_proxy(proxy)?;
     }
-    let mut cur = read_from(&path);
+    let mut cur = read_checked(&path)?;
     merge(&mut cur, patch);
     write_to(&path, &cur)?;
     Ok(with_defaults(cur))
@@ -770,6 +785,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ccode-settings-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("settings.json")
+    }
+
+    #[test]
+    fn corrupt_settings_are_not_overwritten_by_patch() {
+        let p = tmp();
+        std::fs::write(&p, "{invalid}").unwrap();
+        assert!(read_checked(&p).is_err());
+        assert!(write_to(&p, &AppSettingsDto::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{invalid}");
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -1224,7 +1249,7 @@ mod tests {
     }
 }
 
-/// 应用数据占用（设置页「数据与存储」）：用户此前完全不知道 Ccode 在硬盘上占了多少、存在哪。
+/// 应用数据占用（设置页「数据与存储」）：用户此前完全不知道 Mesa 在硬盘上占了多少、存在哪。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageEntryDto {
@@ -1275,13 +1300,14 @@ pub async fn app_storage_usage() -> Result<Vec<StorageEntryDto>, String> {
             .ok_or("无法确定平台配置目录")?
             .join("ccode");
         // (展示名, 相对名, 可清理)
-        let items: [(&str, &str, bool); 6] = [
+        let items: [(&str, &str, bool); 7] = [
             ("会话索引与用量（app.db）", "app.db", false),
             ("配置（profiles.json）", "profiles.json", false),
             ("技能库", "skills", false),
             ("会话快照（pin 保留的）", "snapshots", true),
             ("配置改写备份", "backups", true),
             ("模型目录缓存", "catalogs", true),
+            ("定时冻结证据与恢复备份", "watch-reviews", false),
         ];
         let mut out = Vec::new();
         for (label, rel, clearable) in items {

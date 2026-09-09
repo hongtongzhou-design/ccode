@@ -1,6 +1,6 @@
 /**
- * 会话列表展示标题：去掉 URL / 中断提示 / CLI resume /「未命名」噪声，
- * 取首句短标题。自定义标题原样保留。不调用 AI、不写回源文件。
+ * 会话列表展示标题：去掉 URL / 中断提示 / CLI resume /「未命名」噪声 / `<user_query>`，
+ * 取首句（之后/然后切开），不砍成首词。自定义标题原样保留。不调用 AI、不写回源文件。
  */
 function interruptedRe() {
   return /\[?\s*request interrupted by user\s*\]?|请求(?:已)?中断|被用户中断/gi;
@@ -35,9 +35,17 @@ function clampTitle(text: string): string {
   const chars = [...text];
   if (chars.length === 0) return "";
   const cjk = chars.filter((c) => (c.codePointAt(0) ?? 0) > 0xff).length;
-  const max = cjk >= chars.length / 2 ? 16 : 40;
+  const max = cjk >= chars.length / 2 ? 48 : 72;
   if (chars.length <= max) return text;
   return `${chars.slice(0, max).join("").trimEnd()}…`;
+}
+
+/** Grok 等会把用户话包在 <user_query> 里；列表和回放只显示里面的话。 */
+export function unwrapPromptTags(text: string): string {
+  const re = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/gi;
+  let out = text.replace(re, "$1");
+  out = out.replace(/<\/?user_query>/gi, "");
+  return out.replace(/\s+/g, " ").trim();
 }
 
 function fileBaseName(p: string): string {
@@ -60,7 +68,8 @@ export function replaceAbsFsPaths(text: string): string {
 /** 去掉噪声后的首句；不够成标题则返回 null。 */
 export function tidySessionText(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  let text = raw.replace(urlRe(), " ").replace(interruptedRe(), " ");
+  let text = unwrapPromptTags(raw);
+  text = text.replace(urlRe(), " ").replace(interruptedRe(), " ");
   text = replaceAbsFsPaths(text);
   text = text.replace(/\s+/g, " ").trim();
   if (!text) return null;
@@ -70,11 +79,6 @@ export function tidySessionText(raw: string | null | undefined): string | null {
   text = clause || text;
   const stripped = text.replace(LEADING_PROMPT_RE, "").trim();
   if ([...stripped].length >= 4) text = stripped;
-  const parts = text.split(/\s+/).filter(Boolean);
-  const first = parts[0] ?? "";
-  if (parts.length > 1 && [...first].length >= 4 && [...first].length <= 16) {
-    text = first;
-  }
   text = clampTitle(text);
   return text || null;
 }
@@ -96,4 +100,22 @@ export function tidySessionTitle(session: {
   const fromSummary = tidySessionText(session.summary);
   if (fromSummary) return { title: fromSummary, interrupted, unnamed: false };
   return { title: "未命名对话", interrupted, unnamed: true };
+}
+
+/** 项目侧栏：未命名不写这三个字，只留「对话」。 */
+export function projectSessionLabel(shown: TidySessionTitle): string {
+  return shown.unnamed ? "对话" : shown.title;
+}
+
+export function splitRecentItems<T>(
+  items: readonly T[],
+  limit = 8,
+): { recent: T[]; older: T[] } {
+  if (limit < 1 || items.length <= limit) {
+    return { recent: [...items], older: [] };
+  }
+  return {
+    recent: items.slice(0, limit),
+    older: items.slice(limit),
+  };
 }

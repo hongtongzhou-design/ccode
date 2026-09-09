@@ -75,7 +75,8 @@ export function isDiscussPermission(
   return Boolean(readonly);
 }
 
-/** 关标签后仍可从会话恢复的交互 Run：有 session、非 internal、非巡检。 */
+/** 关标签后仍可从会话恢复的交互 Run：有 session、非 internal、非巡检。
+ *  阅读 Run 排除在外：阅读标签只在还开着时算「正在进行」，关掉后不当项目任务留着。 */
 export function pickRecoverableRun(
   runs: readonly Pick<
     RunDto,
@@ -97,7 +98,12 @@ export function pickRecoverableRun(
   for (const run of runs) {
     if (run.internal) continue;
     if (!run.closedAt) continue;
-    if (run.taskKind === "login" || run.taskKind === "watch") continue;
+    if (
+      run.taskKind === "login" ||
+      run.taskKind === "watch" ||
+      run.taskKind === "reader"
+    )
+      continue;
     if (run.runtime === "custom" || !run.capabilities.canResume) continue;
     if (!run.sessionId) continue;
     const root = run.projectRoot?.trim();
@@ -105,6 +111,18 @@ export function pickRecoverableRun(
     if (pathWithin(run.isolationPath, path, isWindows)) return run;
   }
   return null;
+}
+
+/**
+ * 进程是否还活着（agent 在跑 / 等确认 / 回合结束停在提示符）。
+ * 已退出回落 shell、未启动的保留标签不算「运行中」——它们只是可继续的视图。
+ * TabStatus.attention 语义：无联动 / shell / 已退出 / 未知为 null，非 null 即进程存活。
+ */
+export function isRunProcessLive(run: {
+  running?: boolean;
+  attention?: "done" | "working" | "confirm" | null;
+}): boolean {
+  return Boolean(run.running) || run.attention != null;
 }
 
 /**

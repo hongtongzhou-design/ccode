@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isGitMissingError } from "./dep-check";
-import { orderedAnswers, parseDecisions } from "./step-decisions";
+import { decisionGate, orderedAnswers, parseDecisions } from "./step-decisions";
 import { pickWorkspaceResume } from "./workspace-resume";
 import { DEFAULT_KICKOFF_PROMPT } from "./pipeline-presets";
 import { renderTaskMd } from "./task-md";
@@ -111,19 +111,12 @@ export async function startPipelineStep({
   /** soft_pause 的二次确认只允许推进不依赖未答决策的工作。 */
   decisionPauseAcknowledged?: boolean;
 }): Promise<void> {
-  const mode =
-    step.decisionMode === "soft_pause" || step.decisionMode === "hard_pause"
-      ? step.decisionMode
-      : "auto_continue";
-  const answered = parseDecisions(taskMdOverride ?? "");
-  const missing = (step.decisions ?? [])
-    .filter((d) => !answered.get(d.q.trim())?.trim())
-    .map((d) => d.q.trim());
-  if (mode === "hard_pause" && missing.length > 0) {
-    throw new Error(`本步骤处于硬暂停，尚有未回答决策：${missing.join("、")}`);
+  const gate = decisionGate(step, taskMdOverride ?? "");
+  if (gate.blocked) {
+    throw new Error(`本步骤处于硬暂停，尚有未授权决策：${gate.missing.join("、")}`);
   }
-  if (mode === "soft_pause" && missing.length > 0 && !decisionPauseAcknowledged) {
-    throw new Error(`本步骤处于软暂停，请先确认仅推进无依赖工作：${missing.join("、")}`);
+  if (gate.needsAck && !decisionPauseAcknowledged) {
+    throw new Error(`本步骤只允许准备或无依赖工作，请先确认：${gate.missing.join("、") || "仅允许准备"}`);
   }
   try {
     await invoke<EnsureGitDto>("ensure_git_repo", { path: projectPath });
@@ -139,7 +132,7 @@ export async function startPipelineStep({
   }
   // 档案卡/gitignore 自动提交为 best-effort（沿用 TASK.md 同款模式）：
   // git init 后 .ccode 与 .gitignore 未跟踪会被工作区合并的「主文件夹里还有没保存的改动」拦截；
-  // 后端只提交这两个 Ccode 自有路径，用户文件绝不纳入，失败不阻断开步
+  // 后端只提交这两个 Mesa 自有路径，用户文件绝不纳入，失败不阻断开步
   try {
     await invoke<BootstrapCommitDto>("commit_project_bootstrap", {
       repoPath: projectPath,
@@ -151,8 +144,7 @@ export async function startPipelineStep({
     repoPath: projectPath,
     name: step.workspaceName,
   });
-  // TASK.md 为 best-effort：write_workspace_task_md 是 P1b 的最小后端补充，
-  // 命令就绪前失败不阻断开步，简报仍可在 project.toml 与步骤「编辑简报」中查看。
+  // 任务书是执行合同；写入失败保留工作区供排查，不得无合同启动 Agent。
   // taskMdOverride（开工确认弹层编辑区定稿）非空时覆盖默认拼装；否则按模板现拼
   let content: string;
   if (taskMdOverride?.trim()) {
@@ -177,7 +169,7 @@ export async function startPipelineStep({
       content,
     });
   } catch (reason) {
-    onError(`工作区「${ws.name}」已创建，TASK.md 写入失败：${String(reason)}`);
+    throw new Error(`工作区「${ws.name}」已创建，但 TASK.md 写入失败，未启动 Agent；请修复任务书后再继续：${String(reason)}`);
   }
   // 步骤预设的 run 脚本（P4 quarto 渲染等）落进项目层 .ccode/settings.toml：
   // 同名覆盖、其余键保留；best-effort 失败不阻断开步

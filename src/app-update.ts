@@ -20,7 +20,7 @@ export function appUpdateInboxFields(
   if (!info?.version) return null;
   return {
     key: `update:${info.version}`,
-    text: `Ccode v${info.version} 可更新（当前 v${info.currentVersion}）`,
+    text: `Mesa v${info.version} 可更新（当前 v${info.currentVersion}）`,
   };
 }
 

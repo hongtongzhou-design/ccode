@@ -303,11 +303,241 @@ impl DerefMut for TrackedChild {
     }
 }
 
+struct ActiveCapture {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+fn captures() -> &'static std::sync::Mutex<std::collections::HashMap<String, ActiveCapture>> {
+    static CAPTURES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, ActiveCapture>>> = std::sync::OnceLock::new();
+    CAPTURES.get_or_init(Default::default)
+}
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) fn shutting_down() -> bool { SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire) }
+pub(crate) fn capture_active(id: &str) -> bool { captures().lock().unwrap_or_else(|e| e.into_inner()).contains_key(id) }
+pub(crate) fn active_capture_ids() -> Vec<String> { captures().lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect() }
+pub(crate) fn capture_count() -> usize { captures().lock().unwrap_or_else(|e| e.into_inner()).len() }
+pub(crate) fn cancel_capture(id: &str) -> Result<(), String> {
+    let registry = captures().lock().unwrap_or_else(|e| e.into_inner());
+    let capture = registry.get(id).ok_or("任务未在此实例运行或已结束")?;
+    capture.cancelled.store(true, std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+pub(crate) fn shutdown_captures() {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Release);
+    for capture in captures().lock().unwrap_or_else(|e| e.into_inner()).values() {
+        capture.cancelled.store(true, std::sync::atomic::Ordering::Release);
+    }
+    // 每个捕获线程自行并发回收，不能在退出线程逐个等待 N 次 taskkill 超时。
+}
+struct CaptureRegistration(String);
+impl Drop for CaptureRegistration {
+    fn drop(&mut self) { captures().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0); }
+}
+
+#[cfg(windows)]
+struct CaptureJob(windows_sys::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+impl CaptureJob {
+    fn assign(child: &TrackedChild) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::*;
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() { return Err(format!("创建进程任务组失败：{}", std::io::Error::last_os_error())); }
+            let guard = Self(job);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits as *const _ as _, std::mem::size_of_val(&limits) as u32) == 0
+                || AssignProcessToJobObject(job, child.inner.as_raw_handle() as _) == 0 {
+                return Err(format!("绑定进程任务组失败：{}", std::io::Error::last_os_error()));
+            }
+            Ok(guard)
+        }
+    }
+    fn resume(child: &TrackedChild) -> Result<(), String> {
+        use windows_sys::Win32::{Foundation::*, System::{Diagnostics::ToolHelp::*, Threading::*}};
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE { return Err(format!("读取挂起线程失败：{}", std::io::Error::last_os_error())); }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut more = Thread32First(snapshot, &mut entry);
+            let mut resumed = false;
+            while more != 0 {
+                if entry.th32OwnerProcessID == child.id() {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        resumed |= ResumeThread(thread) != u32::MAX;
+                        CloseHandle(thread);
+                    }
+                }
+                more = Thread32Next(snapshot, &mut entry);
+            }
+            CloseHandle(snapshot);
+            if resumed { Ok(()) } else { Err("无法恢复已加入任务组的进程".into()) }
+        }
+    }
+    fn terminate(&self) { unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1); } }
+}
+#[cfg(windows)]
+impl Drop for CaptureJob { fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0); } } }
+
+/// 后台捕获的公共生命周期：父进程退出不是管道 EOF，deadline 覆盖两者。
+/// 仅这些受管理的捕获命令建独立进程组，不改变打开外部应用等后台命令的语义。
+#[derive(Debug)]
+pub(crate) struct CapturedOutput {
+    pub status: Option<std::process::ExitStatus>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub timed_out: bool,
+    pub cancelled: bool,
+    pub truncated: bool,
+}
+
+#[derive(Default)]
+struct CaptureBuffer {
+    bytes: Vec<u8>,
+    truncated: bool,
+    error: Option<String>,
+}
+
+fn capture_pipe<R: std::io::Read + Send + 'static>(
+    mut pipe: R,
+    cap: usize,
+) -> (std::thread::JoinHandle<()>, std::sync::Arc<std::sync::Mutex<CaptureBuffer>>) {
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(CaptureBuffer::default()));
+    let shared = buffer.clone();
+    let handle = std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut b = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    let keep = n.min(cap.saturating_sub(b.bytes.len()));
+                    b.bytes.extend_from_slice(&chunk[..keep]);
+                    b.truncated |= keep < n;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    shared.lock().unwrap_or_else(|e| e.into_inner()).error = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+    });
+    (handle, buffer)
+}
+
+pub(crate) fn capture_command(
+    cmd: &mut BackgroundCommand,
+    timeout: std::time::Duration,
+    cap: usize,
+) -> Result<CapturedOutput, String> {
+    capture_command_for(cmd, timeout, cap, None)
+}
+
+pub(crate) fn capture_command_for(cmd: &mut BackgroundCommand, timeout: std::time::Duration, cap: usize, run_id: Option<&str>) -> Result<CapturedOutput, String> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    if shutting_down() { return Err("应用正在退出，拒绝启动新进程".into()); }
+    let id = run_id.map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut registry = captures().lock().unwrap_or_else(|e| e.into_inner());
+        if shutting_down() { return Err("应用正在退出，拒绝启动新进程".into()); }
+        if registry.contains_key(&id) { return Err("此任务已在执行".into()); }
+        registry.insert(id.clone(), ActiveCapture { cancelled: cancelled.clone() });
+    }
+    let _registration = CaptureRegistration(id.clone());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.inner.creation_flags(CREATE_NO_WINDOW | windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+    let spawned = cmd.spawn();
+    #[cfg(windows)]
+    configure_background(&mut cmd.inner);
+    let mut child = spawned.map_err(|e| format!("启动进程失败: {e}"))?;
+    #[cfg(windows)]
+    let job = match CaptureJob::assign(&child) {
+        Ok(job) => {
+            if let Err(error) = CaptureJob::resume(&child) { job.terminate(); let _ = child.kill(); let _ = child.wait(); return Err(error); }
+            job
+        }
+        Err(error) => { let _ = child.kill(); let _ = child.wait(); return Err(error); }
+    };
+    let (out_thread, out) = capture_pipe(child.stdout.take().expect("piped stdout"), cap);
+    let (err_thread, err) = capture_pipe(child.stderr.take().expect("piped stderr"), cap);
+    let deadline = Instant::now() + timeout;
+    let mut status = None;
+    let mut failure = None;
+    let mut timed_out = false;
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(value) => status = value,
+                Err(e) => { failure = Some(format!("等待进程失败: {e}")); break; }
+            }
+        }
+        if status.is_some() && out_thread.is_finished() && err_thread.is_finished() {
+            break;
+        }
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) { break; }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let was_cancelled = cancelled.load(std::sync::atomic::Ordering::Acquire);
+    if timed_out || was_cancelled || failure.is_some() {
+        #[cfg(windows)]
+        job.terminate();
+        crate::pty::kill_process_tree(child.id());
+        let _ = child.kill();
+        let cleanup = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < cleanup {
+            if status.is_none() {
+                if let Ok(value) = child.try_wait() { status = value; }
+            }
+            if status.is_some() && out_thread.is_finished() && err_thread.is_finished() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    // 未关闭的管道线程不阻塞返回；共享缓冲保留已收到的输出，且永不超过 cap。
+    if out_thread.is_finished() { let _ = out_thread.join(); }
+    if err_thread.is_finished() { let _ = err_thread.join(); }
+    if let Some(error) = failure { return Err(error); }
+    let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+    let mut err = err.lock().unwrap_or_else(|e| e.into_inner());
+    if !timed_out {
+        if let Some(error) = out.error.as_ref().or(err.error.as_ref()) {
+            return Err(format!("读取进程输出失败: {error}"));
+        }
+    }
+    Ok(CapturedOutput {
+        status,
+        stdout: std::mem::take(&mut out.bytes),
+        stderr: std::mem::take(&mut err.bytes),
+        timed_out,
+        cancelled: was_cancelled,
+        truncated: out.truncated || err.truncated,
+    })
+}
+
+
 /// 带超时的读线程收尾：超时就放弃这个线程（它会在管道最终关闭时自行退出），
 /// 不让漏网的子孙进程把调用方的工作线程永久钉死。
 ///
 /// 超时路径必须用它而不是裸 `join()`：Windows 上包装层（`cmd /C`）之下的孙进程
 /// 才是真正持有 stdout/stderr 管道写端的那个，只 kill 包装层的话读线程永远等不到 EOF。
+
 /// 配合 `pty::kill_process_tree` 使用——先杀树消除根因，这里只是最后一道兜底。
 pub(crate) fn join_with_timeout(
     handle: std::thread::JoinHandle<Vec<u8>>,
@@ -326,6 +556,102 @@ pub(crate) fn join_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_capture_stops_process_and_releases_registry() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let thread_id = id.clone();
+        let worker = std::thread::spawn(move || capture_command_for(&mut shell("exec sleep 60"), std::time::Duration::from_secs(30), 1024, Some(&thread_id)).unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !capture_active(&id) { assert!(std::time::Instant::now() < deadline); std::thread::yield_now(); }
+        cancel_capture(&id).unwrap();
+        let output = worker.join().unwrap();
+        assert!(output.cancelled);
+        assert!(!capture_active(&id));
+        assert!(cancel_capture(&id).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_capture_job_preserves_output_and_exit_code() {
+        let mut command = background_command("cmd.exe");
+        command.args(["/D", "/C", "echo out & echo err 1>&2 & exit /b 7"]);
+        let output = capture_command(&mut command, std::time::Duration::from_secs(15), 1024).unwrap();
+        assert_eq!(output.status.and_then(|s| s.code()), Some(7));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "out");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "err");
+        assert!(!output.timed_out);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_capture_job_times_out_and_reaps_shell() {
+        let mut command = background_command("cmd.exe");
+        command.args(["/D", "/C", "echo started & ping -n 60 127.0.0.1 >nul"]);
+        let output = capture_command(&mut command, std::time::Duration::from_secs(2), 1024).unwrap();
+        assert!(output.timed_out);
+        assert!(output.status.is_some());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("started"));
+    }
+
+    #[cfg(unix)]
+    fn shell(script: &str) -> BackgroundCommand {
+        let mut cmd = background_command("/bin/sh");
+        cmd.args(["-c", script]);
+        cmd
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_keeps_stdout_stderr_and_exit_code() {
+        let got = capture_command(&mut shell("printf out; printf err >&2; exit 7"), std::time::Duration::from_secs(10), 1024).unwrap();
+        assert_eq!(got.stdout, b"out");
+        assert_eq!(got.stderr, b"err");
+        assert_eq!(got.status.and_then(|s| s.code()), Some(7));
+        assert!(!got.timed_out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_deadline_applies_after_parent_exit_and_keeps_partial_output() {
+        // 子进程继承管道但父进程退出；只检查状态/内容，不断言精确耗时。
+        let got = capture_command(&mut shell("sleep 60 & printf partial; exit 0"), std::time::Duration::from_secs(2), 1024).unwrap();
+        assert!(got.timed_out);
+        assert_eq!(got.stdout, b"partial");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_timeout_terminates_running_child() {
+        let got = capture_command(&mut shell("printf started; exec sleep 60"), std::time::Duration::from_secs(2), 1024).unwrap();
+        assert!(got.timed_out);
+        assert!(got.status.is_some(), "超时子进程必须被回收");
+        assert_eq!(got.stdout, b"started");
+    }
+
+    #[test]
+    fn capture_pipe_drains_after_cap_without_unbounded_memory() {
+        let (thread, buffer) = capture_pipe(std::io::Cursor::new(vec![b'x'; 100_000]), 32);
+        thread.join().unwrap();
+        let buffer = buffer.lock().unwrap();
+        assert_eq!(buffer.bytes, vec![b'x'; 32]);
+        assert!(buffer.truncated);
+        assert!(buffer.error.is_none());
+    }
+
+    #[test]
+    fn capture_pipe_reports_read_error() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("broken"))
+            }
+        }
+        let (thread, buffer) = capture_pipe(Broken, 32);
+        thread.join().unwrap();
+        assert_eq!(buffer.lock().unwrap().error.as_deref(), Some("broken"));
+    }
 
     // cmd-shim 包现代格式（SET dp0 + "%dp0%\..."）
     const MODERN_SHIM: &str = r#"@ECHO off

@@ -110,8 +110,8 @@ export interface AppSettings {
   navCapsuleVisibleItems?: string[];
   /** 「停用」的 profile id（字段名沿用旧称）：软停用 = 不被自动路径挑中，手动指定仍可用 */
   hiddenProfiles?: string[];
-  /** 「设为全局」追踪：agent id → 上次由 Ccode 写入该 agent 全局配置的 profile id
-      （只代表「上次写入」，Ccode 之外手改配置文件会失真；恢复备份后由后端清除） */
+  /** 「设为全局」追踪：agent id → 上次由 Mesa 写入该 agent 全局配置的 profile id
+      （只代表「上次写入」，Mesa 之外手改配置文件会失真；恢复备份后由后端清除） */
   activeGlobalProfiles?: Record<string, string>;
   /** 对话页「⇗ 外部恢复」的终端应用；auto/undefined = 按优先级探测 */
   externalTerminal?: string;
@@ -396,6 +396,9 @@ export function runInboxAction(item: InboxItem) {
                 : undefined,
               reuseKey: run.reuseKey ?? undefined,
               runId,
+              // 透传原 Task 身份：缺了它后端会按 reuseKey/路径重新推导 kind/ref，
+              // 与已登记 Run（声明目标是 free_research + 目标名）对不上而被拒
+              taskId: run.taskId || undefined,
               permission: run.permission === "discuss" ? "discuss" : "write_tree",
               resume: !custom && run.sessionId
                 ? { agentId: run.agent, sessionId: run.sessionId }
@@ -541,6 +544,9 @@ interface AppState {
   focusTab: (tabId: string | null) => void;
   /** 工作区页 → 对话页的搜索词交接（对话页消费并清空） */
   sessionsQuery: string | null;
+  /** 快速开聊「查看全部」→ 对话页只列随手聊（消费并清空） */
+  sessionsScratchReq: boolean;
+  setSessionsScratchReq: (on: boolean) => void;
   /** 请求对话页打开指定会话（终端页「⤴对话」跳转用） */
   openSessionReq: { agent: string; sessionId: string } | null;
   setOpenSessionReq: (r: { agent: string; sessionId: string } | null) => void;
@@ -573,9 +579,9 @@ interface AppState {
   setArtifactCheckReq: (id: string | null) => void;
   /** 对话页卡片 chip → 工作区页选中对应项目的一次性请求（项目根路径，工作区页消费并清空） */
   /** 当前项目·步骤上下文镜像（WorkspacesPage 唯一写入方）：顶栏跨页展示「我在哪」。
-   *  只读消费，不新增轮询——数据本就在工作区页手里 */
-  contextLabel: { project: string; step: string | null } | null;
-  setContextLabel: (v: { project: string; step: string | null } | null) => void;
+   *  只读消费，不新增轮询——数据本就在工作区页手里；projectPath 供工作台按路径归属（同名项目不猜名字） */
+  contextLabel: { project: string; projectPath?: string | null; step: string | null } | null;
+  setContextLabel: (v: { project: string; projectPath?: string | null; step: string | null } | null) => void;
   selectProjectReq: string | null;
   projectFocusReq: {
     projectRoot: string;
@@ -638,6 +644,7 @@ interface AppState {
   /** 启动时检查应用更新；开发模式跳过；失败写入 status 而不伪装成「已是最新」 */
   checkAppUpdate: () => Promise<void>;
   loadAll: () => Promise<void>;
+  connectionLoadError: string | null;
   /** 拉取全部 agent 的会话元数据，返回最新列表供轮询比对 */
   loadSessions: (force?: boolean) => Promise<SessionMetaDto[]>;
   saveProfile: (id: string | null, input: ProfileInput) => Promise<void>;
@@ -658,6 +665,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   return {
   profiles: [],
+  connectionLoadError: null,
   gateways: [],
   agents: [],
   sessions: [],
@@ -776,8 +784,10 @@ export const useAppStore = create<AppState>((set, get) => {
   focusTabId: null,
   focusTab: (tabId) => set({ focusTabId: tabId }),
   sessionsQuery: null,
+  sessionsScratchReq: false,
   openSessionReq: null,
   setSessionsQuery: (q) => set({ sessionsQuery: q }),
+  setSessionsScratchReq: (on) => set({ sessionsScratchReq: on }),
   setOpenSessionReq: (r) => set({ openSessionReq: r }),
   skillDraftReq: null,
   setSkillDraftReq: (r) => set({ skillDraftReq: r }),
@@ -928,12 +938,17 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   loadAll: async () => {
-    const [profiles, agents, gateways] = await Promise.all([
-      invoke<Profile[]>("list_profiles"),
-      invoke<DetectResult[]>("detect_agents"),
-      invoke<Gateway[]>("list_gateways").catch(() => [] as Gateway[]),
-    ]);
-    set({ profiles, agents, gateways });
+    try {
+      const [profiles, agents, gateways] = await Promise.all([
+        invoke<Profile[]>("list_profiles"),
+        invoke<DetectResult[]>("detect_agents"),
+        invoke<Gateway[]>("list_gateways"),
+      ]);
+      set({ profiles, agents, gateways, connectionLoadError: null });
+    } catch (reason) {
+      set({ connectionLoadError: String(reason) });
+      throw reason;
+    }
   },
 
   loadSessions: (force = false) => sessionRefresh.load(force),

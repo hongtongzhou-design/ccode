@@ -7,6 +7,7 @@ interface ConfirmRequest {
   danger: boolean;
   confirmText: string;
   alert: boolean;
+  focusCancel: boolean;
   resolve: (ok: boolean) => void;
 }
 
@@ -39,7 +40,7 @@ function settle(ok: boolean) {
  */
 export function confirmDialog(
   message: string,
-  opts?: { danger?: boolean; confirmText?: string },
+  opts?: { danger?: boolean; confirmText?: string; focusCancel?: boolean },
 ): Promise<boolean> {
   current?.resolve(false);
   return new Promise<boolean>((resolve) => {
@@ -48,6 +49,7 @@ export function confirmDialog(
       danger: opts?.danger ?? false,
       confirmText: opts?.confirmText ?? "确认",
       alert: false,
+      focusCancel: opts?.focusCancel ?? false,
       resolve,
     };
     emit();
@@ -63,6 +65,7 @@ export function alertDialog(message: string): Promise<void> {
       danger: false,
       confirmText: "知道了",
       alert: true,
+      focusCancel: false,
       resolve: () => resolve(),
     };
     emit();
@@ -118,7 +121,10 @@ export function ConfirmDialogHost() {
       settle(action === "confirm");
     };
     window.addEventListener("keydown", onKey, true);
-    requestAnimationFrame(() => confirmRef.current?.focus());
+    requestAnimationFrame(() => {
+      if (req.focusCancel) cancelRef.current?.focus();
+      else confirmRef.current?.focus();
+    });
     return () => {
       window.removeEventListener("keydown", onKey, true);
       previous?.focus();

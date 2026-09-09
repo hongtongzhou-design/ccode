@@ -52,6 +52,14 @@ pub(crate) fn same_path(a: &str, b: &str) -> bool {
     path_key(a) == path_key(b)
 }
 
+/// 大小写不敏感的比较键：安全闸（如保护路径）要跟文件系统默认语义对齐——
+/// macOS 默认 APFS、Windows NTFS 都按大小写不敏感解析，仅大小写不同的两条路径
+/// 在盘上是同一个文件（保护 `RAW/` 会被 `raw/a.txt` 绕过），必须折叠后比较。
+/// Linux 大小写敏感文件系统上折叠属于偏保守方向（宁可误拦，不可漏拦）。
+pub(crate) fn path_key_folded(path: &str) -> String {
+    path_key(path).to_lowercase()
+}
+
 /// `child` 是否落在 `root` 之内（含 root 自身），按路径分量判定，跨方言。
 /// 不用字符串前缀：那会让 `/ws/task2` 误命中 `/ws/task`。
 pub(crate) fn path_within(child: &str, root: &str) -> bool {
@@ -193,6 +201,14 @@ mod tests {
     fn path_key_is_case_sensitive_on_posix() {
         // POSIX 上大小写是有意义的，不能折叠
         assert_ne!(path_key("/Users/Foo"), path_key("/users/foo"));
+    }
+
+    #[test]
+    fn path_key_folded_is_case_insensitive_everywhere() {
+        // 保护路径等安全闸全平台折叠：APFS/NTFS 上大小写不同也是同一个文件
+        assert_eq!(path_key_folded("/Users/Foo"), path_key_folded("/users/foo"));
+        assert_eq!(path_key_folded("RAW/a.txt"), path_key_folded("raw/A.TXT"));
+        assert_ne!(path_key_folded("raw/a.txt"), path_key_folded("raw/b.txt"));
     }
 
     #[test]

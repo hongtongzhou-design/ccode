@@ -18,6 +18,7 @@ import type {
   ProjectConfigDto,
   ProjectStepDto,
   TaskCardDto,
+  TaskDraftDto,
   WorkspaceDto,
 } from "../types";
 
@@ -351,7 +352,7 @@ export default function TaskCardsSection({
   async function seedDraftForChat() {
     const step = focusStepDto;
     if (!step) return;
-    const cur = await invoke<{ relPath: string; text: string | null }>(
+    const cur = await invoke<TaskDraftDto>(
       "read_task_draft",
       { projectRoot: projectPath, stepName: step.name },
     );
@@ -362,6 +363,7 @@ export default function TaskCardsSection({
       projectRoot: projectPath,
       stepName: step.name,
       content: assembled,
+      expectedRevision: cur?.revision ?? null,
     });
     onDraftChanged?.();
   }
@@ -369,16 +371,16 @@ export default function TaskCardsSection({
   /** 「预览/编辑 TASK.md」的统一加载（v3.90：入口合一，不再有「草稿」概念）：
    *  有正文内容读文件全文；否则给模板拼装（只读展示不落盘——纯看不留痕，
    *  保存才经 write_task_draft 落地；与 seedDraftForChat 同一拼装出处） */
-  async function loadTaskMdForStep(): Promise<string> {
+  async function loadTaskMdForStep(): Promise<{ text: string; revision: string | null }> {
     const step = focusStepDto;
-    if (!step) return "";
-    const cur = await invoke<{ relPath: string; text: string | null }>(
+    if (!step) return { text: "", revision: null };
+    const cur = await invoke<TaskDraftDto>(
       "read_task_draft",
       { projectRoot: projectPath, stepName: step.name },
     );
     const raw = cur?.text?.trim() ?? "";
-    if (raw && !isDecisionsOnly(raw)) return cur?.text ?? "";
-    return buildTaskMdPreview(projectPath, step, cfg);
+    if (raw && !isDecisionsOnly(raw)) return { text: cur?.text ?? "", revision: cur?.revision ?? null };
+    return { text: await buildTaskMdPreview(projectPath, step, cfg), revision: cur?.revision ?? null };
   }
 
   /** 想法卡行（想法区）：主按钮 = 只读纯聊「聊想法」；「◈ 沉淀进任务书」只在开工前渲染
@@ -702,8 +704,8 @@ export default function TaskCardsSection({
                     className="ml-auto flex shrink-0 items-center gap-1"
                     title={
                       guardHard
-                        ? `开启后以只读/计划模式启动 ${guardAgentLabel}——进程级参数，agent 改不了文件（硬保护）`
-                        : `${guardAgentLabel} 没有只读启动参数：开启后只能在指令里嘱咐它别动文件，agent 可以无视（软约束）。要硬保护请换 Claude Code / Codex / Gemini / Kimi / CodeBuddy / Cursor / Grok`
+                        ? `开启后以只读/计划模式启动 ${guardAgentLabel}——进程级参数，约束工具执行（计划模式不等同于 OS 沙箱）`
+                        : `${guardAgentLabel} 没有只读启动参数：不能以只讨论权限启动；请换 Claude Code / Codex / Gemini / Kimi / CodeBuddy / Cursor / Grok`
                     }
                   >
                     <span className="text-xs text-l4">聊天时不让 AI 改文件</span>
@@ -711,7 +713,7 @@ export default function TaskCardsSection({
                         而头脑风暴恰恰最依赖「它不会动我文件」这个假设 */}
                     {discussGuard && !guardHard && (
                       <span className="text-micro text-warn-text">
-                        {guardAgentLabel} 仅提示约束
+                        {guardAgentLabel} 不支持只讨论
                       </span>
                     )}
                     <Toggle

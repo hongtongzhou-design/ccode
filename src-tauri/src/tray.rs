@@ -59,7 +59,7 @@ pub fn rebuild(app: &AppHandle) -> Result<(), String> {
     let app2 = app.clone();
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .tooltip("Ccode")
+        .tooltip("Mesa")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(move |_tray, event| {
@@ -77,7 +77,7 @@ fn build_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
     let settings = settings::read_current();
     let active = settings.active_global_profiles.unwrap_or_default();
 
-    let show = MenuItem::with_id(app, "show", "打开 Ccode", true, None::<&str>)
+    let show = MenuItem::with_id(app, "show", "打开 Mesa", true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let quit =
         MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
@@ -168,7 +168,7 @@ fn build_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
             let hint = MenuItem::with_id(
                 app,
                 format!("stale:{agent}"),
-                "全局文件已在 Ccode 外改过",
+                "全局文件已在 Mesa 外改过",
                 false,
                 None::<&str>,
             )
@@ -217,6 +217,20 @@ fn handle_menu(app: &AppHandle, id: &str) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let store = app.state::<ProfileStore>();
+        if let Ok(p) = store.get(&bind_id) {
+            if p.account_type != AccountType::Official
+                && global_config::set_global_conflict_message(&p.agent).is_some()
+            {
+                let _ = crate::tray::rebuild_and_wait(app.clone()).await;
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("未设为全局")
+                    .body("检测到 cc-switch。托盘不会直接接管默认渠道，请到连接页确认。")
+                    .show();
+                return;
+            }
+        }
         let result = global_config::apply_profile_global(app.clone(), store, bind_id).await;
         // 成功或失败都重绘：失败时勾选态不能停在错误项上
         let _ = crate::tray::rebuild_and_wait(app.clone()).await;
@@ -225,7 +239,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
             let _ = app
                 .notification()
                 .builder()
-                .title("Ccode 设为全局失败")
+                .title("Mesa 设为全局失败")
                 .body(e)
                 .show();
         }

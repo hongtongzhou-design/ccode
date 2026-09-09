@@ -171,10 +171,10 @@ export function inboxTaskLabel(opts: {
   return opts.cwdLabel?.trim() || "这项工作";
 }
 
-/** 收件箱主文案：去「任务」做什么。 */
+/** 收件箱主文案：和「项目现在」同一句式——名字紧贴状态，不写「去」。 */
 export function inboxTaskLine(taskLabel: string, action: string): string {
   const label = taskLabel.trim() || "这项工作";
-  return `去「${label}」${action}`;
+  return `${label}${action.trim()}`;
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   frequencyLabel,
   hhmm,
   litWatchSchedules,
+  reconcileRunningSchedules,
   runDoneNotifyBody,
   runDoneNotifyTitle,
   scheduleStatusMark,
@@ -128,4 +129,31 @@ test("summaryPreview：多行简报折叠为单行预览", () => {
     summary: "检索 3 条关键词\n新命中 2 篇，推荐 1 篇\narXiv 未达",
   });
   assert.equal(preview, "检索 3 条关键词 新命中 2 篇，推荐 1 篇 arXiv 未达");
+});
+
+test("reconcileRunningSchedules：挂载/刷新并入后端实报的运行中任务", () => {
+  const out = reconcileRunningSchedules(new Set(), new Set(), new Set(["s-1"]));
+  assert.deepEqual([...out], ["s-1"]);
+});
+
+test("reconcileRunningSchedules：刚点立即运行未登记 Run 的不清掉（防闪烁）", () => {
+  // 本地有点击态，但前后两次后端快照都没报在跑（Run 行还没建出来）→ 保留
+  const out = reconcileRunningSchedules(new Set(["s-1"]), new Set(), new Set());
+  assert.deepEqual([...out], ["s-1"]);
+});
+
+test("reconcileRunningSchedules：后端曾报在跑、现在不再跑的清除（事件漏收兜底）", () => {
+  const out = reconcileRunningSchedules(
+    new Set(["s-1", "s-2"]),
+    new Set(["s-1"]),
+    new Set(["s-2"]),
+  );
+  assert.deepEqual([...out].sort(), ["s-2"]);
+  // 清除后下一轮换 snapshot，本地已无该 id，不会被反复加回
+  const again = reconcileRunningSchedules(out, new Set(["s-2"]), new Set());
+  assert.deepEqual([...again], []);
+});
+
+test("reconcileRunningSchedules：空集合对账返回空", () => {
+  assert.deepEqual([...reconcileRunningSchedules(new Set(), new Set(), new Set())], []);
 });

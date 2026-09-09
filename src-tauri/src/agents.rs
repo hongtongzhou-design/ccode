@@ -497,7 +497,7 @@ fn grok_overlay_note() -> String {
 }
 
 /// Claude Code 的 settings.json env 会覆盖父进程 shell env。
-/// 用 --settings 传入一个不含密钥的高优先级覆盖层，避免用户全局配置把 Ccode
+/// 用 --settings 传入一个不含密钥的高优先级覆盖层，避免用户全局配置把 Mesa
 /// 当前连接静默改回另一家模型；认证密钥仍只存在子进程环境中。
 fn claude_settings_override(profile: &Profile, model: Option<&str>) -> String {
     let mut env = serde_json::Map::new();
@@ -670,7 +670,7 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         ));
                         // 会话内自省入口：codex 没有模型/base URL 环境变量（matrix §2），配置又走
                         // 内联 -c 不落盘，agent 被问「你是什么模型」时 config.json/$CODEX_MODEL 全空。
-                        // 注入 Ccode 命名空间的显示名（配置名 · 模型，与选择器口径一致），
+                        // 注入 Mesa 命名空间的显示名（配置名 · 模型，与选择器口径一致），
                         // 对齐 kimi KIMI_MODEL_DISPLAY_NAME 先例；纯信息性，codex 本身不读
                         plan.env.push((
                             "CCODE_MODEL_DISPLAY_NAME".into(),
@@ -1022,7 +1022,7 @@ fn grok_model_config_matches(
 /// 「聊想法」只读模式（硬保护，想法期防 agent 擅自改主仓文件）：在启动计划 args 上应用
 /// 注册表 readonly_args。codex 特殊：只读要替换默认的 `-s workspace-write`
 ///（重复 -s 哪个生效未文档化，不赌后者生效——先剔除原沙箱参数对再追加）。
-/// 返回 None = 该 CLI 无只读参数（只有 prompt 软约束），调用方原样使用 plan.args。
+/// 返回 None = 该 CLI 无只读/计划模式参数；discuss 启动必须拒绝，不得沿用可写参数。
 pub fn readonly_launch_args(agent_id: &str, base_args: &[String]) -> Option<Vec<String>> {
     let spec = agent_spec(agent_id)?;
     if spec.readonly_args.is_empty() {
@@ -1327,6 +1327,8 @@ fn codex_catalog_entry_for(
         "supports_parallel_tool_calls": true,
         // v0.146 起为必填（无 serde default），空数组即可
         "experimental_supported_tools": [],
+        // ≥0.144.5 缺此字段会拒收整份 catalog，ChatGPT 自带 Codex 同样（cc-switch 同补）
+        "supports_reasoning_summaries": true,
     })
 }
 
@@ -1449,7 +1451,7 @@ fn codex_relay_compat_args() -> Vec<String> {
 fn codex_inline_provider_args(base_url: &str, key_env: &str, provider: &str) -> Vec<String> {
     let mut out = Vec::new();
     for kv in [
-        format!(r#"model_providers.{provider}.name="Ccode""#),
+        format!(r#"model_providers.{provider}.name="Mesa""#),
         format!(r#"model_providers.{provider}.base_url="{base_url}""#),
         format!(r#"model_providers.{provider}.env_key="{key_env}""#),
         format!(r#"model_providers.{provider}.wire_api="responses""#),
@@ -1463,7 +1465,7 @@ fn codex_inline_provider_args(base_url: &str, key_env: &str, provider: &str) -> 
 }
 
 /// 复制到用户终端的恢复命令附加参数：仅 codex 且调用方给出 Base URL 时补
-/// provider 定义；复制命令本身不携带 Ccode profile 密钥，其他 agent 依赖用户全局配置。
+/// provider 定义；复制命令本身不携带 Mesa profile 密钥，其他 agent 依赖用户全局配置。
 fn resume_extra_args(
     agent_id: &str,
     base_url: Option<&str>,
@@ -1550,13 +1552,29 @@ fn require_external_profile_id(profile_id: Option<&str>) -> Result<&str, String>
     profile_id
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| "外部启动必须指定 Ccode profile，请重新选择配置".to_string())
+        .ok_or_else(|| "外部启动必须指定 Mesa profile，请重新选择配置".to_string())
 }
 
+/// 启动凭证检查：API 连接必须有密钥（或显式无密钥）；官方账号必须先过配置层冲突防线。
 pub(crate) fn ensure_launch_credentials(
     profile: &Profile,
     key: Option<&str>,
 ) -> Result<(), String> {
+    if profile.account_type == crate::profiles::AccountType::Official {
+        // 只读检测、命中即拒，不自动改用户配置文件：claude 等的配置文件 env 块会
+        // 覆盖 shell env（matrix §1），env_remove 只清进程环境变量管不到磁盘配置——
+        // 残留 ANTHROPIC_* 会让「官方账号」会话实际走 API 计费。
+        if let Some(home) = dirs::home_dir() {
+            let conflicts = official_launch_conflicts(&home, profile);
+            if !conflicts.is_empty() {
+                return Err(format!(
+                    "无法按官方账号启动：{}。请到连接页该 Agent 状态行的冲突警告（!）里点「备份后清理已识别项」，或手动编辑对应文件删除这些键后重试",
+                    conflicts.join("；")
+                ));
+            }
+        }
+        return Ok(());
+    }
     if profile.account_type == crate::profiles::AccountType::Api
         && !profile.no_auth
         && key.is_none_or(|value| value.trim().is_empty())
@@ -1564,6 +1582,20 @@ pub(crate) fn ensure_launch_credentials(
         return Err("API 连接没有密钥；请回到连接页填写密钥，或明确勾选本地端点无密钥".into());
     }
     Ok(())
+}
+
+/// 官方账号启动前的配置层冲突扫描（只读；home 显式传入便于测试，不随宿主机器漂移）
+fn official_launch_conflicts(home: &std::path::Path, profile: &Profile) -> Vec<String> {
+    if profile.account_type != crate::profiles::AccountType::Official {
+        return Vec::new();
+    }
+    let Some(spec) = agent_spec(&profile.agent) else {
+        return Vec::new();
+    };
+    let Some(oa) = &spec.official_account else {
+        return Vec::new();
+    };
+    probe_conflicts(home, oa)
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -1592,7 +1624,33 @@ fn external_wrapper_dir() -> Result<PathBuf, String> {
     }
     // Windows：目录在 %APPDATA%\ccode 下，默认 ACL 已是当前用户；不要在启动热路径
     // 同步跑 icacls（Defender 下可卡数秒，表现为「在外部继续」点了很久才弹出窗口）。
+    sweep_stale_external_wrappers(&dir);
     Ok(dir)
+}
+
+/// 清扫遗留的启动包装器（best-effort）：正常寿命 = 脚本首行自删 + 60s 兜底线程；
+/// 兜底线程没跑到进程就退出时，靠这里在下一次外部启动前回收，不让旧 wrapper 无限滞留。
+fn sweep_stale_external_wrappers(dir: &std::path::Path) {
+    let Some(cutoff) = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(120))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("launch-") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|mtime| mtime < cutoff);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn schedule_wrapper_cleanup(path: PathBuf) {
@@ -1602,6 +1660,10 @@ fn schedule_wrapper_cleanup(path: PathBuf) {
     });
 }
 
+/// 外部终端一次性启动包装。凭证通道分平台（audit P0）：
+/// - Linux：终端由 Mesa 直接 spawn，密钥注入终端进程 env 继承进窗口 shell，脚本不含凭证；
+/// - macOS：终端经 launchd 拉起（open/AppleScript/已在运行的 Ghostty 实例），父进程 env
+///   到不了新窗口，密钥只能随脚本传递——0600 文件 + 0700 目录 + 首行自删 + 60s 兜底清理。
 #[cfg(unix)]
 fn write_external_wrapper(
     binary: &str,
@@ -1619,7 +1681,7 @@ fn write_external_wrapper(
     let dir = external_wrapper_dir()?;
     let path = dir.join(format!("launch-{}.sh", uuid::Uuid::new_v4()));
     let mut text = String::from(
-        "#!/bin/sh\n\n# Ccode one-shot external launch; remove credentials before exec.\n\n",
+        "#!/bin/sh\n\n# Mesa one-shot external launch; remove credentials before exec.\n\n",
     );
     text.push_str("self=\"$0\"\nrm -f -- \"$self\" 2>/dev/null || :\n");
     for name in env_remove {
@@ -1659,43 +1721,18 @@ fn write_external_wrapper(
     Ok(path)
 }
 
-#[cfg(windows)]
-fn write_external_wrapper(
-    binary: &str,
-    args: &[String],
-    env: &[(String, String)],
-    env_remove: &[String],
-) -> Result<PathBuf, String> {
-    // PowerShell 脚本只通过路径传给 cmd/Ghostty，密钥不进入命令行；脚本首行自删。
-    for (name, _) in env {
-        if !valid_env_name(name) {
-            return Err(format!("profile 附加环境变量名非法: {name}"));
-        }
-    }
-    let dir = external_wrapper_dir()?;
-    let path = dir.join(format!("launch-{}.ps1", uuid::Uuid::new_v4()));
+/// PowerShell 外部启动脚本正文：只含自删 + 启动命令，不含任何环境变量。
+/// 密钥走父进程环境块经 start 继承（与 cmd 路径同口径，spawn_windows_start 注入）。
+// 运行路径仅 Windows；测试在任意宿主构造文本
+#[cfg(any(windows, test))]
+fn external_ps1_script_text(binary: &str, args: &[String]) -> String {
     // 首字符必须是 UTF-8 BOM：powershell.exe（5.1）对**无 BOM** 文件按系统 ANSI 代码页
     // 解析（中文系统 = GBK936）。脚本里的中文（用户名 C:\Users\张三、项目名、prompt 参数）
     // 会被按 GBK 错位解码，把后面的引号当成汉字的 trail byte 吞掉，直接报
-    // 「字符串缺少终止符」——整个脚本一行都不执行，外部终端一闪而过，
-    // 且首行自删语句也没跑到，带密钥的 wrapper 会滞留到 60 秒后的兜底清理。
+    // 「字符串缺少终止符」——整个脚本一行都不执行，外部终端一闪而过。
     // 是否触发取决于具体汉字的字节序列（「中文路径」侥幸无损、「技能张三」必炸），
     // 是数据相关的间歇故障，务必不要因为某次没复现就把 BOM 去掉。
     let mut text = String::from("\u{FEFF}$self = $PSCommandPath\nRemove-Item -LiteralPath $self -Force -ErrorAction SilentlyContinue\n");
-    for name in env_remove {
-        if valid_env_name(name) {
-            text.push_str("Remove-Item Env:");
-            text.push_str(name);
-            text.push_str(" -ErrorAction SilentlyContinue\n");
-        }
-    }
-    for (name, value) in env {
-        text.push_str("$env:");
-        text.push_str(name);
-        text.push_str(" = ");
-        text.push_str(&format!("'{}'", value.replace('\'', "''")));
-        text.push('\n');
-    }
     text.push_str("& ");
     text.push_str(&format!("'{}'", binary.replace('\'', "''")));
     for arg in args {
@@ -1703,7 +1740,15 @@ fn write_external_wrapper(
         text.push_str(&format!("'{}'", arg.replace('\'', "''")));
     }
     text.push('\n');
-    std::fs::write(&path, text).map_err(|e| format!("写入外部启动包装器失败: {e}"))?;
+    text
+}
+
+#[cfg(windows)]
+fn write_external_wrapper(binary: &str, args: &[String]) -> Result<PathBuf, String> {
+    let dir = external_wrapper_dir()?;
+    let path = dir.join(format!("launch-{}.ps1", uuid::Uuid::new_v4()));
+    std::fs::write(&path, external_ps1_script_text(binary, args))
+        .map_err(|e| format!("写入外部启动包装器失败: {e}"))?;
     schedule_wrapper_cleanup(path.clone());
     Ok(path)
 }
@@ -1827,11 +1872,27 @@ fn open_external_profiled(
             &env_remove,
         );
     }
-    #[cfg(not(windows))]
+    // macOS：终端经 launchd 拉起（open/AppleScript/已运行的 Ghostty 实例），父进程 env
+    // 到不了新窗口，密钥只能随一次性包装脚本传递（0600 + 首行自删 + 60s 兜底清理）。
+    #[cfg(target_os = "macos")]
     {
         let wrapper = write_external_wrapper(&binary.to_string_lossy(), &args, &env, &env_remove)?;
         let cmd = external_wrapper_command(cwd, &wrapper);
         match open_external_terminal(&cmd, &pref, cwd, &wrapper) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&wrapper);
+                Err(e)
+            }
+        }
+    }
+    // Linux：终端由 Mesa 直接 spawn，密钥注入终端进程 env 由窗口 shell 继承
+    //（与 Windows start 环境块同口径），包装脚本不含凭证。
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let wrapper = write_external_wrapper(&binary.to_string_lossy(), &args, &[], &[])?;
+        let cmd = external_wrapper_command(cwd, &wrapper);
+        match open_external_terminal(&cmd, &pref, cwd, &wrapper, &env, &env_remove) {
             Ok(()) => Ok(()),
             Err(e) => {
                 let _ = std::fs::remove_file(&wrapper);
@@ -1855,7 +1916,7 @@ fn sh_quote_if_needed(s: &str) -> String {
 }
 
 /// 会话恢复的完整命令行（cd 到项目目录 + CLI resume 参数）。
-/// 刻意不带 profile env——密钥只在 Ccode 自家拉起时注入（关键约定），
+/// 刻意不带 profile env——密钥只在 Mesa 自家拉起时注入（关键约定），
 /// 外部恢复用的是用户全局配置。binary 参数允许外部拉起时传绝对路径（见下）。
 // 运行路径仅 unix（Windows 走 windows_resume_command_line）；测试跨平台校验命令文本
 #[cfg_attr(not(any(unix, test)), allow(dead_code))]
@@ -1968,12 +2029,22 @@ fn codex_config_provider_names(text: &str) -> Vec<String> {
     };
     doc.get("model_providers")
         .and_then(|i| i.as_table())
-        .map(|t| t.iter().map(|(k, _)| k.to_string()).collect())
+        .map(|t| {
+            t.iter()
+                .filter(|(_, item)| {
+                    // ChatGPT 自带 Codex 不认 provider 上的 http_headers（MCP 字段），
+                    // 整段加载失败后查找即报 not found。不当成已注册，菜单才能再点「注册」迁走。
+                    item.as_table()
+                        .is_none_or(|tbl| tbl.get("http_headers").is_none())
+                })
+                .map(|(k, _)| k.to_string())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 /// 复制用：返回该会话的恢复命令行。
-/// base_url：codex 会话走 Ccode 内联 provider（rollout 记 model_provider="ccode"）时必须
+/// base_url：codex 会话走 Mesa 内联 provider（rollout 记 model_provider="ccode"）时必须
 /// 补上 provider 定义才能在外部恢复——定义不含密钥（env_key 是变量名引用）
 #[tauri::command]
 pub fn session_resume_command(
@@ -2017,7 +2088,7 @@ pub fn resume_external_terminal(
     )
 }
 
-/// 在外部终端按指定 Ccode profile 新建会话。与连接页「在终端使用」同一套注入计划。
+/// 在外部终端按指定 Mesa profile 新建会话。与连接页「在终端使用」同一套注入计划。
 #[tauri::command]
 pub fn new_external_terminal(
     store: tauri::State<'_, ProfileStore>,
@@ -2296,7 +2367,7 @@ fn windows_start_prefix(cwd: &str) -> String {
     // 旧版 libuv（<1.52，kimi 等自带运行时的 CLI 可能内嵌）uv_get_process_title
     // 把 0 当成功、process_title 缓存仍是 NULL，随后 assert(process_title) 直接 abort
     // （win/util.c:412，start "" 场景 100% 复现，见 nodejs/node#58695）。
-    let mut line = String::from("start \"Ccode\"");
+    let mut line = String::from("start \"Mesa\"");
     if !cwd.trim().is_empty() {
         line.push_str(&format!(" /D \"{}\"", cwd.replace('"', "")));
     }
@@ -2316,7 +2387,8 @@ fn windows_external_start_line_cmd(cwd: &str, binary: &str, args: &[String]) -> 
     line
 }
 
-/// 设置「PowerShell」：可见宿主是 powershell -NoExit -File wrapper（密钥在 ps1 里）。
+/// 设置「PowerShell」：可见宿主是 powershell -NoExit -File wrapper；
+/// 密钥经 start 环境块继承进会话（与 cmd 路径同口径），ps1 只含启动命令。
 #[cfg(any(windows, test))]
 fn windows_external_start_line_ps(cwd: &str, wrapper: &Path) -> String {
     let mut line = windows_start_prefix(cwd);
@@ -2400,9 +2472,10 @@ fn open_windows_external(
 ) -> Result<(), String> {
     let cwd = expand_home_path(cwd);
     if pref == "powershell" {
-        let wrapper = write_external_wrapper(binary, args, env, env_remove)?;
+        // 密钥放父进程环境块经 start 继承（与 cmd 路径同口径），ps1 只含启动命令
+        let wrapper = write_external_wrapper(binary, args)?;
         let line = windows_external_start_line_ps(&cwd, &wrapper);
-        return spawn_windows_start(&line, &[], &[]).map_err(|e| {
+        return spawn_windows_start(&line, env, env_remove).map_err(|e| {
             let _ = std::fs::remove_file(&wrapper);
             e
         });
@@ -2425,6 +2498,8 @@ fn open_external_terminal(
     pref: &str,
     _cwd: &str,
     _wrapper: &Path,
+    env: &[(String, String)],
+    env_remove: &[String],
 ) -> Result<(), String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     // auto 按优先级探测；显式选择只试指定终端，未装则报错（设置页可改选）
@@ -2441,6 +2516,18 @@ fn open_external_terminal(
     for term in candidates {
         if let Some(bin) = resolve_binary(term) {
             let mut c = Command::new(bin);
+            // 密钥经 spawn env 由终端进程继承进窗口 shell（与 Windows start 环境块
+            // 同口径），包装脚本本体不含凭证
+            for (k, v) in env {
+                if valid_env_name(k) {
+                    c.env(k, v);
+                }
+            }
+            for k in env_remove {
+                if valid_env_name(k) {
+                    c.env_remove(k);
+                }
+            }
             // -l -i 交互登录 shell：非交互模式不加载 .zshrc/.bashrc，用户 PATH 会丢
             if term == "gnome-terminal" {
                 c.args(["--", &shell, "-l", "-i", "-c", cmd]);
@@ -2472,7 +2559,7 @@ fn kimi_variant_hint() -> Option<&'static str> {
 }
 
 /// 检测结果按进程缓存；更新成功后由 updater 调 invalidate_detect_cache 清空。
-/// 另加 2 分钟 TTL：用户在 Ccode 外自行安装 CLI 后不必重启才认（与 CHECK_CACHE 同口径）。
+/// 另加 2 分钟 TTL：用户在 Mesa 外自行安装 CLI 后不必重启才认（与 CHECK_CACHE 同口径）。
 const DETECT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 static DETECT_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<DetectResult>)>> =
     std::sync::Mutex::new(None);
@@ -2554,7 +2641,7 @@ pub struct OfficialAccountStatusDto {
     pub login_command: Option<String>,
     /// 配置文件冲突告警（中文可读描述；只含文件名与变量名，绝不含密钥值）
     pub conflicts: Vec<String>,
-    /// Files that can be safely cleaned by removing only Ccode-owned API keys.
+    /// Files that can be safely cleaned by removing only Mesa-owned API keys.
     pub cleanup_supported: bool,
     /// 组头登录标签要注入的环境（出网代理；连接 extra_env 由前端再覆盖）
     pub login_env: std::collections::BTreeMap<String, String>,
@@ -2973,6 +3060,9 @@ mod tests {
         assert!(codex_config_provider_names("").is_empty());
         assert!(codex_config_provider_names("not toml [[[").is_empty());
         assert!(codex_config_provider_names("model = \"gpt-5\"\n").is_empty());
+        // provider 上的 http_headers 客户端加载失败，不当成已注册
+        let stale = "[model_providers.ccode-x]\nbase_url = \"https://a\"\n\n[model_providers.ccode-x.http_headers]\nAuthorization = \"Bearer sk\"\n";
+        assert!(codex_config_provider_names(stale).is_empty());
     }
 
     fn profile(agent: &str, base_url: Option<&str>) -> Profile {
@@ -3033,7 +3123,7 @@ mod tests {
             "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(),
             "测试 · m5".into()
         )));
-        // 子 agent 不被 Ccode 固定到绑定列表中的任意模型，保留 Claude 原生选择链
+        // 子 agent 不被 Mesa 固定到绑定列表中的任意模型，保留 Claude 原生选择链
         assert!(!plan
             .env
             .iter()
@@ -4039,6 +4129,84 @@ api_backend = "responses"
     }
 
     #[test]
+    fn official_launch_conflicts_block_settings_env_residuals() {
+        // 官方账号启动防线：settings.json env 块覆盖 shell env（matrix §1），
+        // 残留 ANTHROPIC_* 时官方账号会话会实际走 API 计费——必须拦在启动前
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{"env": {"ANTHROPIC_BASE_URL": "https://gw.example.com", "ANTHROPIC_AUTH_TOKEN": "sk-disk-secret"}}"#,
+        )
+        .unwrap();
+        let mut official = profile("claude-code", None);
+        official.account_type = crate::profiles::AccountType::Official;
+        let conflicts = official_launch_conflicts(&dir, &official);
+        assert_eq!(conflicts.len(), 2);
+        let joined = conflicts.join("；");
+        assert!(joined.contains("~/.claude/settings.json"));
+        assert!(joined.contains("ANTHROPIC_BASE_URL"));
+        assert!(joined.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!joined.contains("sk-disk-secret"), "只报变量名不读值");
+        // API 连接不触发该防线（API 模式本来就注入这些变量）
+        let api = profile("claude-code", Some("https://gw.example.com"));
+        assert!(official_launch_conflicts(&dir, &api).is_empty());
+        // codex 官方账号无探测项（TOML 顶层键无法按变量名探测，见注册表注释）
+        let mut codex = profile("codex", None);
+        codex.account_type = crate::profiles::AccountType::Official;
+        assert!(official_launch_conflicts(&dir, &codex).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn official_launch_conflicts_empty_when_settings_clean() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(dir.join(".claude/settings.json"), r#"{"model": "opus"}"#).unwrap();
+        let mut official = profile("claude-code", None);
+        official.account_type = crate::profiles::AccountType::Official;
+        assert!(official_launch_conflicts(&dir, &official).is_empty());
+        // 文件缺失同样放行（probe 语义：缺失/不可读静默跳过）
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(official_launch_conflicts(&dir, &official).is_empty());
+    }
+
+    #[test]
+    fn external_ps1_script_text_carries_no_env_or_credentials() {
+        // audit P0：ps1 只含自删 + 启动命令；密钥走 start 环境块继承，不落脚本
+        let text = external_ps1_script_text(
+            "C:\\tools\\claude.cmd",
+            &["读 简报".into(), "it's".into()],
+        );
+        assert!(text.starts_with('\u{FEFF}'), "powershell 5.1 GBK 解码坑：BOM 不能丢");
+        assert!(text.contains("& 'C:\\tools\\claude.cmd'"));
+        assert!(text.contains("'it''s'"), "单引号加倍转义");
+        assert!(!text.contains("$env:"), "脚本不得写环境变量");
+        assert!(!text.contains("Remove-Item Env:"), "env_remove 也在父进程环境块完成");
+    }
+
+    #[test]
+    fn sweep_stale_external_wrappers_removes_only_old_launch_files() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = dir.join("launch-old.sh");
+        let fresh = dir.join("launch-fresh.sh");
+        let other = dir.join("keep.txt");
+        std::fs::write(&stale, "x").unwrap();
+        std::fs::write(&fresh, "x").unwrap();
+        std::fs::write(&other, "x").unwrap();
+        let file = std::fs::File::options().write(true).open(&stale).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+            .unwrap();
+        drop(file);
+        sweep_stale_external_wrappers(&dir);
+        assert!(!stale.exists(), "超龄 launch- 文件被清扫");
+        assert!(fresh.exists(), "新 wrapper 不动（终端可能还没读到）");
+        assert!(other.exists(), "非 launch- 前缀不动");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn qwen_conflict_probe_flags_dotenv_residual_keys() {
         let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join(".qwen")).unwrap();
@@ -4349,6 +4517,7 @@ api_backend = "responses"
         // 能力字段：有效上下文 95%（自动压缩阈值）、如实声明无 search tool
         assert_eq!(e["effective_context_window_percent"], 95);
         assert_eq!(e["supports_search_tool"], false);
+        assert_eq!(e["supports_reasoning_summaries"], true);
         assert_eq!(e["service_tiers"], serde_json::json!([]));
         // 图像输入按能力注册表：gpt-5 系不在确知多模态清单 → 仅 text
         assert_eq!(e["input_modalities"], serde_json::json!(["text"]));
@@ -4738,7 +4907,7 @@ api_backend = "responses"
         );
         assert_eq!(
             line,
-            r#"start "Ccode" /D "C:\work\my proj" cmd.exe /K C:\tools\claude.cmd -r abc"#
+            r#"start "Mesa" /D "C:\work\my proj" cmd.exe /K C:\tools\claude.cmd -r abc"#
         );
         assert!(!line.contains("powershell"));
         let spaced = windows_external_start_line_cmd(
@@ -4760,7 +4929,7 @@ api_backend = "responses"
         );
         assert_eq!(
             line,
-            "start \"Ccode\" /D \"C:\\work\\my proj\" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File \"C:\\Users\\x\\AppData\\Roaming\\ccode\\external-launch\\launch-1.ps1\""
+            "start \"Mesa\" /D \"C:\\work\\my proj\" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File \"C:\\Users\\x\\AppData\\Roaming\\ccode\\external-launch\\launch-1.ps1\""
         );
         assert!(line.contains("-NoExit"));
         assert!(!line.contains("cmd.exe /K"));
@@ -4821,8 +4990,8 @@ api_backend = "responses"
         let home = dirs::home_dir().unwrap();
         assert_eq!(expand_home_path("~"), home.to_string_lossy());
         assert_eq!(
-            expand_home_path("~/Ccode project"),
-            home.join("Ccode project").to_string_lossy()
+            expand_home_path("~/Mesa project"),
+            home.join("Mesa project").to_string_lossy()
         );
         assert_eq!(expand_home_path("/tmp/project"), "/tmp/project");
     }
@@ -4831,10 +5000,10 @@ api_backend = "responses"
     #[test]
     fn external_wrapper_command_does_not_single_quote_tilde() {
         let wrapper = Path::new("/tmp/ccode-wrapper.sh");
-        let cmd = external_wrapper_command("~/Ccode project", wrapper);
+        let cmd = external_wrapper_command("~/Mesa project", wrapper);
         assert!(cmd.starts_with("cd "));
         assert!(!cmd.contains("cd '~"));
-        assert!(cmd.contains("Ccode project"));
+        assert!(cmd.contains("Mesa project"));
     }
 
     #[cfg(target_os = "macos")]

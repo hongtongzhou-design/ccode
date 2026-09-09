@@ -19,7 +19,7 @@ test("内置种子判定只看 source=builtin", () => {
   }
 });
 
-test("来源说明：内置与 Ccode 自建不需要来源行", () => {
+test("来源说明：内置与 Mesa 自建不需要来源行", () => {
   assert.equal(skillOriginLabel({ source: "builtin" }), null);
   assert.equal(skillOriginLabel({ source: "ccode" }), null);
 });

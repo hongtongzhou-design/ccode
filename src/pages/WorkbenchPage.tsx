@@ -31,7 +31,7 @@ import type {
   TaskDto,
   WorkspaceDto,
 } from "../types";
-import { pickRecoverableRun } from "../run-model";
+import { pickRecoverableRun, isWorkbenchSurfaceRun } from "../run-model";
 import { visibleDeclaredTasks } from "../project-tasks";
 import {
   continueWorkbenchTarget,
@@ -40,8 +40,10 @@ import {
   namedSessionTitle,
   pickWorkbenchHero,
   pickWorkbenchNow,
+  workbenchNowSubtitle,
   workbenchRecentRows,
   workbenchRecentSessions,
+  type WorkbenchContinue,
   type WorkbenchNowSeed,
 } from "../workbench-hero";
 import {
@@ -146,7 +148,10 @@ function WorkbenchPage({
   >({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
-  const [recoverableRuns, setRecoverableRuns] = useState<RunDto[]>([]);
+  const [allRuns, setAllRuns] = useState<RunDto[]>([]);
+  const [taskProjectById, setTaskProjectById] = useState<Record<string, string>>(
+    {},
+  );
   const [userTasks, setUserTasks] = useState<TaskDto[]>([]);
 
   useEffect(() => {
@@ -224,12 +229,15 @@ function WorkbenchPage({
           current ?? "工作区状态加载失败，可重试；其他工作台内容仍可继续使用。",
         );
       });
+    // 全量 Run（created_at 降序 500 条）：工作台归属（runId→项目）与「继续」按 runId 找回共用
+    invoke<RunDto[]>("run_list", { projectRoot: null })
+      .then(setAllRuns)
+      .catch(() => setAllRuns([]));
   }, [visible, runCwdSig, reloadToken]);
 
   const nowSeeds = useMemo((): WorkbenchNowSeed[] => {
-    const live = terminalRunInputs.filter(
-      (r) => r.running || r.attention === "confirm",
-    );
+    // 「活着」只算工作台表面白名单内的运行（登录/定时巡检/无头不算）
+    const live = terminalRunInputs.filter((r) => isWorkbenchSurfaceRun(r));
     return projects.map((p) => {
       const mode = normalizeWorkMode(p.workMode);
       const mineWs = workspaces.filter(
@@ -242,8 +250,12 @@ function WorkbenchPage({
       ];
       let subtitle: string | null = null;
       let needsYou = false;
+      const mineTasks = userTasks.filter((task) =>
+        samePath(task.projectRoot ?? "", p.path, IS_WINDOWS),
+      );
       if (mode === "research") {
-        const st = researchSteps[p.path] ?? steps;
+        // 流程只读本项目自己的；读取失败就是无步骤，不跨项目回落到主卡 steps
+        const st = researchSteps[p.path] ?? [];
         subtitle = firstOpenStepName(st, mineWs);
         needsYou = mineWs.some((w) => w.status === "active" && !w.mergedAt);
       } else if (mode === "coding") {
@@ -304,6 +316,12 @@ function WorkbenchPage({
         });
         subtitle = lastSession ? "最近有文档对话" : null;
       }
+      const goalLine = workbenchNowSubtitle({
+        tasks: mineTasks,
+        fallback: subtitle,
+      });
+      subtitle = goalLine.subtitle;
+      if (goalLine.needsYou) needsYou = true;
       const hasLive = live.some((r) =>
         extraRoots
           .concat(p.path)
@@ -324,19 +342,29 @@ function WorkbenchPage({
     workspaces,
     codingByPath,
     researchSteps,
-    steps,
     sessions,
     terminalRunInputs,
+    userTasks,
   ]);
+
+  // 归属表：runId / taskId → 项目根（隔离目标副本按稳定身份归回真实项目，不按 cwd 拆卡）
+  const runAttribution = useMemo(() => {
+    const runProjects: Record<string, string> = {};
+    for (const r of allRuns) {
+      if (r.projectRoot) runProjects[r.id] = r.projectRoot;
+    }
+    return { runProjects, taskProjects: taskProjectById };
+  }, [allRuns, taskProjectById]);
 
   const nowItems = useMemo(
     () =>
       pickWorkbenchNow({
         seeds: nowSeeds,
         runs: terminalRunInputs,
+        attribution: runAttribution,
         isWindows: IS_WINDOWS,
       }),
-    [nowSeeds, terminalRunInputs],
+    [nowSeeds, terminalRunInputs, runAttribution],
   );
 
   const wbProjects = useMemo(
@@ -359,27 +387,11 @@ function WorkbenchPage({
       workspaces,
       runs: terminalRunInputs,
       contextName: contextLabel?.project ?? null,
+      contextPath: contextLabel?.projectPath ?? null,
+      attribution: runAttribution,
       isWindows: IS_WINDOWS,
     });
-  }, [nowItems, wbProjects, recentRepos, workspaces, terminalRunInputs, contextLabel]);
-
-  useEffect(() => {
-    if (!visible || !hero?.path) {
-      setRecoverableRuns([]);
-      return;
-    }
-    let cancelled = false;
-    invoke<RunDto[]>("run_list", { projectRoot: hero.path })
-      .then((list) => {
-        if (!cancelled) setRecoverableRuns(list);
-      })
-      .catch(() => {
-        if (!cancelled) setRecoverableRuns([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [visible, hero?.path]);
+  }, [nowItems, wbProjects, recentRepos, workspaces, terminalRunInputs, contextLabel, runAttribution]);
 
   const recentRows = useMemo(
     () =>
@@ -413,6 +425,7 @@ function WorkbenchPage({
   useEffect(() => {
     if (!visible || projects.length === 0) {
       setUserTasks([]);
+      setTaskProjectById({});
       return;
     }
     let cancelled = false;
@@ -424,11 +437,15 @@ function WorkbenchPage({
       ),
     ).then((lists) => {
       if (cancelled) return;
+      const all = lists.flat();
+      // 归属表用未过滤全集（含会话自动登记的任务），展示列表仍只留人声明的
+      const byId: Record<string, string> = {};
+      for (const task of all) {
+        if (task.projectRoot) byId[task.id] = task.projectRoot;
+      }
+      setTaskProjectById(byId);
       setUserTasks(
-        visibleDeclaredTasks(
-          lists.flat(),
-          new Set(["office_doc", "free_research"]),
-        ),
+        visibleDeclaredTasks(all, new Set(["office_doc", "free_research"])),
       );
     });
     return () => {
@@ -465,9 +482,8 @@ function WorkbenchPage({
 
   const showCodexJump = canOpenCodexClient();
 
-  async function continueWork() {
-    if (!hero) return;
-    const target = continueWorkbenchTarget(hero);
+  /** 「继续」统一入口：主卡 / 紧凑行 / 未添加目录都先按 runId 找回原 Run，找不到再回落项目页或真进入。 */
+  async function openContinueTarget(target: WorkbenchContinue) {
     if (target.kind === "terminal") {
       if (target.runId) openRun(target.runId, target.tabId);
       else {
@@ -476,16 +492,12 @@ function WorkbenchPage({
       }
       return;
     }
+    const recovered = pickRecoverableRun(allRuns, target.path, IS_WINDOWS);
+    if (recovered) {
+      openRun(recovered.id);
+      return;
+    }
     if (target.kind === "project") {
-      const recovered = pickRecoverableRun(
-        recoverableRuns,
-        target.path,
-        IS_WINDOWS,
-      );
-      if (recovered) {
-        openRun(recovered.id);
-        return;
-      }
       setSelectProjectReq(target.path);
       setPage("workspaces");
       return;
@@ -507,6 +519,11 @@ function WorkbenchPage({
     setPage("terminal");
   }
 
+  async function continueWork() {
+    if (!hero) return;
+    await openContinueTarget(continueWorkbenchTarget(hero));
+  }
+
   const stepName = useMemo(() => {
     if (nowItems[0]?.subtitle) return nowItems[0].subtitle;
     if (!hero?.registered) return null;
@@ -520,7 +537,7 @@ function WorkbenchPage({
     return workbenchRecentSessions(sessions).map((session) => ({
       agent: session.agent,
       sessionId: session.sessionId,
-      title: namedSessionTitle(session) ?? session.title ?? "",
+      title: namedSessionTitle(session) ?? "",
       updatedAt: session.updatedAt,
     }));
   }, [sessions]);
@@ -662,7 +679,9 @@ function WorkbenchPage({
                           className={`size-1.5 shrink-0 rounded-full ${
                             r.attention === "confirm"
                               ? "bg-warn-text"
-                              : "bg-ok-text"
+                              : r.live === false
+                                ? "bg-l4"
+                                : "bg-ok-text"
                           }`}
                         />
                         <span className="min-w-0 flex-1 truncate">
@@ -692,21 +711,9 @@ function WorkbenchPage({
                 <button
                   type="button"
                   className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                  onClick={() => {
-                    const target = continueWorkbenchTarget(item);
-                    if (target.kind === "terminal") {
-                      if (target.runId) openRun(target.runId, target.tabId);
-                      else {
-                        setFocusTabReq(target.tabId);
-                        setPage("terminal");
-                      }
-                      return;
-                    }
-                    if (target.kind === "project") {
-                      setSelectProjectReq(target.path);
-                      setPage("workspaces");
-                    }
-                  }}
+                  onClick={() =>
+                    void openContinueTarget(continueWorkbenchTarget(item))
+                  }
                 >
                   <span
                     className={`size-1.5 shrink-0 rounded-full ${itemDot(item)}`}
@@ -754,7 +761,7 @@ function WorkbenchPage({
               <EmptyState
                 compact
                 title="从一个项目开始"
-                detail="添加项目后，Ccode 会从上次停下的地方继续。"
+                detail="添加项目后，Mesa 会从上次停下的地方继续。"
                 action={
                   <div className="flex items-center justify-center gap-2">
                     <button
@@ -817,7 +824,7 @@ function WorkbenchPage({
         <section className="mt-8">
           <SectionHeading
             icon={CircleDot}
-            title="待验收"
+            title="待你验收"
             action={
               <span className="rounded-full bg-warn px-2 py-0.5 text-micro text-warn-text">
                 {reviewTasks.length}
@@ -849,10 +856,17 @@ function WorkbenchPage({
                 >
                   <span className="size-1.5 shrink-0 rounded-full bg-warn-text" />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm text-l1">{task.name}</span>
-                    <span className="mt-0.5 block truncate text-micro text-l4">
-                      {project?.name ?? "项目"} · 等待验收
+                    <span className="block truncate text-sm text-l1">
+                      {workbenchNowSubtitle({
+                        tasks: [task],
+                        fallback: task.name,
+                      }).subtitle ?? task.name}
                     </span>
+                    {project?.name ? (
+                      <span className="mt-0.5 block truncate text-micro text-l4">
+                        {project.name}
+                      </span>
+                    ) : null}
                   </span>
                   <ChevronRight size={14} className="shrink-0 text-l4" aria-hidden="true" />
                 </button>
@@ -888,7 +902,7 @@ function WorkbenchPage({
                     title={
                       row.registered
                         ? row.path
-                        : "还没添加到 Ccode，点开会进运行页"
+                        : "还没添加到 Mesa，点开会进运行页"
                     }
                     onClick={() =>
                       void enterRepo({

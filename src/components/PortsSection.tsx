@@ -39,7 +39,7 @@ export default function PortsSection({
     if (
       port.ownerKind === "other" &&
       !(await confirmDialog(
-        `「${port.process || "未知进程"}」不是 Ccode 启动的进程（PID ${port.pid}，端口 ${port.port}）。终止它可能影响其他正在运行的应用。继续？`,
+        `「${port.process || "未知进程"}」不是 Mesa 启动的进程（PID ${port.pid}，端口 ${port.port}）。终止它可能影响其他正在运行的应用。继续？`,
         { danger: true },
       ))
     )

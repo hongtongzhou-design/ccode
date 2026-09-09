@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 const T: Duration = Duration::from_secs(20);
@@ -893,9 +892,23 @@ pub async fn coding_upsert_lane(
         let wt = expand(&worktree_path);
         let conn = crate::sessions::open_db()?;
         ensure_lanes_schema(&conn)?;
-        let id = id
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let wt_key = crate::projects::canonical_key(&wt);
+        let wt_stored = wt.to_string_lossy().into_owned();
+        let existing_id: Option<String> = id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                conn.query_row(
+                    "SELECT id FROM coding_lanes
+                     WHERE worktree_path = ?1 OR worktree_path = ?2
+                     ORDER BY created_at LIMIT 1",
+                    params![wt_stored.as_str(), wt_key.as_str()],
+                    |r| r.get(0),
+                )
+                .ok()
+            });
+        let id = existing_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let name = name
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| branch.clone());
@@ -1257,51 +1270,19 @@ fn run_tool(
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<(bool, String), String> {
+    // 这里只打开 GitHub Desktop/浏览器，子孙窗口必须在启动器退出后继续运行。
+    // 不纳入捕获任务的 kill-on-close Job；也不继承输出管道，避免等到窗口关闭才 EOF。
     let mut cmd = crate::process::background_command(bin);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("无法启动进程: {e}"))?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let out_h = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stdout.take() {
-            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-        }
-        buf
-    });
-    let err_h = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stderr.take() {
-            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-        }
-        buf
-    });
+    if let Some(dir) = cwd { cmd.current_dir(dir); }
+    cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("启动外部应用失败：{e}"))?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(st)) => {
-                let out = String::from_utf8_lossy(&out_h.join().unwrap_or_default()).into_owned();
-                let err = String::from_utf8_lossy(&err_h.join().unwrap_or_default()).into_owned();
-                let msg = crate::sessions::redact_sensitive_text(&if err.trim().is_empty() {
-                    out
-                } else {
-                    err
-                });
-                return Ok((st.success(), msg));
-            }
-            Ok(None) => {
-                if std::time::Instant::now() > deadline {
-                    crate::pty::kill_process_tree(child.id());
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("命令超时".into());
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return Err(format!("等待进程失败: {e}")),
+            Ok(Some(status)) => return Ok((status.success(), if status.success() { String::new() } else { format!("启动器退出码：{:?}", status.code()) })),
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => { let _ = child.kill(); return Err("外部应用启动超时".into()); }
+            Err(error) => { let _ = child.kill(); return Err(format!("等待启动器失败：{error}")); }
         }
     }
 }
@@ -1455,7 +1436,7 @@ fn open_desktop_at(repo_path: &Path, path: &Path) -> Result<CodingOpDto, String>
     {
         let mut dto = op_err(
             "desktop_missing",
-            "Linux 没有官方 GitHub Desktop。请用「显示」打开这个目录，或继续用 Ccode 改动面板。",
+            "Linux 没有官方 GitHub Desktop。请用「显示」打开这个目录，或继续用 Mesa 改动面板。",
         );
         dto.tried = Some(tried);
         return Ok(dto);
@@ -1576,11 +1557,18 @@ pub async fn coding_create_worktree(
 
 #[tauri::command]
 pub async fn coding_remove_worktree(
+    manager: tauri::State<'_, crate::pty::PtyManager>,
     repo_path: String,
     worktree_path: String,
     delete_branch: bool,
     force: bool,
 ) -> Result<(), String> {
+    if !manager.active_workspace_tasks(&worktree_path).is_empty() {
+        return Err("工作树中仍有任务运行，请先停止后再删除".into());
+    }
+    if crate::runs::has_active_run_in(&worktree_path)? {
+        return Err("工作树中仍有活跃运行，请先停止后再删除".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let repo = expand(&repo_path);
         if force {

@@ -99,12 +99,12 @@ test("codexResumeKind / 文案", () => {
   assert.equal(codexResumeKind("openai"), "chatgpt");
   assert.equal(codexResumeKind("custom"), "disk");
   assert.equal(codexResumeKind(null), "unknown");
-  assert.equal(codexResumeKindLabel("gateway"), "Ccode 网关");
+  assert.equal(codexResumeKindLabel("gateway"), "Mesa 网关");
   assert.equal(codexResumeKindLabel("chatgpt"), "ChatGPT 官方");
   assert.equal(codexResumeKindLabel("disk", "custom"), "Codex 客户端 · custom");
   assert.equal(codexResumeKindLabel("unknown"), "");
   assert.equal(codexSessionChannelChip(null), null);
-  assert.equal(codexSessionChannelChip("ccode")?.label, "Ccode 网关");
+  assert.equal(codexSessionChannelChip("ccode")?.label, "Mesa 网关");
   assert.equal(
     codexSessionChannelChip("custom")?.label,
     "Codex 客户端 · custom",

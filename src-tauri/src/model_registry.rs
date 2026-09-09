@@ -606,7 +606,7 @@ pub async fn download_model_db() -> Result<ModelDbStatusDto, String> {
             .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
+                match crate::storage::response_bytes(resp, 32 * 1024 * 1024).await.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())) {
                     Ok(v) => {
                         let entries = if is_models_dev {
                             parse_models_dev(&v)

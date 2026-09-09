@@ -13,21 +13,21 @@ import { agentBrand } from "../agent-colors";
 import {
   buildProjectAgentRoster,
   currentProfileLine,
+  projectAgentsEmptyWorkHint,
   projectAgentsHint,
   type ProjectAgentRow,
 } from "../project-agents";
-import {
-  declaredTaskKindsForMode,
-  taskStatusLabel,
-} from "../project-tasks";
+import { declaredTaskKindsForMode } from "../project-tasks";
 
 export default function ProjectAgentsView({
   project,
   onProjectChanged,
+  onOpenGoals,
   onError,
 }: {
   project: ProjectDto;
   onProjectChanged: (project: ProjectDto) => void;
+  onOpenGoals?: () => void;
   onError: (message: string) => void;
 }) {
   const profiles = useAppStore((state) => state.profiles);
@@ -59,7 +59,7 @@ export default function ProjectAgentsView({
       const next = await invoke<TaskDto[]>("task_list", { projectRoot: project.path });
       setTasks(next);
     } catch (reason) {
-      onError(`读取项目步骤失败：${String(reason)}`);
+      onError(`读取目标失败：${String(reason)}`);
     }
   }, [onError, project.path, taskKinds]);
 
@@ -80,8 +80,9 @@ export default function ProjectAgentsView({
         defaultProfiles,
         tasks,
         taskKinds,
+        workMode: project.workMode,
       }),
-    [defaultAgent, defaultProfiles, hiddenProfiles, profiles, taskKinds, tasks],
+    [defaultAgent, defaultProfiles, hiddenProfiles, profiles, project.workMode, taskKinds, tasks],
   );
 
   async function saveAgent(agent: string) {
@@ -183,21 +184,22 @@ export default function ProjectAgentsView({
                 {row.isProjectDefault ? (
                   <button
                     type="button"
-                    className={`${ghostActionClass} ${hoverRevealClass} text-micro`}
+                    className={`${ghostActionClass} text-micro`}
                     disabled={saving}
-                    title="＋新对话改沿用上次选择"
+                    title="取消后，＋新对话不再默认用这家。不改 Mesa 启动栏，也不写 CLI 全局文件。"
                     onClick={() => void saveAgent("")}
                   >
-                    取消默认
+                    项目默认
                   </button>
                 ) : (
                   <button
                     type="button"
                     className={`${ghostActionClass} ${hoverRevealClass} text-micro`}
                     disabled={saving}
+                    title="只影响这个项目的新对话预选，不改 Mesa 启动栏，也不写 CLI 全局文件"
                     onClick={() => void saveAgent(row.agentId)}
                   >
-                    设为默认
+                    设为项目默认
                   </button>
                 )}
               </div>
@@ -210,15 +212,12 @@ export default function ProjectAgentsView({
                   >
                     还没有连接
                   </button>
-                ) : row.profiles.length === 1 ? (
-                  <p className="truncate text-xs text-l3">
-                    {currentProfileLine(row)}
-                  </p>
                 ) : (
                   <ProfileMenu
                     row={row}
                     disabled={saving}
                     onPick={(profileId) => void saveProfile(row.agentId, profileId)}
+                    onAdd={() => setPage("profiles")}
                   />
                 )}
               </div>
@@ -226,12 +225,18 @@ export default function ProjectAgentsView({
                 <ul className="mt-3 space-y-2 pl-[18px]">
                   {row.works.map((work) => (
                     <li key={work.id} className="min-w-0">
-                      <p className="truncate text-xs text-l2">{work.name}</p>
-                      <p className="truncate text-micro text-l4">
-                        {work.materials}
-                        {" · "}
-                        {taskStatusLabel(work.status)}
-                      </p>
+                      {onOpenGoals ? (
+                        <button
+                          type="button"
+                          className="block w-full truncate text-left text-xs text-l2 hover:text-l1"
+                          onClick={onOpenGoals}
+                        >
+                          {work.name}
+                        </button>
+                      ) : (
+                        <p className="truncate text-xs text-l2">{work.name}</p>
+                      )}
+                      <p className="truncate text-micro text-l4">{work.statusLabel}</p>
                     </li>
                   ))}
                 </ul>
@@ -240,18 +245,40 @@ export default function ProjectAgentsView({
           ))}
         </ul>
       )}
+      {roster.rows.length > 0 &&
+        roster.rows.every((row) => row.works.length === 0) &&
+        roster.unassigned.length === 0 && (
+          <p className="mt-3 px-1 text-micro text-l4">
+            {projectAgentsEmptyWorkHint(project.workMode)}
+            {onOpenGoals && project.workMode !== "coding" && (
+              <button
+                type="button"
+                className="ml-1 text-l3 underline-offset-2 hover:text-l1 hover:underline"
+                onClick={onOpenGoals}
+              >
+                去任务页
+              </button>
+            )}
+          </p>
+        )}
       {roster.unassigned.length > 0 && (
         <div className="mt-4 px-1">
-          <p className="text-xs text-l3">还没指定 Agent</p>
+          <p className="text-xs text-l3">还没指定 Agent 的目标</p>
           <ul className="mt-2 space-y-2">
             {roster.unassigned.map((work) => (
               <li key={work.id} className="min-w-0">
-                <p className="truncate text-xs text-l2">{work.name}</p>
-                <p className="truncate text-micro text-l4">
-                  {work.materials}
-                  {" · "}
-                  {taskStatusLabel(work.status)}
-                </p>
+                {onOpenGoals ? (
+                  <button
+                    type="button"
+                    className="block w-full truncate text-left text-xs text-l2 hover:text-l1"
+                    onClick={onOpenGoals}
+                  >
+                    {work.name}
+                  </button>
+                ) : (
+                  <p className="truncate text-xs text-l2">{work.name}</p>
+                )}
+                <p className="truncate text-micro text-l4">{work.statusLabel}</p>
               </li>
             ))}
           </ul>
@@ -265,10 +292,12 @@ function ProfileMenu({
   row,
   disabled,
   onPick,
+  onAdd,
 }: {
   row: ProjectAgentRow;
   disabled: boolean;
   onPick: (profileId: string) => void;
+  onAdd: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -298,6 +327,7 @@ function ProfileMenu({
         disabled={disabled}
         aria-expanded={open}
         aria-haspopup="listbox"
+        title="换这个项目用的配置。只影响本项目，不改 Mesa 启动栏，也不写 CLI 全局文件。"
         className="inline-flex h-7 max-w-full items-center gap-1 text-xs text-l3 hover:text-l1 disabled:opacity-50"
         onClick={() => setOpen((value) => !value)}
       >
@@ -330,6 +360,18 @@ function ProfileMenu({
               </li>
             );
           })}
+          <li>
+            <button
+              type="button"
+              className="flex h-7 w-full items-center px-2.5 text-left text-xs text-l4 hover:bg-hover hover:text-l1"
+              onClick={() => {
+                setOpen(false);
+                onAdd();
+              }}
+            >
+              去连接页添加
+            </button>
+          </li>
         </ul>
       )}
     </div>

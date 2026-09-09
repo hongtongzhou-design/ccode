@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  projectSessionLabel,
   replaceAbsFsPaths,
   sessionIsInterrupted,
+  splitRecentItems,
   tidySessionText,
   tidySessionTitle,
+  unwrapPromptTags,
 } from "../src/session-title.ts";
 
 test("自定义标题原样保留，不清洗", () => {
@@ -55,11 +58,19 @@ test("CLI resume 与未命名回落", () => {
   );
 });
 
-test("已短的标题不动；空格分段取首段", () => {
+test("已短的标题不动；空格后的正事也留下", () => {
   assert.equal(tidySessionText("优化 AI 工作台导航页"), "优化 AI 工作台导航页");
   assert.equal(
     tidySessionText("熟悉一下该程序 我要对该程序进行设计优化"),
-    "熟悉一下该程序",
+    "熟悉一下该程序 我要对该程序进行设计优化",
+  );
+});
+
+test("剥掉 user_query 标签，标题留完整句子", () => {
+  assert.equal(unwrapPromptTags("<user_query>\n你好\n</user_query>"), "你好");
+  assert.equal(
+    tidySessionText("<user_query>\n把文献综述的第二章压缩到 800 字\n</user_query>"),
+    "把文献综述的第二章压缩到 800 字",
   );
 });
 
@@ -94,4 +105,20 @@ test("绝对路径换成文件名，相对路径不动", () => {
     "看这份文件：AI4Paper.md",
   );
   assert.equal(tidySessionText("Fix the nav. Then merge it"), "Fix the nav");
+});
+
+test("项目侧栏未命名写成对话，旧的收在更早", () => {
+  assert.equal(
+    projectSessionLabel({ title: "未命名对话", interrupted: false, unnamed: true }),
+    "对话",
+  );
+  assert.equal(
+    projectSessionLabel({ title: "综述角度", interrupted: false, unnamed: false }),
+    "综述角度",
+  );
+  assert.deepEqual(splitRecentItems([1, 2, 3], 8), { recent: [1, 2, 3], older: [] });
+  assert.deepEqual(splitRecentItems([1, 2, 3, 4], 3), {
+    recent: [1, 2, 3],
+    older: [4],
+  });
 });

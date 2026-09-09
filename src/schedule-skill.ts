@@ -102,7 +102,7 @@ export function buildWatchSkillSeedPrompt(input: {
   scheduleName: string;
 }): string {
   const intent = input.intent.trim() || "（用户未写意图，先问清楚再写）";
-  return `请为这个 Ccode 项目写一份定时巡检技能的 SKILL.md。
+  return `请为这个 Mesa 项目写一份定时巡检技能的 SKILL.md。
 
 【任务名】${input.scheduleName}
 【技能目录名】${input.skillName}
@@ -110,9 +110,9 @@ export function buildWatchSkillSeedPrompt(input: {
 ${intent}
 
 【硬要求】
-- 这是定时任务：Ccode 会在用户不在场时按每天/每周无头跑。
+- 这是定时任务：Mesa 会在用户不在场时按每天/每周无头跑。
 - 把完整 SKILL.md（含 YAML frontmatter）写入项目文件 \`${input.draftRelPath}\`。只写这一个文件，不要安装到 agent 技能目录、不要改其它文件。
 - frontmatter 必须含：name: ${input.skillName}；description（一行）；outputs（结果写到哪）。不要把产出写成 notes/inbox.md（那是文献雷达专用）。
 - 正文写清：何时用、读什么、做什么、完成标准。约束：只新建/追加 outputs 里的文件；不删文件；未声明的表格和代码不要改；结束输出三行以内简报，关键数字在前。
-- 写完告诉我文件路径，等我在 Ccode 里确认落盘。不要说已经安装好。`;
+- 写完告诉我文件路径，等我在 Mesa 里确认落盘。不要说已经安装好。`;
 }

@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter};
 // 慢网络下 brew/npm/winget 下载可能远超 5 分钟，给 15 分钟
 const TIMEOUT: Duration = Duration::from_secs(900);
 /// npm 默认重试/等待可能持续数分钟且几乎没有可见输出；安装和更新使用
-/// 明确的网络参数，让失败在约 30 秒内反馈到界面，避免被误认为 Ccode 卡死。
+/// 明确的网络参数，让失败在约 30 秒内反馈到界面，避免被误认为 Mesa 卡死。
 const NPM_FETCH_ARGS: [&str; 5] = [
     "--no-audit",
     "--no-fund",
@@ -530,7 +530,7 @@ pub(crate) fn run_streaming(
     let app = app.clone();
     // PTY 子进程（尤其是 Windows 下的 npm.cmd）可能在建立网络连接前暂时没有任何
     // stdout。先发一条明确的启动状态，避免前端只能显示「运行中，等待输出…」而被误认为
-    // Ccode 没有执行命令。
+    // Mesa 没有执行命令。
     let _ = app.emit(
         &event,
         format!("已启动 {program}，正在连接安装源；若网络不可达，稍后会显示失败原因。\n"),

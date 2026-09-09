@@ -4,6 +4,7 @@ import {
   canonicalizeReuseKey,
   inferTaskKind,
   isDiscussPermission,
+  isRunProcessLive,
   isWorkbenchSurfaceRun,
   pickRecoverableRun,
 } from "../src/run-model.ts";
@@ -117,8 +118,18 @@ test("pickRecoverableRun：关标签后按项目找回可恢复 Run", () => {
   assert.equal(pickRecoverableRun([run], "/repo")?.sessionId, "s1");
   assert.equal(pickRecoverableRun([{ ...run, internal: true }], "/repo"), null);
   assert.equal(pickRecoverableRun([{ ...run, taskKind: "watch" }], "/repo"), null);
+  assert.equal(pickRecoverableRun([{ ...run, taskKind: "reader" }], "/repo"), null);
   assert.equal(
     pickRecoverableRun([{ ...run, runtime: "custom", capabilities: { ...caps, canResume: false } }], "/repo"),
     null,
   );
+});
+
+test("isRunProcessLive：进程活着才算运行中，保留标签不算", () => {
+  assert.equal(isRunProcessLive({ running: true, attention: null }), true);
+  assert.equal(isRunProcessLive({ running: false, attention: "working" }), true);
+  assert.equal(isRunProcessLive({ running: false, attention: "confirm" }), true);
+  assert.equal(isRunProcessLive({ running: false, attention: "done" }), true);
+  assert.equal(isRunProcessLive({ running: false, attention: null }), false);
+  assert.equal(isRunProcessLive({}), false);
 });

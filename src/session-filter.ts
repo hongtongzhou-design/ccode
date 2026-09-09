@@ -32,7 +32,7 @@ export const QUICK_FILTERS: readonly QuickFilterDef[] = [
   { id: "live", label: "进行中", title: "只看仍在运行的会话" },
   { id: "today", label: "今天", title: "今天有更新的对话" },
   { id: "week", label: "近 7 天", title: "近 7 天有更新的对话" },
-  { id: "internal", label: "内部 AI", title: "只看 Ccode 内部 AI 的会话" },
+  { id: "internal", label: "内部 AI", title: "只看 Mesa 内部 AI 的会话" },
   { id: "archived", label: "已归档", title: "把已归档的对话也列出来" },
 ];
 
@@ -111,6 +111,38 @@ export function applySessionFilters(
   });
 }
 
+/** 搜索时把已归档也放进来；未搜索仍排除（除非快筛已开归档）。左侧分类计数不走这条。 */
+export function sessionFilterQuickForSearch(
+  quick: ReadonlySet<QuickFilterId>,
+  searching: boolean,
+): ReadonlySet<QuickFilterId> {
+  if (!searching || quick.has("archived")) return quick;
+  const next = new Set(quick);
+  next.add("archived");
+  return next;
+}
+
+export const SEARCH_ARCHIVED_HEADER = "已归档";
+
+/** 搜索命中：未归档在前，已归档沉底并挂组头。 */
+export function groupSearchHitsByArchive<T extends { archived: boolean }>(
+  sessions: readonly T[],
+): { header: string | null; s: T }[] {
+  const active: T[] = [];
+  const archived: T[] = [];
+  for (const s of sessions) {
+    if (s.archived) archived.push(s);
+    else active.push(s);
+  }
+  return [
+    ...active.map((s) => ({ header: null as string | null, s })),
+    ...archived.map((s, i) => ({
+      header: i === 0 ? SEARCH_ARCHIVED_HEADER : null,
+      s,
+    })),
+  ];
+}
+
 /**
  * 搜索建议：从当前会话集里提取匹配查询的结构化维度，点选即落成 chip。
  * 取代原先「展开手风琴 → 找 agent → 展开 → 找项目」的三次点击钻取。
@@ -148,12 +180,12 @@ export function baseName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-/** Ccode 无头 AI 的临时 cwd 名：`ccode-ai-<uuid>`（与 ai.rs 命名同步）。 */
+/** Mesa 无头 AI 的临时 cwd 名：`ccode-ai-<uuid>`（与 ai.rs 命名同步）。 */
 const CCODE_AI_TEMP_RE =
   /^ccode-ai-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * 是否为 Ccode 自建的无头 AI 临时目录。
+ * 是否为 Mesa 自建的无头 AI 临时目录。
  * 用量统计仍只认 provenance；对话页范围用它把已过期登记的临时目录从「项目」里拿开。
  */
 export function isCcodeAiTempCwd(path: string): boolean {
@@ -169,7 +201,7 @@ export const HEADLESS_TITLE_HINTS = [
   "请用中文解读下面这篇文献",
   "技能执行一次文献巡检",
   "技能在项目内执行一次定时巡检",
-  "本任务由 Ccode 定时雷达自动触发",
+  "本任务由 Mesa 定时雷达自动触发",
 ] as const;
 
 function titleLooksHeadless(
@@ -195,7 +227,7 @@ export function sessionLooksInternal(s: {
 }
 
 /**
- * 本项目会话再排除 Ccode 按钮拉起的交互会话（问 AI / 沉浸阅读注入 / 接力简报）。
+ * 本项目会话再排除 Mesa 按钮拉起的交互会话（问 AI / 沉浸阅读注入 / 接力简报）。
  * 这些仍是普通项目对话，对话页照常列出，不进「内部 AI」。
  */
 export const PROJECT_SESSION_EXCLUDE_HINTS = [

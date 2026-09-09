@@ -1,3 +1,5 @@
+import { previewSaveCompletion, type FilePreviewSnapshot } from "../file-preview";
+import { sanitizeDocumentHtml } from "../document-html";
 import {
   memo,
   useCallback,
@@ -43,8 +45,8 @@ self.MonacoEnvironment = {
   getWorker: () => new editorWorker(),
 };
 
-// Monaco 主题跟随 App.css 令牌：编辑器面色从 --color-editor-* 三个 CSS 变量实时读取
-// （与设置页 readThemeSwatch 同一思路，避免双份维护色值漂移）；base vs-dark 继承语法高亮。
+// Monaco 主题跟随 App.css 令牌：编辑器面色从当前主题的 --color-editor-* 读取
+// （只读正在显示的主题，不切 data-theme）；base vs-dark 继承语法高亮。
 // 主题切换由 MutationObserver 监听 data-theme 触发重新 define + setTheme（见组件内 effect）。
 function syncMonacoTheme() {
   const cs = getComputedStyle(document.documentElement);
@@ -90,8 +92,7 @@ function isMarkdownPath(path: string): boolean {
 
 /**
  * Markdown 阅读视图（RX2a）：marked 渲染本地文件内容。
- * 渲染源是 read_file_preview 根约束内的用户本地文件（可信内容），
- * 因此不引入 sanitize 重库；仅关闭与本场景无关的项，GFM 支持表格等。
+ * 本地文件同样是不可信内容；转换与图片重写后统一清洗，保留 GFM 排版。
  * v1 代码块不做语法高亮（素色块），样式全部走 App.css 的 .md-body 主题令牌。
  * 选中文字出现浮动按钮「◈ 讨论/改写此段」（与 PDF 问 AI 共用 SelectionFloatBar），
  * 点击把选段 + 出处交给调用方写入活跃终端输入（「↵ 直接发送」立即回车发送）；沉浸阅读覆盖层同款生效。
@@ -132,12 +133,14 @@ function MarkdownView({
     // FE0E 让其按文字颜色单色渲染。只改显示、不改文件内容；
     // 实测 font-variant-emoji: text 在 WKWebView 无效，故走字符替换
     () =>
-      rewriteMdImageHtml(
-        marked.parse(text.replace(/\u26A0\uFE0F/g, "\u26A0\uFE0E"), {
-          gfm: true,
-          breaks: false,
-          async: false,
-        }) as string,
+      sanitizeDocumentHtml(
+        rewriteMdImageHtml(
+          marked.parse(text.replace(/\u26A0\uFE0F/g, "\u26A0\uFE0E"), {
+            gfm: true,
+            breaks: false,
+            async: false,
+          }) as string,
+        ),
       ),
     [text],
   );
@@ -310,6 +313,9 @@ function TextFilePreviewEditor({
   const textPathRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
+  const [readOnlyReason, setReadOnlyReason] = useState<string | null>(null);
+  const dirtyRef = useRef(false);
+  const savingRef = useRef(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [ctx, setCtx] = useState<PathContext | null>(null);
@@ -392,7 +398,7 @@ function TextFilePreviewEditor({
   }, [path]);
 
   // 磁盘上的最新内容（加载/保存时更新）：外部变化重载时用于比对，避免自己保存触发的回环
-  const lastSavedRef = useRef<string | null>(null);
+  const lastSavedRef = useRef<FilePreviewSnapshot | null>(null);
   // executeEdits 做外部内容替换期间置位，dirty 监听跳过这次程序性改动
   const applyingExternalRef = useRef(false);
 
@@ -402,18 +408,24 @@ function TextFilePreviewEditor({
     setText(null);
     setError(null);
     setDirty(false);
+    dirtyRef.current = false;
+    savingRef.current = false;
+    setSaving(false);
+    lastSavedRef.current = null;
+    setReadOnlyReason(null);
     onDirtyChange?.(false);
     void (async () => {
       try {
-        const p = await invoke<{ text: string; truncated: boolean }>(
+        const p = await invoke<FilePreviewSnapshot>(
           "read_file_preview",
           { path, root },
         );
         if (cancelled) return;
-        lastSavedRef.current = p.text;
+        lastSavedRef.current = p;
         textPathRef.current = path;
         setText(p.text);
         setTruncated(p.truncated);
+        setReadOnlyReason(p.readOnlyReason);
       } catch (e) {
         if (!cancelled) setError(String(e));
       }
@@ -430,10 +442,11 @@ function TextFilePreviewEditor({
   // 外部变化自动刷新（合并/agent 写盘等）：监听文件所在目录，内容真的变了才重载；
   // 编辑中（dirty）不订阅，不覆盖用户未保存的修改
   useEffect(() => {
-    if (dirty || !ready) return;
+    if (dirty || saving || !ready) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     let watchId: string | null = null;
+    let refreshGeneration = 0;
     const parent = path.replace(/[\\/][^\\/]*$/, "");
     void (async () => {
       try {
@@ -444,9 +457,22 @@ function TextFilePreviewEditor({
         }
         unlisten = await listen(`fs-changed-${watchId}`, async () => {
           try {
-            const p = await invoke<{ text: string }>("read_file_preview", { path, root });
-            if (!cancelled && p.text !== lastSavedRef.current) {
-              lastSavedRef.current = p.text;
+            const generation = ++refreshGeneration;
+            const p = await invoke<FilePreviewSnapshot>("read_file_preview", { path, root });
+            if (!cancelled && generation === refreshGeneration && !dirtyRef.current && !savingRef.current) {
+              const ed = editorRef.current;
+              const model = ed?.getModel();
+              if (ed && model && model.getValue() !== p.text) {
+                applyingExternalRef.current = true;
+                try {
+                  ed.executeEdits("external-reload", [{ range: model.getFullModelRange(), text: p.text }]);
+                } finally {
+                  applyingExternalRef.current = false;
+                }
+              }
+              lastSavedRef.current = p;
+              setTruncated(p.truncated);
+              setReadOnlyReason(p.readOnlyReason);
               setText(p.text);
             }
           } catch {
@@ -463,9 +489,9 @@ function TextFilePreviewEditor({
       if (watchId) invoke("unwatch_dir", { id: watchId }).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, root, dirty, ready]);
+  }, [path, root, dirty, saving, ready]);
 
-  // 创建/销毁编辑器（截断文件只读，避免保存出不完整内容）。
+  // 创建/销毁编辑器；只读状态单独更新，不因文件增长而重建旧内容。
   // 同路径的外部内容更新不重建编辑器，由下方同步 effect 走 executeEdits，保住滚动/光标/undo。
   useEffect(() => {
     if (!ready) return;
@@ -474,7 +500,7 @@ function TextFilePreviewEditor({
       value: text!,
       language: languageFor(path),
       theme: "ccode-dark",
-      readOnly: truncated,
+      readOnly: truncated || readOnlyReason !== null,
       minimap: { enabled: false },
       fontSize: 12.5,
       automaticLayout: true,
@@ -493,6 +519,7 @@ function TextFilePreviewEditor({
     editorRef.current = ed;
     const sub = ed.onDidChangeModelContent(() => {
       if (applyingExternalRef.current) return;
+      dirtyRef.current = true;
       setDirty(true);
       onDirtyChange?.(true);
     });
@@ -502,14 +529,18 @@ function TextFilePreviewEditor({
       editorRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, truncated]);
+  }, [ready]);
+
+  useEffect(() => {
+    editorRef.current?.updateOptions({ readOnly: truncated || readOnlyReason !== null });
+  }, [ready, truncated, readOnlyReason]);
 
   // 编辑态粘贴图片（批次 B2）：剪贴板含 image/* 时接管粘贴——
   // 项目内 md 落 notes/assets/ 并在光标处插 ![](相对路径)；非项目文件回落临时图路径文本（终端粘贴同口径）
   useEffect(() => {
     const ed = editorRef.current;
     const dom = ed?.getDomNode();
-    if (!ed || !dom || !isMd || truncated) return;
+    if (!ed || !dom || !isMd || truncated || readOnlyReason) return;
     const onPaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
       if (!items) return;
@@ -523,7 +554,7 @@ function TextFilePreviewEditor({
     dom.addEventListener("paste", onPaste, true);
     return () => dom.removeEventListener("paste", onPaste, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, truncated, isMd, path, root]);
+  }, [ready, truncated, readOnlyReason, isMd, path, root]);
 
   /** 粘贴图片落盘并在光标处插入（executeEdits 会触发 dirty，沿用既有保存链路） */
   async function pasteImageIntoMd(
@@ -542,7 +573,7 @@ function TextFilePreviewEditor({
         insert = `![](${relMdLinkPath(path, cap.absPath)})`;
       } catch (reason) {
         // 不在已注册项目内：回落 <config>/ccode/tmp 临时图 + 路径文本；其它失败如实上报
-        if (!String(reason).includes("不是 Ccode 项目")) throw reason;
+        if (!String(reason).includes("不是 Mesa 项目")) throw reason;
         const p = await invoke<string>("save_clipboard_image", {
           bytes: Array.from(bytes),
           ext: imageExtFromMime(file.type),
@@ -578,7 +609,7 @@ function TextFilePreviewEditor({
   // 仅在非 dirty 时外部内容才会进来（上方监听 effect 的订阅条件），不会覆盖用户编辑
   useEffect(() => {
     const ed = editorRef.current;
-    if (!ed || text === null) return;
+    if (!ed || text === null || dirtyRef.current || savingRef.current) return;
     const model = ed.getModel();
     if (!model || model.getValue() === text) return;
     applyingExternalRef.current = true;
@@ -588,27 +619,37 @@ function TextFilePreviewEditor({
 
   async function onSave() {
     const ed = editorRef.current;
-    if (!ed) return;
-    // 主仓库文件保存前必须确认：改动不属于任何分支，直接写主项目（防误改）
-    if (
-      ctx?.kind === "main" &&
-      !(await confirmDialog(
-        "这是主仓库（非工作区分支）的文件，保存会直接改动主项目。确认保存？",
-        { danger: true },
-      ))
-    )
-      return;
+    const baseline = lastSavedRef.current;
+    if (!ed || !baseline?.revision || savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
-    setError(null);
     try {
-      await invoke("save_file_preview", { path, root, text: ed.getValue() });
-      lastSavedRef.current = ed.getValue(); // 自己保存的也算磁盘最新，防监听回环
-      setDirty(false);
-      onDirtyChange?.(false);
+      if (
+        ctx?.kind === "main" &&
+        !(await confirmDialog(
+          "这是主仓库（非工作区分支）的文件，保存会直接改动主项目。确认保存？",
+          { danger: true },
+        ))
+      ) return;
+      if (editorRef.current !== ed || textPathRef.current !== path) return;
+      const submitted = ed.getValue();
+      setError(null);
+      const revision = await invoke<string>("save_file_preview", {
+        path, root, text: submitted, expectedRevision: baseline.revision,
+      });
+      if (editorRef.current !== ed || textPathRef.current !== path) return;
+      const completion = previewSaveCompletion(submitted, ed.getValue(), revision);
+      lastSavedRef.current = completion.snapshot;
+      dirtyRef.current = completion.dirty;
+      setDirty(completion.dirty);
+      onDirtyChange?.(completion.dirty);
     } catch (e) {
-      setError(String(e));
+      if (editorRef.current === ed) setError(String(e));
     } finally {
-      setSaving(false);
+      if (editorRef.current === ed) {
+        savingRef.current = false;
+        setSaving(false);
+      }
     }
   }
 
@@ -635,9 +676,9 @@ function TextFilePreviewEditor({
             主仓库（非分支）
           </span>
         )}
-        {truncated && (
-          <span className="shrink-0 rounded-sm bg-warn px-1 text-warn-text">
-            已截断（只读）
+        {readOnlyReason && (
+          <span className="shrink-0 rounded-sm bg-warn px-1 text-warn-text" title={readOnlyReason}>
+            {truncated ? "已截断（只读）" : "只读"}
           </span>
         )}
         {dirty && <span className="shrink-0 text-l3" title="有未保存的修改">●</span>}
@@ -680,7 +721,7 @@ function TextFilePreviewEditor({
               ⛶ {mode === "read" ? "沉浸阅读" : "沉浸编辑"}
             </button>
           )}
-          {!truncated && mode === "edit" && (
+          {!readOnlyReason && mode === "edit" && (
             <button
               onClick={onSave}
               disabled={!dirty || saving}
@@ -723,7 +764,7 @@ function TextFilePreviewEditor({
             <span className="text-l4">
               沉浸{mode === "read" ? "阅读" : "编辑"} · Esc 退出
             </span>
-            {mode === "edit" && !truncated && (
+            {mode === "edit" && !readOnlyReason && (
               <button
                 onClick={onSave}
                 disabled={!dirty || saving}
@@ -742,7 +783,7 @@ function TextFilePreviewEditor({
             <button
               onClick={() => setImmersive(false)}
               title={`退出沉浸${mode === "read" ? "阅读" : "编辑"}（Esc）`}
-              className={`${mode === "edit" && !truncated ? "" : "ml-auto "}shrink-0 rounded-sm px-2 py-1 text-l3 hover:bg-hover hover:text-l1`}
+              className={`${mode === "edit" && !readOnlyReason ? "" : "ml-auto "}shrink-0 rounded-sm px-2 py-1 text-l3 hover:bg-hover hover:text-l1`}
             >
               ✕ 退出
             </button>

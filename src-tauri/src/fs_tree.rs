@@ -2,6 +2,7 @@
 //! 预览路径被限制在调用方给出的项目根内（canonicalize 后前缀校验，防 ../ 逃逸）。
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -27,6 +28,9 @@ pub struct DirEntryDto {
 pub struct FilePreviewDto {
     pub text: String,
     pub truncated: bool,
+    pub revision: Option<String>,
+    #[serde(rename = "readOnlyReason")]
+    pub read_only_reason: Option<String>,
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -115,21 +119,42 @@ fn list_dir_sync(path: &str, show_hidden: bool) -> Result<Vec<DirEntryDto>, Stri
     Ok(entries)
 }
 
-fn read_file_preview_sync(path: &str, root: &str) -> Result<FilePreviewDto, String> {
-    // 词法包含检查（不解析符号链接）：node_modules 这类链接到根外的文件在树上可见，
-    // 应允许预览；真正的越权由下方 canonicalize 读取兜底（"../" 无法通过词法前缀）
-    let root_exp = norm_sep(&expand_tilde(root));
-    let path_exp = norm_sep(&expand_tilde(path));
-    let root_norm = root_exp.trim_end_matches('/');
-    if !(path_exp == root_norm || path_exp.starts_with(&format!("{root_norm}/"))) {
+/// Automatic report reads may not follow external symlinks, unlike explicit manual previews.
+fn require_inside_root(path: &str, root: &str) -> Result<(), String> {
+    let path = PathBuf::from(expand_tilde(path));
+    let root = PathBuf::from(expand_tilde(root));
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err("路径超出项目根目录，拒绝读取".into());
+    }
+    let path = crate::paths::canonicalize_plain(&path).map_err(|e| format!("路径不可读: {e}"))?;
+    let root = crate::paths::canonicalize_plain(&root).map_err(|e| format!("项目根目录无效: {e}"))?;
+    if !crate::paths::path_within_path(&path, &root) {
+        return Err("符号链接或路径指向项目根目录之外，拒绝自动读取".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn read_file_preview_sync(path: &str, root: &str) -> Result<FilePreviewDto, String> {
+    let root_exp = expand_tilde(root);
+    let path_exp = expand_tilde(path);
+    // 保留用户从树中预览外链 symlink 的能力，但不允许 ../ 绕过词法根边界。
+    if std::path::Path::new(&path_exp)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+        || !(crate::paths::path_within(&path_exp, &root_exp) || root_exp == "/")
+    {
         return Err("路径超出项目根目录，拒绝预览".into());
     }
-    let path_c = PathBuf::from(&path_exp)
-        .canonicalize()
+    let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&root_exp))
+        .map_err(|e| format!("项目根目录无效: {e}"))?;
+    let path_c = crate::paths::canonicalize_plain(std::path::Path::new(&path_exp))
         .map_err(|e| format!("文件不存在或不可读: {e}"))?;
     let md = fs::metadata(&path_c).map_err(|e| format!("读取文件失败: {e}"))?;
     if md.is_dir() {
         return Err("目录不支持预览".into());
+    }
+    if !md.is_file() {
+        return Err("仅支持预览普通文件".into());
     }
     let f = fs::File::open(&path_c).map_err(|e| format!("打开文件失败: {e}"))?;
     let mut buf = Vec::new();
@@ -144,46 +169,90 @@ fn read_file_preview_sync(path: &str, root: &str) -> Result<FilePreviewDto, Stri
     if truncated {
         buf.truncate(PREVIEW_CAP);
     }
+    let read_only_reason = if truncated {
+        Some("文件超过 256 KB，仅预览开头部分，不能保存".into())
+    } else if !(crate::paths::path_within_path(&path_c, &root_c) || root_c == std::path::Path::new("/")) {
+        Some("符号链接指向项目根目录之外，仅支持预览".into())
+    } else if std::str::from_utf8(&buf).is_err() {
+        Some("文件不是有效 UTF-8，仅支持预览，避免保存时改变编码".into())
+    } else {
+        None
+    };
     Ok(FilePreviewDto {
+        revision: read_only_reason.is_none().then(|| preview_revision(&buf)),
         text: String::from_utf8_lossy(&buf).into_owned(),
         truncated,
+        read_only_reason,
     })
 }
 
 #[tauri::command]
-pub async fn list_dir(path: String, show_hidden: bool) -> Result<Vec<DirEntryDto>, String> {
-    tauri::async_runtime::spawn_blocking(move || list_dir_sync(&path, show_hidden))
+pub async fn list_dir(path: String, show_hidden: bool, root: Option<String>) -> Result<Vec<DirEntryDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(root) = root { require_inside_root(&path, &root)?; }
+        list_dir_sync(&path, show_hidden)
+    })
         .await
         .map_err(|e| format!("读取目录失败: {e}"))?
 }
 
 #[tauri::command]
-pub async fn read_file_preview(path: String, root: String) -> Result<FilePreviewDto, String> {
-    tauri::async_runtime::spawn_blocking(move || read_file_preview_sync(&path, &root))
+pub async fn read_file_preview(path: String, root: String, require_within_root: Option<bool>) -> Result<FilePreviewDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if require_within_root.unwrap_or(false) { require_inside_root(&path, &root)?; }
+        read_file_preview_sync(&path, &root)
+    })
         .await
         .map_err(|e| format!("读取文件失败: {e}"))?
 }
 
-/// 保存预览编辑：与 read_file_preview 相同的根目录约束；超 256KB 暂拒；原子写入
-fn save_file_preview_sync(path: &str, root: &str, text: &str) -> Result<(), String> {
+fn preview_revision(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+// 序列化 Mesa 内的“比较版本→替换”，避免两个预览用同一旧版本同时保存。
+static PREVIEW_SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 保存必须携带读取时的版本；已截断、外链、编码不支持或磁盘已变更一律拒绝。
+fn save_file_preview_sync(
+    path: &str,
+    root: &str,
+    text: &str,
+    expected_revision: &str,
+) -> Result<String, String> {
     if text.len() > PREVIEW_CAP {
         return Err("文件超过 256 KB，暂不支持在预览里保存".into());
     }
-    let root_c = PathBuf::from(expand_tilde(root))
-        .canonicalize()
+    let _guard = PREVIEW_SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = crate::storage::config_lock("preview-save")?;
+    let current = read_file_preview_sync(path, root)?;
+    if let Some(reason) = current.read_only_reason {
+        return Err(reason);
+    }
+    if current.revision.as_deref() != Some(expected_revision) {
+        return Err("文件已被 Agent 或其他程序修改，未覆盖磁盘内容。请先保留本次编辑，再重新打开文件对比合并。".into());
+    }
+    let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&expand_tilde(root)))
         .map_err(|e| format!("项目根目录无效: {e}"))?;
-    let path_c = PathBuf::from(expand_tilde(path))
-        .canonicalize()
+    let path_c = crate::paths::canonicalize_plain(std::path::Path::new(&expand_tilde(path)))
         .map_err(|e| format!("文件不存在或不可读: {e}"))?;
-    if !path_c.starts_with(&root_c) {
+    if !(crate::paths::path_within_path(&path_c, &root_c) || root_c == std::path::Path::new("/")) {
         return Err("路径超出项目根目录，拒绝写入".into());
     }
-    crate::profiles::atomic_write(&path_c, text)
+    crate::profiles::atomic_write(&path_c, text)?;
+    Ok(preview_revision(text.as_bytes()))
 }
 
 #[tauri::command]
-pub async fn save_file_preview(path: String, root: String, text: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || save_file_preview_sync(&path, &root, &text))
+pub async fn save_file_preview(
+    path: String,
+    root: String,
+    text: String,
+    expected_revision: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_file_preview_sync(&path, &root, &text, &expected_revision)
+    })
         .await
         .map_err(|e| format!("保存文件失败: {e}"))?
 }
@@ -369,14 +438,69 @@ mod tests {
         let dir = tmpdir("save");
         let f = dir.join("edit.txt");
         fs::write(&f, "old").unwrap();
-        save_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap(), "new content\n")
+        save_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap(), "new content\n", &preview_revision(b"old"))
             .unwrap();
         assert_eq!(fs::read_to_string(&f).unwrap(), "new content\n");
         // 超限拒绝且不改动文件
         let big = "x".repeat(PREVIEW_CAP + 1);
-        assert!(save_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap(), &big).is_err());
+        assert!(save_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap(), &big, &preview_revision(b"new content\n")).is_err());
         assert_eq!(fs::read_to_string(&f).unwrap(), "new content\n");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preview_rejects_parent_traversal_to_file() {
+        let dir = tmpdir("parent-traversal");
+        let root = dir.join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(dir.join("secret.txt"), "secret").unwrap();
+        let escaped = root.join("..").join("secret.txt");
+        assert!(read_file_preview_sync(escaped.to_str().unwrap(), root.to_str().unwrap()).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preview_save_rejects_external_change_and_growth() {
+        let dir = tmpdir("save-conflict");
+        let path = dir.join("note.md");
+        fs::write(&path, "before").unwrap();
+        let read = || read_file_preview_sync(path.to_str().unwrap(), dir.to_str().unwrap()).unwrap();
+        let revision = read().revision.unwrap();
+        fs::write(&path, "agent changed it").unwrap();
+        let save = || save_file_preview_sync(path.to_str().unwrap(), dir.to_str().unwrap(), "user edits", &revision);
+        assert!(save().unwrap_err().contains("已被 Agent"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "agent changed it");
+        fs::write(&path, "x".repeat(PREVIEW_CAP + 100)).unwrap();
+        assert!(save().unwrap_err().contains("256 KB"));
+        assert_eq!(fs::metadata(&path).unwrap().len(), (PREVIEW_CAP + 100) as u64);
+        assert!(read().truncated);
+        assert!(read().revision.is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preview_revision_changes_after_save_and_rejects_stale_second_save() {
+        let dir = tmpdir("revision");
+        let path = dir.join("note.md");
+        fs::write(&path, "before").unwrap();
+        let first = read_file_preview_sync(path.to_str().unwrap(), dir.to_str().unwrap()).unwrap().revision.unwrap();
+        let second = save_file_preview_sync(path.to_str().unwrap(), dir.to_str().unwrap(), "after", &first).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(read_file_preview_sync(path.to_str().unwrap(), dir.to_str().unwrap()).unwrap().revision, Some(second));
+        assert!(save_file_preview_sync(path.to_str().unwrap(), dir.to_str().unwrap(), "stale", &first).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preview_invalid_utf8_is_readonly() {
+        let dir = tmpdir("invalid-utf8");
+        let path = dir.join("note.txt");
+        fs::write(&path, [b'x', 0xff]).unwrap();
+        let snapshot = read_file_preview_sync(path.to_str().unwrap(), dir.to_str().unwrap()).unwrap();
+        assert!(snapshot.revision.is_none());
+        assert!(snapshot.read_only_reason.unwrap().contains("UTF-8"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -385,7 +509,7 @@ mod tests {
         let outside = tmpdir("save-outside");
         let secret = outside.join("s.txt");
         fs::write(&secret, "nope").unwrap();
-        let err = save_file_preview_sync(secret.to_str().unwrap(), root.to_str().unwrap(), "x")
+        let err = save_file_preview_sync(secret.to_str().unwrap(), root.to_str().unwrap(), "x", &preview_revision(b"nope"))
             .unwrap_err();
         assert!(err.contains("超出项目根目录"), "{err}");
         assert_eq!(fs::read_to_string(&secret).unwrap(), "nope");
@@ -397,6 +521,26 @@ mod tests {
 #[cfg(test)]
 mod fix_tests {
     use super::*;
+
+    #[test]
+    fn automatic_report_paths_are_rooted() {
+        let dir = std::env::temp_dir().join(format!("ccode-report-root-{}", uuid::Uuid::new_v4()));
+        let root = dir.join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("report.md"), "summary").unwrap();
+        fs::write(dir.join("outside.md"), "secret").unwrap();
+        assert!(require_inside_root(root.join("report.md").to_str().unwrap(), root.to_str().unwrap()).is_ok());
+        assert!(require_inside_root(dir.join("outside.md").to_str().unwrap(), root.to_str().unwrap()).is_err());
+        assert!(require_inside_root(root.join("../outside.md").to_str().unwrap(), root.to_str().unwrap()).is_err());
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(dir.join("outside.md"), root.join("linked.md")).unwrap();
+            std::os::unix::fs::symlink(&dir, root.join("linked-dir")).unwrap();
+            assert!(require_inside_root(root.join("linked.md").to_str().unwrap(), root.to_str().unwrap()).is_err());
+            assert!(require_inside_root(root.join("linked-dir").to_str().unwrap(), root.to_str().unwrap()).is_err());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
 
     #[test]
     #[cfg(unix)] // 测的是 unix symlink 语义；Windows 上无法无权限创建符号链接
@@ -415,7 +559,11 @@ mod fix_tests {
             root.to_str().unwrap(),
         );
         assert!(r.is_ok(), "{r:?}");
-        assert_eq!(r.unwrap().text, "hello");
+        let snapshot = r.unwrap();
+        assert_eq!(snapshot.text, "hello");
+        assert!(snapshot.revision.is_none());
+        assert!(snapshot.read_only_reason.unwrap().contains("符号链接"));
+        assert!(save_file_preview_sync(root.join("link.txt").to_str().unwrap(), root.to_str().unwrap(), "no", &preview_revision(b"hello")).is_err());
         // 根外路径仍拒绝
         let r2 = read_file_preview_sync(
             outside.join("real.txt").to_str().unwrap(),
@@ -1139,7 +1287,7 @@ fn is_protected_str(p: &str) -> bool {
     .collect();
     let pn = protect_key(p);
     let pn = pn.as_str();
-    // 精确匹配保护 home 与 shell 配置；关键目录（Library/ssh/CLI 配置/Ccode 数据）连同子路径一并保护
+    // 精确匹配保护 home 与 shell 配置；关键目录（Library/ssh/CLI 配置/Mesa 数据）连同子路径一并保护
     #[allow(unused_mut)]
     let mut dir_prefixes: Vec<String> = [
         format!("{home}/Library"),

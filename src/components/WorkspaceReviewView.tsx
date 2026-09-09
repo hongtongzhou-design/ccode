@@ -1,3 +1,8 @@
+import ResearchEvidencePanel from "./ResearchEvidencePanel";
+import ResearchReproductionPanel from "./ResearchReproductionPanel";
+import ResearchAcceptancePanel from "./ResearchAcceptancePanel";
+import { researchReportPatterns, reproductionEntrypoints } from "../research-report";
+import WatchRunReview from "./WatchRunReview";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -18,7 +23,6 @@ import ImagePairView, { isImagePath } from "./ImagePairView";
 import { loadArtifactRows } from "./ArtifactChecklist";
 import { Checkbox, LoadingRows, secondaryActionClass } from "./PageFrame";
 import { defaultCommitMessage } from "../git-commit-message";
-import { toast } from "../toast";
 import { useAppStore } from "../store";
 import type {
   CitationHealthDto,
@@ -921,7 +925,30 @@ function MainRepoCommitPanel({
   );
 }
 
-export default function WorkspaceReviewView({
+export default function WorkspaceReviewView(props: Parameters<typeof LiveWorkspaceReviewView>[0]) {
+  const [resolved, setResolved] = useState<{ id: string; run: RunDto | null; error?: string } | null>(null);
+  useEffect(() => {
+    if (!props.runId) return;
+    let cancelled = false;
+    const id = props.runId;
+    invoke<RunDto | null>("run_get", { id })
+      .then((run) => { if (!cancelled) setResolved({ id, run }); })
+      .catch((reason) => { if (!cancelled) setResolved({ id, run: null, error: String(reason) }); });
+    return () => { cancelled = true; };
+  }, [props.runId]);
+  if (props.runId) {
+    if (resolved?.id !== props.runId) return <div className="absolute inset-0 z-30 bg-canvas p-4 text-sm text-l3">正在读取运行记录…<button type="button" onClick={props.onClose} className="ml-3 text-l2">返回</button></div>;
+    if (resolved.error || !resolved.run) return <div className="absolute inset-0 z-30 bg-canvas p-4 text-sm text-err-text">
+      <p>{resolved.error ?? "运行记录不存在，无法核验历史证据"}</p>
+      <button type="button" onClick={props.onClose} className="mt-2 text-l2">返回</button>
+    </div>;
+    if (resolved.run.taskKind === "watch") return <WatchRunReview key={props.runId} run={resolved.run} onClose={props.onClose}
+      currentDirectory={<LiveWorkspaceReviewView {...props} runId={null} />} />;
+  }
+  return <LiveWorkspaceReviewView {...props} />;
+}
+
+function LiveWorkspaceReviewView({
   worktreePath,
   runId = null,
   initialAction = null,
@@ -938,6 +965,9 @@ export default function WorkspaceReviewView({
   onClose: () => void;
 }) {
   const [diff, setDiff] = useState<WorkspaceDiffDto | null>(null);
+  const [researchContext, setResearchContext] = useState<{ root: string; workspace: WorkspaceDto; step: ProjectStepDto; artifactDir: string; hasReproduction: boolean } | null>(null);
+  const [researchRunId, setResearchRunId] = useState<string | null>(null);
+  const [researchError, setResearchError] = useState<string | null>(null);
   const [status, setStatus] = useState<GitStatusDto | null>(null);
   const [health, setHealth] = useState<WorkspaceHealthDto | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1024,9 +1054,6 @@ export default function WorkspaceReviewView({
   const [fileQuery, setFileQuery] = useState("");
   const [activePath, setActivePath] = useState<string | null>(null);
   const readOnlyRunReview = diff?.reviewOnly === true;
-  const [watchRun, setWatchRun] = useState<RunDto | null>(null);
-  const [adopting, setAdopting] = useState(false);
-  const [watchAdopted, setWatchAdopted] = useState(false);
 
   const refresh = useCallback(
     async (quiet = false) => {
@@ -1092,6 +1119,8 @@ export default function WorkspaceReviewView({
     }
     sectionRefs.current.clear();
     setMergedAt(null);
+    setResearchContext(null);
+    setResearchError(null);
     setMergeDone(false);
     setNextStep(null);
     setCitations(null);
@@ -1110,27 +1139,7 @@ export default function WorkspaceReviewView({
     setRepoPath(null);
     setMainCommitOpen(false);
     initialActionRef.current = null;
-    setWatchRun(null);
-    setWatchAdopted(false);
   }, [worktreePath]);
-
-  useEffect(() => {
-    if (!runId || !readOnlyRunReview) {
-      setWatchRun(null);
-      return;
-    }
-    let stale = false;
-    invoke<RunDto | null>("run_get", { id: runId })
-      .then((run) => {
-        if (!stale) setWatchRun(run?.taskKind === "watch" ? run : null);
-      })
-      .catch(() => {
-        if (!stale) setWatchRun(null);
-      });
-    return () => {
-      stale = true;
-    };
-  }, [runId, readOnlyRunReview]);
 
   // merged_at 不在 diff/health DTO 上，按工作区单独取一次，用于「已合并」按钮态；
   // 顺带取所属主仓库路径（主仓脏拦截的内联快速提交）与上游漂移提醒（staleUpstream）
@@ -1161,7 +1170,7 @@ export default function WorkspaceReviewView({
     void (async () => {
       try {
         if (runId) {
-          const rows = await invoke<RunArtifactDto[]>("run_artifacts", { runId });
+          const rows = await invoke<RunArtifactDto[]>("run_artifacts", { runId }).catch(() => []);
           if (!stale) {
             const expectedRows = rows.filter((row) => row.expected);
             setArtifacts({
@@ -1173,13 +1182,24 @@ export default function WorkspaceReviewView({
         if (diff?.reviewOnly) return;
         const list = await invoke<WorkspaceDto[]>("list_workspaces");
         const workspace = list.find((entry) => entry.id === workspaceId);
-        if (!workspace) return;
+        if (!workspace || workspace.worktreePath !== worktreePath) return;
         const read = await invoke<ProjectConfigReadDto>("read_project_config", {
           path: workspace.repoPath,
         });
         const step = read.config.steps.find(
           (s) => s.workspaceName === workspace.name,
         );
+        if (!stale) {
+          setResearchError(null);
+          setResearchContext(step ? { root: worktreePath, workspace, step, artifactDir: read.config.artifactDir || "artifacts", hasReproduction: reproductionEntrypoints(step).length > 0 || step.run.some((s) => /reproduc|复现|复算/i.test(s.name)) } : null);
+        }
+        if (step) {
+          invoke<{ run: { name: string }[] }>("workspace_settings", { repoPath: workspace.repoPath }).then((settings) => {
+            if (!stale && settings.run.some((s) => /reproduc|复现|复算/i.test(s.name))) {
+              setResearchContext((context) => context?.root === worktreePath ? { ...context, hasReproduction: true } : context);
+            }
+          }).catch(() => { if (!stale) setResearchError("复现配置读取失败，请重新打开评审后重试。"); });
+        }
         // 人工事项收尾提醒：步骤声明了人工事项才查（after 档未完成才提醒，同只提醒不阻断口径）
         if (step && (step.humanTasks?.length ?? 0) > 0) {
           invoke<HumanTaskStateDto[]>("list_human_task_states", {
@@ -1207,8 +1227,8 @@ export default function WorkspaceReviewView({
             });
           }
         }
-      } catch {
-        /* 静默降级 */
+      } catch (reason) {
+        if (!stale && !diff?.reviewOnly) setResearchError(`科研报告上下文读取失败：${String(reason)}`);
       }
     })();
     return () => {
@@ -2231,7 +2251,7 @@ export default function WorkspaceReviewView({
             (humanClosing && humanClosing.length > 0)) && (
             <div className="border-t border-hairline px-3 py-1.5 text-xs">
               <div className="flex min-h-6 items-center gap-3">
-                <span className="shrink-0 text-l4">可信度</span>
+                <span className="shrink-0 text-l4" title="仅检查引用键和产物；不验证内容正确性或结论是否成立">基础检查</span>
                 {citations && citations.bibFound && citations.totalRefs > 0 && (
                   <button
                     type="button"
@@ -2273,6 +2293,7 @@ export default function WorkspaceReviewView({
                   </span>
                 )}
               </div>
+              <p className="mt-1 text-micro text-l4">文件已产出、引用键可解析不代表内容已通过审查；接受改动前仍须核对证据与未决事项。</p>
               {citeExpanded && citations && citations.missing.length > 0 && (
                 <p className="mt-1 break-all font-mono text-micro text-warn-text">
                   缺失引用键：{citations.missing.join("、")}
@@ -2281,6 +2302,14 @@ export default function WorkspaceReviewView({
             </div>
           )}
       </header>
+
+      {!diff?.reviewOnly && researchError && <p role="alert" className="px-3 py-2 text-xs text-err-text">{researchError}</p>}
+      {!diff?.reviewOnly && researchContext?.root === worktreePath && <div className="max-h-[42vh] shrink-0 overflow-y-auto border-b border-hairline px-3">
+        <ResearchEvidencePanel root={worktreePath} patterns={researchReportPatterns(researchContext.step, "acceptance")} kind="acceptance" />
+        {researchContext.hasReproduction &&
+          <ResearchReproductionPanel key={`${worktreePath}:${researchContext.workspace.id}`} workspace={researchContext.workspace} step={researchContext.step} artifactDir={researchContext.artifactDir} onLaunched={onClose} onRun={(record) => setResearchRunId(record.id)} />}
+        <ResearchAcceptancePanel workspace={researchContext.workspace} step={researchContext.step} runId={researchRunId} />
+      </div>}
 
       {/* 上游漂移提醒（启发式，只提醒不阻断）：上游步骤晚于本步最后推进时间合并，
           本步合并后（merged_at 推进）自然恢复新鲜 */}
@@ -2365,42 +2394,7 @@ export default function WorkspaceReviewView({
           <span className="min-w-0 flex-1">
             这是定时 Run 的只读评审视图：可查看改动和产物证据；不自动写入主仓。
           </span>
-          {watchRun && !watchAdopted && (
-            <button
-              type="button"
-              disabled={adopting}
-              className="inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-2 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
-              onClick={() => {
-                void (async () => {
-                  const ok = await confirmDialog(
-                    "把隔离树里的 notes/inbox.md、papers/watch-seen.md 等拷进主仓？不会跑 git merge。",
-                    { confirmText: "采纳进主仓" },
-                  );
-                  if (!ok) return;
-                  setAdopting(true);
-                  try {
-                    const copied = await invoke<string[]>("adopt_watch_run", {
-                      runId: watchRun.id,
-                    });
-                    toast(
-                      copied.length > 0
-                        ? `已采纳 ${copied.length} 个文件进主仓`
-                        : "没有可采纳的文件",
-                      "success",
-                    );
-                    setWatchAdopted(true);
-                    void refresh(true);
-                  } catch (reason) {
-                    setError(String(reason));
-                  } finally {
-                    setAdopting(false);
-                  }
-                })();
-              }}
-            >
-              {adopting ? "采纳中…" : "采纳进主仓"}
-            </button>
-          )}
+
         </div>
       )}
       {result && (

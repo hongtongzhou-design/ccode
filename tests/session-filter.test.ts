@@ -3,6 +3,9 @@ import test from "node:test";
 import {
   QUICK_FILTERS,
   applySessionFilters,
+  sessionFilterQuickForSearch,
+  groupSearchHitsByArchive,
+  SEARCH_ARCHIVED_HEADER,
   buildScopeSuggestions,
   groupSessionsByProjectPath,
   isCcodeAiTempCwd,
@@ -65,6 +68,31 @@ test("archived 是放宽不是只看归档", () => {
     applySessionFilters(rows, q("archived"), [], NO_LIVE, NOW).length,
     2,
   );
+});
+
+test("搜索时 quick 放宽归档，未搜索不动", () => {
+  const base = q("today");
+  assert.equal(sessionFilterQuickForSearch(base, false), base);
+  const searching = sessionFilterQuickForSearch(base, true);
+  assert.ok(searching.has("archived"));
+  assert.ok(searching.has("today"));
+  assert.equal(sessionFilterQuickForSearch(q("archived"), true).has("archived"), true);
+});
+
+test("搜索命中：未归档在前，已归档沉底挂组头", () => {
+  const a = s({ sessionId: "a" });
+  const b = s({ sessionId: "b", archived: true });
+  const c = s({ sessionId: "c", archived: true });
+  const rows = groupSearchHitsByArchive([a, b, c]);
+  assert.deepEqual(
+    rows.map((r) => [r.header, r.s.sessionId]),
+    [
+      [null, "a"],
+      [SEARCH_ARCHIVED_HEADER, "b"],
+      [null, "c"],
+    ],
+  );
+  assert.deepEqual(groupSearchHitsByArchive([a]), [{ header: null, s: a }]);
 });
 
 test("internal 是收窄：只看内部 AI", () => {

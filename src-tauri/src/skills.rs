@@ -26,7 +26,7 @@ pub struct SkillDto {
     pub name: String,
     pub description: String,
     /// 来源标记（删除保护的 origin 口径，单一出处即本字段，不另加 origin 列）：
-    /// builtin=内置种子（播种器写入）/ ccode=Ccode 新建 / local=本地目录导入 /
+    /// builtin=内置种子（播种器写入）/ ccode=Mesa 新建 / local=本地目录导入 /
     /// zip=ZIP 导入 / github=GitHub 导入 / discovered=从 agent 目录收编。
     /// fail-safe：ccode 是后加的，旧数据的自建与本地导入同记 local 无法区分，
     /// 前端删除提示一律按「非自建（外部导入）」对待——宁可多提示来源，不错过警告
@@ -189,9 +189,14 @@ fn new_skill(
 
 /// 种子版本：内置技能集合有新增/修订时 +1；启动时 marker 低于此版本才补播缺失项。
 /// marker 是库目录下的 . 开头文件（发现逻辑跳过），记录已播种到的版本；
-/// 用户删掉某个内置技能后不会被复活——只有版本升级才补播「库里没有」的项。
+/// 用户删掉某个内置技能后不会被复活——逐技能删除墓碑（BUILTIN_TOMBSTONE_FILE）
+/// 记下用户删过的内置技能名，版本升级补播时跳过墓碑项。
 const BUILTIN_SEED_VERSION: u32 = 4;
 const BUILTIN_SEED_MARKER: &str = ".builtin-seed-version";
+
+/// 内置技能删除墓碑（库目录下 . 开头文件，一行一个技能名）：删除内置技能先落墓碑，
+/// 之后任何种子版本升级都不再复活它——兑现删除弹层「内置技能删除后不再复活」的口径。
+const BUILTIN_TOMBSTONE_FILE: &str = ".builtin-skill-tombstones";
 
 /// 内置技能表：(技能名, SKILL.md 全文)。内容单一出处在 resources/skills/<name>/SKILL.md，
 /// 经 include_str! 编进二进制，dev 与打包行为一致，无需配置 bundle resources。
@@ -270,6 +275,49 @@ static BUILTIN_SKILLS: &[(&str, &str)] = &[
     ),
 ];
 
+/// 读内置技能删除墓碑（用户删过的内置技能名清单）；文件不存在按空表处理。
+fn read_builtin_tombstones(store: &SkillStore) -> Vec<String> {
+    fs::read_to_string(store.lib.join(BUILTIN_TOMBSTONE_FILE))
+        .map(|t| {
+            t.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 落一条内置技能删除墓碑（幂等去重、原子写）。
+fn record_builtin_tombstone(store: &SkillStore, name: &str) -> Result<(), String> {
+    let mut tombstones = read_builtin_tombstones(store);
+    if tombstones.iter().any(|n| n == name) {
+        return Ok(());
+    }
+    tombstones.push(name.to_string());
+    fs::create_dir_all(&store.lib).map_err(|e| format!("创建技能库目录失败: {e}"))?;
+    crate::profiles::atomic_write(
+        &store.lib.join(BUILTIN_TOMBSTONE_FILE),
+        &format!("{}\n", tombstones.join("\n")),
+    )
+}
+
+/// 墓碑机制前的老版本删除的内置技能没有墓碑，但删除流程必留 skill-backups 备份：
+/// 库里缺名却有同名备份 → 视同用户删过，补播时回填墓碑防复活。
+fn deleted_builtin_has_backup(store: &SkillStore, name: &str) -> bool {
+    let Some(root) = store.json_path.parent().map(|p| p.join("skill-backups")) else {
+        return false;
+    };
+    let prefix = format!("{name}.");
+    fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        })
+        .unwrap_or(false)
+}
+
 /// 启动时播种内置技能（幂等）：只补库里没有的，同名技能（含用户自建/改过的）一律跳过，
 /// 永不覆盖。返回本次新播种的技能名清单（无新增时为空）。
 pub fn seed_builtin_skills() -> Result<Vec<String>, String> {
@@ -287,10 +335,20 @@ fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     }
     let mut skills = store.read();
+    let mut tombstones = read_builtin_tombstones(store);
     let mut added = Vec::new();
     for (name, content) in BUILTIN_SKILLS {
         if skills.iter().any(|s| s.name == *name) || store.skill_dir(name).exists() {
             continue; // 已有同名（含用户自建/改过的）：不覆盖
+        }
+        // 用户删过的内置技能不复活；墓碑机制前的老删除靠 skill-backups 备份回填墓碑
+        if tombstones.iter().any(|n| n == name) {
+            continue;
+        }
+        if deleted_builtin_has_backup(store, name) {
+            record_builtin_tombstone(store, name)?;
+            tombstones.push(name.to_string());
+            continue;
         }
         let dir = store.skill_dir(name);
         fs::create_dir_all(&dir).map_err(|e| format!("创建内置技能目录失败: {e}"))?;
@@ -951,7 +1009,7 @@ fn apply_impl(
         if target.exists() || fs::read_link(&target).is_ok() {
             if !is_ours(&target, &store.lib) {
                 return Err(format!(
-                    "目标已存在且不是由 Ccode 管理，请先手动处理: {}",
+                    "目标已存在且不是由 Mesa 管理，请先手动处理: {}",
                     target.display()
                 ));
             }
@@ -1041,6 +1099,11 @@ fn delete_impl(
         .position(|s| s.id == id)
         .ok_or_else(|| format!("技能不存在: {id}"))?;
     let name = skills[pos].name.clone();
+    // 内置技能先落删除墓碑再动手：墓碑写失败就放弃删除，免得「删了没记」
+    // 导致下次种子版本升级把它复活（违背删除弹层「内置不复活」的口径）
+    if skills[pos].source == "builtin" {
+        record_builtin_tombstone(store, &name)?;
+    }
     // 先备份再卸载：Windows 文件锁下 rename 失败时不得留下「显示启用但盘上无物」
     let lib_dir = store.skill_dir(&name);
     if lib_dir.exists() {
@@ -2239,7 +2302,7 @@ pub struct SkillAdaptDto {
 /// 口径与 pipeline-presets 模板的 expectedArtifacts/inputs 对齐
 pub(crate) fn build_adapt_prompt(name: &str, current: &str) -> String {
     format!(
-        "你是技能改写助手。下面是一份 agent 技能文件 SKILL.md「{name}」，和 Ccode 科研工作台的流水线路径约定。\n\n\
+        "你是技能改写助手。下面是一份 agent 技能文件 SKILL.md「{name}」，和 Mesa 科研工作台的流水线路径约定。\n\n\
          【流水线路径约定（相对项目根）】\n\
          - papers/ 文献检索与筛选：screening.md 初筛、included.md 精读清单、to-fetch.md 付费墙待办、watchlist.md 监控订阅\n\
          - notes/ 精读笔记与文献雷达收件箱（inbox.md）\n\
@@ -2556,6 +2619,60 @@ mod tests {
         fx.store.write(&skills).unwrap();
         assert!(seed_builtin_skills_impl(&fx.store).unwrap().is_empty());
         assert!(!fx.store.skill_dir(first).exists());
+    }
+
+    #[test]
+    fn seed_version_bump_does_not_resurrect_deleted_builtin() {
+        let fx = Fx::new();
+        seed_builtin_skills_impl(&fx.store).unwrap();
+        // 走正式删除通道删掉一个内置技能 → 落墓碑
+        let first = BUILTIN_SKILLS[0].0;
+        let id = fx
+            .store
+            .read()
+            .iter()
+            .find(|s| s.name == first)
+            .unwrap()
+            .id
+            .clone();
+        let backups = fx.dir.join("skill-backups");
+        delete_impl(&fx.store, &fx.agents, &backups, &id).unwrap();
+        assert!(read_builtin_tombstones(&fx.store).contains(&first.to_string()));
+        // 模拟种子版本升级（marker 拨回旧版）：补播不得复活已删技能
+        fs::write(fx.store.lib.join(BUILTIN_SEED_MARKER), "0").unwrap();
+        let added = seed_builtin_skills_impl(&fx.store).unwrap();
+        assert!(!added.contains(&first.to_string()));
+        assert!(!fx.store.skill_dir(first).exists());
+        assert!(!fx.store.read().iter().any(|s| s.name == first));
+    }
+
+    #[test]
+    fn seed_backfills_tombstone_from_legacy_backup() {
+        // 墓碑机制前的老版本删除：库里缺名但 skill-backups 留有同名备份 →
+        // 升级补播时回填墓碑、不复活
+        let fx = Fx::new();
+        seed_builtin_skills_impl(&fx.store).unwrap();
+        let first = BUILTIN_SKILLS[0].0;
+        fs::remove_dir_all(fx.store.skill_dir(first)).unwrap();
+        let mut skills = fx.store.read();
+        skills.retain(|s| s.name != first);
+        fx.store.write(&skills).unwrap();
+        let backups = fx.dir.join("skill-backups");
+        fs::create_dir_all(backups.join(format!("{first}.20260101-000000"))).unwrap();
+        fs::write(fx.store.lib.join(BUILTIN_SEED_MARKER), "0").unwrap();
+        let added = seed_builtin_skills_impl(&fx.store).unwrap();
+        assert!(!added.contains(&first.to_string()));
+        assert!(read_builtin_tombstones(&fx.store).contains(&first.to_string()));
+        assert!(!fx.store.skill_dir(first).exists());
+    }
+
+    #[test]
+    fn deleting_non_builtin_skill_leaves_no_tombstone() {
+        let fx = Fx::new();
+        let skill = fx.add_lib_skill("mine", "用户自建");
+        let backups = fx.dir.join("skill-backups");
+        delete_impl(&fx.store, &fx.agents, &backups, &skill.id).unwrap();
+        assert!(read_builtin_tombstones(&fx.store).is_empty());
     }
 
     #[test]
@@ -3161,7 +3278,7 @@ mod tests {
         );
         assert_eq!(
             saved[0].source, "ccode",
-            "新建技能标记为 Ccode 自建（删除保护来源分类）"
+            "新建技能标记为 Mesa 自建（删除保护来源分类）"
         );
         // 重名拒绝并提示改用编辑（不覆盖、不静默跳过）
         let mut again = fx.store.read();
@@ -3277,7 +3394,7 @@ mod tests {
         assert!(target.join("SKILL.md").exists(), "无标记目录必须保留");
         // 同名冲突：开启时报错且不覆盖
         let err = apply_impl(&fx.store, &fx.agents, &skill.id, "codex", true, false).unwrap_err();
-        assert!(err.contains("不是由 Ccode 管理"), "{err}");
+        assert!(err.contains("不是由 Mesa 管理"), "{err}");
         assert_eq!(
             fs::read_to_string(target.join("SKILL.md")).unwrap(),
             "user's own"

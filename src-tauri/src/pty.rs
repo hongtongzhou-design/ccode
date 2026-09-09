@@ -2,7 +2,7 @@ use crate::agents;
 use crate::profiles::{self, ProfileStore};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ const TRUNC_MARK: &str = "[…输出过多已截断]\n";
 const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
 
 struct PtyEntry {
-    writer: Box<dyn Write + Send>,
+    writer: crate::pty_input::PtyInput,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     /// 标签可见才推流；不可见时输出进 backlog（优化 2）
@@ -51,13 +51,22 @@ pub struct PtyManager {
     entries: Arc<Mutex<HashMap<String, PtyEntry>>>,
 }
 
-fn path_within(path: &str, root: &str) -> bool {
-    let path = std::path::Path::new(path);
-    let root = std::path::Path::new(root);
-    path == root || path.starts_with(root)
-}
+fn path_within(path: &str, root: &str) -> bool { crate::paths::path_within(path, root) }
 
 impl PtyManager {
+    pub(crate) fn shutdown(&self) {
+        let entries: Vec<_> = self.entries.lock().unwrap().drain().map(|(_, e)| e).collect();
+        let mut workers = Vec::new();
+        for entry in entries {
+            workers.push(std::thread::spawn(move || {
+                terminate_pty_child(entry.child);
+                if let Some(id) = entry.run_id { let _ = crate::runs::close_run_with_result(&id, None, "stopped", None, Some("应用退出")); }
+            }));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while workers.iter().any(|w| !w.is_finished()) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
+    }
+
     /// 返回指定工作区里仍存活的 agent/run 脚本类型；普通登录 shell 不阻止归档。
     pub(crate) fn active_workspace_tasks(&self, worktree_path: &str) -> Vec<&'static str> {
         self.entries
@@ -253,14 +262,12 @@ fn win32_input_records(text: &str) -> Vec<String> {
 /// win32 按键记录之间的投递间隔——低于此值 ConPTY 输入解析器会丢同步漏出字面记录
 const WIN32_INPUT_RECORD_GAP: std::time::Duration = std::time::Duration::from_millis(2);
 
-/// 向指定 PTY 写字节。`PtyEntry.writer` 只受整表 `entries` 锁保护，
-/// 所以每次写都得取这把锁——调用方务必逐次取放，别攥着锁做带 sleep 的长投递。
+/// 向指定 PTY 的独立队列写字节；只在查找 writer 句柄时持全局表锁。
 /// PTY 已消失（标签被秒关）时返回 Err，由调用方决定是否静默。
 fn write_pty_bytes(manager: &PtyManager, pty_id: &str, bytes: &[u8]) -> Result<(), String> {
-    let mut entries = manager.entries.lock().unwrap();
-    let entry = entries.get_mut(pty_id).ok_or("终端不存在或已退出")?;
-    entry.writer.write_all(bytes).map_err(|e| e.to_string())?;
-    entry.writer.flush().map_err(|e| e.to_string())
+    let writer = manager.entries.lock().unwrap().get(pty_id)
+        .map(|entry| entry.writer.clone()).ok_or("终端不存在或已退出")?;
+    writer.write(bytes)
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -305,10 +312,11 @@ fn spawn_tracked(
     purpose: PtyPurpose,
     run_id: Option<String>,
 ) -> Result<String, String> {
+    if crate::process::shutting_down() { return Err("应用正在退出，拒绝启动终端".into()); }
     // 声明现代终端能力：缺少这些时 CLI 会按哑终端处理，输出退化为黑白
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("TERM_PROGRAM", "Ccode");
+    cmd.env("TERM_PROGRAM", "Mesa");
     cmd.env_remove("TERM_PROGRAM_VERSION"); // 避免继承到宿主终端的版本号
                                             // NO_COLOR 只要存在就会强制 CLI 关闭彩色，优先级高于 TERM/COLORTERM，必须剔除
     cmd.env_remove("NO_COLOR");
@@ -323,7 +331,7 @@ fn spawn_tracked(
         })
         .map_err(|e| format!("创建 PTY 失败: {e}"))?;
 
-    let mut child = pair
+    let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("启动进程失败: {e}"))?;
@@ -331,16 +339,14 @@ fn spawn_tracked(
     let reader = match pair.master.try_clone_reader() {
         Ok(r) => r,
         Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_pty_child(child);
             return Err(format!("读取 PTY 失败: {e}"));
         }
     };
     let writer = match pair.master.take_writer() {
         Ok(w) => w,
         Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_pty_child(child);
             return Err(format!("写入 PTY 失败: {e}"));
         }
     };
@@ -352,7 +358,7 @@ fn spawn_tracked(
     manager.entries.lock().unwrap().insert(
         pty_id.clone(),
         PtyEntry {
-            writer,
+            writer: crate::pty_input::PtyInput::new(writer),
             master: pair.master,
             child,
             visible: visible.clone(),
@@ -401,7 +407,7 @@ fn spawn_tracked(
                         bracketed_paste.store(true, Ordering::Relaxed);
                     }
                     if let Some(id) = run_id.as_deref() {
-                        // 事件只保留脱敏后的最近输出；PTY 仍按帧推送，SQLite 写入不影响终端显示。
+                        // 有界队列仅传递副本；数据库/脱敏不占用终端读取线程。
                         let text = String::from_utf8_lossy(&buf[..n]);
                         let _ = crate::runs::record_output(id, &text);
                     }
@@ -417,11 +423,14 @@ fn spawn_tracked(
         let entry = entries.lock().unwrap().remove(&id);
         if let Some(mut entry) = entry {
             // wait 失败按异常退出（-1）上报，不误报正常退出
-            let code = entry
-                .child
-                .wait()
-                .map(|s| s.exit_code() as i64)
-                .unwrap_or(-1);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let code = loop {
+                match entry.child.try_wait() {
+                    Ok(Some(status)) => break status.exit_code() as i64,
+                    Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+                    _ => { terminate_pty_child(entry.child); break -1; }
+                }
+            };
             if let Some(run_id) = entry.run_id {
                 let status = if code == 0 { "completed" } else { "failed" };
                 let _ = crate::runs::close_run_with_result(
@@ -457,7 +466,7 @@ pub fn pty_spawn(
     initial_prompt: Option<String>,
     // 无固定 session id 的 agent 用终端标签 id 预登记关联声明，避免并发标签抢同一会话
     link_claim_id: Option<String>,
-    // 「聊想法」只读模式：对支持的 CLI 注入注册表 readonly_args（仅全新会话生效）
+    // 「聊想法」只读模式：新建和恢复均注入注册表 readonly_args，缺能力拒绝
     readonly: Option<bool>,
     // 恢复会话时 rollout 记下的 provider（旧 "ccode" 或派生名 ccode-<gid>）
     resume_provider: Option<String>,
@@ -507,9 +516,10 @@ pub fn pty_spawn(
         }
         _ => readonly.unwrap_or(false),
     };
-    // 聊想法只读模式（仅全新会话）：支持的 CLI 替换/追加只读参数；不支持的原样（软约束兜底）
-    let plan_args = if discuss && resume_session_id.is_none() {
-        agents::readonly_launch_args(&agent_id, &plan.args).unwrap_or_else(|| plan.args.clone())
+    // 恢复和新建必须兑现同一权限；能力不足不能只保留 discuss 标签。
+    let plan_args = if discuss {
+        agents::readonly_launch_args(&agent_id, &plan.args)
+            .ok_or("此 Agent 不支持只讨论启动约束，请换支持只读/计划模式的 Agent 或明确选择可写权限")?
     } else {
         plan.args.clone()
     };
@@ -609,6 +619,7 @@ pub fn pty_spawn(
     };
     if let Some(id) = opened_id.as_deref() {
         if let Err(error) = crate::runs::mark_started(id) {
+            discard_spawned_pty(&app, manager.inner(), &pty_id);
             let _ = crate::runs::close_run_with_result(
                 id,
                 None,
@@ -619,10 +630,15 @@ pub fn pty_spawn(
             return Err(error);
         }
     }
-    // 官方账号（订阅制）启动：登记 usage provenance，统计页费用栏据此显示「订阅」。
-    // 尽力而为：登记失败不阻断启动（与 touch_last_used 同语义）
+    // 官方账号（订阅制）启动：按会话级登记 usage provenance，统计页费用栏据此显示「订阅」。
+    // 尽力而为：登记失败不阻断启动（与 touch_last_used 同语义）；
+    // session_hint 为空（无固定会话 id 的 agent 新开）时不落行，重建索引按会话档案的 profile 兜底
     if profile.account_type == profiles::AccountType::Official {
-        let _ = crate::usage::register_official_launch(&agent_id, std::path::Path::new(&cwd));
+        let _ = crate::usage::register_official_launch(
+            &agent_id,
+            std::path::Path::new(&cwd),
+            session_hint.as_deref(),
+        );
     }
     crate::sessions::invalidate_scan_cache();
     store.touch_last_used(&profile_id);
@@ -682,6 +698,7 @@ pub fn shell_spawn(
         Ok(id) => {
             if let Some(run_id) = run_id.as_deref() {
                 if let Err(error) = crate::runs::mark_started(run_id) {
+                    discard_spawned_pty(&app, manager.inner(), &id);
                     let _ = crate::runs::close_run_with_result(
                         run_id,
                         None,
@@ -762,6 +779,7 @@ pub fn pty_spawn_custom(
         }
     };
     if let Err(error) = crate::runs::mark_started(&run_id) {
+        discard_spawned_pty(&app, manager.inner(), &pty_id);
         let _ = crate::runs::close_run_with_result(
             &run_id,
             None,
@@ -816,7 +834,7 @@ fn login_shell_argv() -> (String, Vec<String>) {
 #[cfg(windows)]
 fn script_shell_argv() -> Result<(String, Vec<String>), String> {
     let bash = crate::agents::resolve_git_bash().ok_or(
-        "找不到 Git Bash，无法运行流水线脚本（setup/archive 钩子与 render-pdf）。请安装 Git for Windows 后重启 Ccode。",
+        "找不到 Git Bash，无法运行流水线脚本（setup/archive 钩子与 render-pdf）。请安装 Git for Windows 后重启 Mesa。",
     )?;
     Ok((bash.to_string_lossy().into_owned(), vec!["-l".to_string()]))
 }
@@ -827,20 +845,19 @@ fn script_shell_argv() -> Result<(String, Vec<String>), String> {
 }
 
 #[tauri::command]
-pub fn pty_write(
+pub async fn pty_write(
     manager: tauri::State<'_, PtyManager>,
     pty_id: String,
     data: String,
 ) -> Result<(), String> {
-    let mut entries = manager.entries.lock().unwrap();
-    let entry = entries.get_mut(&pty_id).ok_or("终端不存在或已退出")?;
-    let paste_on = entry.bracketed_paste.load(Ordering::Relaxed);
-    let data = wrap_bracketed_paste(&data, paste_on);
-    entry
-        .writer
-        .write_all(data.as_bytes())
-        .and_then(|_| entry.writer.flush())
-        .map_err(|e| format!("写入终端失败: {e}"))
+    let (writer, paste_on) = {
+        let entries = manager.entries.lock().unwrap();
+        let entry = entries.get(&pty_id).ok_or("终端不存在或已退出")?;
+        (entry.writer.clone(), entry.bracketed_paste.load(Ordering::Relaxed))
+    };
+    // 先按 IPC 到达次序入队，再后台等待；不能让线程池调度把按键顺序打乱。
+    let receipt = writer.enqueue(wrap_bracketed_paste(&data, paste_on).as_bytes(), None)?;
+    tauri::async_runtime::spawn_blocking(move || receipt.wait()).await.map_err(|e| e.to_string())?
 }
 
 /// Windows 专用：把终端前景/底色（OSC 10/11 回报载荷）主动推给 agent。
@@ -875,7 +892,7 @@ pub fn pty_report_terminal_colors(
     Ok(())
 }
 
-/// 将一条聊天消息和提交键在同一把 PTY 锁内连续写入。
+/// 将聊天消息和提交键作为同一个输入队列请求，避免其它输入插入中间。
 /// 文本仍遵守 bracketed-paste 规则，提交键在粘贴包结束后单独写入，
 /// 避免前端两个 IPC 调用之间被 TUI 切帧，也避免多行消息把回车吞进粘贴文本。
 #[tauri::command]
@@ -885,32 +902,13 @@ pub async fn pty_write_submit(
     text: String,
     submit: String,
 ) -> Result<(), String> {
-    let entries = manager.entries.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        // 正文与提交键分两次写、中间留 60ms：开了 bracketed paste 的 TUI 要把粘贴内容
-        // 收进输入框后才认得回车，背靠背写入时回车会被吞掉（消息躺在输入框里没发出去）
-        {
-            let mut entries = entries.lock().unwrap();
-            let entry = entries.get_mut(&pty_id).ok_or("终端不存在或已退出")?;
-            let paste_on = entry.bracketed_paste.load(Ordering::Relaxed);
-            let text = wrap_bracketed_paste(&text, paste_on);
-            entry
-                .writer
-                .write_all(text.as_bytes())
-                .and_then(|_| entry.writer.flush())
-                .map_err(|e| format!("写入终端失败: {e}"))?;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        let mut entries = entries.lock().unwrap();
-        let entry = entries.get_mut(&pty_id).ok_or("终端不存在或已退出")?;
-        entry
-            .writer
-            .write_all(submit.as_bytes())
-            .and_then(|_| entry.writer.flush())
-            .map_err(|e| format!("写入终端失败: {e}"))
-    })
-    .await
-    .map_err(|e| format!("写入终端失败: {e}"))?
+    let (writer, paste_on) = {
+        let entries = manager.entries.lock().unwrap();
+        let entry = entries.get(&pty_id).ok_or("终端不存在或已退出")?;
+        (entry.writer.clone(), entry.bracketed_paste.load(Ordering::Relaxed))
+    };
+    let receipt = writer.enqueue_submit(wrap_bracketed_paste(&text, paste_on).as_bytes(), submit.as_bytes())?;
+    tauri::async_runtime::spawn_blocking(move || receipt.wait()).await.map_err(|e| format!("写入终端失败：{e}"))?
 }
 
 /// 关窗守卫用：PTY 在管且子进程尚未退出才为 true。
@@ -1042,7 +1040,42 @@ pub(crate) fn kill_process_tree(pid: u32) {
     {
         let mut cmd = crate::process::background_command("taskkill");
         cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
-        let _ = cmd.output();
+        cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        if let Ok(mut taskkill) = cmd.spawn() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match taskkill.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) if Instant::now() >= deadline => { let _ = taskkill.kill(); break; }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        }
+    }
+}
+
+fn terminate_pty_child(mut child: Box<dyn Child + Send + Sync>) {
+    if let Some(pid) = child.process_id() { kill_process_tree(pid); }
+    let _ = child.kill();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if Instant::now() >= deadline => {
+                // 最后回收不阻塞 IPC；管理表已移除，主窗口仍可响应。
+                std::thread::spawn(move || { let _ = child.wait(); });
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+fn discard_spawned_pty(app: &AppHandle, manager: &PtyManager, id: &str) {
+    let entry = manager.entries.lock().unwrap().remove(id);
+    if let Some(entry) = entry {
+        terminate_pty_child(entry.child);
+        let _ = app.emit(&format!("pty-exit-{id}"), -1);
     }
 }
 
@@ -1053,13 +1086,8 @@ pub fn pty_kill(
     pty_id: String,
 ) -> Result<(), String> {
     let entry = manager.entries.lock().unwrap().remove(&pty_id);
-    if let Some(mut entry) = entry {
-        #[cfg(unix)]
-        if let Some(pid) = entry.child.process_id() {
-            kill_process_group(pid);
-        }
-        let _ = entry.child.kill();
-        let _ = entry.child.wait();
+    if let Some(entry) = entry {
+        terminate_pty_child(entry.child);
         if let Some(run_id) = entry.run_id {
             let _ = crate::runs::close_run_with_result(
                 &run_id,

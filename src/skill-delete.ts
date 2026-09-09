@@ -3,7 +3,7 @@
  *
  *  来源口径 = SkillDto.source（持久字段，各入口写入的单一出处，不另加 origin 列）：
  *  builtin    = 内置种子（播种器写入；判定不需与种子清单现算比对——source 比现算更简单可靠）
- *  ccode      = Ccode 新建（v3.100 起 create_skill 写入）
+ *  ccode      = Mesa 新建（v3.100 起 create_skill 写入）
  *  local      = 本地目录导入；旧数据的自建技能同记 local 无法区分
  *  zip/github = ZIP / GitHub 仓库导入（github 带 repo 记录）
  *  discovered = 从 agent 目录收编
@@ -42,7 +42,7 @@ export function skillOriginLabel(skill: {
 }
 
 /** 删除影响面：apps 里值为 true 的 agent 显示名清单（按 agents 表序，稳定可测）。
- *  后端删除时只清理 Ccode 分发的副本/链接（symlink 指向库目录或带 .ccode-copy 标记），
+ *  后端删除时只清理 Mesa 分发的副本/链接（symlink 指向库目录或带 .ccode-copy 标记），
  *  agent 目录里用户自放的同名内容本就不会被动 */
 export function skillDeleteImpact(
   apps: Record<string, boolean>,

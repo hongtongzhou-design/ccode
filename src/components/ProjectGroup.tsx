@@ -17,6 +17,7 @@ import ScheduleSection from "./ScheduleSection";
 import LitWatchCard from "./LitWatchCard";
 import ResourceListSection from "./ResourceListSection";
 import ProjectUserTasksView from "./ProjectUserTasksView";
+import ProjectRulesPanel from "./ProjectRulesPanel";
 import ProjectSessionsSection, {
   sessionsAsideOpenClass,
 } from "./ProjectSessionsSection";
@@ -32,11 +33,12 @@ import {
   NoticeBar,
 } from "./PageFrame";
 import { useAppStore } from "../store";
-import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
+import { RESOURCE_TYPE_LABELS, settingsForTemplateApply } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
 import type { KickoffLaunch } from "../kickoff-launch";
 import { upsertLitSourceSection } from "../task-md-sections";
 import { isDecisionsOnly } from "../step-decisions";
+import { demoReadPaperResource } from "../step-flow";
 import { normSep } from "../path-utils";
 import { beginAskAi, beginProjectChat } from "./AskAiModal";
 import { runIdForPath, type RunOverviewInput } from "../run-overview";import type {
@@ -639,7 +641,7 @@ export default function ProjectGroup({
         await invoke("apply_pipeline_template", {
           projectRoot: projectPath,
           steps: item.steps,
-          projectSettings: item.projectSettings ?? [],
+          projectSettings: settingsForTemplateApply(item),
           strategy: "append",
           topic: templateTopic.trim() || null,
           submissionMode:
@@ -679,7 +681,7 @@ export default function ProjectGroup({
       await invoke("apply_pipeline_template", {
         projectRoot: projectPath,
         steps: item.steps.map((s) => ({ ...s })),
-        projectSettings: item.projectSettings ?? [],
+        projectSettings: settingsForTemplateApply(item),
         strategy: "replace",
         topic: templateTopic.trim() || null,
         submissionMode:
@@ -837,26 +839,7 @@ export default function ProjectGroup({
     if (chromeReq.action === "editor") openEditor();
     if (chromeReq.action === "history") setHistoryOpen(true);
   }, [chromeReq, cfg]);
-  // 全局设定编辑（抽屉内）：textarea 一行一条，失焦即存
-  const [globalsDraft, setGlobalsDraft] = useState("");
-  useEffect(() => {
-    setGlobalsDraft((cfg?.settings ?? []).join("\n"));
-  }, [cfg?.settings]);
-  /** 失焦即存：静默保存等于「我改了但不知道存没存」（用户实测反馈），
-   *  故给一次性「已保存」反馈（2s 自动消退）；失败走 onError 横幅 */
-  const [globalsSaved, setGlobalsSaved] = useState(false);
-  async function saveGlobals() {
-    if (!cfg) return;
-    const next = globalsDraft
-      .split("\n")
-      .map((x) => x.trim())
-      .filter(Boolean);
-    if (next.join("\n") === (cfg.settings ?? []).join("\n")) return;
-    if (await saveConfig({ ...cfg, settings: next })) {
-      setGlobalsSaved(true);
-      window.setTimeout(() => setGlobalsSaved(false), 2000);
-    }
-  }
+
   // 「文献与数据」落点聚焦：从流程线按所选来源跳过来时高亮对应进料入口，2.5s 后自动消退。
   // 落点统一是这一处面板（导入只此一处），高亮解决「到了之后点哪个」
   const [resFocus, setResFocus] = useState<"zotero" | "files" | null>(null);
@@ -932,7 +915,7 @@ export default function ProjectGroup({
     if (!project || !cfg) return;
     for (const s of cfg.steps) {
       try {
-        const cur = await invoke<{ relPath: string; text: string | null }>(
+        const cur = await invoke<{ relPath: string; text: string | null; revision: string | null }>(
           "read_task_draft",
           { projectRoot: project.path, stepName: s.name },
         );
@@ -944,6 +927,7 @@ export default function ProjectGroup({
             projectRoot: project.path,
             stepName: s.name,
             content: nextText,
+            expectedRevision: cur?.revision ?? null,
           });
         }
       } catch {
@@ -1181,6 +1165,7 @@ export default function ProjectGroup({
     (cfg.steps?.length ?? 0) === 0
   );
   const [sessionsOpen, setSessionsOpen] = useState(true);
+  const [urgentGoals, setUrgentGoals] = useState(false);
 
   useEffect(() => {
     if (liteResearch) void loadTaskCards(projectPath);
@@ -1400,6 +1385,14 @@ export default function ProjectGroup({
   // 聚焦步骤的已归档工作区（pending + ws）：流程线 agent 节点此时主入口是「恢复工作区」而非「开始」
   const focusArchivedWs =
     focusDesc && focusDesc.st.key === "pending" ? (focusDesc.st.ws ?? null) : null;
+  // 「开读这一篇」只给示例课题精读步；普通模板流程线只显示「开始」
+  const demoPaper = cfg
+    ? demoReadPaperResource({
+        steps: cfg.steps,
+        focusStepName,
+        resources: cfg.resources,
+      })
+    : undefined;
   return (
     // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给研究流程等必要块
     <section
@@ -1416,17 +1409,7 @@ export default function ProjectGroup({
             : undefined
         }
       >
-      {liteResearch && !sessionsOpen && (
-        <div className="mb-2 flex justify-end">
-          <ProjectSessionsSection
-            projectPath={projectPath}
-            extraRoots={workspaces.map((w) => w.worktreePath)}
-            variant="sidebar"
-            collapsed
-            onToggle={() => setSessionsOpen(true)}
-          />
-        </div>
-      )}
+
 
       {/* 分组主体：左侧 1px 缩进线 + 透明度分层，保持原 p-4 留白节奏 */}
       <div className="border-l border-white/5 pb-4 pl-3 pr-1">
@@ -1536,11 +1519,17 @@ export default function ProjectGroup({
       {/* 首启引导（轻量版）：注册项目且 steps 为空 → 从模板库选择写入研究流程；
           「不使用研究流程」（pipelineOptOut）显式隐藏本横幅，回流入口在项目设置 */}
       {liteResearch && project && (
-        <ProjectUserTasksView project={project} embed />
+        <ProjectUserTasksView
+          project={project}
+          embed
+          sessionsCollapsed={!sessionsOpen}
+          onOpenSessions={() => setSessionsOpen(true)}
+          onUrgentGoals={setUrgentGoals}
+        />
       )}
 
       {liteResearch && cfg && (
-        <div className="mb-8 space-y-8">
+        <div className="mb-5 space-y-5">
           <div ref={litWatchRef}>
           <LitWatchCard
             projectRoot={projectPath}
@@ -1563,6 +1552,7 @@ export default function ProjectGroup({
                 ? projectFocusReq.entryId
                 : null
             }
+            preferCollapsed={urgentGoals}
           />
           </div>
         </div>
@@ -1813,7 +1803,7 @@ export default function ProjectGroup({
           tone="info"
           className="mb-3"
           onDismiss={() => setTplApplied(false)}
-        >研究流程已就位。先打开第 1 步，按流程线确认输入与人工事项，再点「开始」。</NoticeBar>
+        >研究流程已就位。</NoticeBar>
       )}
 
       {/* 人工事项清单已并入聚焦视图（TaskCardsSection 聚焦步骤时顶部渲染）；原 ⋯ 手风琴面板删除 */}
@@ -1878,29 +1868,8 @@ export default function ProjectGroup({
           }
           onFocusIndex={focusByIndex}
           onStartStep={(index, originCardId) => startStep(index, originCardId)}
-          onReadPaper={
-            cfg.resources.some(
-              (r) =>
-                r.type === "paper" &&
-                r.path.replace(/\\/g, "/").toLowerCase().endsWith(".pdf"),
-            )
-              ? () => {
-                  const paper = cfg.resources.find(
-                    (r) =>
-                      r.type === "paper" &&
-                      r.path.replace(/\\/g, "/").toLowerCase().endsWith(".pdf"),
-                  );
-                  if (paper) immerseResource(paper);
-                }
-              : undefined
-          }
-          readPaperPrimary={Boolean(
-            focusStepName &&
-              cfg.steps.some((s) => s.seedComplete) &&
-              cfg.steps.find((s) => s.name === focusStepName)?.skills.includes(
-                "lit-notes",
-              ),
-          )}
+          onReadPaper={demoPaper ? () => immerseResource(demoPaper) : undefined}
+          readPaperPrimary={Boolean(demoPaper)}
         />
       )}
 
@@ -1999,30 +1968,18 @@ export default function ProjectGroup({
                         编辑
                       </button>
                     </div>
-                    {/* 全局设定编辑（v3.89）：一行一条「问题：答案」，随 TASK.md 下发每一步 */}
-                    <div className="mb-2 flex items-start gap-2">
-                      <span className="w-20 shrink-0 pt-1 text-xs text-l3">
-                        全局设定
-                      </span>
-                      <span className="flex min-w-0 flex-1 flex-col gap-1">
-                        {/* fieldSm 自带 h-7（单行高），会把 rows={3} 压成一行——
-                            多行输入必须去掉那个固定高度（v3.89 修：4 条设定只看得见 1 条） */}
-                        <textarea
-                          className={`${fieldSm.replace("h-7 ", "")} min-w-0 flex-1 resize-y py-1 leading-5`}
-                          rows={4}
-                          value={globalsDraft}
-                          onChange={(e) => setGlobalsDraft(e.target.value)}
-                          onBlur={() => void saveGlobals()}
-                          placeholder={"综述角度：聚焦储能应用\n目标篇幅：8000 词"}
+                    {cfg && project && (
+                      <div className="mb-3">
+                        <ProjectRulesPanel
+                          projectPath={project.path}
+                          workMode={cfg.workMode ?? project.workMode}
+                          compact
+                          defaultOpen
+                          onSaved={() => void reloadCfg(projectPath)}
+                          onError={onError}
                         />
-                        <span className="flex items-center gap-2 text-micro text-l4">
-                          一行一条，写成「问题：答案」；每一步开工时都会带给 AI
-                          {globalsSaved && (
-                            <span className="text-ok-text">✓ 已保存</span>
-                          )}
-                        </span>
-                      </span>
-                    </div>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2">
                       <span className="w-20 shrink-0 text-xs text-l3">
                         项目路径
@@ -2348,7 +2305,11 @@ export default function ProjectGroup({
       </div>
 
       {liteResearch && sessionsOpen && (
-        <aside className={sessionsAsideOpenClass}>
+        <aside
+          className={`${sessionsAsideOpenClass} ccode-project-sessions-rail ${
+            sessionsOpen ? "ccode-project-sessions-rail-open" : ""
+          }`}
+        >
           <div className="flex min-w-0 flex-col gap-4">
             <ProjectSessionsSection
               projectPath={projectPath}
@@ -2356,6 +2317,7 @@ export default function ProjectGroup({
               variant="sidebar"
               collapsed={false}
               onToggle={() => setSessionsOpen(false)}
+              title="这个项目的对话"
               onNewChat={(e) =>
                 beginProjectChat(
                   {

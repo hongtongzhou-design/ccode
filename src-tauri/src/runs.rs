@@ -164,6 +164,7 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         ("archived_at", "TEXT"),
         ("agent", "TEXT"),
         ("profile_id", "TEXT"),
+        ("adopted_paths", "TEXT NOT NULL DEFAULT '[]'"),
     ] {
         if !columns.iter().any(|c| c == column) {
             conn.execute(
@@ -259,6 +260,7 @@ pub struct TaskDto {
     pub created_at: String,
     pub updated_at: String,
     pub declared: bool,
+    pub adopted_paths: Vec<String>,
 }
 fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
     let input_paths: String = r.get(7)?;
@@ -281,9 +283,10 @@ fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
         created_at: r.get(13)?,
         updated_at: r.get(14)?,
         declared: identity_key.starts_with("user:"),
+        adopted_paths: serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default(),
     })
 }
-const TASK_COLS: &str = "id,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,archived_at,agent,profile_id,created_at,updated_at,identity_key";
+const TASK_COLS: &str = "id,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,archived_at,agent,profile_id,created_at,updated_at,identity_key,adopted_paths";
 fn ensure_task_at(
     conn: &Connection,
     root: Option<&str>,
@@ -368,7 +371,7 @@ fn task_rel_path(root: &Path, raw: &str, label: &str) -> Result<(String, PathBuf
         .split('/')
         .any(|part| matches!(part, ".git" | ".ccode"))
     {
-        return Err(format!("{label}不能指向 Ccode 或 Git 内部目录"));
+        return Err(format!("{label}不能指向 Mesa 或 Git 内部目录"));
     }
     Ok((relative, canonical))
 }
@@ -593,6 +596,175 @@ fn copy_adopt_file(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AdoptBackupFile {
+    path: String,
+    existed: bool,
+}
+
+struct AdoptItem {
+    relative: String,
+    source: PathBuf,
+    target: PathBuf,
+    before: Option<Vec<u8>>,
+    after: Vec<u8>,
+}
+
+fn read_regular_optional(path: &Path, label: &str) -> Result<Option<Vec<u8>>, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{label}失败：{error}")),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(format!("{label}不能是符号链接：{}", path.display()))
+        }
+        Ok(meta) if meta.is_dir() => Err(format!("{label}是目录：{}", path.display())),
+        Ok(_) => fs::read(path).map(Some).map_err(|e| format!("{label}失败：{e}")),
+    }
+}
+
+fn adopt_lock(dir: &Path) -> Result<fs::File, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("创建采纳锁目录失败：{e}"))?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("adopt.lock"))
+        .map_err(|e| format!("打开采纳锁失败：{e}"))?;
+    file.try_lock()
+        .map_err(|_| "另一个采纳操作正在执行，请稍后重试".to_string())?;
+    Ok(file)
+}
+
+fn persist_adopt_backup(dir: &Path, items: &[AdoptItem]) -> Result<PathBuf, String> {
+    let backup = dir.join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(backup.join("files")).map_err(|e| format!("创建采纳备份失败：{e}"))?;
+    let manifest: Vec<AdoptBackupFile> = items
+        .iter()
+        .map(|item| AdoptBackupFile {
+            path: item.relative.clone(),
+            existed: item.before.is_some(),
+        })
+        .collect();
+    crate::profiles::atomic_write(
+        &backup.join("before.json"),
+        &serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?,
+    )?;
+    for item in items {
+        if let Some(bytes) = &item.before {
+            let dest = backup.join("files").join(&item.relative);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("创建采纳备份失败：{e}"))?;
+            }
+            crate::profiles::atomic_write_bytes(&dest, bytes)?;
+        }
+    }
+    Ok(backup)
+}
+
+fn rollback_adopt(written: &[AdoptItem], backup: &Path) -> Vec<String> {
+    let mut errors = Vec::new();
+    for item in written.iter().rev() {
+        let rollback = (|| {
+            let current = read_regular_optional(&item.target, "读取项目文件")?;
+            if current.as_deref() != Some(item.after.as_slice()) {
+                return Err("文件再次被外部修改，未强制回滚".to_string());
+            }
+            match &item.before {
+                Some(bytes) => crate::profiles::atomic_write_bytes(&item.target, bytes),
+                None => fs::remove_file(&item.target).map_err(|e| e.to_string()),
+            }
+        })();
+        if let Err(e) = rollback {
+            errors.push(format!("{}: {e}", item.relative));
+        }
+    }
+    if !errors.is_empty() {
+        errors.push(format!("恢复备份：{}", backup.display()));
+    }
+    errors
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ADOPT_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+fn adopt_state_root(project: &Path) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(root) = TEST_ADOPT_ROOT.with(|c| c.borrow().clone()) {
+        return Ok(root);
+    }
+    Ok(task_runs_root()?
+        .join("adopt")
+        .join(format!("{:x}", md5::compute(project.to_string_lossy().as_bytes()))))
+}
+
+fn adopt_selected_with_writer(
+    run_id: &str,
+    run_root: &Path,
+    project: &Path,
+    selected: &[String],
+    mut write: impl FnMut(&Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let lock_dir = adopt_state_root(project)?;
+    let _lock = adopt_lock(&lock_dir)?;
+    let mut pending = Vec::new();
+    for relative in selected {
+        let source = run_root.join(relative);
+        let target = project.join(relative);
+        let after = fs::read(&source).map_err(|e| format!("读取任务输出失败：{e}"))?;
+        let before = read_regular_optional(&target, "读取项目文件")?;
+        if before.as_deref() == Some(after.as_slice()) {
+            continue;
+        }
+        pending.push(AdoptItem {
+            relative: relative.clone(),
+            source,
+            target,
+            before,
+            after,
+        });
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let backup = persist_adopt_backup(&lock_dir.join("backups").join(run_id), &pending)?;
+    let mut written = Vec::new();
+    for item in pending {
+        let result = (|| {
+            let current = read_regular_optional(&item.target, "读取项目文件")?;
+            if current != item.before {
+                return Err(format!("{} 在采纳期间变化，未覆盖", item.relative));
+            }
+            write(&item.source, &item.target)
+        })();
+        if let Err(error) = result {
+            let rollback = rollback_adopt(&written, &backup);
+            return Err(if rollback.is_empty() {
+                format!("采纳失败：{error}。已回滚；备份：{}", backup.display())
+            } else {
+                format!(
+                    "采纳失败：{error}。回滚未完全成功；备份：{}。{}",
+                    backup.display(),
+                    rollback.join("；")
+                )
+            });
+        }
+        written.push(item);
+    }
+    Ok(())
+}
+
+fn adopt_selected_files(
+    run_id: &str,
+    run_root: &Path,
+    project: &Path,
+    selected: &[String],
+) -> Result<(), String> {
+    adopt_selected_with_writer(run_id, run_root, project, selected, copy_adopt_file)
+}
+
 fn files_equal(source: &Path, target: &Path) -> Result<bool, String> {
     let source_meta = fs::metadata(source).map_err(|e| format!("读取任务输出失败：{e}"))?;
     let target_meta = match fs::metadata(target) {
@@ -640,7 +812,7 @@ fn task_runs_root() -> Result<PathBuf, String> {
     let base = dirs::data_local_dir()
         .or_else(dirs::data_dir)
         .or_else(dirs::config_dir)
-        .ok_or("无法确定 Ccode 数据目录")?;
+        .ok_or("无法确定 Mesa 数据目录")?;
     let root = base.join("ccode").join("task-runs");
     fs::create_dir_all(&root).map_err(|e| format!("创建任务运行目录失败：{e}"))?;
     Ok(root)
@@ -799,6 +971,12 @@ pub struct PrepareTaskRunInput {
     pub task_id: String,
     pub agent: String,
     pub profile_id: String,
+    /// 同一目标再出一版：沿用上次隔离目录，不从项目重新复制。
+    #[serde(default)]
+    pub reuse_isolation: Option<bool>,
+    /// 验收意见，记在上一版 Run 上，供时间线与下一版 Context Pack。
+    #[serde(default)]
+    pub feedback: Option<String>,
 }
 
 #[tauri::command]
@@ -831,23 +1009,42 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
         task.project_root.as_deref().ok_or("Task 没有关联项目")?,
         "项目根目录",
     )?;
-    let staging_id = uuid::Uuid::new_v4().to_string();
-    let run_root = task_runs_root()?.join(&task.id).join(&staging_id);
-    fs::create_dir_all(&run_root).map_err(|e| format!("创建 Task 独立目录失败：{e}"))?;
-    let mut copy_budget = TaskCopyBudget::default();
-    for relative in &task.input_paths {
-        let result = if relative == "." {
-            copy_project_contents(Path::new(&root), &run_root, &mut copy_budget)
-        } else {
-            let source = Path::new(&root).join(relative);
-            let target = run_root.join(relative);
-            copy_task_tree_with_budget(&source, &target, &mut copy_budget)
-        };
-        if let Err(error) = result {
-            let _ = fs::remove_dir_all(&run_root);
-            return Err(error);
+    let reuse_isolation = input.reuse_isolation.unwrap_or(false);
+    let previous = query_runs(
+        &conn,
+        "WHERE task_id=?1 AND internal=0 ORDER BY created_at DESC LIMIT 1",
+        [&task.id],
+    )?
+    .into_iter()
+    .next();
+    let previous_id = previous.as_ref().map(|run| run.id.clone());
+    let run_root = if reuse_isolation {
+        let previous = previous.ok_or("还没有上一版，不能在原副本上继续")?;
+        let existing = PathBuf::from(&previous.isolation_path);
+        if !existing.is_dir() {
+            return Err("上一版工作目录已经不在，请重新开始这个目标".into());
         }
-    }
+        existing
+    } else {
+        let staging_id = uuid::Uuid::new_v4().to_string();
+        let run_root = task_runs_root()?.join(&task.id).join(&staging_id);
+        fs::create_dir_all(&run_root).map_err(|e| format!("创建 Task 独立目录失败：{e}"))?;
+        let mut copy_budget = TaskCopyBudget::default();
+        for relative in &task.input_paths {
+            let result = if relative == "." {
+                copy_project_contents(Path::new(&root), &run_root, &mut copy_budget)
+            } else {
+                let source = Path::new(&root).join(relative);
+                let target = run_root.join(relative);
+                copy_task_tree_with_budget(&source, &target, &mut copy_budget)
+            };
+            if let Err(error) = result {
+                let _ = fs::remove_dir_all(&run_root);
+                return Err(error);
+            }
+        }
+        run_root
+    };
     let permission = if task.review_required {
         "write_tree"
     } else {
@@ -882,6 +1079,21 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
         params![task.id, now_rfc3339()],
     )
     .map_err(|e| format!("更新 Task 状态失败: {e}"))?;
+    if let Some(note) = input
+        .feedback
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        if let Some(previous_id) = previous_id.as_deref() {
+            record_event(
+                &conn,
+                previous_id,
+                "task.review_notes",
+                Some(&serde_json::json!({ "feedback": note }).to_string()),
+            )?;
+        }
+    }
     Ok(run)
 }
 
@@ -909,7 +1121,11 @@ pub async fn task_output_changes(run_id: String) -> Result<Vec<TaskOutputChangeD
         .map_err(|e| format!("读取任务变更失败：{e}"))?
 }
 
-fn task_adopt_outputs_impl(run_id: &str, paths: Option<Vec<String>>) -> Result<TaskDto, String> {
+fn task_adopt_outputs_impl(
+    run_id: &str,
+    paths: Option<Vec<String>>,
+    note: Option<String>,
+) -> Result<TaskDto, String> {
     let conn = db()?;
     let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
     if run.status != "completed" {
@@ -941,7 +1157,12 @@ fn task_adopt_outputs_impl(run_id: &str, paths: Option<Vec<String>>) -> Result<T
             selected
         }
     };
+    // 保护路径读不出来 = 不可信，fail-closed 拒绝写回，不按「没有保护」继续复制
+    let protected = crate::projects::protected_paths_at(Path::new(&root))?;
     for relative in &selected {
+        if crate::projects::path_is_protected(relative, &protected) {
+            return Err(format!("保护路径不可覆盖：{relative}"));
+        }
         let target = Path::new(&root).join(relative);
         if let Some(mut probe) = target.parent() {
             while !probe.exists() {
@@ -953,11 +1174,11 @@ fn task_adopt_outputs_impl(run_id: &str, paths: Option<Vec<String>>) -> Result<T
                 return Err("输出目标必须位于项目目录内".into());
             }
         }
-        copy_adopt_file(&run_root.join(relative), &target)?;
     }
+    adopt_selected_files(run_id, run_root, Path::new(&root), &selected)?;
     conn.execute(
-        "UPDATE tasks SET status='completed', updated_at=?2 WHERE id=?1",
-        params![task.id, now_rfc3339()],
+        "UPDATE tasks SET status='completed', adopted_paths=?3, updated_at=?2 WHERE id=?1",
+        params![task.id, now_rfc3339(), task_json_paths(&selected)?],
     )
     .map_err(|e| format!("更新 Task 完成状态失败：{e}"))?;
     record_event(
@@ -966,6 +1187,13 @@ fn task_adopt_outputs_impl(run_id: &str, paths: Option<Vec<String>>) -> Result<T
         "task.outputs_adopted",
         Some(&serde_json::json!({"taskId": task.id, "paths": selected}).to_string()),
     )?;
+    let note = note.unwrap_or_default();
+    let _ = crate::projects::record_accepted_goal_at(
+        Path::new(&root),
+        &task.name,
+        &selected,
+        &note,
+    );
     task_by_id(&conn, &run.task_id)
 }
 
@@ -973,8 +1201,9 @@ fn task_adopt_outputs_impl(run_id: &str, paths: Option<Vec<String>>) -> Result<T
 pub async fn task_adopt_outputs(
     run_id: String,
     paths: Option<Vec<String>>,
+    note: Option<String>,
 ) -> Result<TaskDto, String> {
-    tauri::async_runtime::spawn_blocking(move || task_adopt_outputs_impl(&run_id, paths))
+    tauri::async_runtime::spawn_blocking(move || task_adopt_outputs_impl(&run_id, paths, note))
         .await
         .map_err(|e| format!("采纳输出失败：{e}"))?
 }
@@ -987,6 +1216,48 @@ pub fn task_list(project_root: Option<String>) -> Result<Vec<TaskDto>, String> {
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
+#[tauri::command]
+pub fn task_delete(id: String) -> Result<(), String> {
+    let conn = db()?;
+    let task = task_by_id(&conn, &id)?;
+    if !task.declared {
+        return Err("只能删除你记下的目标".into());
+    }
+    if task.kind != "free_research" && task.kind != "office_doc" {
+        return Err("只能删除科研或工作目标".into());
+    }
+    if task.status == "running" {
+        return Err("先停掉正在跑的 Agent，再删这个目标".into());
+    }
+    let open = query_runs(
+        &conn,
+        "WHERE task_id=?1 AND closed_at IS NULL AND internal=0 LIMIT 1",
+        [&task.id],
+    )?;
+    if !open.is_empty() {
+        return Err("先停掉正在跑的 Agent，再删这个目标".into());
+    }
+    conn.execute(
+        "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id=?1)",
+        [&task.id],
+    )
+    .map_err(|e| format!("清理目标记录失败: {e}"))?;
+    conn.execute("DELETE FROM runs WHERE task_id=?1", [&task.id])
+        .map_err(|e| format!("清理目标记录失败: {e}"))?;
+    conn.execute("DELETE FROM tasks WHERE id=?1", [&task.id])
+        .map_err(|e| format!("删除目标失败: {e}"))?;
+    if let Ok(dir) = task_runs_root() {
+        let isolation = dir.join(&task.id);
+        if isolation.is_dir() {
+            let _ = fs::remove_dir_all(&isolation);
+        }
+    }
+    if let Some(root) = task.project_root.as_deref() {
+        let _ = crate::projects::remove_accepted_goal_at(Path::new(root), &task.name);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn task_get(id: String) -> Result<Option<TaskDto>, String> {
     db()?
@@ -1129,6 +1400,10 @@ fn validate_policy(input: &OpenRunInput) -> Result<(), String> {
     if !matches!(permission, "discuss" | "write_tree") {
         return Err("不支持的权限政策".into());
     }
+    if runtime == "local_cli" && permission == "discuss" && crate::agents::readonly_launch_args(&input.agent, &[]).is_none() {
+        return Err("此 Agent 不支持只讨论权限，请更换 Agent 或明确选择可写权限".into());
+    }
+
     if !matches!(
         kind,
         "pipeline_step"
@@ -1164,26 +1439,31 @@ pub fn open_run_impl(mut input: OpenRunInput) -> Result<RunDto, String> {
         input.reuse_key = if key.is_empty() { None } else { Some(key) };
     }
     let reuse = input.reuse_key.as_deref().unwrap_or("");
-    input.project_root = input
-        .project_root
-        .or_else(|| infer_project_root(reuse, &input.isolation_path))
-        .map(|p| validate_existing_dir(&p, "项目根目录"))
-        .transpose()?;
-    input.task_kind = Some(
-        input
-            .task_kind
-            .unwrap_or_else(|| infer_task_kind(reuse, &input.isolation_path).into()),
-    );
-    // 无显式 taskRef 时以完整隔离路径命名，避免同项目下同名文件/车道串 Task。
-    input.task_ref = input.task_ref.or_else(|| {
-        if reuse.starts_with("watch:") {
-            infer_task_ref(reuse, &input.isolation_path)
-        } else if reuse.starts_with("office:") {
-            Some(reuse.into())
-        } else {
-            Some(input.isolation_path.clone())
-        }
-    });
+    // 恢复已有 Run（带 id）时不重新猜测身份：按 reuseKey/路径推出的 kind/ref/root
+    // 与已登记值稍有出入（声明目标是 free_research + 目标名，路径只能推出
+    // scratch/目录名）就会被 open_at 的身份校验拒掉。推断只服务新建。
+    if input.id.is_none() {
+        input.project_root = input
+            .project_root
+            .or_else(|| infer_project_root(reuse, &input.isolation_path))
+            .map(|p| validate_existing_dir(&p, "项目根目录"))
+            .transpose()?;
+        input.task_kind = Some(
+            input
+                .task_kind
+                .unwrap_or_else(|| infer_task_kind(reuse, &input.isolation_path).into()),
+        );
+        // 无显式 taskRef 时以完整隔离路径命名，避免同项目下同名文件/车道串 Task。
+        input.task_ref = input.task_ref.or_else(|| {
+            if reuse.starts_with("watch:") {
+                infer_task_ref(reuse, &input.isolation_path)
+            } else if reuse.starts_with("office:") {
+                Some(reuse.into())
+            } else {
+                Some(input.isolation_path.clone())
+            }
+        });
+    }
     validate_policy(&input)?;
     let mut conn = db()?;
     let tx = conn
@@ -1252,7 +1532,8 @@ fn open_at(conn: &Connection, input: OpenRunInput) -> Result<RunDto, String> {
     if !internal {
         if let Some(key) = reuse {
             if let Some(run) = query_runs(conn, "WHERE reuse_key=?1 AND closed_at IS NULL AND internal=0 ORDER BY created_at DESC LIMIT 1", [key])?.into_iter().next() {
-                if run.agent != input.agent || run.runtime != runtime || run.isolation_path != input.isolation_path {
+                if run.agent != input.agent || run.runtime != runtime || run.isolation_path != input.isolation_path
+                    || input.permission.as_deref().is_some_and(|p| run.permission != p) {
                     return Err("此任务已有活跃 Run，请先停止它再更换执行体".into());
                 }
                 return Ok(run);
@@ -1311,13 +1592,39 @@ fn claim_at(conn: &Connection, id: &str) -> Result<(), String> {
     }
     record_event(conn, id, "run.start_requested", None)
 }
+fn leases() -> &'static std::sync::Mutex<std::collections::HashMap<String, fs::File>> {
+    static LEASES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, fs::File>>> = std::sync::OnceLock::new();
+    LEASES.get_or_init(Default::default)
+}
+
+fn lease_dir() -> Result<PathBuf, String> {
+    Ok(dirs::config_dir().ok_or("无法确定配置目录")?.join("ccode/run-leases"))
+}
+
+fn try_run_lease(dir: &Path, id: &str) -> Result<Option<fs::File>, String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{:x}.lock", md5::compute(id.as_bytes())));
+    let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(path).map_err(|e| format!("打开运行锁失败：{e}"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(format!("取得运行锁失败：{error}")),
+    }
+}
+
 pub fn claim_start(id: &str) -> Result<(), String> {
+    let mut leases = leases().lock().unwrap_or_else(|e| e.into_inner());
+    if leases.contains_key(id) { return Err("此运行已在启动或执行中".into()); }
+    let lease = try_run_lease(&lease_dir()?, id)?.ok_or("此运行正在另一个实例执行")?;
     let mut conn = db()?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     claim_at(&tx, id)?;
-    tx.commit().map_err(|e| e.to_string())
+    tx.commit().map_err(|e| e.to_string())?;
+    leases.insert(id.to_string(), lease);
+    Ok(())
 }
 pub fn mark_started(id: &str) -> Result<(), String> {
     let mut conn = db()?;
@@ -1389,14 +1696,26 @@ pub fn close_run_with_result(
     code: Option<i32>,
     reason: Option<&str>,
 ) -> Result<(), String> {
-    let mut conn = db()?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| e.to_string())?;
-    close_at(&tx, id, session, status, code, reason)?;
-    tx.commit().map_err(|e| e.to_string())?;
+    let outcome = (|| {
+        let mut conn = db()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        close_at(&tx, id, session, status, code, reason)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    // 进程侧已经结束时必须放开存活锁，否则账本失败会把 Run 钉在「仍在运行」。
+    leases().lock().unwrap_or_else(|e| e.into_inner()).remove(id);
     crate::coding::clear_lane_current_run(id);
-    Ok(())
+    if let Err(error) = &outcome {
+        crate::logbuf::record(
+            "error",
+            "runs",
+            &format!("Run {id} 已结束，但账本登记失败：{error}"),
+        );
+    }
+    outcome
 }
 pub fn attach_session_impl(id: &str, session_id: &str) -> Result<(), String> {
     let conn = db()?;
@@ -1425,17 +1744,63 @@ pub fn attach_session_impl(id: &str, session_id: &str) -> Result<(), String> {
     }
     Ok(())
 }
+const OUTPUT_EVENT_CAP: usize = 100;
+
+fn output_tail(text: &str) -> String {
+    // 末尾未完成 token 留到下一批；不把跨块密钥前半段当独立文本持久化。
+    let end = text.rfind(char::is_whitespace).unwrap_or(0);
+    let redacted = crate::sessions::redact_sensitive_text(&text[..end]);
+    redacted.chars().rev().take(2000).collect::<String>().chars().rev().collect()
+}
+
+fn persist_output(conn: &Connection, id: &str, text: &str) -> Result<(), String> {
+    let tail = output_tail(text);
+    if tail.is_empty() { return Ok(()); }
+    record_event(conn, id, "run.output", Some(&tail))?;
+    conn.execute("DELETE FROM run_events WHERE event_type='run.output' AND run_id=?1 AND rowid NOT IN (SELECT rowid FROM run_events WHERE event_type='run.output' AND run_id=?1 ORDER BY rowid DESC LIMIT ?2)", params![id, OUTPUT_EVENT_CAP as i64]).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM run_events WHERE event_type='run.output' AND rowid NOT IN (SELECT rowid FROM run_events WHERE event_type='run.output' ORDER BY rowid DESC LIMIT 10000)", []).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn record_output(id: &str, text: &str) -> Result<(), String> {
-    let text = crate::sessions::redact_sensitive_text(text);
-    let tail: String = text
-        .chars()
-        .rev()
-        .take(2000)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    record_event(&db()?, id, "run.output", Some(&tail))
+    use std::sync::{OnceLock, mpsc};
+    static OUTPUT: OnceLock<mpsc::SyncSender<(String, String)>> = OnceLock::new();
+    let send = OUTPUT.get_or_init(|| {
+        let (send, receive) = mpsc::sync_channel::<(String, String)>(128);
+        std::thread::spawn(move || {
+            let mut conn = None;
+            let mut pending: std::collections::HashMap<String, String> = Default::default();
+            loop {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                while let Ok((id, text)) = receive.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                    if pending.len() >= 64 && !pending.contains_key(&id) { continue; }
+                    let buffer = pending.entry(id).or_default();
+                    buffer.push_str(&text);
+                    if buffer.len() > 65536 {
+                        let start = buffer.len() - 32768;
+                        let start = buffer.char_indices().find(|(i, c)| *i >= start && c.is_whitespace()).map(|(i, c)| i+c.len_utf8()).unwrap_or(buffer.len());
+                        buffer.drain(..start);
+                    }
+                    if std::time::Instant::now() >= deadline { break; }
+                }
+                if pending.is_empty() { continue; }
+                if conn.is_none() { conn = db().ok(); }
+                if let Some(db) = &conn {
+                    let _ = db.busy_timeout(std::time::Duration::from_millis(250));
+                    for (id, text) in &mut pending {
+                        let _ = persist_output(db, id, text);
+                        let end = text.char_indices().rev().find(|(_, c)| c.is_whitespace()).map(|(i, c)| i+c.len_utf8()).unwrap_or(0);
+                        text.drain(..end);
+                    }
+                    pending.retain(|_, text| !text.is_empty());
+                } else { pending.clear(); }
+            }
+        });
+        send
+    });
+    // 拥堵时只丢诊断副本，不阻塞/丢失实际终端输出。
+    let _ = send.try_send((id.into(), text.into()));
+    Ok(())
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1446,20 +1811,41 @@ pub struct RunEventDto {
     payload: Option<String>,
     created_at: String,
 }
+fn map_run_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunEventDto> {
+    Ok(RunEventDto {
+        id: r.get(0)?,
+        run_id: r.get(1)?,
+        event_type: r.get(2)?,
+        payload: r.get(3)?,
+        created_at: r.get(4)?,
+    })
+}
+
 #[tauri::command]
 pub fn run_events(id: String) -> Result<Vec<RunEventDto>, String> {
     let conn = db()?;
     let mut stmt = conn.prepare("SELECT id,run_id,event_type,payload,created_at FROM run_events WHERE run_id=?1 ORDER BY rowid").map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([id], |r| {
-            Ok(RunEventDto {
-                id: r.get(0)?,
-                run_id: r.get(1)?,
-                event_type: r.get(2)?,
-                payload: r.get(3)?,
-                created_at: r.get(4)?,
-            })
-        })
+        .query_map([id], map_run_event)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn task_goal_events(project_root: Option<String>) -> Result<Vec<RunEventDto>, String> {
+    let conn = db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.id, e.run_id, e.event_type, e.payload, e.created_at
+             FROM run_events e
+             INNER JOIN runs r ON r.id = e.run_id
+             WHERE (?1 IS NULL OR r.project_root=?1)
+               AND e.event_type IN ('task.review_notes', 'task.outputs_adopted')
+             ORDER BY e.rowid",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([project_root], map_run_event)
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
@@ -1479,19 +1865,21 @@ pub fn reconcile_stale_runs() -> Result<usize, String> {
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
     drop(stmt);
-    for id in &ids {
-        close_at(
-            &tx,
-            id,
-            None,
-            "failed",
-            None,
-            Some("应用上次异常退出，Run 未能正常收尾"),
-        )?;
-    }
+    let closed = reconcile_ids(&tx, &lease_dir()?, &ids)?;
     tx.commit().map_err(|e| e.to_string())?;
-    Ok(ids.len())
+    Ok(closed)
 }
+fn reconcile_ids(conn: &Connection, dir: &Path, ids: &[String]) -> Result<usize, String> {
+    let mut closed = 0;
+    for id in ids {
+        // 只有确实无人持有的 Run 才是陈旧运行；OS 锁随进程退出释放。
+        let Some(_lease) = try_run_lease(dir, id)? else { continue; };
+        close_at(conn, id, None, "failed", None, Some("应用上次异常退出，Run 未能正常收尾"))?;
+        closed += 1;
+    }
+    Ok(closed)
+}
+
 #[tauri::command]
 pub fn run_open(input: OpenRunInput) -> Result<RunDto, String> {
     open_run_impl(input)
@@ -1508,6 +1896,10 @@ pub fn run_list(project_root: Option<String>) -> Result<Vec<RunDto>, String> {
         [project_root],
     )
 }
+pub(crate) fn has_active_run_in(path: &str) -> Result<bool, String> {
+    Ok(query_runs(&db()?, "WHERE closed_at IS NULL AND status IN ('starting','running')", [])?
+        .iter().any(|r| crate::paths::path_within(&r.isolation_path, path)))
+}
 // 仅入口允许用旧键查身份，页面之间绝不传 tabId/reuseKey。
 #[tauri::command]
 pub fn run_find(
@@ -1518,6 +1910,25 @@ pub fn run_find(
     Ok(query_runs(&db()?,"WHERE (?1 IS NOT NULL AND reuse_key=?1 AND closed_at IS NULL) OR (?2 IS NOT NULL AND agent=?2 AND session_id=?3) ORDER BY created_at DESC LIMIT 1",
         params![reuse_key,agent,session_id])?.into_iter().next())
 }
+#[tauri::command]
+pub async fn active_background_runs() -> Result<Vec<RunDto>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let conn = db()?;
+        let mut out = Vec::new();
+        for id in crate::process::active_capture_ids() {
+            if let Some(run) = get_run_at(&conn, &id)? { if run.runtime == "headless" { out.push(run); } }
+        }
+        Ok(out)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn run_cancel(id: String) -> Result<(), String> {
+    let run = run_get(id.clone())?.ok_or("Run 不存在")?;
+    if run.runtime != "headless" { return Err("交互终端请使用终端停止按钮".into()); }
+    crate::process::cancel_capture(&id)
+}
+
 #[tauri::command]
 pub fn run_close(
     id: String,
@@ -1653,6 +2064,84 @@ pub fn run_open_custom(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_events_are_bounded_without_deleting_lifecycle_events() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        record_event(&conn, "r", "run.started", None).unwrap();
+        for i in 0..OUTPUT_EVENT_CAP + 5 { persist_output(&conn, "r", &format!("line {i}\n")).unwrap(); }
+        let count: i64 = conn.query_row("SELECT count(*) FROM run_events WHERE run_id='r' AND event_type='run.output'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, OUTPUT_EVENT_CAP as i64);
+        let lifecycle: i64 = conn.query_row("SELECT count(*) FROM run_events WHERE event_type='run.started'", [], |r| r.get(0)).unwrap();
+        assert_eq!(lifecycle, 1);
+        assert!(output_tail("sk-partial").is_empty());
+        assert!(!output_tail("sk-supersecrettoken123456\n").contains("sk-supersecrettoken"));
+    }
+
+    #[test]
+    fn run_lease_distinguishes_live_from_stale_and_releases_on_drop() {
+        let dir = std::env::temp_dir().join(format!("ccode-run-lease-{}", uuid::Uuid::new_v4()));
+        let live = try_run_lease(&dir, "run1").unwrap().unwrap();
+        assert!(try_run_lease(&dir, "run1").unwrap().is_none());
+        assert!(try_run_lease(&dir, "run2").unwrap().is_some());
+        drop(live);
+        assert!(try_run_lease(&dir, "run1").unwrap().is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_skips_live_run_and_closes_stale_run() {
+        let dir = std::env::temp_dir().join(format!("ccode-run-reconcile-{}", uuid::Uuid::new_v4()));
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute("INSERT INTO tasks(id,identity_key,kind,name,created_at,updated_at) VALUES('task','task','scratch','task','now','now')", []).unwrap();
+        for id in ["live", "stale"] {
+            conn.execute("INSERT INTO runs(id,task_id,task_kind,isolation_path,runtime,agent,permission,created_at,status) VALUES(?1,'task','scratch','/tmp','local_cli','test','discuss','now','running')", [id]).unwrap();
+        }
+        let live = try_run_lease(&dir, "live").unwrap().unwrap();
+        assert_eq!(reconcile_ids(&conn, &dir, &["live".into(), "stale".into()]).unwrap(), 1);
+        let status = |id| conn.query_row("SELECT status FROM runs WHERE id=?1", [id], |r| r.get::<_, String>(0)).unwrap();
+        assert_eq!(status("live"), "running");
+        assert_eq!(status("stale"), "failed");
+        drop(live);
+        assert_eq!(reconcile_ids(&conn, &dir, &["live".into()]).unwrap(), 1);
+        assert_eq!(status("live"), "failed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resume_by_id_tolerates_unspecified_identity_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute("INSERT INTO tasks(id,identity_key,kind,name,created_at,updated_at) VALUES('task','user:目标','free_research','目标X','now','now')", []).unwrap();
+        conn.execute("INSERT INTO runs(id,task_id,task_kind,task_ref,isolation_path,runtime,agent,permission,created_at,status,reuse_key) VALUES('run','task','free_research','目标X','/tmp/ccode-task-runs/task/x','local_cli','claude-code','write_tree','now','running','task:task')", []).unwrap();
+        let input = |kind: Option<&str>, task_ref: Option<&str>| OpenRunInput {
+            id: Some("run".into()),
+            task_id: None,
+            project_root: None,
+            task_kind: kind.map(Into::into),
+            task_ref: task_ref.map(Into::into),
+            isolation_path: "/tmp/ccode-task-runs/task/x".into(),
+            runtime: Some("local_cli".into()),
+            agent: "claude-code".into(),
+            profile_id: None,
+            permission: Some("write_tree".into()),
+            reuse_key: Some("task:task".into()),
+            session_id: None,
+            custom_runtime_id: None,
+            internal: Some(false),
+            sentinel: Some(false),
+        };
+        // 恢复带 id 且未显式给 kind/ref（open_run_impl 对 id 命中不再推断）：
+        // 不与已登记值比较，直接复用同一 Run
+        let resumed = open_at(&conn, input(None, None)).unwrap();
+        assert_eq!(resumed.id, "run");
+        assert_eq!(resumed.task_kind, "free_research");
+        // 显式给了不一致身份（修复前推断结果就是 scratch/目录名）仍拒绝
+        let err = open_at(&conn, input(Some("scratch"), Some("x"))).unwrap_err();
+        assert!(err.contains("不一致"), "{err}");
+    }
 
     #[test]
     fn custom_runtime_on_scratch_is_not_isolated_write() {
@@ -1833,6 +2322,85 @@ mod tests {
     }
 
     #[test]
+    fn adopt_second_file_failure_rolls_back_first() {
+        let root =
+            std::env::temp_dir().join(format!("ccode-task-adopt-rb-{}", uuid::Uuid::new_v4()));
+        let source = root.join("run");
+        let target = root.join("project");
+        let adopt = root.join("adopt-state");
+        std::fs::create_dir_all(source.join("notes")).unwrap();
+        std::fs::create_dir_all(target.join("notes")).unwrap();
+        std::fs::write(source.join("notes/first.md"), "new-first").unwrap();
+        std::fs::write(target.join("notes/first.md"), "old-first").unwrap();
+        std::fs::write(source.join("notes/second.md"), "new-second").unwrap();
+        std::fs::write(target.join("notes/second.md"), "old-second").unwrap();
+        TEST_ADOPT_ROOT.with(|c| *c.borrow_mut() = Some(adopt));
+        let mut remaining = 1;
+        let result = adopt_selected_with_writer(
+            "run-1",
+            &source,
+            &target,
+            &["notes/first.md".into(), "notes/second.md".into()],
+            |src, dst| {
+                if remaining == 0 {
+                    return Err("injected failure".into());
+                }
+                remaining -= 1;
+                copy_adopt_file(src, dst)
+            },
+        );
+        TEST_ADOPT_ROOT.with(|c| *c.borrow_mut() = None);
+        assert!(result.unwrap_err().contains("injected failure"));
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes/first.md")).unwrap(),
+            "old-first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes/second.md")).unwrap(),
+            "old-second"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adopt_detects_concurrent_change_and_rolls_back() {
+        let root =
+            std::env::temp_dir().join(format!("ccode-task-adopt-race-{}", uuid::Uuid::new_v4()));
+        let source = root.join("run");
+        let target = root.join("project");
+        let adopt = root.join("adopt-state");
+        std::fs::create_dir_all(source.join("notes")).unwrap();
+        std::fs::create_dir_all(target.join("notes")).unwrap();
+        std::fs::write(source.join("notes/first.md"), "new-first").unwrap();
+        std::fs::write(target.join("notes/first.md"), "old-first").unwrap();
+        std::fs::write(source.join("notes/second.md"), "new-second").unwrap();
+        std::fs::write(target.join("notes/second.md"), "old-second").unwrap();
+        TEST_ADOPT_ROOT.with(|c| *c.borrow_mut() = Some(adopt));
+        let second = target.join("notes/second.md");
+        let result = adopt_selected_with_writer(
+            "run-2",
+            &source,
+            &target,
+            &["notes/first.md".into(), "notes/second.md".into()],
+            |src, dst| {
+                copy_adopt_file(src, dst)?;
+                if dst.ends_with("first.md") {
+                    std::fs::write(&second, "external").unwrap();
+                }
+                Ok(())
+            },
+        );
+        TEST_ADOPT_ROOT.with(|c| *c.borrow_mut() = None);
+        assert!(result.unwrap_err().contains("采纳期间变化"));
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes/first.md")).unwrap(),
+            "old-first"
+        );
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "external");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn specified_output_existing_file_is_modified_not_rejected() {
         let root =
             std::env::temp_dir().join(format!("ccode-task-specified-{}", uuid::Uuid::new_v4()));
@@ -1848,5 +2416,12 @@ mod tests {
         assert_eq!(changes[0].path, "notes/result.md");
         assert_eq!(changes[0].kind, "modified");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn protected_paths_block_descendant_files() {
+        let protected = vec!["数据/raw".to_string()];
+        assert!(crate::projects::path_is_protected("数据/raw/a.csv", &protected));
+        assert!(!crate::projects::path_is_protected("论文/综述.md", &protected));
     }
 }

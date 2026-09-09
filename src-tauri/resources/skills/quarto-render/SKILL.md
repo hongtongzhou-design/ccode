@@ -1,6 +1,6 @@
 ---
 name: quarto-render
-description: Quarto 稿件渲染规范。当用户要求把 manuscript/ 下的 .md/.qmd 渲染为 PDF/docx/html，或论文流水线中「渲染成稿」一步时使用。先 quarto check 确认环境，渲染产物写入产物目录（不进 git），缺依赖按序引导安装，报错按归属处理并走修复-验证闭环，渲染成功后验收产物并在 Ccode 改动面板「登记产物」记入提货单。
+description: Quarto 稿件渲染规范。当用户要求把 manuscript/ 下的 .md/.qmd 渲染为 PDF/docx/html，或论文流水线中「渲染成稿」一步时使用。先 quarto check 确认环境，渲染产物写入产物目录（不进 git），缺依赖按序引导安装，报错按归属处理并走修复-验证闭环，渲染成功后验收产物并在 Mesa 改动面板「登记产物」记入提货单。
 outputs: [output/]
 ---
 
@@ -79,7 +79,7 @@ quarto render manuscript/<稿件>.md --to pdf      # 或 .qmd / docx / html
 - 产物文件存在且非零字节；
 - 统计残留 undefined citation/reference 类 warning 条数，写进渲染说明。
 
-验收通过后，建议用户经 **Ccode 改动面板「登记产物」** 把 PDF 记入工作区提货单（`artifacts.yaml`）——产物本体不进 git，清单随分支传给下一步。Agent 本身不直接改 `artifacts.yaml`。
+验收通过后，建议用户经 **Mesa 改动面板「登记产物」** 把 PDF 记入工作区提货单（`artifacts.yaml`）——产物本体不进 git，清单随分支传给下一步。Agent 本身不直接改 `artifacts.yaml`。
 
 ## 产出格式
 

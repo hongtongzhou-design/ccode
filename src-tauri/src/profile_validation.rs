@@ -6,7 +6,6 @@ use crate::profiles::{self, Profile, ProfileStore};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(20);
@@ -227,7 +226,7 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
                 "{label} 仅支持会话内原生命令切换（如 /effort），启动与写盘均不携带"
             )),
             other => Some(format!(
-                "当前 Agent 对 {label} 的协议支持状态为 {other}，不会由 Ccode 强行注入"
+                "当前 Agent 对 {label} 的协议支持状态为 {other}，不会由 Mesa 强行注入"
             )),
         }
     };
@@ -419,60 +418,15 @@ fn run_capture(
     cmd: &mut crate::process::BackgroundCommand,
     timeout: Duration,
 ) -> Result<String, String> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("启动 CLI 失败: {e}"))?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let out_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stdout.take() {
-            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-        }
-        buf
-    });
-    let err_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stderr.take() {
-            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-        }
-        buf
-    });
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout =
-                    String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
-                let stderr =
-                    String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
-                let detail = if stderr.trim().is_empty() {
-                    stdout
-                } else {
-                    stderr
-                };
-                if status.success() {
-                    return Ok(tail_chars(detail.trim(), 1200));
-                }
-                return Err(format!(
-                    "CLI 退出码 {:?}: {}",
-                    status.code(),
-                    tail_chars(detail.trim(), 1200)
-                ));
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                // 连带杀子孙：Windows 上包装层（cmd /d /c call）之下的 CLI 才是持有
-                // 管道写端的那个，只杀包装层会让下面两个 join 永久阻塞
-                crate::pty::kill_process_tree(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = crate::process::join_with_timeout(out_handle, Duration::from_secs(2));
-                let _ = crate::process::join_with_timeout(err_handle, Duration::from_secs(2));
-                return Err(format!("CLI 预检超时（{} 秒）", timeout.as_secs()));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => return Err(format!("等待 CLI 失败: {e}")),
-        }
-    }
+    let captured = crate::process::capture_command(cmd, timeout, 1024 * 1024)?;
+    if captured.cancelled { return Err("CLI 预检已取消".into()); }
+    if captured.timed_out { return Err(format!("CLI 预检超时（{} 秒）", timeout.as_secs())); }
+    if captured.truncated { return Err("CLI 预检输出超过 1 MB 安全上限".into()); }
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+    if captured.status.is_some_and(|s| s.success()) { return Ok(tail_chars(detail.trim(), 1200)); }
+    Err(format!("CLI 退出码 {:?}: {}", captured.status.and_then(|s| s.code()), tail_chars(detail.trim(), 1200)))
 }
 
 fn codex_config_args(plan: &agents::LaunchPlan) -> Vec<String> {
@@ -793,14 +747,15 @@ fn chat_url(base: &str, kind: ApiKind) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
-/// 探针请求体：stream 控制流式；with_policy 时把 profile 请求策略按协议字段名带上。
+/// 探针请求体：stream 控制流式。思考档与采样必须分开发，避免一个字段失败株连另一个。
 /// anthropic 的 effort 没有线协议字段，CLI 内部翻译成 thinking 块——探针同样翻译成
 /// thinking.enabled（budget 1024，max_tokens 同步抬到 2048 满足 > budget 的协议要求）
 fn probe_body(
     kind: ApiKind,
     model: &str,
     policy: &profiles::RequestPolicy,
-    with_policy: bool,
+    include_effort: bool,
+    include_sampling: bool,
     stream: bool,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
@@ -808,33 +763,25 @@ fn probe_body(
         "messages": [{ "role": "user", "content": "ping" }],
         "stream": stream,
     });
-    let max_tokens = if with_policy {
-        policy.max_output_tokens.unwrap_or(16)
-    } else {
-        16
-    };
-    match kind {
-        ApiKind::Anthropic => {
-            body["max_tokens"] = serde_json::json!(max_tokens);
-        }
-        _ => {
-            body["max_tokens"] = serde_json::json!(max_tokens);
-        }
-    }
-    if with_policy {
+    let mut max_tokens = 16u64;
+    body["max_tokens"] = serde_json::json!(max_tokens);
+    if include_sampling {
         if let Some(v) = policy.temperature {
             body["temperature"] = serde_json::json!(v);
         }
         if let Some(v) = policy.top_p {
             body["top_p"] = serde_json::json!(v);
         }
+    }
+    if include_effort {
         if let Some(effort) = policy.reasoning_effort.as_deref() {
             match kind {
                 ApiKind::Anthropic => {
                     body["thinking"] =
                         serde_json::json!({ "type": "enabled", "budget_tokens": 1024 });
                     if max_tokens <= 1024 {
-                        body["max_tokens"] = serde_json::json!(2048);
+                        max_tokens = 2048;
+                        body["max_tokens"] = serde_json::json!(max_tokens);
                     }
                     let _ = effort; // 档位本身不进 anthropic 请求体，只体现为 thinking 开关
                 }
@@ -1015,15 +962,17 @@ async fn probe_loaded_profile(
     };
 
     let policy = &profile.request_policy;
-    let has_policy = policy.temperature.is_some()
-        || policy.top_p.is_some()
-        || policy.max_output_tokens.is_some()
-        || policy.reasoning_effort.is_some();
+    let has_effort = policy.reasoning_effort.as_deref().is_some_and(|s| !s.is_empty());
+    let has_sampling = policy.temperature.is_some() || policy.top_p.is_some();
     let mut checks = Vec::new();
 
     // ① 基础请求：鉴权 + 模型存在（不流式、不带策略）
     let started = Instant::now();
-    let basic = send_probe(build(probe_body(kind, &model, policy, false, false), false)).await;
+    let basic = send_probe(build(
+        probe_body(kind, &model, policy, false, false, false),
+        false,
+    ))
+    .await;
     let basic_ok = matches!(&basic, Ok(o) if o.status.is_success());
     checks.push(match &basic {
         Ok(o) if o.status.is_success() => {
@@ -1043,7 +992,7 @@ async fn probe_loaded_profile(
     let basic_latency = checks.last().and_then(|c| c.latency_ms).map(|n| n as u64);
     if !basic_ok {
         // 基础请求挂了，流式/参数探测无意义
-        for label in ["流式响应", "请求策略参数", "自定义 Header"] {
+        for label in ["流式响应", "思考档参数", "采样参数", "自定义 Header"] {
             checks.push(check(
                 "skipped",
                 format!("{label}：基础请求未通过，跳过"),
@@ -1086,8 +1035,11 @@ async fn probe_loaded_profile(
 
     // ② 流式：裸 stream:true，看网关回不回 SSE
     let started = Instant::now();
-    let bare_stream = send_probe(build(probe_body(kind, &model, policy, false, true), false)).await;
-    let bare_sse = matches!(&bare_stream, Ok(o) if o.status.is_success() && o.sse);
+    let bare_stream = send_probe(build(
+        probe_body(kind, &model, policy, false, false, true),
+        false,
+    ))
+    .await;
     checks.push(match &bare_stream {
         Ok(o) if o.status.is_success() && o.sse => check(
             "passed",
@@ -1114,36 +1066,41 @@ async fn probe_loaded_profile(
         ),
     });
 
-    // ③ 请求策略参数：带上策略再发流式，对比 ② 定位「加参数就不流式」
-    let started = Instant::now();
-    if !has_policy {
-        checks.push(check("skipped", "请求策略参数：未配置请求策略字段", None));
-    } else {
-        let with_policy =
-            send_probe(build(probe_body(kind, &model, policy, true, true), false)).await;
-        checks.push(match &with_policy {
-            Ok(o) if o.status.is_success() && o.sse => check(
-                "passed",
-                "请求策略参数：被接受且保持流式",
-                Some(started.elapsed().as_millis()),
-            ),
-            Ok(o) if o.status.is_success() => check(
-                "failed",
-                "请求策略参数：被接受（HTTP 200）但响应不再流式——疑似网关对带参请求降级，这正是不流式的触发源",
-                Some(started.elapsed().as_millis()),
-            ),
-            Ok(o) => check(
-                "failed",
-                format!("请求策略参数：被拒（HTTP {}）：{}", o.status, o.error_tail),
-                Some(started.elapsed().as_millis()),
-            ),
-            Err(e) => check(
-                "failed",
-                format!("请求策略参数：{e}"),
-                Some(started.elapsed().as_millis()),
-            ),
-        });
-    }
+    // ③ 思考档、采样分开发：一个模型拒 effort 不得关掉温度。
+    append_policy_probe_check(
+        &mut checks,
+        if has_effort {
+            let started = Instant::now();
+            Some((
+                started,
+                send_probe(build(
+                    probe_body(kind, &model, policy, true, false, true),
+                    false,
+                ))
+                .await,
+            ))
+        } else {
+            None
+        },
+        "思考档参数",
+    );
+    append_policy_probe_check(
+        &mut checks,
+        if has_sampling {
+            let started = Instant::now();
+            Some((
+                started,
+                send_probe(build(
+                    probe_body(kind, &model, policy, false, true, true),
+                    false,
+                ))
+                .await,
+            ))
+        } else {
+            None
+        },
+        "采样参数",
+    );
 
     // ④ 自定义 Header：带上解析后的 header 发一次基础请求
     let started = Instant::now();
@@ -1156,8 +1113,11 @@ async fn probe_loaded_profile(
             .filter(|var| std::env::var(var).map(|v| v.is_empty()).unwrap_or(true))
             .map(String::as_str)
             .collect();
-        let with_headers =
-            send_probe(build(probe_body(kind, &model, policy, false, false), true)).await;
+        let with_headers = send_probe(build(
+            probe_body(kind, &model, policy, false, false, false),
+            true,
+        ))
+        .await;
         let suffix = if unresolved.is_empty() {
             String::new()
         } else {
@@ -1189,39 +1149,46 @@ async fn probe_loaded_profile(
     }
 
     let ok = checks.iter().all(|c| c.status != "failed");
-    if let Some(gid) = profile.gateway_id.clone() {
-        let slot =
-            crate::gateway_store::slot_for_agent(&profile.agent, profile.protocol.as_deref());
-        let st = |prefix: &str| -> crate::profiles::ProbeStatus {
-            match checks.iter().find(|c| c.message.starts_with(prefix)) {
-                Some(c) if c.status == "passed" => crate::profiles::ProbeStatus::Passed,
-                Some(c) if c.status == "failed" => crate::profiles::ProbeStatus::Failed,
-                _ => crate::profiles::ProbeStatus::Never,
-            }
-        };
-        let rec = crate::profiles::ProbeRecord {
-            slot: slot.as_str().into(),
-            model: Some(model.clone()),
-            url_fp: format!("{:x}", md5::compute(base.as_bytes())),
-            key_fp: if key.as_deref().is_some_and(|k| !k.is_empty()) {
-                "has".into()
-            } else {
-                "none".into()
-            },
-            streaming: st("流式"),
-            effort: st("请求策略"),
-            headers: st("自定义 Header"),
-            basic: st("基础请求"),
-            probed_at: crate::sessions::now_iso(),
-            latency_ms: checks
-                .iter()
-                .find(|c| c.message.starts_with("基础请求"))
-                .and_then(|c| c.latency_ms)
-                .map(|n| n as u64),
-        };
-        let _ = store.record_probe(&gid, rec);
-    }
+    persist_slot_probe(
+        store,
+        &profile,
+        &model,
+        &base,
+        key.as_deref(),
+        &checks,
+        basic_latency,
+        false,
+    );
     Ok(GatewayProbeDto { ok, model, checks })
+}
+
+fn append_policy_probe_check(
+    checks: &mut Vec<ValidationCheckDto>,
+    outcome: Option<(Instant, Result<ProbeOutcome, String>)>,
+    label: &str,
+) {
+    let Some((started, outcome)) = outcome else {
+        checks.push(check("skipped", format!("{label}：未配置"), None));
+        return;
+    };
+    checks.push(match &outcome {
+        Ok(o) if o.status.is_success() && o.sse => check(
+            "passed",
+            format!("{label}：被接受且保持流式"),
+            Some(started.elapsed().as_millis()),
+        ),
+        Ok(o) if o.status.is_success() => check(
+            "failed",
+            format!("{label}：被接受（HTTP 200）但响应不再流式——疑似网关对带参请求降级"),
+            Some(started.elapsed().as_millis()),
+        ),
+        Ok(o) => check(
+            "failed",
+            format!("{label}：被拒（HTTP {}）：{}", o.status, o.error_tail),
+            Some(started.elapsed().as_millis()),
+        ),
+        Err(e) => check("failed", format!("{label}：{e}"), Some(started.elapsed().as_millis())),
+    });
 }
 
 fn persist_slot_probe(
@@ -1248,14 +1215,11 @@ fn persist_slot_probe(
     let mut rec = crate::profiles::ProbeRecord {
         slot: slot.as_str().into(),
         model: Some(model.to_string()),
-        url_fp: format!("{:x}", md5::compute(base.as_bytes())),
-        key_fp: if key.is_some_and(|k| !k.is_empty()) {
-            "has".into()
-        } else {
-            "none".into()
-        },
+        url_fp: crate::gateway_store::url_fingerprint(base),
+        key_fp: crate::gateway_store::key_presence_fp(key.is_some_and(|k| !k.is_empty())),
         streaming: st("流式"),
-        effort: st("请求策略"),
+        effort: st("思考档"),
+        sampling: st("采样"),
         headers: st("自定义 Header"),
         basic: st("基础请求"),
         probed_at: crate::sessions::now_iso(),
@@ -1266,11 +1230,17 @@ fn persist_slot_probe(
             if let Some(prev) = gws.iter().find(|g| g.id == gid).and_then(|g| {
                 g.last_probe
                     .iter()
-                    .filter(|p| p.slot == rec.slot)
+                    .filter(|p| {
+                        p.slot == rec.slot
+                            && p.model == rec.model
+                            && p.url_fp == rec.url_fp
+                            && p.key_fp == rec.key_fp
+                    })
                     .max_by_key(|p| p.probed_at.as_str())
             }) {
                 rec.streaming = prev.streaming;
                 rec.effort = prev.effort;
+                rec.sampling = prev.sampling;
                 rec.headers = prev.headers;
             }
         }
@@ -1352,6 +1322,45 @@ mod tests {
             model_sync_note: None,
             provider_override: None,
         }
+    }
+
+    #[test]
+    fn probe_body_splits_effort_and_sampling() {
+        let mut policy = crate::profiles::RequestPolicy::default();
+        policy.temperature = Some(0.4);
+        policy.top_p = Some(0.8);
+        policy.reasoning_effort = Some("high".into());
+        let sampling = probe_body(
+            ApiKind::OpenAi,
+            "m",
+            &policy,
+            false,
+            true,
+            true,
+        );
+        assert_eq!(sampling["temperature"], serde_json::json!(0.4));
+        assert_eq!(sampling["top_p"], serde_json::json!(0.8));
+        assert!(sampling.get("reasoning_effort").is_none());
+        let effort = probe_body(
+            ApiKind::OpenAi,
+            "m",
+            &policy,
+            true,
+            false,
+            true,
+        );
+        assert_eq!(effort["reasoning_effort"], serde_json::json!("high"));
+        assert!(effort.get("temperature").is_none());
+        let anth = probe_body(
+            ApiKind::Anthropic,
+            "m",
+            &policy,
+            true,
+            false,
+            true,
+        );
+        assert!(anth.get("thinking").is_some());
+        assert!(anth.get("temperature").is_none());
     }
 
     #[test]

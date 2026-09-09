@@ -99,7 +99,7 @@ export default function TerminalStatusBar({
   const dim = `${fg}99`; // 60% 弱化
   const faint = `${fg}66`; // 40% 最弱
 
-  // 模型显示名：用户经状态栏切换后的内存态覆盖（CLI 内部状态 Ccode 不回读）
+  // 模型显示名：用户经状态栏切换后的内存态覆盖（CLI 内部状态 Mesa 不回读）
   const [modelOverride, setModelOverride] = useState<string | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const tabKey = status

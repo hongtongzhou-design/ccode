@@ -1,3 +1,6 @@
+import ResearchEvidencePanel from "./ResearchEvidencePanel";
+import ResearchDecisionFields from "./ResearchDecisionFields";
+import { researchReportPatterns } from "../research-report";
 import { useEffect, useMemo, useReducer, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -173,7 +176,9 @@ export default function KickoffConfirmDialog({
     { text: "", dirty: false } satisfies TaskMdEditorState,
   );
   const [editorReady, setEditorReady] = useState(false);
-  const gate = decisionGate(stepNow, editor.text);
+  const [evidenceRevision, setEvidenceRevision] = useState<string | null>(null);
+  useEffect(() => { setEvidenceRevision(null); }, [stepNow.workspaceName]);
+  const gate = decisionGate(stepNow, editor.text, evidenceRevision);
   const [decisionAck, setDecisionAck] = useState<string | null>(null);
   // 合同或未答问题变了，旧确认自动失效。
   const decisionSignature = JSON.stringify([stepNow.workspaceName, gate.missing, editor.text]);
@@ -555,6 +560,14 @@ export default function KickoffConfirmDialog({
           </div>
         )}
 
+        {(stepNow.decisions?.length ?? 0) > 0 && <>
+          <ResearchEvidencePanel key={`${projectPath}:${stepNow.workspaceName}`} root={projectPath} patterns={researchReportPatterns(stepNow, "decision")} kind="decision"
+            onFingerprint={setEvidenceRevision} />
+          <ResearchDecisionFields decisions={stepNow.decisions ?? []} text={editor.text} disabled={busy || !editorReady}
+            evidenceRevision={evidenceRevision}
+            onChange={(text) => dispatchEditor({ type: "edit", text })} />
+        </>}
+
         {profiles.length === 0 ? (
           <p className="mb-3 text-xs text-l2">
             还没有可用连接。
@@ -861,7 +874,11 @@ export default function KickoffConfirmDialog({
         {(gate.blocked || gate.needsAck) && (
           <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-warn-text">
             待拍板：{gate.missing.join("、")}。
-            {gate.blocked ? "硬暂停：完成决策项后才能开工。" : "软暂停：建议先回答；再次确认只允许先做不依赖这些答案的工作。"}
+            {gate.blocked
+              ? `硬暂停：${gate.gaps.map((g) => `${g.q}（${g.reason === "legacy" ? "旧纯文本需重选状态" : g.reason === "stale" ? "依据已变，需重新确认" : g.reason === "wait" ? "待补证据" : g.reason === "reject" ? "不批准" : "未选择状态并填写说明"}）`).join("、")}。待补或不批准不能开工。`
+              : gate.prepareOnly
+                ? "当前决定只允许准备，不能当作正式开工授权。"
+                : "软暂停：建议先回答；再次确认只允许先做不依赖这些答案的工作。"}
           </p>
         )}
 
@@ -902,7 +919,7 @@ export default function KickoffConfirmDialog({
               : !launch
                 ? "先加连接"
                 : gate.needsAck && !needsDecisionAck
-                  ? "先做无依赖工作"
+                  ? gate.prepareOnly ? "仅开始准备" : "先做无依赖工作"
                   : prevClosing.length > 0 && closingAcked
                   ? "仍要开工"
                   : "确认开始"}

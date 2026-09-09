@@ -1,3 +1,5 @@
+use tauri::Manager;
+
 mod agent_specs;
 mod agents;
 mod ai;
@@ -22,6 +24,7 @@ mod journal_metrics;
 mod lit_watch;
 mod logbuf;
 mod mcp;
+mod mcp_blender;
 mod model_registry;
 mod models;
 mod paths;
@@ -34,7 +37,9 @@ mod profiles;
 mod projects;
 mod provider_id;
 mod pty;
+mod pty_input;
 mod reader;
+mod research_quality;
 mod runs;
 mod runtime;
 mod scheduler;
@@ -42,6 +47,7 @@ mod session_search;
 mod session_transfer;
 mod sessions;
 mod settings;
+mod storage;
 mod sheet_preview;
 mod skills;
 mod tray;
@@ -49,10 +55,15 @@ mod updater;
 mod usage;
 mod workspaces;
 mod ws_settings;
+mod watch_review;
 mod zotero;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    static CLOSE_DIALOG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static ALLOW_CLOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static EXIT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static EXIT_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     diagnostics::start_process_monitor();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -81,6 +92,21 @@ pub fn run() {
                 logbuf::record("warn", "tray", &format!("托盘初始化失败: {e}"));
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if process::capture_count() > 0 && !ALLOW_CLOSE.load(std::sync::atomic::Ordering::Acquire) {
+                    use tauri_plugin_dialog::DialogExt;
+                    api.prevent_close();
+                    if CLOSE_DIALOG_OPEN.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+                    let window = window.clone();
+                    window.app_handle().dialog().message("仍有后台任务运行，退出将终止这些任务。确认退出？")
+                        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel).show(move |ok| {
+                            CLOSE_DIALOG_OPEN.store(false, std::sync::atomic::Ordering::Release);
+                            if ok { ALLOW_CLOSE.store(true, std::sync::atomic::Ordering::Release); let _ = window.close(); }
+                        });
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             profiles::list_profiles,
@@ -124,7 +150,9 @@ pub fn run() {
             model_registry::download_model_db,
             model_registry::model_capability_brief,
             global_config::check_global_drift,
+            global_config::preview_profile_global,
             global_config::apply_profile_global,
+            global_config::set_global_conflict,
             global_config::codex_register_client_provider,
             global_config::codex_unregister_client_provider,
             global_config::codex_client_registered_profiles,
@@ -137,15 +165,19 @@ pub fn run() {
             runs::run_open,
             runs::run_open_custom,
             runs::run_close,
+            runs::run_cancel,
+            runs::active_background_runs,
             runs::run_attach_session,
             artifacts::run_artifacts,
             runs::run_get,
             runs::run_list,
             runs::run_find,
             runs::run_events,
+            runs::task_goal_events,
             runs::task_get,
             runs::task_list,
             runs::task_create,
+            runs::task_delete,
             runs::task_prepare_run,
             runs::task_output_changes,
             runs::task_adopt_outputs,
@@ -216,8 +248,14 @@ pub fn run() {
             mcp::parse_mcp_json,
             mcp::mcp_command_path_status,
             mcp::resolve_mcp_command_fix,
+            mcp_blender::probe_blender_mcp_setup,
             fs_tree::list_dir,
             fs_tree::read_file_preview,
+            research_quality::research_run_reproduce,
+            research_quality::research_get_run,
+            research_quality::research_read_run_file,
+            research_quality::research_save_acceptance,
+            research_quality::research_get_acceptance,
             fs_tree::save_file_preview,
             fs_tree::watch_dir,
             fs_tree::unwatch_dir,
@@ -292,6 +330,7 @@ pub fn run() {
             projects::delete_project_dir,
             projects::purge_project_traces,
             projects::read_project_config,
+            projects::read_project_status,
             projects::write_project_config,
             projects::update_step_skills,
             projects::read_task_draft,
@@ -385,7 +424,9 @@ pub fn run() {
             scheduler::update_schedule,
             scheduler::delete_schedule,
             scheduler::run_schedule_now,
+            scheduler::cancel_schedule_run,
             scheduler::adopt_watch_run,
+            watch_review::watch_run_snapshot,
             scheduler::start_watch_skill_draft,
             scheduler::list_watch_skill_drafts,
             scheduler::read_watch_skill_draft,
@@ -418,6 +459,24 @@ pub fn run() {
             reader::remove_glossary_entry,
             reader::append_note_translation,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if EXIT_READY.load(std::sync::atomic::Ordering::Acquire) { return; }
+                api.prevent_exit();
+                if EXIT_STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    process::shutdown_captures();
+                    app.state::<pty::PtyManager>().shutdown();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while process::capture_count() > 0 && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    EXIT_READY.store(true, std::sync::atomic::Ordering::Release);
+                    app.exit(code.unwrap_or(0));
+                });
+            }
+        });
 }

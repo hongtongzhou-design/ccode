@@ -138,21 +138,52 @@ test("体检时间标签：ISO → MM-DD HH:mm，认不出原样返回", () => {
 test("体检行文案：检测中 / 正常带耗时与 detail / 失败给原因 / 沉淀结果带时间前缀", () => {
   assert.equal(mcpHealthText(undefined), null, "未检测过不显示");
   assert.equal(mcpHealthText("checking"), "正在检测连通性…");
-  const ok = mcpHealthText({ ok: true, latencyMs: 123, error: null, detail: "fs@1.0" });
+  const ok = mcpHealthText({
+    ok: true,
+    latencyMs: 123,
+    error: null,
+    detail: "fs@1.0",
+    status: "handshake",
+  });
   assert.equal(ok, "连通正常 · fs@1.0 · 123ms\n点击重新检测");
+  // reachable 细分：地址可达但握手未确认，不说「连通正常」
+  const reachable = mcpHealthText({
+    ok: true,
+    latencyMs: 45,
+    error: null,
+    detail: "HTTP 405",
+    status: "reachable",
+  });
+  assert.match(reachable ?? "", /^地址可达，握手未确认 · HTTP 405 · 45ms/);
+  // 认证失败 / 路径错误：ok=false，error 文案直出
+  const auth = mcpHealthText({
+    ok: false,
+    latencyMs: 30,
+    error: "认证失败（HTTP 401）：密钥未设置、未注入或被服务端拒绝",
+    detail: null,
+    status: "auth",
+  });
+  assert.match(auth ?? "", /认证失败/);
   const fail = mcpHealthText({
     ok: false,
     latencyMs: 8123,
     error: "8 秒未响应 initialize（超时）",
     detail: null,
+    status: "error",
   });
   assert.match(fail ?? "", /8 秒未响应/);
   assert.match(fail ?? "", /点击重新检测/);
+  // 沉淀结果没有 status 字段（lastCheck 不落它）：维持 ok/error 两层文案，不虚构细分
   const persisted = mcpHealthText(
     { ok: false, latencyMs: 8123, error: "超时", detail: null },
     "2026-09-03T08:05:11Z",
   );
   assert.match(persisted ?? "", /^上次检测（09-03 08:05）：/, "沉淀结果必须与实时结果可区分");
+  const persistedOk = mcpHealthText(
+    { ok: true, latencyMs: 50, error: null, detail: "HTTP 200 OK" },
+    "2026-09-03T08:05:11Z",
+  );
+  assert.match(persistedOk ?? "", /连通正常 · HTTP 200 OK/, "无 status 时按原口径");
 });
 
 test("缺失变量签名：去重 + 排序，同组变量任意顺序同签名", () => {

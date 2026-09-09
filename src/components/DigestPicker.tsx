@@ -252,7 +252,7 @@ export default function DigestPicker({
       await writeBackIfChanged();
       const profile = targetProfile(t);
       if (!profile) {
-        setLocalError(`${agentLabel(t.id)} 没有可用的 Ccode 配置`);
+        setLocalError(`${agentLabel(t.id)} 没有可用的 Mesa 配置`);
         return;
       }
       await invoke("digest_external_terminal", {

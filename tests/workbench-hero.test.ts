@@ -9,6 +9,7 @@ import {
   pickWorkbenchHero,
   pickWorkbenchNow,
   taskLabelForRun,
+  workbenchNowSubtitle,
   workbenchRecentRows,
   workbenchRecentSessions,
   WORKBENCH_RECENT_LIMIT,
@@ -342,6 +343,39 @@ test("namedSessionTitle 丢掉未命名对话", () => {
   assert.equal(namedSessionTitle({ customTitle: "方向", title: "hi" }), "方向");
   assert.equal(namedSessionTitle({ customTitle: null, title: "  " }), null);
   assert.equal(namedSessionTitle({ customTitle: null, title: null }), null);
+  assert.equal(namedSessionTitle({ customTitle: null, title: "未命名对话" }), null);
+  assert.equal(
+    namedSessionTitle({
+      customTitle: null,
+      title: "https://example.com/a",
+      summary: "网页美观度对标顶尖AI网站",
+    }),
+    "网页美观度对标顶尖AI网站",
+  );
+});
+
+test("workbenchNowSubtitle prefers pending review over step fallback", () => {
+  assert.deepEqual(
+    workbenchNowSubtitle({
+      tasks: [{ name: "整理数据", status: "pending_review" }],
+      fallback: "文献检索",
+    }),
+    { subtitle: "项目现在：整理数据待验收", needsYou: true },
+  );
+  assert.deepEqual(
+    workbenchNowSubtitle({
+      tasks: [{ name: "写周报", status: "running" }],
+      fallback: "最近有文档对话",
+    }),
+    { subtitle: "项目现在：写周报进行中", needsYou: true },
+  );
+  assert.deepEqual(
+    workbenchNowSubtitle({
+      tasks: [{ name: "记下", status: "pending" }],
+      fallback: "文献检索",
+    }),
+    { subtitle: "文献检索", needsYou: false },
+  );
 });
 
 test("最近项目：已添加用注册名，外部仓库标未添加", () => {
@@ -588,4 +622,208 @@ test("正在进行：同一项目两次 Run 都挂在卡上，待确认排前面
     ["api", "ui"],
   );
   assert.equal(items[0]?.runs[0]?.taskLabel, "feature/login-api");
+});
+
+test("正在进行：隔离目标副本按 runId/taskId 归到真实项目，不单独成卡", () => {
+  const staging =
+    "/Users/me/Library/Application Support/ccode/task-runs/task-1/9f9b0a-staging";
+  const items = pickWorkbenchNow({
+    seeds: [
+      {
+        path: ccode.path,
+        name: ccode.name,
+        registered: true,
+        workMode: "coding",
+        subtitle: null,
+        needsYou: false,
+      },
+    ],
+    runs: [
+      run({
+        tabId: "goal",
+        running: true,
+        attention: "working",
+        cwd: staging,
+        reuseKey: "task:task-1",
+        runId: "run-1",
+        taskId: "task-1",
+      }),
+    ],
+    attribution: {
+      runProjects: { "run-1": ccode.path },
+      taskProjects: { "task-1": ccode.path },
+    },
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.path, ccode.path);
+  assert.equal(items[0]?.registered, true);
+  assert.equal(items[0]?.runs[0]?.tabId, "goal");
+});
+
+test("正在进行：重启恢复的标签没有 reuseKey，按 runId 或 taskId 归属", () => {
+  const staging = "/x/ccode/task-runs/task-2/uuid-staging";
+  const seed = {
+    path: ccode.path,
+    name: ccode.name,
+    registered: true,
+    workMode: "coding" as const,
+    subtitle: null,
+    needsYou: false,
+  };
+  const byRunId = pickWorkbenchNow({
+    seeds: [seed],
+    runs: [run({ tabId: "r1", running: true, cwd: staging, runId: "run-2" })],
+    attribution: { runProjects: { "run-2": ccode.path } },
+  });
+  assert.equal(byRunId.length, 1);
+  assert.equal(byRunId[0]?.path, ccode.path);
+  const byTaskId = pickWorkbenchNow({
+    seeds: [seed],
+    runs: [run({ tabId: "r2", running: true, cwd: staging, taskId: "task-2" })],
+    attribution: { taskProjects: { "task-2": ccode.path } },
+  });
+  assert.equal(byTaskId.length, 1);
+  assert.equal(byTaskId[0]?.path, ccode.path);
+});
+
+test("正在进行：归属表外的隔离目录仍按 cwd 单独成卡（不猜）", () => {
+  const items = pickWorkbenchNow({
+    seeds: [
+      {
+        path: ccode.path,
+        name: ccode.name,
+        registered: true,
+        workMode: "coding",
+        subtitle: null,
+        needsYou: false,
+      },
+    ],
+    runs: [run({ tabId: "x", running: true, cwd: "/tmp/scratch" })],
+    attribution: { runProjects: {}, taskProjects: {} },
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.path, "/tmp/scratch");
+  assert.equal(items[0]?.registered, false);
+});
+
+test("正在进行：已退出/未启动的保留标签留在卡上但不算运行数", () => {
+  const items = pickWorkbenchNow({
+    seeds: [
+      {
+        path: ccode.path,
+        name: ccode.name,
+        registered: true,
+        workMode: "coding",
+        subtitle: null,
+        needsYou: false,
+        extraRoots: ["/Users/me/ccode/worktrees/Ccode/login"],
+      },
+    ],
+    runs: [
+      run({
+        tabId: "dead",
+        reuseKey: "lane:/Users/me/ccode/worktrees/Ccode/login",
+        running: false,
+        shell: true,
+        attention: null,
+        cwd: "/Users/me/ccode/worktrees/Ccode/login",
+      }),
+    ],
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.runs.length, 1);
+  assert.equal(items[0]?.runs[0]?.live, false);
+  assert.equal(items[0]?.runningCount, 0);
+});
+
+test("主卡：保留标签不冒充运行数，进程活着才算", () => {
+  const hero = pickWorkbenchHero({
+    projects: [ccode],
+    recentRepos: [],
+    workspaces: [],
+    runs: [
+      run({
+        tabId: "dead",
+        reuseKey: "lane:/t",
+        running: false,
+        attention: null,
+        cwd: ccode.path,
+      }),
+      run({
+        tabId: "busy",
+        running: true,
+        attention: "working",
+        cwd: ccode.path,
+      }),
+    ],
+    contextName: null,
+  });
+  assert.equal(hero?.runs.length, 2);
+  assert.equal(hero?.runningCount, 1);
+  assert.equal(hero?.tabId, "busy");
+});
+
+test("同名项目：有上下文路径时按路径选，不按名字取首项", () => {
+  const hero = pickWorkbenchHero({
+    projects: [
+      { path: "/a/demo", name: "演示" },
+      { path: "/b/demo", name: "演示" },
+    ],
+    recentRepos: [],
+    workspaces: [],
+    runs: [],
+    contextName: "演示",
+    contextPath: "/b/demo",
+  });
+  assert.equal(hero?.path, "/b/demo");
+  assert.equal(hero?.source, "context");
+});
+
+test("同名项目且无上下文路径：不猜首项，回落最近项目", () => {
+  const hero = pickWorkbenchHero({
+    projects: [
+      { path: "/a/demo", name: "演示" },
+      { path: "/b/demo", name: "演示" },
+    ],
+    recentRepos: [{ path: "/b/demo", name: "演示" }],
+    workspaces: [],
+    runs: [],
+    contextName: "演示",
+  });
+  assert.equal(hero?.source, "recent-registered");
+  assert.equal(hero?.path, "/b/demo");
+});
+
+test("唯一同名项目仍可按显示名命中上下文", () => {
+  const hero = pickWorkbenchHero({
+    projects: [
+      { path: "/a/demo", name: "演示" },
+      { path: "/b/other", name: "别的" },
+    ],
+    recentRepos: [],
+    workspaces: [],
+    runs: [],
+    contextName: "演示",
+  });
+  assert.equal(hero?.path, "/a/demo");
+  assert.equal(hero?.source, "context");
+});
+
+test("最近对话：内部 / 归档 / 无头 / 阅读注入会话不进列表", () => {
+  const listed = workbenchRecentSessions([
+    { customTitle: "正常对话", title: null },
+    { customTitle: "定时巡检", title: null, internal: true },
+    { customTitle: "旧对话", title: null, archived: true },
+    {
+      customTitle: null,
+      title: "你是科研文献快筛助手，请筛选以下文献",
+      projectPath: "/p",
+    },
+    { customTitle: "无头摘要", title: null, source: "ccode-ai" },
+    { customTitle: "阅读注入", title: "【阅读上下文】某篇论文" },
+  ]);
+  assert.deepEqual(
+    listed.map((s) => s.customTitle),
+    ["正常对话"],
+  );
 });

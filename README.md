@@ -1,7 +1,7 @@
-# Ccode
+# Mesa
 
 <p>
-  <img src="icon/icon-v3-01-emerald-mint.png" width="96" alt="Ccode icon" />
+  <img src="icon/icon-v3-01-emerald-mint.png" width="96" alt="Mesa icon" />
 </p>
 
 <p>
@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" /></a>
 </p>
 
-**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）：底层是九个终端 agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研流程（读文献 → 整数据 → 做图 → 写论文）。AI 负责干活，Ccode 负责管活，人负责拍板。
+**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）：底层是九个终端 agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研流程（读文献 → 整数据 → 做图 → 写论文）。AI 负责干活，Mesa 负责管活，人负责拍板。
 
 为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 九个终端 agent 管理多套 API 配置（端点/密钥/模型）与官方账号登录，内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览；在此之上提供项目研究流程（模板 + 一键开步）、任务工作区评审、PDF/笔记阅读写作与用量成本统计。
 
@@ -34,11 +34,11 @@
 
 | 平台 | 选哪个 | 说明 |
 |---|---|---|
-| macOS（Apple 芯片 M1/M2/M3/M4） | `Ccode_x.x.x_aarch64.dmg` | 目前唯一 macOS 包；Intel Mac 暂需自行 `npm run tauri build` 构建 |
-| Windows | `Ccode_x.x.x_x64-setup.exe` | 推荐，安装向导简单；`x64_en-US.msi` 适合企业批量部署，二选一即可 |
-| Linux（Debian/Ubuntu） | `Ccode_x.x.x_amd64.deb` | `sudo dpkg -i` 安装 |
-| Linux（Fedora/RHEL/openSUSE） | `Ccode-x.x.x-1.x86_64.rpm` | `sudo rpm -i` 安装 |
-| Linux（其他发行版） | `Ccode_x.x.x_amd64.AppImage` | 免安装，chmod +x 后直接运行 |
+| macOS（Apple 芯片 M1/M2/M3/M4） | `Mesa_x.x.x_aarch64.dmg` | 目前唯一 macOS 包；Intel Mac 暂需自行 `npm run tauri build` 构建 |
+| Windows | `Mesa_x.x.x_x64-setup.exe` | 推荐，安装向导简单；`x64_en-US.msi` 适合企业批量部署，二选一即可 |
+| Linux（Debian/Ubuntu） | `Mesa_x.x.x_amd64.deb` | `sudo dpkg -i` 安装 |
+| Linux（Fedora/RHEL/openSUSE） | `Mesa-x.x.x-1.x86_64.rpm` | `sudo rpm -i` 安装 |
+| Linux（其他发行版） | `Mesa_x.x.x_amd64.AppImage` | 免安装，chmod +x 后直接运行 |
 
 其余 `.sig`、`latest.json`、`.app.tar.gz` 是应用内自动更新用的签名文件，**不用手动下载**。
 
@@ -46,7 +46,7 @@
 
 > **macOS 注意**：应用暂未做 Apple 签名公证，首次打开如提示「已损坏」，终端执行：
 > ```bash
-> xattr -cr /Applications/Ccode.app
+> xattr -cr /Applications/Mesa.app
 > ```
 
 之后的版本更新：打开应用后若有新版本，顶栏「待处理」会出现提醒，也可在「设置 → 更新」查看说明并一键下载安装（完成后自动重启）。

@@ -1,3 +1,4 @@
+import { sanitizeDocumentHtml } from "../document-html";
 import { useRef, useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { marked } from "marked";
@@ -7,11 +8,16 @@ import { confirmDialog } from "./ConfirmDialog";
 import { Checkbox, FoldMark } from "./PageFrame";
 import { buildStepFlow, type StepFlowNode } from "../step-flow";
 import {
-  parseDecisions,
+  DECISION_STATUS,
+  formatDecisionAnswer,
   isDecisionsOnly,
+  parseDecisionAnswer,
+  parseDecisions,
   recommendedAnswers,
   unansweredDecisions,
   upsertDecisions,
+  decisionGate,
+  type DecisionStatus,
 } from "../step-decisions";
 import { useHumanTasks, RegisterOfferRow } from "./HumanTasksList";
 import { buildWorkspaceTerminalRequest } from "../pipeline-start";
@@ -106,7 +112,8 @@ export default function StepFlow({
   openSeeds?: string[];
   /** agent 节点「开始」= 打开开工确认弹层 */
   onStart: () => void;
-  /** 示例课题精读：主按钮「开读这一篇」进沉浸阅读，开始仍在旁边 */
+  /** 仅示例课题精读步：主按钮「开读这一篇」进沉浸阅读，开始仍在旁边。
+   *  父级必须用 demoReadPaperResource 门控，普通模板不得传入。 */
   onReadPaper?: () => void;
   readPaperPrimary?: boolean;
   /** 人工事项勾选/交付后通知父级（流程线橙点等外部计数重取） */
@@ -120,7 +127,7 @@ export default function StepFlow({
   onSeedDraft?: () => Promise<void>;
   /** 「预览/编辑 TASK.md」的统一加载（v3.90）：返回展示内容——已有编辑内容读文件全文，
    *  否则给模板拼装（只读展示不落盘，保存才落地）。由卡片区实现（它有 cfg 与拼装出处） */
-  onLoadTaskMd?: () => Promise<string>;
+  onLoadTaskMd?: () => Promise<{ text: string; revision: string | null }>;
   /** discuss 节点内嵌内容（想法区）：讨论的事全归这个节点，不在流程线外另立并列区块 */
   discussContent?: React.ReactNode;
   /** 项目的文献来源（project.toml lit_source）：zotero/folder 时，落点在 papers/ 的人工事项
@@ -191,17 +198,20 @@ export default function StepFlow({
   const draftHasBody =
     !!draft?.text?.trim() && !isDecisionsOnly(draft.text ?? "");
   const pendingDecisions = unansweredDecisions(decisions, answered);
+  const decisionGaps = decisionGate(step, draft?.text ?? "").missing;
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [decisionError, setDecisionError] = useState<string | null>(null);
   // 「自己写」行内输入：选项不合适时多半只是想填一句自己的答案，
   // 为这个开终端太贵——真要展开讨论才走「开聊」
-  // 决策项折叠态（v3.89）：默认收起——它们不拦开工，摊开像必办清单
+  // 决策区默认收起；hard_pause 的未答项由开工弹层明确拦截。
   const [decisionsOpen, setDecisionsOpen] = useState(false);
   // 方式二折叠态（v3.90）：与方式一同款——默认收起一行，展开才露「跟 AI 商量一下」
   const [chatOpen, setChatOpen] = useState(false);
-  const [writeOwn, setWriteOwn] = useState<{ q: string; text: string } | null>(
-    null,
-  );
+  const [writeOwn, setWriteOwn] = useState<{
+    q: string;
+    text: string;
+    status: DecisionStatus | "";
+  } | null>(null);
   // 草稿弹层的呈现方式：编辑（textarea，主用途）/ 预览（渲染 markdown，长草稿好读）
   const [draftPreview, setDraftPreview] = useState(false);
 
@@ -213,7 +223,7 @@ export default function StepFlow({
     setDecisionError(null);
     try {
       // 以磁盘上的最新草稿为基（agent 可能刚改过），不拿组件里可能过期的那份
-      const cur = await invoke<{ relPath: string; text: string | null }>(
+      const cur = await invoke<{ relPath: string; text: string | null; revision: string | null }>(
         "read_task_draft",
         { projectRoot: projectPath, stepName: step.name },
       );
@@ -221,6 +231,7 @@ export default function StepFlow({
         projectRoot: projectPath,
         stepName: step.name,
         content: upsertDecisions(cur?.text ?? "", answers),
+        expectedRevision: cur?.revision ?? null,
       });
       onDraftChanged?.();
     } catch (reason) {
@@ -282,6 +293,7 @@ export default function StepFlow({
     /** 打开时读到的原文，用来判断是否有未保存改动 */
     origin: string;
     text: string;
+    revision: string | null;
     /** true = 还没有编辑内容，显示的是模板拼装（保存才创建文件）；「在终端里打开」此时无文件可开 */
     fromTemplate: boolean;
     saving: boolean;
@@ -291,11 +303,13 @@ export default function StepFlow({
   const draftHtml = useMemo(
     () =>
       draftEdit?.text
-        ? marked.parse(draftEdit.text, {
-            gfm: true,
-            breaks: false,
-            async: false,
-          })
+        ? sanitizeDocumentHtml(
+            marked.parse(draftEdit.text, {
+              gfm: true,
+              breaks: false,
+              async: false,
+            }) as string,
+          )
         : "",
     [draftEdit?.text],
   );
@@ -306,13 +320,14 @@ export default function StepFlow({
   }, [draftHtml]);
 
   async function openDraftInline() {
-    setDraftEdit({ origin: "", text: "", fromTemplate: false, saving: false, error: null });
+    setDraftEdit({ origin: "", text: "", revision: null, fromTemplate: false, saving: false, error: null });
     try {
       if (onLoadTaskMd) {
-        const text = await onLoadTaskMd();
+        const loaded = await onLoadTaskMd();
         setDraftEdit({
-          origin: text,
-          text,
+          origin: loaded.text,
+          text: loaded.text,
+          revision: loaded.revision,
           fromTemplate: !draftHasBody,
           saving: false,
           error: null,
@@ -320,16 +335,17 @@ export default function StepFlow({
         return;
       }
       // 无加载回调的兜底（StepFlow 目前仅卡片区使用，正常不会走到）
-      const cur = await invoke<{ relPath: string; text: string | null }>(
+      const cur = await invoke<{ relPath: string; text: string | null; revision: string | null }>(
         "read_task_draft",
         { projectRoot: projectPath, stepName: step.name },
       );
       const text = cur?.text ?? "";
-      setDraftEdit({ origin: text, text, fromTemplate: !text.trim(), saving: false, error: null });
+      setDraftEdit({ origin: text, text, revision: cur?.revision ?? null, fromTemplate: !text.trim(), saving: false, error: null });
     } catch (reason) {
       setDraftEdit({
         origin: "",
         text: "",
+        revision: null,
         fromTemplate: false,
         saving: false,
         error: String(reason),
@@ -339,15 +355,24 @@ export default function StepFlow({
 
   async function saveDraftInline() {
     if (!draftEdit || draftEdit.saving) return;
+    const submitted = draftEdit.text;
+    const expected = draftEdit.revision;
     setDraftEdit({ ...draftEdit, saving: true, error: null });
     try {
-      await invoke("write_task_draft", {
+      const saved = await invoke<{ relPath: string; revision: string | null }>("write_task_draft", {
         projectRoot: projectPath,
         stepName: step.name,
-        content: draftEdit.text,
+        content: submitted,
+        expectedRevision: expected,
       });
-      setDraftEdit(null);
       onDraftChanged?.();
+      setDraftEdit((s) => {
+        if (!s) return s;
+        if (s.text !== submitted) {
+          return { ...s, origin: submitted, revision: saved.revision, saving: false, error: null };
+        }
+        return null;
+      });
     } catch (reason) {
       setDraftEdit((s) =>
         s ? { ...s, saving: false, error: String(reason) } : s,
@@ -401,7 +426,7 @@ export default function StepFlow({
     hasDraft,
     runStatus,
     litSource,
-    pendingDecisions: pendingDecisions.length,
+    pendingDecisions: decisionGaps.length,
   });
   const seeds = step.discussionSeeds ?? [];
 
@@ -517,7 +542,7 @@ export default function StepFlow({
         }
         return runStatus === "pending" ? (
           // 唯一主路径（v3.89）：上面那些题都不拦着开工，所以「开始」必须比它们显眼一档。
-          // 示例课题精读：主按钮改成「开读这一篇」，开始仍可用。
+          // 仅示例课题精读：主按钮改成「开读这一篇」，开始仍可用。普通模板不应传入 onReadPaper。
           <span className="flex shrink-0 items-center gap-1.5">
             {onReadPaper && (
               <button
@@ -762,11 +787,11 @@ export default function StepFlow({
                     className="flex min-w-0 items-center gap-1 text-xs text-l3 hover:text-l1"
                   >
                     <FoldMark open={decisionsOpen} boxed />
-                    {pendingDecisions.length > 0
-                      ? `直接选择（${pendingDecisions.length} 项待定）`
+                    {decisionGaps.length > 0
+                      ? `直接选择（${decisionGaps.length} 项待定）`
                       : "直接选择（已定）"}
                   </button>
-                  {pendingDecisions.length > 0 && (
+                  {pendingDecisions.some((d) => d.options.length > 0) && (
                     <button
                       type="button"
                       disabled={decisionBusy}
@@ -785,6 +810,7 @@ export default function StepFlow({
                 {decisionsOpen &&
                   decisions.map((d) => {
                   const picked = answered.get(d.q.trim());
+                  const pickedRecord = picked ? parseDecisionAnswer(picked) : null;
                   return (
                     <div
                       key={d.q}
@@ -796,7 +822,7 @@ export default function StepFlow({
                         {d.q}
                       </span>
                       {d.options.map((opt) => {
-                        const on = picked === opt;
+                        const on = picked === opt || (pickedRecord?.status === "approve" && pickedRecord.note === opt);
                         return (
                           <button
                             key={opt}
@@ -804,7 +830,7 @@ export default function StepFlow({
                             disabled={decisionBusy}
                             onClick={() =>
                               void commitDecisions([
-                                { q: d.q, answer: opt },
+                                { q: d.q, answer: formatDecisionAnswer("approve", opt) },
                               ])
                             }
                             title={
@@ -824,16 +850,22 @@ export default function StepFlow({
                       })}
                       {/* 自己写的答案不在选项里：单独显示成同款选中 chip，
                           否则填完看不到任何选中态，像是没生效 */}
-                      {picked && !d.options.includes(picked) && (
+                      {picked && !d.options.some((opt) => picked === opt || (pickedRecord?.status === "approve" && pickedRecord.note === opt)) && (
                         <button
                           type="button"
                           onClick={() =>
-                            setWriteOwn({ q: d.q, text: picked })
+                            setWriteOwn({
+                              q: d.q,
+                              text: pickedRecord?.note ?? picked,
+                              status: pickedRecord && pickedRecord.status !== "legacy" ? pickedRecord.status : "",
+                            })
                           }
                           title="你自己写的答案，点击可改"
                           className="rounded-full border border-cta-bd bg-cta-pill px-2 py-0.5 text-xs text-cta-pill-text hover:brightness-110"
                         >
-                          {picked}
+                          {pickedRecord && pickedRecord.status !== "legacy"
+                            ? `${DECISION_STATUS[pickedRecord.status]}：${pickedRecord.note || "（无说明）"}`
+                            : picked}
                         </button>
                       )}
                       <button
@@ -842,13 +874,17 @@ export default function StepFlow({
                           setWriteOwn(
                             writeOwn?.q === d.q
                               ? null
-                              : { q: d.q, text: picked ?? "" },
+                              : {
+                                  q: d.q,
+                                  text: pickedRecord?.note ?? picked ?? "",
+                                  status: pickedRecord && pickedRecord.status !== "legacy" ? pickedRecord.status : "",
+                                },
                           )
                         }
                         title="选项都不合适：自己写一句，或展开去聊"
                         className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
                       >
-                        其他…
+                        {d.options.length > 0 ? "其他…" : "填写依据…"}
                       </button>
                     </div>
                   );
@@ -856,19 +892,29 @@ export default function StepFlow({
                 {/* 自己写：写完直接进草稿，和点选项同一条路径，不开终端 */}
                 {writeOwn && (
                   <form
-                    className="flex items-center gap-1.5 pt-0.5"
+                    className="flex flex-wrap items-center gap-1.5 pt-0.5"
                     onSubmit={(e) => {
                       e.preventDefault();
                       const answer = writeOwn.text.trim();
-                      if (!answer) return;
+                      if (!writeOwn.status || !answer) return;
                       void commitDecisions([
-                        { q: writeOwn.q, answer },
+                        { q: writeOwn.q, answer: formatDecisionAnswer(writeOwn.status, answer) },
                       ]).then(() => setWriteOwn(null));
                     }}
                   >
                     <span className="shrink-0 text-micro text-l4">
                       {writeOwn.q}
                     </span>
+                    <select
+                      value={writeOwn.status}
+                      onChange={(e) => setWriteOwn({ ...writeOwn, status: e.target.value as DecisionStatus | "" })}
+                      className="rounded-sm border border-field bg-canvas px-1.5 py-0.5 text-xs text-l1"
+                    >
+                      <option value="">选择状态</option>
+                      {(Object.keys(DECISION_STATUS) as DecisionStatus[]).map((key) => (
+                        <option key={key} value={key}>{DECISION_STATUS[key]}</option>
+                      ))}
+                    </select>
                     <input
                       autoFocus
                       value={writeOwn.text}
@@ -878,12 +924,12 @@ export default function StepFlow({
                       onKeyDown={(e) => {
                         if (e.key === "Escape") setWriteOwn(null);
                       }}
-                      placeholder="自己写一句，回车写进草稿"
+                      placeholder="说明范围／版本／证据，回车写进草稿"
                       className="min-w-0 flex-1 rounded-sm border border-field bg-canvas px-1.5 py-0.5 text-xs text-l1 outline-none focus:border-cta-bd"
                     />
                     <button
                       type="submit"
-                      disabled={decisionBusy || !writeOwn.text.trim()}
+                      disabled={decisionBusy || !writeOwn.status || !writeOwn.text.trim()}
                       className="shrink-0 rounded-sm border border-cta-bd bg-cta px-1.5 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
                     >
                       记下
@@ -1061,7 +1107,7 @@ export default function StepFlow({
       {flow.nodes.some((n) => n.section === "optional") && (
         <>
           <div className="mt-2 flex items-center gap-2">
-            <span className="shrink-0 text-micro text-l4">可选（不做也能跑）</span>
+            <span className="shrink-0 text-micro text-l4">可选</span>
             <span className="h-px min-w-0 flex-1 bg-hairline" />
           </div>
           <ol className="mt-1 space-y-0.5">

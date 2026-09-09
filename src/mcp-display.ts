@@ -121,7 +121,7 @@ export function mcpDistBadge(state: string | undefined): McpDistBadge | null {
       return mkBadge(
         "#8a8f98",
         "外部已禁用",
-        "在该 agent 侧被禁用，Ccode 清单不受影响；拨开开关重写条目即恢复启用",
+        "在该 agent 侧被禁用，Mesa 清单不受影响；拨开开关重写条目即恢复启用",
       );
     default:
       return null;
@@ -139,7 +139,7 @@ export function mcpCmdPathBadge(state: string | undefined): McpDistBadge | null 
       return mkBadge(
         "#d9930d",
         "相对路径命令",
-        "命令是相对路径，只有来源 CLI 在特定目录启动时才找得到——Ccode 内嵌终端拉起会启动失败。展开条目可用「修复为绝对路径」自动解析",
+        "命令是相对路径，只有来源 CLI 在特定目录启动时才找得到——Mesa 内嵌终端拉起会启动失败。展开条目可用「修复为绝对路径」自动解析",
       );
     case "missing":
       return mkBadge(
@@ -170,21 +170,28 @@ export function mcpCheckAtLabel(at: string): string {
   return m ? `${m[1]}-${m[2]} ${m[3]}:${m[4]}` : at;
 }
 
+/** HealthDot/mcpHealthText 消费的最小形状：实时结果带 status 细分；清单沉淀（lastCheck）
+ *  没落 status 字段，按可选处理——沉淀文案维持 ok/error 两层，不虚构细分 */
+export type McpHealthView = Pick<
+  McpHealthDto,
+  "ok" | "latencyMs" | "error" | "detail"
+> & { status?: McpHealthDto["status"] };
+
 /** 行内健康状态浮层文案（HealthDot 的 tooltip 与 aria 共用）：
- *  检测中 / 正常（detail + 耗时）/ 失败原因；checkedAt 有值 = 展示的是沉淀的上次结果，
- *  加「上次检测」前缀与实时结果区分；未检测过返回 null（无状态不渲染状态点） */
+ *  检测中 / 正常（握手成功；reachable 细分只说「地址可达」）/ 失败原因；
+ *  checkedAt 有值 = 展示的是沉淀的上次结果，加「上次检测」前缀与实时结果区分；
+ *  未检测过返回 null（无状态不渲染状态点） */
 export function mcpHealthText(
-  health:
-    | Pick<McpHealthDto, "ok" | "latencyMs" | "error" | "detail">
-    | "checking"
-    | undefined,
+  health: McpHealthView | "checking" | undefined,
   checkedAt?: string | null,
 ): string | null {
   if (!health) return null;
   if (health === "checking") return "正在检测连通性…";
   const prefix = checkedAt ? `上次检测（${mcpCheckAtLabel(checkedAt)}）：` : "";
   const body = health.ok
-    ? `连通正常${health.detail ? ` · ${health.detail}` : ""} · ${health.latencyMs}ms`
+    ? health.status === "reachable"
+      ? `地址可达，握手未确认${health.detail ? ` · ${health.detail}` : ""} · ${health.latencyMs}ms`
+      : `连通正常${health.detail ? ` · ${health.detail}` : ""} · ${health.latencyMs}ms`
     : (health.error ?? "检测失败");
   return `${prefix}${body}\n点击重新检测`;
 }

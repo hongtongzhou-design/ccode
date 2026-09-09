@@ -12,6 +12,78 @@ export const DECISIONS_HEADING = "## 已定方向";
 /** 小节内的答案行：`- 问题：答案`（全角冒号，与模板文案同一套标点） */
 const ANSWER_LINE = /^-\s*(.+?)：(.*)$/;
 
+/** 决定状态与说明分开；标签是闭集，不从「同意／拒绝」等自由文本猜测授权。 */
+export const DECISION_STATUS = {
+  approve: "批准指定范围",
+  prepare: "仅允许准备",
+  wait: "待补证据",
+  reject: "不批准",
+} as const;
+
+export type DecisionStatus = keyof typeof DECISION_STATUS;
+
+export interface DecisionRecord {
+  q: string;
+  /** 旧纯文本没有状态，不能当成已批准。 */
+  status: DecisionStatus | "legacy";
+  note: string;
+  boundRevision: string | null;
+}
+
+const STATUS_MARK = new RegExp(
+  `^\\[(${Object.values(DECISION_STATUS).join("|")})\\](?: 绑定:([0-9a-fA-F.]{8,64}))?(?:\\s+(.*))?$`,
+);
+
+const MARK_TO_STATUS = Object.fromEntries(
+  (Object.entries(DECISION_STATUS) as [DecisionStatus, string][]).map(([k, v]) => [v, k]),
+) as Record<string, DecisionStatus>;
+
+export function formatDecisionAnswer(
+  status: DecisionStatus,
+  note: string,
+  boundRevision?: string | null,
+): string {
+  const bind = boundRevision?.trim() ? ` 绑定:${boundRevision.trim()}` : "";
+  const text = note.trim();
+  return `[${DECISION_STATUS[status]}]${bind}${text ? ` ${text}` : ""}`;
+}
+
+export function parseDecisionAnswer(answer: string): Omit<DecisionRecord, "q"> {
+  const raw = answer.trim();
+  const match = STATUS_MARK.exec(raw);
+  if (!match) return { status: "legacy", note: raw, boundRevision: null };
+  return {
+    status: MARK_TO_STATUS[match[1]],
+    boundRevision: match[2] ?? null,
+    note: (match[3] ?? "").trim(),
+  };
+}
+
+export function parseDecisionRecords(draft: string): Map<string, DecisionRecord> {
+  const out = new Map<string, DecisionRecord>();
+  for (const [q, answer] of parseDecisions(draft)) {
+    out.set(q, { q, ...parseDecisionAnswer(answer) });
+  }
+  return out;
+}
+
+export function evidenceFingerprint(
+  reports: { path: string; revision: string | null }[],
+): string | null {
+  const parts = reports
+    .filter((r) => r.revision)
+    .map((r) => `${r.path}:${r.revision}`)
+    .sort();
+  if (!parts.length) return null;
+  const joined = parts.join("|");
+  let hash = 2166136261;
+  for (let i = 0; i < joined.length; i++) {
+    hash ^= joined.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 /** 定位已定方向小节的行区间 [start, end)；start = -1 表示草稿里还没有这个小节。
  *
  *  小节的结束 = 第一个「既不是空行、也不是答案行」的行。不能图省事写成「下一个 ## 标题或文件末尾」：
@@ -104,6 +176,19 @@ export function upsertDecisions(
   return [...before, ...pad, ...section, ...lines.slice(at)].join("\n");
 }
 
+/** 开工表单逐项编辑；清空时真正撤掉该答案，不保留旧批准，也不修改其他正文。 */
+export function setDecisionAnswer(draft: string, question: string, answer: string): string {
+  if (answer.trim()) return upsertDecisions(draft, [{ q: question, answer }]);
+  const lines = draft.split(/\r?\n/);
+  const { start, end } = locateSection(lines);
+  if (start < 0) return draft;
+  return lines.filter((line, index) => {
+    if (index <= start || index >= end) return true;
+    const match = ANSWER_LINE.exec(line.trim());
+    return !match || match[1].trim() !== question.trim();
+  }).join("\n");
+}
+
 /** 去掉「已定方向」小节后的剩余正文（trim 后） */
 export function stripDecisions(draft: string): string {
   const lines = draft.split(/\r?\n/);
@@ -158,20 +243,55 @@ export function unansweredDecisions(
   return decisions.filter((d) => !answered.has(d.q.trim()));
 }
 
-/** 开工门禁只认结构化答案，不从讨论种子或推荐选项推断用户授权。 */
+export type DecisionGapReason = "unanswered" | "legacy" | "stale" | "wait" | "reject";
+
+function gapReason(
+  record: DecisionRecord | undefined,
+  currentRevision: string | null,
+): DecisionGapReason | null {
+  if (!record) return "unanswered";
+  if (record.status === "legacy") return "legacy";
+  if (record.status === "wait") return "wait";
+  if (record.status === "reject") return "reject";
+  if ((record.status === "approve" || record.status === "prepare") && !record.note) {
+    return "unanswered";
+  }
+  if (
+    currentRevision &&
+    record.boundRevision &&
+    (record.status === "approve" || record.status === "prepare") &&
+    record.boundRevision !== currentRevision
+  ) {
+    return "stale";
+  }
+  return null;
+}
+
+/** 开工门禁认决定状态，不把非空说明或「同意／拒绝」关键词当成授权。
+ *  旧纯文本必须重新确认。证据版本变化后，已绑定的批准／准备失效。 */
 export function decisionGate(
   step: { decisionMode?: string; decisions?: StepDecisionDto[] },
   draft: string,
+  currentRevision?: string | null,
 ) {
   const mode = step.decisionMode === "hard_pause" || step.decisionMode === "soft_pause"
     ? step.decisionMode : "auto_continue";
-  const missing = unansweredDecisions(step.decisions ?? [], parseDecisions(draft)).map((d) => d.q.trim());
-  return {
-    mode,
-    missing,
-    blocked: mode === "hard_pause" && missing.length > 0,
-    needsAck: mode === "soft_pause" && missing.length > 0,
-  };
+  const records = parseDecisionRecords(draft);
+  const gaps: { q: string; reason: DecisionGapReason }[] = [];
+  let prepareOnly = false;
+  for (const d of step.decisions ?? []) {
+    const q = d.q.trim();
+    const record = records.get(q);
+    const reason = gapReason(record, currentRevision ?? null);
+    if (reason) gaps.push({ q, reason });
+    else if (record?.status === "prepare") prepareOnly = true;
+  }
+  const missing = gaps.map((g) => g.q);
+  const blocked = mode === "hard_pause" && gaps.length > 0;
+  const needsAck =
+    (mode === "soft_pause" && gaps.length > 0) ||
+    (mode === "hard_pause" && !blocked && prepareOnly);
+  return { mode, missing, gaps, blocked, needsAck, prepareOnly };
 }
 
 export function decisionPolicyText(mode: string | undefined): string {
@@ -181,7 +301,7 @@ export function decisionPolicyText(mode: string | undefined): string {
   if (mode === "soft_pause") {
     return "soft_pause：遇到待拍板问题，写入 .ccode/help-wanted.md 并暂停受影响的操作；只可推进无依赖、可逆的部分，等待人明确答复后恢复受影响的操作。";
   }
-  return "auto_continue：一般问题写入 .ccode/help-wanted.md 并附可逆兜底方案，可按兜底继续；涉及隐私、伦理、合规、主指标或不可逆操作时必须等待人明确授权，不得默认同意。";
+  return "auto_continue：一般问题写入 .ccode/help-wanted.md 并附可逆兜底方案，可按兜底继续；涉及目标/对象范围、关键处理规则、结论范围、隐私、伦理、合规、主指标或不可逆操作时必须等待人明确授权，不得默认同意。";
 }
 
 /** 「全部用推荐值」要写入的答案：未答项取首个选项（模板里首项即推荐值）；
@@ -192,5 +312,5 @@ export function recommendedAnswers(
 ): { q: string; answer: string }[] {
   return unansweredDecisions(decisions, answered)
     .filter((d) => d.options.length > 0)
-    .map((d) => ({ q: d.q.trim(), answer: d.options[0] }));
+    .map((d) => ({ q: d.q.trim(), answer: formatDecisionAnswer("approve", d.options[0]) }));
 }

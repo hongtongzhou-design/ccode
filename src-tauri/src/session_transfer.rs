@@ -1760,7 +1760,7 @@ fn apply_at(
             Ok(_) => {
                 let meta_warning = write_ccode_meta(entry)
                     .err()
-                    .map(|err| format!("会话文件已导入，但 Ccode 整理信息写入失败：{err}"));
+                    .map(|err| format!("会话文件已导入，但 Mesa 整理信息写入失败：{err}"));
                 existing.insert((entry.agent.clone(), entry.session_id.clone()));
                 imported += 1;
                 if entry.agent == "codex" {

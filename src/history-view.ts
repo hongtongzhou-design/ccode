@@ -48,11 +48,10 @@ export function translateHistoryEntry(
       stats: "",
     };
   }
-  if (entry.message.startsWith("Ccode:")) {
+  if (/^(Ccode|Mesa):/.test(entry.message)) {
     // 后端自动提交（档案卡/gitignore 等）：去掉前缀与结尾的「（自动）提交」避免语义重复
     const rest = entry.message
-      .slice("Ccode:".length)
-      .trim()
+      .replace(/^(Ccode|Mesa):\s*/, "")
       .replace(/(自动)?提交\s*$/, "")
       .trim();
     return { kind: "auto", icon: "⚙", title: `自动保存：${rest || "项目配置"}`, stats: fileStats(entry) };

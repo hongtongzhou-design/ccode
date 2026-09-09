@@ -2,6 +2,13 @@
 
 > 适用范围：TerminalPage、PTY 生命周期、评审/冲突覆盖层、收件箱与注意力标记、改动面板、键盘流、会话关联。从 AGENTS.md 迁入（原文照录，未做语义改动）。
 
+## 审计后的可靠性合同（2026-09-08）
+
+- 输入只在查找句柄时取 PTY 表锁；按请求到达顺序进每终端队列，队列写入/等待不占其它标签的锁，异常显示在终端错误区。正文+提交作为一个队列请求保留 60ms TUI 消化间隔。
+- 诊断输出副本不参与终端回显热路径，拥堵可丢诊断副本但不能影响实际终端；数据库输出事件有保留上限，不把它视为完整会话日志。
+- “停止运行”与应用退出都回收原生进程；后台任务入口在设置诊断区。新建/恢复的只讨论权限一致，缺能力不能降级成可写。
+- 文件树达到 2000 项上限必须提示“部分文件未列出”，保留搜索和子目录导航；编程工作树仍有活跃 Run/PTY 时不得删除。
+
 ## 终端行为（用户明确要求；配色 = VS Code Dark+ 调色板，集中在 `TerminalPage.tsx` 的 `theme` 一处）
 
 - **Run 与标签（v3.221 / v3.223 / v3.225）**：终端标签是一次 Run 的视图，不是身份。同一 `reuseKey` 只留一个活标签；标题先任务名（工作区/分支/文档）后 Agent（Agent 只在进程起来后的状态栏）。交互 `pty_spawn` 必先登记 `runs` 行（登录标签除外）；无头标 `internal` 不进工作台。启动入口用 `permission`（`discuss` / `write_tree`），旧 `readonly` 仅回落。重启白名单含 `runId`，仍禁 PTY/密钥/env。关标签后按 `runId` 恢复。细则 `docs/conventions/agent-workbench.md`。
@@ -17,12 +24,19 @@
 - **聊天资源入口不自动发送（v3.130）**：聊天 composer 的技能/MCP 菜单点击只插入提示文本并保留焦点，用户可继续补充后按 Enter 发送；不得直接调用发送链路。终端启动栏的技能/MCP 入口继续只写入 PTY 输入缓冲、不自动回车。全局命令面板/页面快捷键忽略 `input`、`textarea`、`select`、`contenteditable` 和 IME 组合输入。
 - **项目 rail 图标语义（v3.129）**：主项目使用 `FolderOpen`；绑定研究流程的工作区使用两位流程序号（01、02…），让步骤先后可扫读；未绑定流程的手动工作区使用 `GitBranch`。不使用抽象斜线或重复 Unicode 符号冒充步骤图标。
 
-- **外部终端安全临时复现（2026-08-21；2026-08-31 Windows 收口）**：外部恢复/提炼接力不得把 profile 密钥拼进命令、剪贴板、前端 IPC 或普通日志。前端只传明确选中的 `profileId`、模型、provider、会话 ID/提示词等非敏感元数据；缺少 `profileId` 时后端必须 fail-closed，不能静默取第一个配置。后端从 `ProfileStore` 读取密钥，复用 `agents::launch_plan`/`prepare_launch` 生成一次性 wrapper。Unix wrapper 存于 `<config>/ccode/external-launch/`（目录 0700、文件 0600，通过 `/bin/sh` 按路径执行），启动首行自删，失败立即清理，60 秒兜底删除。Windows 由设置页二选一（立即生效）：**cmd**（默认）走 `start "Ccode" /D <cwd> cmd.exe /K <binary> <args>`，密钥在父进程环境块经 start 继承、不写 ps1（命令行超过约 7000 字才写无密钥的 `.cmd`——批处理必须单字节编码：前两行 ASCII + `chcp 65001` 后按 UTF-8 读，禁 UTF-16/带 BOM）；**powershell** 走一次性 UTF-8 BOM 的 `.ps1` wrapper + `start powershell.exe -NoExit -File`。两条都经 **`background_command("cmd")` + `raw_arg` 直投 start**。五个坑都别改回去：① 预加引号的复合命令不能走 `Command::args`（Rust 加壳成 `\"`，cmd 对 /C 后文本不认反斜杠转义，start 把 `\"\"` 当程序名）；② 不能直接 spawn powershell/cmd + CREATE_NEW_CONSOLE（dev 实例从 npm/Git Bash 链路继承的 std 句柄是管道不是控制台，会遗传给子进程——TUI 写进管道、读不到键盘，新窗口只剩黑屏光标、agent 随即退出，grok 实测复现；start 经 ShellExecute 拉起时子进程 std 才挂到自己的新控制台）；③ 启动热路径不要同步 icacls（`%APPDATA%\ccode` 默认 ACL 已是当前用户）；④ **start 的窗口标题必须非空**（空标题下 GetConsoleTitleW 返回 0，旧版 libuv <1.52 的 uv_get_process_title 会 assert(process_title) 直接 abort——kimi 这类内嵌旧运行时的 CLI 必崩，win/util.c:412，实测复现）；⑤ **拉起后不能 output()/pipe 收尾**（start 的子进程继承 cmd 的管道句柄，read-to-EOF 会阻塞到用户关掉外部窗口，同步 command 堵死、整个应用未响应；start 立即返回，只 spawn+wait 收外层 cmd，毫秒级）。外层 cmd CREATE_NO_WINDOW 不可见，可见窗口由 start 创建——这是「用户明确打开外部终端」例外。Ghostty 运行中实例使用其原生 AppleScript `new surface configuration`/`new window`：工作目录单独写入 `initial working directory`，先启动 `/bin/sh`，再经 `initial input` 发送带 shell 引号的 wrapper 路径；不能把 `Application Support` 等带空格路径直接放进 `command`。该路径不依赖 System Events 辅助功能权限或剪贴板；未运行实例使用 `open -na`。iTerm/Terminal.app 只接收不含密钥的启动命令。复制命令继续保持全局配置模式，不自动携带 profile 密钥；Windows 复制的是 PowerShell 方言。
+- **外部终端安全临时复现（2026-08-21；2026-08-31 Windows 收口）**：外部恢复/提炼接力不得把 profile 密钥拼进命令、剪贴板、前端 IPC 或普通日志。前端只传明确选中的 `profileId`、模型、provider、会话 ID/提示词等非敏感元数据；缺少 `profileId` 时后端必须 fail-closed，不能静默取第一个配置。后端从 `ProfileStore` 读取密钥，复用 `agents::launch_plan`/`prepare_launch` 生成一次性 wrapper。Unix wrapper 存于 `<config>/ccode/external-launch/`（目录 0700、文件 0600，通过 `/bin/sh` 按路径执行），启动首行自删，失败立即清理，60 秒兜底删除。Windows 由设置页二选一（立即生效）：**cmd**（默认）走 `start "Mesa" /D <cwd> cmd.exe /K <binary> <args>`，密钥在父进程环境块经 start 继承、不写 ps1（命令行超过约 7000 字才写无密钥的 `.cmd`——批处理必须单字节编码：前两行 ASCII + `chcp 65001` 后按 UTF-8 读，禁 UTF-16/带 BOM）；**powershell** 走一次性 UTF-8 BOM 的 `.ps1` wrapper + `start powershell.exe -NoExit -File`。两条都经 **`background_command("cmd")` + `raw_arg` 直投 start**。五个坑都别改回去：① 预加引号的复合命令不能走 `Command::args`（Rust 加壳成 `\"`，cmd 对 /C 后文本不认反斜杠转义，start 把 `\"\"` 当程序名）；② 不能直接 spawn powershell/cmd + CREATE_NEW_CONSOLE（dev 实例从 npm/Git Bash 链路继承的 std 句柄是管道不是控制台，会遗传给子进程——TUI 写进管道、读不到键盘，新窗口只剩黑屏光标、agent 随即退出，grok 实测复现；start 经 ShellExecute 拉起时子进程 std 才挂到自己的新控制台）；③ 启动热路径不要同步 icacls（`%APPDATA%\ccode` 默认 ACL 已是当前用户）；④ **start 的窗口标题必须非空**（空标题下 GetConsoleTitleW 返回 0，旧版 libuv <1.52 的 uv_get_process_title 会 assert(process_title) 直接 abort——kimi 这类内嵌旧运行时的 CLI 必崩，win/util.c:412，实测复现）；⑤ **拉起后不能 output()/pipe 收尾**（start 的子进程继承 cmd 的管道句柄，read-to-EOF 会阻塞到用户关掉外部窗口，同步 command 堵死、整个应用未响应；start 立即返回，只 spawn+wait 收外层 cmd，毫秒级）。外层 cmd CREATE_NO_WINDOW 不可见，可见窗口由 start 创建——这是「用户明确打开外部终端」例外。Ghostty 运行中实例使用其原生 AppleScript `new surface configuration`/`new window`：工作目录单独写入 `initial working directory`，先启动 `/bin/sh`，再经 `initial input` 发送带 shell 引号的 wrapper 路径；不能把 `Application Support` 等带空格路径直接放进 `command`。该路径不依赖 System Events 辅助功能权限或剪贴板；未运行实例使用 `open -na`。iTerm/Terminal.app 只接收不含密钥的启动命令。复制命令继续保持全局配置模式，不自动携带 profile 密钥；Windows 复制的是 PowerShell 方言。
 
+- **定时历史评审（2026-09-07）**：有 watch Run 身份时先打开冻结产物对照，三列是执行前主仓、执行前隔离目录、本次结果；
+  仅四类台账可在这里采纳。另点「查看当前工作目录」才进既有只读 Git 评审，标题明确不是历史快照，该视图不得保留旧的直接采纳按钮。
+  无证据/失败任务不开放自动采纳，内容以纯文本显示；保留返回与当前目录入口，不影响底层 PTY 挂载。
 - 「停止」或 agent 退出后必须**自动回落用户登录 shell**（`$SHELL -l`，同 cwd），不死在最终画面；手动 `exit` 不自动
   重开；回落 shell 不带 profile env；agent/shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分。
 - **重启只恢复标签元数据，不恢复 PTY**：白名单限 label/cwd/agent/profile/model/sessionId，禁存 PTY id/scrollback/密钥/
   env/run 脚本；重开后为「上次任务，可恢复」占位，点击才建新 PTY；目录/profile 失效留在可编辑启动栏提示，禁自动换目标。
+- **预览版本与编辑缓冲（2026-09-07）**：文件预览和产物内联编辑均使用后端读取快照的 `revision` 保存，冲突时保留
+  当前编辑并提示用户另存/复制后重开对比，不自动强制覆盖。文件由外部增长至超过 256 KB 时立即只读；编码不支持和根外
+  symlink 同样只读。外部刷新晚返回不能覆盖已变脏的编辑器；保存确认返回只承认实际提交文本，保存中新增输入不得清 dirty。
+  只读状态变动用 Monaco `updateOptions`，不重建旧文本实例。文档 HTML 安全口径见 safety.md。
 - **预览编辑器不映射同名文件**：切项目/工作区/标签 cwd/树根时清空旧预览，由用户在新根重选，禁自动打开新根同相对路径
   文件；有未保存改动先确认，取消则不切根；主仓库文件保存按钮警示色 + 二次确认。
 - **`.ccode` 目录对「默认隐藏」豁免**：文件树 `list_dir` 在 `showHidden=false` 时仍显示 `.ccode`（任务书草稿
@@ -112,7 +126,7 @@
 - **终端右栏统一称“对话”，有界实时视图（历史）**：仅最近 50 条；该实时视图已在 v3.125 移到主工作区聊天层，右栏只保留文件与改动。
 - **同会话双界面（v3.126 / v3.153 / v3.168）**：主工作区默认显示终端（2026-09-02 起，此前默认聊天；默认值单一出处 `DEFAULT_SURFACE_MODE`，TerminalPage.tsx），模式切换收进终端标签栏同一个单击按钮（图标显示当前层，再点切到另一层），不再单独占用一行、也不再并排两个按钮。两者共享同一个 TerminalView、xterm、PTY 和会话文件；聊天层隐藏终端画面但不卸载，切回终端不重建进程、不丢滚动缓冲。进入聊天模式自动退出分屏，切回终端不自动恢复分屏；聊天模式隐藏完整 TerminalStatusBar，必要上下文移到聊天头部与 composer，终端模式保留状态栏；该显示策略只存运行态，不增加持久化设置。右侧工作台只保留「文件 / 改动」，不再显示重复的对话面板。
 - **聊天层拉起终端（v3.168 / v3.177）**：聊天与终端仍是同一 PTY 的两层，不是两个会话。拉起 = 底栏真实分栏（约 32% 高度），终端按此高度 fit，TUI 才能画进可见区域。不能只裁全高 xterm 的底部——Codex 主对话是 inline viewport，内容靠上、底下是空行，裁底就是白板。切聊天/终端仍铺满同一容器、行列数不变；**只有拉起开合**会 SIGWINCH 一次（Codex 可能重放历史，这是能看见 TUI 的代价）。默认关；`attention === confirm`、8 秒无会话文件、斜杠 `/model` 无参 / `/models` / `/login`、以及聊天层点 picker 模型时自动打开。用户手动收起后本轮不再自动打开。开关只在聊天头部（「拉起终端」/「收起终端」），不在标签栏菜单重复。不复制九家 TUI 菜单解析器；交接表在 `src/chat-handoff.ts`（chat_ok / peek / must_switch）。
-- **聊天等待态与历史窗（v3.168）**：发送后的加载文案按交接表区分「已送出 / 正在写盘 / 正在用 {工具} / 会话文件还没出现」。工具块一旦进会话文件立即渲染，不必等 assistant 正文才结束等待。聊天主区展示会话文件尾窗（后端 192KB 分页），可「加载更早的消息」；完整回放仍走对话页。压缩会话（zstd）没有更早一页。
+- **聊天等待态与历史窗（v3.168）**：发送后的加载文案按交接表区分「已送出 / 正在写盘 / 正在用 {工具} / 会话文件还没出现」。工具块一旦进会话文件立即渲染，不必等 assistant 正文才结束等待。聊天主区展示会话文件尾窗（后端 192KB 分页），可「加载更早的消息」；完整回放仍走对话页。压缩会话（zstd）没有更早一页。JSONL 超长行（Codex 工具输出常 >192KB）必须整行跳过，且空窗在同一请求里继续往前，禁止把 cursor 钉在行尾。
 - **聊天空态（v3.214）**：未开始时头部不写「等待会话文件」（`chatHeaderStatus`：没跑、也没消息则空着；可恢复占位除外）。画布不写「从一个问题开始」、**不加点阵**。输入框占位「问一个问题…」，目录短句收进 composer 底栏「将在 … 开始」（点选目录，`welcomeCwdLine`）。＋新建 / 历史等会话建立后才出现。模型芯片未启动不做成假下拉。
 - **聊天层模型/思考档与拖入（v3.168）**：头部模型菜单与状态栏同一套 `modelSwitch`/`effort`（直切写 PTY 命令；picker 写命令并窥视）。拖入文件进聊天输入框（一行一个路径），盖住终端的坐标不再写 PTY。Kimi 的 CSI-u Enter / Ctrl+V 序列集中在 `terminal-input.ts`（`KIMI_CSI_U_ENTER` / `KIMI_CSI_U_CTRL_V`）。
 - **表层默认（2026-09-02 起终端为默认）**：默认面层改为终端后，「落终端」不再是需要列举的例外；明确聊天意图的入口（分叉聊天等）仍显式落聊天层。纯 shell/脚本标签（官方账号登录、CLI 自更新、run 脚本——shellOnly/prefillCommand）创建时仍显式置终端面，守住「默认值再变也不回到 chat 盖住登录输出」的口径；agent 启动被会话前确认卡住（信任此目录/登录菜单，attention 门控要求 sessionFile 存在、管不到这段）时，聊天空态 8 秒无会话文件即显示「终端里可能有待处理的确认」+「打开终端处理」出口（8s 延迟防正常启动误闪现）。
@@ -449,7 +463,7 @@
 - **TUI 配色只在启动时探测终端底色（2026-08-24 实证，codex 0.149.1 源码级）**：codex 启动时经 OSC 10/11
   查询终端默认前/背景色（terminal_probe.rs，仅启动一次，xterm.js 会如实应答当前主题色），据此选定
   浅/深配色并用显式 RGB 画出用户消息行与输入框行（style.rs user_message_style_for(terminal_bg)）。
-  Ccode 运行时切主题 → xterm 默认背景即时翻转，但显式 RGB 单元格保持旧色，且进程收不到「调色板变了」
+  Mesa 运行时切主题 → xterm 默认背景即时翻转，但显式 RGB 单元格保持旧色，且进程收不到「调色板变了」
   的推送（终端协议无此机制，DEC 2031 明暗通知 codex 未订阅）→ 运行中会话滞留旧配色，重启会话才一致。
   codex 的 /theme 只是代码块语法高亮主题，不解决。对策 = 设置页主题区与 ⌘K 命令面板主题命令
   **无条件常驻**说明（设置页主题区一行；⌘K 命令面板「外观」组头下一行，不逐行挂 hint）——曾按 liveSessions
@@ -478,7 +492,7 @@
   - **codex 0.150.1 ❌ 不探测**：二进制里搜不到 OSC 10/11 查询、也没有 termbg/colorsaurus 一类库
     （2026-08-24 那条记的 0.149.1 terminal_probe 已不复存在）。`[tui] theme` 的取值是
     coldark-cold / dracula / gruvbox-light / solarized-light … 这些 **bat/syntect 语法高亮主题名**，
-    只影响代码块，控制不了输入框和用户消息行。**Ccode 侧对 codex 没有可用杠杆，别再试。**
+    只影响代码块，控制不了输入框和用户消息行。**Mesa 侧对 codex 没有可用杠杆，别再试。**
   - **claude-code ❌ 不探测**：走 `~/.claude/settings.json` 的 theme 配置。
   只推浅色是因为深色本就是 agent 探测失败的回落值；不推 shell 是因为它不做这个探测。
   设置页开关 `terminal_color_report`（默认开）留作白名单内 CLI 换实现时的兜底。

@@ -1,3 +1,4 @@
+import { sanitizeDocumentHtml } from "../document-html";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { marked } from "marked";
@@ -64,7 +65,7 @@ export default function OfficePreviewModal({
   useEffect(() => {
     if (text == null || !isMarkdown) return;
     const raw = marked.parse(text, { async: false }) as string;
-    setHtml(rewriteMdImageHtml(raw));
+    setHtml(sanitizeDocumentHtml(rewriteMdImageHtml(raw)));
   }, [text, isMarkdown]);
 
   useLayoutEffect(() => {

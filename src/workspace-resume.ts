@@ -4,7 +4,7 @@
 import type { SessionMetaDto } from "./types";
 
 /** 从会话列表（已按最近活跃降序）挑出该工作区可 resume 的最近一条；无命中返回 null。
- *  排除归档（恢复语义怪异）、Ccode 内部无头会话（不是人聊的对话）、
+ *  排除归档（恢复语义怪异）、Mesa 内部无头会话（不是人聊的对话）、
  *  live（CLI 进程仍活着，resume 同会话会冲突） */
 export function pickWorkspaceResume(
   sessions: SessionMetaDto[],

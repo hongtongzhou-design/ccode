@@ -1,3 +1,4 @@
+import { sanitizeDocumentHtml } from "../document-html";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -41,7 +42,7 @@ export default function ChatMarkdown({
   cwd?: string | null;
 }) {
   const html = useMemo(
-    () => rewriteMdImageHtml(chatMarked.parse(text) as string),
+    () => sanitizeDocumentHtml(rewriteMdImageHtml(chatMarked.parse(text) as string)),
     [text],
   );
   const bodyRef = useRef<HTMLDivElement>(null);

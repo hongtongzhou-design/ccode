@@ -811,7 +811,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     {},
   );
   const [error, setError] = useState<string | null>(null);
-  // 一般操作成功提示（清除 Ccode 痕迹等）：10s 自动消退
+  // 一般操作成功提示（清除 Mesa 痕迹等）：10s 自动消退
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     if (!notice) return;
@@ -1250,7 +1250,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   async function onMarkArchived(ws: WorkspaceDto) {
-    if (!(await confirmDialog("仅把 Ccode 记录标记为已归档，不删除分支。继续？")))
+    if (!(await confirmDialog("仅把 Mesa 记录标记为已归档，不删除分支。继续？")))
       return;
     try {
       await invoke("workspace_mark_archived", { id: ws.id });
@@ -1264,7 +1264,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   async function onCleanRecord(ws: WorkspaceDto) {
     if (
       !(await confirmDialog(
-        `只清理 Ccode 中「${ws.name}」的记录并释放端口，不删除磁盘目录或 Git 分支。继续？`,
+        `只清理 Mesa 中「${ws.name}」的记录并释放端口，不删除磁盘目录或 Git 分支。继续？`,
       ))
     )
       return;
@@ -1359,9 +1359,16 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   const contextProject = selectedGroup
     ? (selectedGroup.project?.name ?? pathBaseName(selectedGroup.repoPath))
     : null;
+  const contextProjectPath = selectedGroup
+    ? (selectedGroup.project?.path ?? selectedGroup.repoPath)
+    : null;
   useEffect(() => {
-    setContextLabel(contextProject ? { project: contextProject, step: null } : null);
-  }, [contextProject, setContextLabel]);
+    setContextLabel(
+      contextProject
+        ? { project: contextProject, projectPath: contextProjectPath, step: null }
+        : null,
+    );
+  }, [contextProject, contextProjectPath, setContextLabel]);
   const groupKeySignature = groups.map((group) => group.key).join("\n");
   useEffect(() => {
     if (groups.length === 0) {
@@ -1442,8 +1449,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-warn-text",
         // 基准已前进：继续按旧两侧选边是在解过期冲突，必须先重新同步
         text: health[w.id]?.staleBase
-          ? inboxTaskLine(w.name, "重新同步（基准已前进）")
-          : inboxTaskLine(w.name, "解决冲突"),
+          ? inboxTaskLine(w.name, "需重新同步")
+          : inboxTaskLine(w.name, "有冲突"),
         actionLabel: health[w.id]?.staleBase ? "重新同步" : "解决冲突",
         action: {
           type: "review" as const,
@@ -1459,7 +1466,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-warn-text",
         text: inboxTaskLine(
           inboxTaskLabel({ title: it.title, cwdLabel: it.cwdLabel }),
-          it.runId ? "看待确认" : "看待确认（尚未登记任务）",
+          "待确认",
         ),
         actionLabel: "去处理",
         action: it.runId
@@ -1482,7 +1489,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             title: s.customTitle ?? s.title,
             cwdLabel: pathBaseName(s.projectPath),
           }),
-          "看待确认",
+          "待确认",
         ),
         actionLabel: "去查看",
         action: {
@@ -1507,7 +1514,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           {
             key: `lit:${c.scheduleId}:${c.at}`,
             dot: "bg-ok-text",
-            text: inboxTaskLine(projectName, `评审 ${c.count} 条新命中`),
+            text: inboxTaskLine(projectName, `有${c.count}条新命中待评审`),
             actionLabel: "去评审",
             action: {
               type: "review" as const,
@@ -1526,7 +1533,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           {
             key: `lit:${c.scheduleId}:${c.at}`,
             dot: "bg-ok-text",
-            text: `文献雷达 · ${projectName}：${c.count} 条新命中`,
+            text: inboxTaskLine(projectName, `有${c.count}条新命中`),
             actionLabel: "去看看",
             action: { type: "litWatch" as const, projectRoot: c.projectRoot },
           },
@@ -1551,7 +1558,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .map((w) => ({
         key: `ready:${w.id}`,
         dot: "bg-ok-text",
-        text: inboxTaskLine(w.name, "评审"),
+        text: inboxTaskLine(w.name, "待评审"),
         actionLabel: "去评审",
         action: {
           type: "review" as const,
@@ -1569,7 +1576,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       .map((a) => ({
         key: `artifacts:${a.workspaceId}`,
         dot: "bg-ok-text",
-        text: inboxTaskLine(a.workspaceName, "核验产物"),
+        text: inboxTaskLine(a.workspaceName, "待核验"),
         actionLabel: "去核验",
         action: { type: "artifacts" as const, workspaceId: a.workspaceId },
       })),
@@ -1585,7 +1592,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         dot: "bg-warn-text",
         text: inboxTaskLine(
           h.workspaceName ?? "主仓",
-          `看人工请求（${helpPreview(h.items[0])}）`,
+          `有人工请求：${helpPreview(h.items[0])}`,
         ),
         actionLabel: "去查看",
         dismissSignature: helpSignature(h.items),
@@ -1597,7 +1604,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           {
             key: "digest",
             dot: "bg-ok-text",
-            text: `接力简报已生成（${digestJob.title || "未命名对话"}），待发送`,
+            text: inboxTaskLine(digestJob.title || "对话", "待发送"),
             actionLabel: "去发送",
             action: { type: "digest" as const },
           },
@@ -1714,6 +1721,25 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     }
     setSelectedGroupKey(g.key);
     setSelectProjectReq(null);
+    // 工作台「待你验收」同行还派了 taskReviewReq：消费它的 ProjectUserTasksView
+    // 只在「任务」页签挂载——若该项目上次停在「文件/Agents」，请求会永远无人消费。
+    // 这里一并把该项目切到任务页（写持久键 + 内存态，与 selectProjectSurface 同口径）
+    const reviewReq = useAppStore.getState().taskReviewReq;
+    if (
+      reviewReq &&
+      g.project &&
+      samePath(reviewReq.projectRoot, g.repoPath)
+    ) {
+      try {
+        localStorage.setItem(projectSurfaceStorageKey(g.repoPath), "tasks");
+      } catch {
+        /* 存储不可用只影响下次进来时的页签记忆 */
+      }
+      setProjectSurfaceTabs((current) => ({
+        ...current,
+        [g.repoPath]: "tasks",
+      }));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectProjectReq, groups]);
 
@@ -1851,7 +1877,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       }
       if (workspaceDrift.canCleanRecord) {
         items.push({
-          label: "清理 Ccode 记录",
+          label: "清理 Mesa 记录",
           onSelect: () => void onCleanRecord(workspace),
         });
       }
@@ -1924,7 +1950,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       {
         label: "重命名项目",
         disabled: !group.project,
-        title: group.project ? undefined : "这个文件夹还没添加到 Ccode",
+        title: group.project ? undefined : "这个文件夹还没添加到 Mesa",
         onSelect: () =>
           group.project &&
           setRenameTarget({ path: group.repoPath, name: group.project.name }),
@@ -1938,13 +1964,13 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         },
       },
       {
-        label: "从 Ccode 移除",
+        label: "从 Mesa 移除",
         disabled: !group.project,
-        title: group.project ? undefined : "这个文件夹还没添加到 Ccode",
+        title: group.project ? undefined : "这个文件夹还没添加到 Mesa",
         onSelect: () => group.project && void removeRegistration(group),
       },
       {
-        label: "清除 Ccode 痕迹（保留文件夹）…",
+        label: "清除 Mesa 痕迹（保留文件夹）…",
         danger: true,
         title: "保留文件夹与你的全部文件；清掉工作区、.ccode 与注册记录",
         onSelect: () => void purgeTraces(group),
@@ -1957,12 +1983,12 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     ];
   }
 
-  /** 清除 Ccode 痕迹（中间档）：文件夹与用户文件保留；工作区/分支彻底删，.ccode 入回收站，注册摘除 */
+  /** 清除 Mesa 痕迹（中间档）：文件夹与用户文件保留；工作区/分支彻底删，.ccode 入回收站，注册摘除 */
   async function purgeTraces(group: (typeof groups)[number]) {
     const name = group.project?.name ?? group.repoName;
     if (
       !(await confirmDialog(
-        `清除「${name}」的 Ccode 痕迹？\n\n` +
+        `清除「${name}」的 Mesa 痕迹？\n\n` +
           `文件夹与你的文件：保留\n` +
           `.ccode/（档案卡、任务卡、各步骤 TASK.md 内容）：移入回收站（可找回）\n` +
           `工作区 worktree 与分支、注册记录：彻底删除\n\n` +
@@ -2321,6 +2347,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         {selectedGroup.project && selectedSurfaceTab === "files" ? (
           <ProjectFilesView
             projectPath={selectedGroup.repoPath}
+            workMode={selectedGroup.project.workMode}
             preferredAgent={selectedGroup.project.defaultAgent}
             preferredProfile={
               selectedGroup.project.defaultAgent
@@ -2341,6 +2368,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                 ),
               )
             }
+            onOpenGoals={() => selectProjectSurface("tasks")}
             onError={setError}
           />
         ) : selectedWorkMode === "coding" ? (

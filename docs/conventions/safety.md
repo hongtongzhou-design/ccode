@@ -2,8 +2,42 @@
 
 > 适用范围：密钥、会话/配置读写、文件与仓库的删除/提交、诊断包、CLI 安装更新。从 AGENTS.md 迁入（原文照录，未做语义改动）。
 
+- **审计收口规则（2026-09-08）**：生产 CSP 禁止内联脚本、JS eval、frame/object、base 和表单提交；只开放本地脚本、IPC、图片、字体与 worker 所需来源，开发策略仅额外允许热更新脚本和本机 WebSocket。DOMPurify 仍是内容清洗边界，CSP 不能替代它。Vite dev/build/preview 必须显式 `--config vite.config.ts`，不能被历史生成的 JS 配置遮蔽。
+- **配置持久化（2026-09-08）**：profiles/keys/settings、schedules 和全局 CLI 配置分别在读改写全程持进程内锁与 OS 文件锁；取锁失败报错，不无锁继续。唯一同目录临时文件创建即 0600（Unix），通用写入保留原文件 mode，私有写入强制 0600；替换失败不得先删原件。Windows 只读属性仅临时放开，失败恢复属性。官方账号绑定不得嵌套获取同一把 profiles 锁。
+- **迁移与损坏（2026-09-08）**：拆层迁移先存 `gateway-split.pending.json`（私有恢复日志），所有文件和引用更新成功才删除；任何阶段可重放，保持日志中的 ID 不变。旧版半迁移只按仍有 key_hint 的网关与保留 binding ID 恢复密钥引用，不猜端点、不覆盖已有新密钥。损坏 keys/settings 保留原件并拒绝写入，不以默认值覆盖；密钥脱敏读取没有改名副作用，暂时失败沿用上次成功快照。
+- **权限诚实性（2026-09-08）**：新建与恢复都执行 discuss 参数约束；无只读/计划模式参数的 Agent 拒绝 discuss，不仅靠提示词。不把 CLI 计划模式称作 OS 级沙箱。定时任务显式连接失效时停下报错，不在无人确认时更换供应商；无头缺密钥拒绝启动。
+- **终端输入/输出（2026-09-08）**：每 PTY 独立有界队列（16 项，单次最多 1 MB），入队后后台等待，不能持全局表锁阻塞写入；聊天正文和延迟提交键是一项请求，不能交错。超时明确告知可能仍在写入，禁止自动重发。PTY 实际输出不等数据库：诊断副本经有界队列每 500ms 批量落盘、复用连接，每 Run 最多 100 条、全局最多 10000 条输出事件，不清除生命周期事件；尾部未闭合 token 不持久化，先脱敏后截尾。
+- **取消和退出（2026-09-08）**：无头任务有取消信号；定时行和设置→诊断均有停止入口。原生退出阶段拒绝新启动，并限时回收捕获进程与 PTY，不只依赖 React 卸载。Windows 受管理捕获命令先挂起创建，再加入 kill-on-close Job Object 后恢复，失败不无保护继续；打开 GitHub Desktop/浏览器的启动器不进入该 Job，也不继承输出管道，以免关闭用户打开的窗口。Windows 全应用/界面仍需实机验收。
+- **出站/预算（2026-09-08）**：普通日志查看、复制、导出与诊断包统一后端脱敏；模型目录响应最多 16 MB，公共模型库/期刊 CSV 最多 32 MB，按实际解压字节累计，不能只相信 Content-Length。配置读取失败不清空上次成功列表，必须提供原因与重试。
+
+- **文档预览不是可信 HTML（2026-09-07）**：Markdown、DOCX、任务书、产物预览和聊天最终 HTML 均经
+  `src/document-html.ts` 的 DOMPurify 文档白名单清洗后才进入 DOM；路径白名单不代表内容可信。
+  禁止脚本、事件属性、嵌入页面、表单、内联样式及危险 URL；仅保留文档排版、脚注、图片、公式占位和禁用的任务复选框。
+  图片字符串重写必须在清洗前完成；清洗后仅允许受控 DOM 图片水合与 KaTeX（默认不信任命令），不得拼接未经清洗的 HTML。
+  DOM 安全回归测试使用 jsdom 30（仅开发依赖）；Node 22 环境需至少 22.22.2，构建产物不包含 jsdom。
+- **文本预览保存带版本（2026-09-07）**：`read_file_preview` 返回内容摘要 `revision`，仅完整可写 UTF-8 文件有版本；
+  `save_file_preview` 必须携带 `expectedRevision`，保存前重新读取核对，外部变更、文件增长超限或编码不支持时拒绝覆盖。
+  前端外部刷新必须同步只读/截断状态；保存期间新增编辑继续保持未保存。`../` 路径拒绝；从树中预览根外 symlink 的既有
+  功能保留，但明确只读，不授予写入权限。该版本检查是乐观并发保护，不宣称能锁住不遵循 Mesa 锁的外部写入进程。
+
+- **受管理后台命令的等待边界（2026-09-07）**：AI 无头调用、CLI 预检、工作区 Git/钩子、编程辅助命令统一走
+  `process::capture_command`；deadline 同时覆盖父进程退出与 stdout/stderr EOF，禁止父进程退出后无限 join。
+  Unix 仅捕获命令建立独立进程组；Windows 杀树命令本身限时。输出分别有界（AI/编程 8 MB、预检 1 MB、工作区 32 MB），
+  超限排空但不将截断数据当作完整结果；超时保留已收输出。无头 API Profile 缺密钥必须在 spawn 前拒绝，登记 Run 失败也不得启动。
+  PTY 成功 spawn 后登记失败必须回收，停止的同步等待有界。Windows 捕获命令的 Job 约束见 2026-09-08 规则；PTY 作业控制与外部程序自行脱离进程组仍需实机验证，进程管理不是文件系统沙箱。
+- **定时采纳安全（2026-09-07）**：采纳只使用冻结文本，不从可复用工作树即时拷贝；检查全部文件基线、项目保护路径及 symlink，
+  原子替换前先保存整批恢复材料。采纳与冻结持跨进程锁，历史无证据、任务失败、源文件删除、版本冲突时 fail-closed。
+  Unix 快照/备份临时文件创建即 0600；不在替换失败时先删原文件。外部编辑器仍是乐观并发，不承诺跨文件崩溃原子性。
+- **普通目标采纳（2026-09-08）**：科研/办公目标写回主仓不得逐文件 `fs::copy` 后无法回滚。采纳持跨进程锁，先持久化原件备份，
+  写入前再读基线；后一文件失败必须回滚已写文件。保护路径、symlink、目录目标 fail-closed。与定时冻结是同一类安全，不是同一套文件名单。
+- **任务书草稿保存（2026-09-08）**：`read_task_draft` 返回内容 `revision`；`write_task_draft` 必须带 `expectedRevision`（新建为 null）。
+  磁盘已变则拒绝覆盖。决策落盘、弹层保存、播种、文献来源同步同一口径。保存期间继续输入保持 dirty，不把后输入标成已保存。
+- **配置多文件与密钥失败（2026-09-08）**：创建/修改连接先写网关再写绑定，第二份失败回退第一份；密钥写入失败回退清单。
+  `delete_key` 读写失败必须返回错误，调用方不得在失败后清除「有密钥」提示。这是成对回退，不是崩溃原子事务。
+- **Run 结束登记（2026-09-08）**：终态事务成功与否都释放存活锁；失败写诊断。禁止只 `let _ = close` 而不记录，留下进程已退出、账本仍运行。
+
 - **密钥绝不回显/进 shell**：存 0600 `keys.json`，只在拉起瞬间注入子进程 env；`profiles.json` 只存尾号 key_hint；
-  `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Ccode` 必须显式设置。
+  `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Mesa` 必须显式设置。
   **外部恢复/复制恢复命令不携带 profile env**（`agents::resume_command_line`，⇗/⧉ 共用）；⇗ 拉起：CLI 用绝对路径
   （`resolve_binary`，⧉ 复制命令才用裸名）、shell 必须 `-l -i` 交互登录（非交互不加载 `.zshrc` 的安装器 PATH）。
   **Ghostty** 走 AppleScript（`open -n` 堆实例、不带 `-n` 不投递 `--args`）：激活 → ⌘N → 剪贴板粘贴命令 + 回车
@@ -43,6 +77,8 @@
   最后替换；中途失败自动回滚整批。恢复分两档：「恢复备份」选最近一个完整批次（每 tag 轮换留 5 份），恢复前先备份当前状态、
   不得移动/消耗原恢复点；「恢复初始状态」走 `backups/<agent>/original/` 永久快照（首次 apply 时落、不参与轮换——
   轮换窗口会被连续写入烧穿，见架构 v3.146），快照里不存在的文件恢复即删除。
+  **Codex 例外（v3.249 / v3.250）**：「设为全局」与注册只写 `config.toml`，禁止写 `auth.json`。密钥落
+  `experimental_bearer_token`（ChatGPT 自带 Codex 认这个字段）。禁止把 MCP 的 `http_headers` 写进 provider 块。
 - **Profile“保存成功”不等于“可用”**：验证固定三层——本地字段/活配置解析、CLI doctor/启动预检、最小 API 请求；密钥仅在
   Rust 层参与验证，结果统一脱敏。「设为全局」成功后必须自动执行本地与 CLI 配置复检。
 - **官方账号 profile 只读检测 + env 净化**：CLI auth 文件只读探测「已连接」，断开引导用户用 CLI 自己的 logout；官方账号
@@ -57,7 +93,7 @@
      （qwen/gemini 走 JSONC 容错读）、kimi `~/.kimi-code/config.toml`（`[[hooks]]` 表，toml_edit 保格式）、
      grok `~/.grok/hooks/ccode.json`、codex `~/.codex/hooks.json`；统一防护口径：写前备份（同前缀留 10 份）+
      原子写、只动 hooks 键/段、已有 hooks 追加不覆盖、关闭只删含 `hooks-state/<tag>-hooks.jsonl` marker 的条目
-     并回收空壳键、配置损坏拒绝写；**grok 为整文件形态特例**——该文件整份归 Ccode（开启=写文件、关闭=删文件），
+     并回收空壳键、配置损坏拒绝写；**grok 为整文件形态特例**——该文件整份归 Mesa（开启=写文件、关闭=删文件），
      不含 marker 的外来文件拒绝覆盖；开关走 `set_hooks_attention(agent, enabled)` 单命令（先改各家配置，
      成功后才落应用设置 hooks_attention map 逐键），失败回滚，禁前端单独 patch `hooksAttention`）；
   3. 会话删除（delete_session/delete_project_sessions：canonicalize 根校验 + **已知会话数据子目录 + 会话后缀白名单**，
@@ -82,7 +118,7 @@
   AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
 - **诊断包是脱敏的有界快照**：设置页一键导出到 `~/Downloads/ccode-exports/`，包含 Windows/WebView2/GPU/WebGL、
   语言与输入法、当前功能开关、应用日志及自应用启动后的子进程生命周期；进程记录为内存环形缓冲，不读取环境变量，命令参数
-  与日志在导出前必须经 Rust 层脱敏。ZIP 内只放 UTF-8 JSON/TXT，保证从 Windows 带回 macOS 后无需 Ccode 或 Windows 工具
+  与日志在导出前必须经 Rust 层脱敏。ZIP 内只放 UTF-8 JSON/TXT，保证从 Windows 带回 macOS 后无需 Mesa 或 Windows 工具
   即可离线分析。系统级活动只额外观察 CTF/TextInputHost，禁止借诊断之名采集无关应用的命令行。
 - **「是否 git 仓库」探测带 30s 负缓存**（`git_info::probe_is_work_tree`）：轮询入口（git_status/git_status_map）对非仓库
   cwd 不得每轮真 spawn git（诊断包实测 Windows 安装版 85 秒 73 次同目录探测）；只缓存否定结果，应用内 `git init` 成功后
@@ -101,7 +137,7 @@
 - **编程页添加 origin**：只接受 https / ssh（含 scp `user@host:path`），拒绝 `file://`、`ext::`、`git://`、host 以 `-` 开头、换行与控制字符。`git remote add -- origin <url>`（argv 数组，禁止拼进 shell）。HTTPS userinfo 须用户确认后才写；出站 DTO 剥 userinfo，stderr 过 `redact_sensitive_text`。fetch 失败不回滚 origin（`code=git_failed, failedPhase=fetch`）。
 - **GitHub Desktop 只走文档化 CLI**：`coding_open_desktop(repo_path, path)` 现场 `git worktree list` + `same_path`，只打开本仓工作树。argv 锁死 `github <absPath>`（`resolve_binary`，没有则用应用捆绑的 `github.sh` / Windows `%LOCALAPPDATA%\GitHubDesktop\bin`）；不对 CLI 传 `--cli-open`，不走已删除的 `x-github-client://openLocalRepo`，Windows **不**给 `GitHubDesktop.exe` 传路径。macOS 再回落必须 `open -n <GitHub Desktop.app> --args --cli-open=<path>`（与官方 cli.js 相同；`open -a` 不加 `-n` 只激活窗口不切仓）。禁止给 WebView 开 `opener:allow-open-path` 或自定义协议。`gh` / `github.bat` 走 `background_command`（Windows `CREATE_NO_WINDOW`）。
 - **PDF 预览（P2a）**：pdf.js 渲染器必须随 PdfPreview 组件动态 import 拆独立 chunk（禁进主包）；`read_pdf_bytes` 只放行五类
-  白名单（注册项目登记资源/注册项目根/工作区·仓库根/终端标签 cwd hint/Ccode 自管剪贴板图片目录 `<config>/ccode/tmp`
+  白名单（注册项目登记资源/注册项目根/工作区·仓库根/终端标签 cwd hint/Mesa 自管剪贴板图片目录 `<config>/ccode/tmp`
   ——paste-* 写入侧已有扩展名白名单 + 50MB 上限 + 7 天清理），canonicalize 后判定，传输用 base64 字符串（macOS
   Raw 响应会退化为逐字节 JSON 数组，禁改 raw bytes）；选段问 AI 只 pty_write 注入活跃标签输入框，不自动回车。
 - **聊天区 Markdown 渲染（ChatMarkdown）**：会话内容可能含联网抓取文本，按不可信处理——独立 Marked 实例，
@@ -116,7 +152,7 @@
   或没有精读步骤 → 项目根；否则 `workspaceName === "lit-notes"` 优先、回落流水线第二步工作区。无活跃工作区时复用
   一键开步链路（ensure_git_repo → create_workspace → TASK.md best-effort → 追加 inbox → pendingTerminal +
   ORGANIZE_NOTES_PROMPT 预填）。
-- **MCP 分发（§6.15，规格 = matrix §10）**：Ccode 清单（<config>/ccode/mcp-servers.json）→ 八家用户级配置的映射写入（grok 首版只读不分发）。
+- **MCP 分发（§6.15，规格 = matrix §10）**：Mesa 清单（<config>/ccode/mcp-servers.json）→ 八家用户级配置的映射写入（grok 首版只读不分发）。
   **只写用户级**（项目级各家都有审批闸）；目标文件多是混合状态文件，一律读-改-写一个键/段 + 写前备份 + 原子写 + 读回校验，
   绝不整文件覆盖；codex 走 toml_edit 保格式、gemini/qwen/opencode/codebuddy 走 JSONC 容错读；密钥一律用 `$VAR`/`${VAR}`
   引用形式，映射成各家间接引用字段（codex env_vars/bearer_token_env_var、opencode {env:VAR}、kimi bearerTokenEnvVar），
@@ -141,7 +177,14 @@
   codebuddy 分发/移除时会把本条目名从 `disabledMcpServers` 清掉（只动自己名下项、键保留）——
   与 codex 重写条目即丢 `enabled=false` 的「拨开 = 恢复启用」语义对齐。
   **安全闸**：清单文件 0600（对齐 keys.json）；env/header 命中常见密钥前缀（sk-/ghp_/AIza/AKIA…，复用
-  `sessions::common_secret_token`）且非 `$VAR` 引用形式时，保存/粘贴导入报 `PLAINDETECT:` 由前端二次确认放行；
+  `sessions::common_secret_token`）且非 `$VAR` 引用形式时，保存/粘贴导入/分发**一律拒绝**（审计收口 2026-09-08，
+  不再有 `PLAINDETECT:` 二次确认放行），报错引导改用 `${VAR}` 引用；清单里的历史明文条目不删不崩、照常列出，
+  但编辑与分发（`apply_to_agent` 安装方向）被同一闸拦住，直到改成引用——移除/停用/删除方向不拦。
+  停用（`enabled=false`）条目的编辑与拨开单个 agent 开关只更新清单/记 apps 意图，不动任何 agent 配置，
+  重开总开关才按 apps 重投。重命名是受保护迁移：新名条目全部写好后才把旧名条目从各 agent 配置移除
+  （同一套读-改-写 + 备份 + 原子写 + 读回校验；旧名条目权属归 Mesa 清单，不另做 EXTMOD 预检；任一步失败不落库）。
+  codex 的 stdio env 引用只支持同名转发（env_vars 白名单），改名引用（`TARGET=${SOURCE}`）明确拒写并引导改键名；
+  预期产物构建不出的条目（如历史改名引用）在外部修改检测里按「被改过」保护，移除需确认。
   移除/删除前比对 agent 侧条目与当前映射产物，被外部改过报 `EXTMOD:` 确认后才强删（保护手调版本）；
   粘贴导入两阶段（`parse_mcp_json` 预览命令清单 → 确认才落库，stdio 命令=任意执行须明示）。
   **stdio 命令名落盘前深度解析**（`resolve_command_deep`）：裸名经 `resolve_binary` 落绝对路径（GUI 短 PATH）；
@@ -161,8 +204,12 @@
   返回（不走渐进事件）；结果沉淀进清单 `last_check` 字段（读-改-写只动该字段，编辑整结构替换保留旧值，落盘失败静默不拖垮
   检测）；stdio 每次尝试的等待上限 = `startup_timeout_ms` 按 clamp(8s, 30s) 生效（未声明 8s、remote 恒 8s），声明了仍超时的
   报错点明「已按此等待」。`startup_timeout_ms` 只被体检消费、不进分发映射；来源 = 收编 codex/grok 的 `startup_timeout_sec`
-  （matrix §10.2 别家无实证等价字段不读）或编辑表单手调。**$VAR 引用预检**（`mcp_missing_env_refs`，只读）：env_ref 同口径
-  提取整值引用查宿主环境（空值算未设置），前端在保存/拨开分发开关前给非阻断警告，同会话同一变量签名只提示一次。
+  （matrix §10.2 别家无实证等价字段不读）或编辑表单手调。**体检结果带 status 细分闭集**（McpHealthDto.status：
+  handshake = initialize 握手成功 / reachable = 地址可达但握手未确认（remote 3xx·其他 4xx）/ auth = 认证失败
+  （401/403）/ not_found = 路径错误（404）/ error = 其余失败——401/403/404 按「连通正常」报是假阳性，必须判失败）。
+  **$VAR 引用预检**（`mcp_missing_env_refs`，只读）：与探测注入同一套引用口径（`scan_env_refs`，整值与
+  `Bearer ${X}` 内嵌都算）查宿主环境（空值算未设置），前端在保存/拨开分发开关前给非阻断警告，同会话同一变量签名
+  只提示一次；探测注入时按宿主环境展开全部引用，任一未设置则整条不注入并在失败文案附提示。
 - **技能同名导入不得静默跳过**：导入返回 added/updated/skipped/conflicts；覆盖前备份、另存为校验单段安全名称，ZIP 先
   staging，元数据保存失败回滚。GitHub 来源保存 repo/ref/subdir/revision；**一键应用更新**（`apply_skill_update`）按记录的
   repo/ref/subdir 重下并只覆盖同名技能（`import_zip_impl` 的 `only` 过滤，同仓库其他技能不新增不覆盖，走同一覆盖+备份
@@ -171,7 +218,7 @@
   辅助文件保留、source/repo 不改写）；◈ 优化开终端让 Agent 直改库文件，备份兜底仍靠保存/覆盖路径。**内置技能更新**
   （`apply_builtin_skill_update`）= 覆盖前原文件自动备份为同目录 `SKILL.md.bak-<yyyymmdd>`（同日重名追加 -2/-3），种子内容原子写入。
 - **技能删除保护（与 MCP 同思路，语义不同）**：删除 = 删 SSOT 库条目 + 回收各 agent 已分发副本——没有 MCP 那种
-  「保留 agent 侧」选项，因为分发出去的本就是 Ccode 管的链接/带标记副本（`remove_ours` 只动这两类，用户自放内容天然不碰）。
+  「保留 agent 侧」选项，因为分发出去的本就是 Mesa 管的链接/带标记副本（`remove_ours` 只动这两类，用户自放内容天然不碰）。
   删除确认走应用内弹层（`src/pages/SkillsPage.tsx` DeleteSkillModal，禁原生对话框）：所有技能列影响面
   （apps 已分发的 agent 显示名）；内置种子（`source == "builtin"`）额外警告「删除后不会随启动恢复」
   （播种只补缺失不复活）；外部导入提示来源渠道。删除前 `delete_impl` 必先把库目录 rename 进

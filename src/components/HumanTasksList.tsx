@@ -8,6 +8,7 @@ import type {
   ImportDeliverableDto,
   ProjectConfigDto,
 } from "../types";
+import { stripOptionalTitlePrefix } from "../step-flow";
 
 /** 检索结果导入的固定落点（lit-search 人肉中转协议：agent 开工自动解析、去重、合并进筛选清单） */
 export const SEARCH_IMPORTS_DIR = "papers/imports/";
@@ -470,7 +471,9 @@ export default function HumanTasksList({
                     task.done ? "text-l3 line-through" : "text-l1"
                   }`}
                 >
-                  {task.title}
+                  {task.optional
+                    ? stripOptionalTitlePrefix(task.title)
+                    : task.title}
                 </span>
                 {task.done && (
                   <span className="shrink-0 text-micro text-done">

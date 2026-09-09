@@ -7,17 +7,28 @@ import {
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronRight, Folder, FolderOpen, Maximize2 } from "lucide-react";
+import {
+  BookOpen,
+  ChevronRight,
+  Folder,
+  FolderOpen,
+  Maximize2,
+  MessageSquare,
+  RefreshCw,
+  SquareTerminal,
+} from "lucide-react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useAppStore } from "../store";
 import { beginAskAi } from "./AskAiModal";
 import type { DirEntryDto, SearchResultDto } from "./FileTree";
 import {
   ghostActionClass,
+  iconActionClass,
   projectWellClass,
   rowActionClass,
   searchFieldClass,
 } from "./PageFrame";
+import FileKindFilters from "./FileKindFilters";
 import { IS_WINDOWS } from "../hotkeys";
 import { pathWithin } from "../path-utils";
 import {
@@ -27,9 +38,15 @@ import {
   projectFilePreviewKind,
   type ProjectFileFilter,
 } from "../project-files";
-import { OFFICE_FILTERS } from "../work-mode";
 import { officeKindCounts } from "../project-status";
-import type { OfficeDocDto } from "../types";
+import type { OfficeDocDto, RunDto, TaskDto, TaskOutputChangeDto } from "../types";
+import {
+  declaredTaskKindsForMode,
+  markForProjectFile,
+  relativeProjectPath,
+  visibleDeclaredTasks,
+} from "../project-tasks";
+import { goalReviewCopy } from "../goal-review";
 import FileTypeMark from "./FileTypeMark";
 import ProjectFilePreview from "./ProjectFilePreview";
 import { Modal } from "./Modal";
@@ -53,11 +70,13 @@ function asFileEntry(file: {
 
 export default function ProjectFilesView({
   projectPath,
+  workMode,
   preferredAgent,
   preferredProfile,
   onError,
 }: {
   projectPath: string;
+  workMode?: string | null;
   preferredAgent?: string | null;
   preferredProfile?: string | null;
   onError: (message: string) => void;
@@ -74,6 +93,10 @@ export default function ProjectFilesView({
   const [filter, setFilter] = useState<ProjectFileFilter>("all");
   const [officeDocs, setOfficeDocs] = useState<OfficeDocDto[]>([]);
   const [searchHits, setSearchHits] = useState<SearchResultDto[] | null>(null);
+  const [goalMarks, setGoalMarks] = useState<
+    { relative: string; goalName: string; pending: boolean }[]
+  >([]);
+  const pendingMark = goalReviewCopy(workMode).fileMark;
   const listRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async (path: string) => {
@@ -101,7 +124,45 @@ export default function ProjectFilesView({
     void invoke<OfficeDocDto[]>("list_office_docs", { root: projectPath })
       .then(setOfficeDocs)
       .catch(() => setOfficeDocs([]));
-  }, [load, projectPath]);
+    const kinds = declaredTaskKindsForMode(workMode);
+    if (kinds.size === 0) {
+      setGoalMarks([]);
+    } else {
+      void Promise.all([
+        invoke<TaskDto[]>("task_list", { projectRoot: projectPath }),
+        invoke<RunDto[]>("run_list", { projectRoot: projectPath }),
+      ])
+        .then(async ([tasks, runs]) => {
+          const declared = visibleDeclaredTasks(tasks, kinds);
+          const latest = new Map<string, RunDto>();
+          for (const run of runs) {
+            if (!latest.has(run.taskId)) latest.set(run.taskId, run);
+          }
+          const marks: { relative: string; goalName: string; pending: boolean }[] = [];
+          for (const task of declared) {
+            if (task.status !== "pending_review") continue;
+            const run = latest.get(task.id);
+            if (!run || run.status !== "completed") continue;
+            try {
+              const changes = await invoke<TaskOutputChangeDto[]>("task_output_changes", {
+                runId: run.id,
+              });
+              for (const change of changes) {
+                marks.push({
+                  relative: change.path,
+                  goalName: task.name,
+                  pending: true,
+                });
+              }
+            } catch {
+              /* 读不到变更时不标 */
+            }
+          }
+          setGoalMarks(marks);
+        })
+        .catch(() => setGoalMarks([]));
+    }
+  }, [load, projectPath, workMode]);
 
   useEffect(() => {
     const q = query.trim();
@@ -245,6 +306,10 @@ export default function ProjectFilesView({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [preview]);
 
+  function goalMarkFor(absPath: string) {
+    return markForProjectFile(relativeProjectPath(projectPath, absPath), goalMarks);
+  }
+
   function renderEntries(root: string, depth: number): ReactNode {
     const entries = cache[root] ?? [];
     return entries.map((entry) => {
@@ -253,7 +318,7 @@ export default function ProjectFilesView({
       return (
         <li key={entry.path}>
           <div
-            className={`group flex min-h-9 items-center gap-2 rounded-md px-2 ${
+            className={`group relative flex min-h-9 items-center gap-2 rounded-md px-2 ${
               selected ? "bg-hover" : "hover:bg-hover"
             }`}
             style={{ paddingLeft: 8 + depth * 16 }}
@@ -288,12 +353,17 @@ export default function ProjectFilesView({
                 <span className="w-[13px] shrink-0" />
                 <FileTypeMark path={entry.path} />
                 <span className="truncate">{entry.name}</span>
+                {goalMarkFor(entry.path) && (
+                  <span className="shrink-0 text-micro text-warn-text">{pendingMark}</span>
+                )}
               </button>
             )}
-            <span className="hidden items-center gap-1 group-hover:flex group-focus-within:flex">
+            <span className="absolute inset-y-0 right-1 hidden items-center bg-hover pl-1 group-hover:flex group-focus-within:flex">
               <button
                 type="button"
-                className={ghostActionClass}
+                className={iconActionClass}
+                title={entry.isDir ? "打开终端" : "问 AI"}
+                aria-label={entry.isDir ? "打开终端" : "问 AI"}
                 onClick={() => {
                   if (entry.isDir) {
                     setEnterCwdReq(entry.path);
@@ -303,23 +373,35 @@ export default function ProjectFilesView({
                   }
                 }}
               >
-                {entry.isDir ? "打开终端" : "问 AI"}
+                {entry.isDir ? (
+                  <SquareTerminal size={13} strokeWidth={1.8} />
+                ) : (
+                  <MessageSquare size={13} strokeWidth={1.8} />
+                )}
               </button>
               {/\.pdf$/i.test(entry.name) && (
-                <button type="button" className={ghostActionClass} onClick={() => readPdf(entry)}>
-                  沉浸阅读
+                <button
+                  type="button"
+                  className={iconActionClass}
+                  title="沉浸阅读"
+                  aria-label="沉浸阅读"
+                  onClick={() => readPdf(entry)}
+                >
+                  <BookOpen size={13} strokeWidth={1.8} />
                 </button>
               )}
               <button
                 type="button"
-                className={ghostActionClass}
+                className={iconActionClass}
+                title="显示"
+                aria-label="显示"
                 onClick={() =>
                   void revealItemInDir(entry.path).catch((reason) =>
                     onError(`无法定位文件：${String(reason)}`),
                   )
                 }
               >
-                显示
+                <FolderOpen size={13} strokeWidth={1.8} />
               </button>
             </span>
           </div>
@@ -341,7 +423,7 @@ export default function ProjectFilesView({
         {files.map((file) => (
           <li key={file.path}>
             <div
-              className={`group flex min-h-9 items-center gap-2 rounded-md px-2 ${
+              className={`group relative flex min-h-9 items-center gap-2 rounded-md px-2 ${
                 preview?.path === file.path ? "bg-hover" : "hover:bg-hover"
               }`}
             >
@@ -354,30 +436,37 @@ export default function ProjectFilesView({
               >
                 <FileTypeMark path={file.path} />
                 <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                {goalMarkFor(file.path) && (
+                  <span className="shrink-0 text-micro text-warn-text">{pendingMark}</span>
+                )}
                 {file.rel && file.rel !== file.name && (
                   <span className="max-w-[40%] truncate font-mono text-micro text-l4">
                     {file.rel}
                   </span>
                 )}
               </button>
-              <span className="hidden items-center gap-1 group-hover:flex group-focus-within:flex">
+              <span className="absolute inset-y-0 right-1 hidden items-center bg-hover pl-1 group-hover:flex group-focus-within:flex">
                 <button
                   type="button"
-                  className={ghostActionClass}
+                  className={iconActionClass}
+                  title="问 AI"
+                  aria-label="问 AI"
                   onClick={() => askAi(asFileEntry(file))}
                 >
-                  问 AI
+                  <MessageSquare size={13} strokeWidth={1.8} />
                 </button>
                 <button
                   type="button"
-                  className={ghostActionClass}
+                  className={iconActionClass}
+                  title="显示"
+                  aria-label="显示"
                   onClick={() =>
                     void revealItemInDir(file.path).catch((reason) =>
                       onError(`无法定位文件：${String(reason)}`),
                     )
                   }
                 >
-                  显示
+                  <FolderOpen size={13} strokeWidth={1.8} />
                 </button>
               </span>
             </div>
@@ -447,46 +536,31 @@ export default function ProjectFilesView({
             preview ? "w-full lg:w-[22rem] lg:pr-6" : "w-full"
           } ${projectWellClass}`}
         >
-          <div className="mb-2 flex shrink-0 items-center gap-2">
-            <h2 className="text-sm font-medium text-l1">项目文件</h2>
+          <div className="mb-2 flex shrink-0 flex-col gap-1.5">
+            <div className="flex items-center gap-1">
+              <FileKindFilters
+                filter={filter}
+                counts={kindCounts}
+                onChange={setFilter}
+              />
+              <button
+                type="button"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1"
+                title="刷新"
+                aria-label="刷新"
+                onClick={() => void load(projectPath)}
+              >
+                <RefreshCw size={13} strokeWidth={1.8} />
+              </button>
+            </div>
             <input
               type="search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索文件名或路径"
-              className={`${searchFieldClass} ml-auto w-40`}
+              placeholder="搜索"
+              className={`${searchFieldClass} w-full`}
               aria-label="搜索文件"
             />
-            <button
-              type="button"
-              className={rowActionClass}
-              onClick={() => void load(projectPath)}
-            >
-              刷新
-            </button>
-          </div>
-          <div
-            className="mb-2 flex shrink-0 flex-wrap gap-1"
-            role="radiogroup"
-            aria-label="文件类型"
-          >
-            {OFFICE_FILTERS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="radio"
-                aria-checked={filter === item.id}
-                className={`${rowActionClass} ${
-                  filter === item.id ? "border-cta-bd text-l1" : ""
-                }`}
-                onClick={() => setFilter(item.id)}
-              >
-                {item.label}
-                {item.id !== "all" && kindCounts[item.id] > 0 && (
-                  <span className="ml-1 text-micro text-l4">{kindCounts[item.id]}</span>
-                )}
-              </button>
-            ))}
           </div>
           <div
             ref={listRef}

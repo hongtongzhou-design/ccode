@@ -3,14 +3,14 @@
 > 状态：**已落地**。改 `profiles.rs` / `launch_plan` / 设为全局 / 模型能力 / 配置页 / 托盘前必读。
 > 产品决策来自 2026-08-30 设计梳理；实现前走查补丁（洞 1–7）已并入本文，覆盖代码以括号内路径为准。
 
-Ccode 的配置单位从「一条连接粘住 Agent + 端点 + 密钥 + 模型 + 策略」拆成两层：**网关**（怎么跟端点说话）和 **绑定**（某个 Agent 用这个网关的哪些模型）。控件是否出现按组合求交，不改写 HTTP，不解析 TUI `/model`。
+Mesa 的配置单位从「一条连接粘住 Agent + 端点 + 密钥 + 模型 + 策略」拆成两层：**网关**（怎么跟端点说话）和 **绑定**（某个 Agent 用这个网关的哪些模型）。控件是否出现按组合求交，不改写 HTTP，不解析 TUI `/model`。
 
 ## 1. 产品承诺（已锁定）
 
 | 主题 | 选择 |
 |---|---|
 | 第三方模型对不上 CLI 原生命令 | 按 **Agent × 启动模型 × 网关槽 × 体检** 求交后只展示真能生效的控件。不走本地代理。 |
-| 配置单位 | 网关一等；Agent 只绑定。同一 `(agent, gatewayId)` 只能有一条 api 绑定。 |
+| 配置单位 | 网关一等；Agent 只绑定。同一 Agent + 网关允许不同模型选择；完全相同的模型/协议/附加环境变量仍拒绝重复。 |
 | 端点 | 一把密钥 + 协议分槽：`anthropic` / `openai` / `responses` / `gemini` / `cursor`。 |
 | 用户策略 | Header 在网关；思考档 / 温度 / 输出上限在网关的**每个模型**上（稀疏）；Agent 绑定只决定能不能注入，以及 `extraEnv`。 |
 | 会话里 `/model` | 不改进程 env。状态栏按**启动时选中的模型**决定原生命令。混用时提示「换模要重开才按新模型注入」。不追踪 TUI。 |
@@ -54,9 +54,11 @@ Binding
   lastUsedAt
 
 约束
-  同一 (agent, gatewayId) 至多一条 api 绑定
+  同一 (agent, gatewayId, protocol, models, extraEnv) 至多一条 api 绑定
   每个 agent 至多一条 official 绑定
   绑定时该 Agent 所需协议槽必须已填，否则先补槽（缺槽态见 §9）
+  绑定更新不得回写共享网关的 URL / Header / noAuth / 密钥
+  导入按绑定身份规则还原，不得把不同模型选择静默合并成一条
 ```
 
 槽对照（与现 `launch_plan` 一致，不是新发明）：
@@ -111,7 +113,7 @@ provider_id(gateway) = "ccode-" + gateway.id 去掉连字符后的前 8 位十�
 
 （kimi 别名字符集 `[A-Za-z0-9_-]`、TOML 裸键、OpenCode provider 键都吃得下。）实现固定取 8 位；碰撞极罕见，不做加长。辅助函数单一出处，禁止各 adapter 再写死 `"ccode"`。
 
-新会话 / 新全局写入用派生名。**写派生名时清掉 Ccode 历史上写的无后缀 `ccode` 段**（`model_providers.ccode` / `provider.ccode` / `providers.ccode`），避免两套并存。
+新会话 / 新全局写入用派生名。**写派生名时清掉 Mesa 历史上写的无后缀 `ccode` 段**（`model_providers.ccode` / `provider.ccode` / `providers.ccode`），避免两套并存。
 
 **恢复回落**：
 
@@ -178,7 +180,7 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 
 今日探针结果不落盘，每次重探（`profile_validation.rs`）。方案把 `lastProbe` 存进网关之后：
 
-**存什么**：按槽（及可选 model）存各检查项：`never` | `passed` | `failed`，外加探测时间和所用 URL 指纹。
+**存什么**：按 **槽 + 模型 + URL 指纹 + 密钥有无** 存各检查项：`never` | `passed` | `failed`，外加探测时间。基础连通、流式、思考档、采样（temperature/top_p）、Header **分字段记录**；思考档失败不得关掉采样。写入前对照当前网关指纹，地址或密钥已变则丢弃迟到回包，不得写成新配置的结论。消费必须匹配当前槽、模型与指纹，禁止用「该槽最近一条」株连其他模型。
 
 **作废**：该槽 URL 变更、网关密钥变更（含从有到无 / 轮换）、`noAuth` 翻转。作废 = 回到 `never`，不把旧失败带到新端点。
 
@@ -194,7 +196,7 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 
 - 注入「未实证一律不注」= Agent **通道表** unknown/unsupported，跟体检无关。Claude 的 effort 通道是 supported，从未体检也会注。
 - 体检失败才会挡住已有通道的注入。
-- 手册原句建议：「网关体检不是开关。没跑过体检时，Ccode 只按 CLI 是否真有注入通道决定；体检明确失败才会关掉对应控件。」
+- 手册原句建议：「网关体检不是开关。没跑过体检时，Mesa 只按 CLI 是否真有注入通道决定；体检明确失败才会关掉对应控件。」
 
 官方绑定、无密钥网关：无 API 探针；求交不看 probe。
 
@@ -211,9 +213,20 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 
 - **默认**：启动栏预选（`default_profiles`，值 = binding id）。
 - **官方账号模型（v3.186）**：启动不得把中转/国产网关模型名（deepseek / qwen / glm…）注入官方通道。Codex 官方只接受 `gpt-` / `o1`/`o3`/`o4` / 含 `codex` 的模型；否则不传 `-m`，避免 ChatGPT 订阅的 `service_tier=priority` 打到 DeepSeek 上。前端 `officialModelAllowed` 与 `agents.rs official_model_allowed` 双端镜像。
-- **全局生效**：上次由 Ccode 写入该 CLI 文件的绑定（`active_global_profiles`）。口径仍是「上次写入」不是绝对生效态；托盘见 §12。
+- **全局生效**：上次由 Mesa 写入该 CLI 文件的绑定（`active_global_profiles`）。口径仍是「上次写入」不是绝对生效态；托盘见 §12。
 
-行内：编辑绑定（模型名单 / 默认模型 / extraEnv）· 在终端使用 · 设为全局 · 停用 · 解绑。
+行内：编辑绑定（模型名单 / 默认模型 / extraEnv）· 在终端使用 · 写入 CLI 全局默认 · 停用 · 解绑。每条配置展示一句：网关 · 协议 · 默认模型 · 影响 Mesa 启动预选还是外部 CLI。
+
+操作分口（不得混用「应用到 Agent」）：
+
+| 操作 | 含义 |
+|---|---|
+| 保存网关 | 保存地址、凭证、目录和逐模型策略 |
+| 添加 Agent 配置 | 选择这个 Agent 使用哪些模型、哪个默认；不写 CLI 文件 |
+| 设为 Mesa 启动默认 | 只影响 Mesa 新启动时的预选 |
+| 设为项目默认 | 只影响当前项目的默认配置选择 |
+| 写入 CLI 全局默认 | 修改外部 CLI 的配置文件；确认前给出脱敏预览 |
+| 注册到客户端 | 登记 provider，不切换默认渠道 |
 
 「添加」= 选用已有网关（缺槽则先补）或新建网关再绑定。选用已有网关时从该网关目录勾选启动模型，禁止把整份目录预填进绑定。
 
@@ -231,9 +244,9 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 
 官方绑定：不注 API、`env_remove` 残留密钥变量（现口径）。`extraEnv` 仍最后注入。
 
-**Codex 官方绑定额外注入** `-c model_provider="openai"`：磁盘 `config.toml` 的 `model_provider` 指向自定义网关时会盖过 ChatGPT 登录（选官方账号仍走网关计费）。`-c` 优先级最高，只影响本进程，不改用户文件、不写 `[model_providers.*]`。登录走 `codex login --device-auth`（设备码印在内嵌终端；不在 Ccode 内自建 OAuth）。未选模型时磁盘 `model` 仍会生效。`chatgpt.com` 401 / `token_revoked` 是 ChatGPT 登录态本身失效，不是官方/API 凭证串台。
+**Codex 官方绑定额外注入** `-c model_provider="openai"`：磁盘 `config.toml` 的 `model_provider` 指向自定义网关时会盖过 ChatGPT 登录（选官方账号仍走网关计费）。`-c` 优先级最高，只影响本进程，不改用户文件、不写 `[model_providers.*]`。登录走 `codex login --device-auth`（设备码印在内嵌终端；不在 Mesa 内自建 OAuth）。未选模型时磁盘 `model` 仍会生效。`chatgpt.com` 401 / `token_revoked` 是 ChatGPT 登录态本身失效，不是官方/API 凭证串台。
 
-**Codex 恢复不得串台（v3.223）**：rollout 的 `model_provider` 分三条——`ccode`/`ccode-<短id>` = Ccode 网关；`openai` = ChatGPT 官方；其他名字（磁盘 `custom` 等）= 客户端/全局配置渠道。自动恢复时客户端渠道只挑带 Base URL 的网关，绝不落到官方账号（否则强制 `api.openai.com` 且 `env_remove` 密钥，报 401 Missing bearer，同一会话在客户端却能继续）。官方未登录时 `openai` 会话也改挑网关；启动栏未登录的官方账号不自动预选，硬启动先确认。纯逻辑 `src/resume-profile.ts`。
+**Codex 恢复不得串台（v3.223）**：rollout 的 `model_provider` 分三条——`ccode`/`ccode-<短id>` = Mesa 网关；`openai` = ChatGPT 官方；其他名字（磁盘 `custom` 等）= 客户端/全局配置渠道。自动恢复时客户端渠道只挑带 Base URL 的网关，绝不落到官方账号（否则强制 `api.openai.com` 且 `env_remove` 密钥，报 401 Missing bearer，同一会话在客户端却能继续）。官方未登录时 `openai` 会话也改挑网关；启动栏未登录的官方账号不自动预选，硬启动先确认。纯逻辑 `src/resume-profile.ts`。
 
 **无头调用（雷达解读 / 提交信息等）** 的「最近使用」回落跳过官方账号：OAuth 过期会把 CLI stderr 甩到界面。有 API 配置就走 API；只有官方才回落官方。显式 id、功能专属、AI 专用仍尊重官方。失败文案走 `summarize_headless_error`，不回整段日志。终端里手选「官方账号」不受这条约束。
 
@@ -243,14 +256,16 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 
 ## 12. 设为全局与托盘
 
-「设为全局」是绑定上的动作，复用现事务写入 / 备份 / 原始快照 / 复检弹层。成功更新「全局生效」徽标，**不**改「默认」绑定。无密钥网关仍禁止设为全局（`plan_writes` 现拒绝 `noAuth`，保持）。
+「写入 CLI 全局默认」是绑定上的动作，复用现事务写入 / 备份 / 原始快照 / 复检弹层。确认前 `preview_profile_global` 给出脱敏变更预览（文件、字段增删改、此入口带不上的策略、已开进程需新开）。成功更新「外部 CLI 上次写入」追踪，**不**改 Mesa 启动默认，也不改项目默认。无密钥网关仍禁止（`plan_writes` 现拒绝 `noAuth`，保持）。
 
-**官方绑定「设为全局」改语义**（今日 `plan_writes` 对 official 直接报错）：改为 `restore_original_backup`——清掉 Ccode 写入的 API 配置，让 CLI 登录态接手，并 `clear_active_global`。没有原始快照（从未对这个 agent 设过全局）= 无事可恢复，按钮说明「当前全局文件不是 Ccode 写的，无需恢复」。这是切回官方账号的托盘 / 菜单入口，不是新发明（`global_config.rs` `original/` + `restore_original_backup`）。
+**设为全局挡路（v3.252 / v3.253）**：本机有 `~/.cc-switch` 时，所有支持「设为全局」的 Agent 连接页二次确认（默认焦点在取消）；托盘一点不写盘，通知去连接页。Codex 另认 live `config.toml` 的 cc-switch catalog / `custom` 渠道（即使卸了 cc-switch）。不挡 Codex「注册到客户端」。官方账号「设为全局」（恢复初始）不挡。
+
+**官方绑定「设为全局」改语义**（今日 `plan_writes` 对 official 直接报错）：改为 `restore_original_backup`——清掉 Mesa 写入的 API 配置，让 CLI 登录态接手，并 `clear_active_global`。没有原始快照（从未对这个 agent 设过全局）= 无事可恢复，按钮说明「当前全局文件不是 Mesa 写的，无需恢复」。这是切回官方账号的托盘 / 菜单入口，不是新发明（`global_config.rs` `original/` + `restore_original_backup`）。
 
 **托盘**（仓库里目前没有，本批新增）：
 
 ```
-Ccode            → 打开主窗口
+Mesa             → 打开主窗口
 Claude Code      → 各绑定（含官方账号）
 Codex            → …
 （set_global unsupported 的 Agent 整组置灰，原因与配置页同源）
@@ -261,14 +276,14 @@ Codex            → …
 
 **托盘选中态不要把「上次写入」画成收音机承诺**（洞 7）：
 
-`active_global_profiles` 在用户于 Ccode 外手改文件后会失真。配置页徽标可以靠 title 交代；托盘 `●` 会放大成「这就是当前全局」。
+`active_global_profiles` 在用户于 Mesa 外手改文件后会失真。配置页徽标可以靠 title 交代；托盘 `●` 会放大成「这就是当前全局」。
 
 菜单弹出时对该 agent 做一次 **dry-run**：`plan_writes` 产物与磁盘现文件比对（忽略无关空白 / JSON 键序若现实现已有归一就用）。
 
 | 比对 | 托盘 |
 |---|---|
 | 与某绑定计划一致 | 该项 `●`，其余 `○` |
-| 谁都比不上（手改 / 他方工具写过） | 全部 `○`，菜单顶一行「全局文件已在 Ccode 外改过」 |
+| 谁都比不上（手改 / 他方工具写过） | 全部 `○`，菜单顶一行「全局文件已在 Mesa 外改过」 |
 | dry-run 失败（读文件失败、超时） | 回落「上次写入」徽标口径，并在该项 title 标明「未校验磁盘」 |
 
 不在托盘做 cc-switch 式回填保真。比对只影响显示，不自动写回。
@@ -356,3 +371,11 @@ Codex            → …
 - 默认不含密钥。含密钥须二次确认，落盘 0600；`extraEnv` 仍按名剔除含 KEY/TOKEN/SECRET/PASSWORD/AUTH 的项，再过 `redact_sensitive_text`，然后才把 `apiKey` 写回。
 - 导入：先按密钥指纹匹配，没有或对不上再按槽指纹。同网关槽 URL 冲突、Header / extraEnv / 协议冲突进 `skippedSlots`（界面列出原文）。唯一约束命中则合并模型名单。
 - 旧 profiles 数组仍能导入（v1 回落）。
+
+## 配置存储与恢复（2026-09-08）
+
+- ProfileStore/settings 的读改写持同一进程锁和 OS 文件锁；schedules 独立锁。跨锁依赖顺序为 profiles→schedules；scheduler 读完日程先放锁再解析 Profile。全局配置先读取 Profile/密钥再取 global-config 锁，持全局锁时不得再次读取 Profile。
+- 官方账号 bind 走 create 前释放已有 profiles 锁，防同线程重入死锁。
+- 拆层迁移先写私有 pending 日志，写网关→密钥→绑定→合并日志→引用，最后删除 pending。失败后用相同 ID 重放；bindings 存在不再绕过 pending 恢复。
+- 私有 JSON 从临时文件创建起就是 0600；普通文本原子替换保留可执行位。损坏密钥原件保留并备份，损坏设置保留且拒绝 patch，不把“读失败”当“空配置”。
+- 定时任务绑定缺失时拒绝静默回落；交互 AI 默认选择仍遵守既有显式/专属/默认优先级。

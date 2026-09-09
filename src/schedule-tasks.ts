@@ -76,12 +76,32 @@ export function summaryPreview(record: RunRecordDto): string {
   return truncateText(record.summary, 120);
 }
 
+/**
+ * 巡检页「运行中」集合与后端真实运行态（ScheduleDto.runningRunId）对账，挂载/刷新时调用：
+ * 后端报在跑的一律并入（挂载同步真实状态）；本地有、后端上次报在跑而这次不再跑的清除
+ * （scheduler-run-done 事件漏收时的兜底）；刚点「立即运行」还没登记 Run 的
+ * （前后两次快照都不在跑）保留，防按钮闪烁。
+ */
+export function reconcileRunningSchedules(
+  current: ReadonlySet<string>,
+  prevBackendRunning: ReadonlySet<string>,
+  nextBackendRunning: ReadonlySet<string>,
+): Set<string> {
+  const next = new Set(current);
+  for (const id of nextBackendRunning) next.add(id);
+  for (const id of next) {
+    if (prevBackendRunning.has(id) && !nextBackendRunning.has(id)) next.delete(id);
+  }
+  return next;
+}
+
 export function scheduleStatusMark(status: string | null | undefined): {
   glyph: string;
   label: string;
   className: string;
 } {
   if (status === "ok") return { glyph: "✓", label: "成功", className: "text-ok-text" };
+  if (status === "cancelled") return { glyph: "■", label: "已取消", className: "text-l4" };
   if (status === "timeout") return { glyph: "⏱", label: "超时", className: "text-warn-text" };
   return { glyph: "✗", label: "失败", className: "text-err-text" };
 }

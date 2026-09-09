@@ -17,6 +17,7 @@ import { interactiveUpdatePrefill } from "../update-routing";
 import { absTime, relTime } from "../rel-time";
 import { toast } from "../toast";
 import { slotForAgent } from "../gateway-slot";
+import { bindingImpactLine } from "../binding-impact";
 import ContextMenu from "../components/ContextMenu";
 import GatewayLibrary from "../components/GatewayLibrary";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
@@ -44,6 +45,7 @@ import type {
   GlobalDriftDto,
   ImportV2Result,
   GlobalApplyResultDto,
+  GlobalWritePreviewDto,
   OfficialAccountStatusDto,
   Profile,
   ProfileInput,
@@ -370,6 +372,9 @@ function ProfileModal({
         headerEnv: parseHeaderEnvLines(headerEnvText),
       },
       apiKey: form.accountType === "official" ? null : form.apiKey || null,
+      expectedGatewayRevision: initial?.gatewayId
+        ? gateways.find((g) => g.id === initial.gatewayId)?.revision ?? null
+        : null,
     };
     try {
       if (!initial && bindMode === "existing") {
@@ -1217,7 +1222,7 @@ interface AgentUpdateInfo {
 /** 各 agent 在 TUI 模型切换页可用的模型数上限（注入模式；matrix 调研结论）。
  *  max = null 表示不限（选择器列出全部已配置模型） */
 
-/** 各 CLI 断开官方账号的方式（Ccode 不删 auth 文件，引导用 CLI 自己的 logout；
+/** 各 CLI 断开官方账号的方式（Mesa 不删 auth 文件，引导用 CLI 自己的 logout；
  *  命令按官方文档/CLI help 核实，见 agent_specs.rs 的 official_account 注释） */
 const OFFICIAL_LOGOUT_HINT: Record<string, string> = {
   "claude-code": "claude auth logout（或 TUI 内 /logout）",
@@ -1369,7 +1374,7 @@ function diagnose(output: string, method: string): string | null {
   }
   if (output.includes("EACCES") || lower.includes("permission denied")) {
     if (/Windows/i.test(navigator.userAgent)) {
-      return "Windows 权限不足：请先安装 Node.js LTS 并重新打开 Ccode；若 Node.js 已安装，请确认 npm 全局目录可写，再重试。";
+      return "Windows 权限不足：请先安装 Node.js LTS 并重新打开 Mesa；若 Node.js 已安装，请确认 npm 全局目录可写，再重试。";
     }
     return "权限不足：该命令需要写入全局目录，检查安装目录权限";
   }
@@ -1390,11 +1395,11 @@ function installToolHelp(agentId: string): string {
       return "Cursor CLI 官方仅支持 macOS/Linux，Windows 请在 WSL 中安装 cursor-agent，或改用其他 Agent。";
     }
     if (WINGET_AGENTS.has(agentId)) {
-      return "未找到可用的安装工具：winget 与 Node.js 都不可用。该 agent 在 Windows 上有两条路——① 系统自带 winget：若被卸载，请在 Microsoft Store 安装「应用安装程序」；② 安装 Node.js LTS 走 npm 渠道（下载：https://nodejs.org/en/download）。完成后完全退出并重新打开 Ccode。";
+      return "未找到可用的安装工具：winget 与 Node.js 都不可用。该 agent 在 Windows 上有两条路——① 系统自带 winget：若被卸载，请在 Microsoft Store 安装「应用安装程序」；② 安装 Node.js LTS 走 npm 渠道（下载：https://nodejs.org/en/download）。完成后完全退出并重新打开 Mesa。";
     }
-    return "未找到可用的安装工具：该 agent 在 Windows 上只能走 npm 渠道。请先安装 Node.js LTS（自带 npm），安装完成后完全退出并重新打开 Ccode 再重试。下载：https://nodejs.org/en/download";
+    return "未找到可用的安装工具：该 agent 在 Windows 上只能走 npm 渠道。请先安装 Node.js LTS（自带 npm），安装完成后完全退出并重新打开 Mesa 再重试。下载：https://nodejs.org/en/download";
   }
-  return "未找到可用的安装工具。请先安装 Node.js（会同时提供 npm），然后完全退出并重新打开 Ccode 再重试。";
+  return "未找到可用的安装工具。请先安装 Node.js（会同时提供 npm），然后完全退出并重新打开 Mesa 再重试。";
 }
 
 function validationTone(status: ValidationCheckDto["status"]): string {
@@ -1611,6 +1616,122 @@ function PreviewDialog({
   );
 }
 
+function changeOpLabel(op: string): string {
+  if (op === "add") return "新增";
+  if (op === "remove") return "删除";
+  if (op === "modify") return "修改";
+  return op;
+}
+
+function fileActionLabel(action: string): string {
+  if (action === "create") return "新建";
+  if (action === "modify") return "修改";
+  return action;
+}
+
+/** 「设为全局默认」确认前的脱敏预览：文件、字段增删改、此入口带不上的策略、是否要重开。 */
+function GlobalWritePreviewDialog({
+  profile,
+  loading,
+  preview,
+  error,
+  conflict,
+  onCancel,
+  onConfirm,
+}: {
+  profile: Profile;
+  loading: boolean;
+  preview: GlobalWritePreviewDto | null;
+  error: string | null;
+  conflict: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Modal
+      open
+      title={`写入 CLI 全局默认 · ${profile.name}`}
+      description="先看将改哪些文件。确认后才写入；失败自动回滚。"
+      onClose={onCancel}
+      size="lg"
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex h-7 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            autoFocus={!conflict}
+            disabled={loading || !preview || !!error}
+            onClick={onConfirm}
+            className="inline-flex h-7 items-center justify-center rounded-md border border-cta-bd bg-cta px-3 text-xs font-medium text-cta-text transition-[filter] hover:brightness-110 disabled:opacity-50"
+          >
+            {conflict ? "仍要写入" : "写入全局默认"}
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3 px-4 py-3 text-xs leading-5">
+        {loading && <p className="text-l3">◌ 正在对照磁盘生成脱敏预览…</p>}
+        {error && <p className="break-words text-err-text">{error}</p>}
+        {conflict && (
+          <p className="whitespace-pre-wrap break-words text-warn-text">{conflict}</p>
+        )}
+        {preview && (
+          <>
+            <p className="text-l3">{preview.scopeNote}</p>
+            {preview.files.length === 0 ? (
+              <p className="text-l3">磁盘已是这份配置，再写入不会改内容。</p>
+            ) : (
+              <ul className="space-y-2">
+                {preview.files.map((file) => (
+                  <li key={file.path}>
+                    <p className="font-medium text-l2">
+                      {fileActionLabel(file.action)} {file.path}
+                    </p>
+                    <ul className="mt-1 space-y-0.5 font-mono text-micro text-l3">
+                      {file.changes.map((c) => (
+                        <li key={`${c.op}:${c.path}`} className="break-all">
+                          {changeOpLabel(c.op)} {c.path}
+                          {c.op === "remove"
+                            ? c.before
+                              ? ` ← ${c.before}`
+                              : ""
+                            : c.after
+                              ? ` → ${c.after}`
+                              : ""}
+                        </li>
+                      ))}
+                    </ul>
+                    {file.omitted > 0 && (
+                      <p className="text-micro text-l4">另有 {file.omitted} 项未列出</p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {preview.skippedPolicies.length > 0 && (
+              <div>
+                <p className="font-medium text-l2">不会通过此入口生效</p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-4 text-l3">
+                  {preview.skippedPolicies.map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <p className="text-l3">{preview.restartNote}</p>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 /** 「设为全局」进度/结果弹层：确认后立即弹出（写入 + CLI 复检含网络检查，要几秒到
     十几秒，没反馈像点了没反应）；完成后同层切换为结果视图；验证未通过可一键展开
     三层验证详情（复用 ValidationDialog）。进行中禁关（点遮罩无效、无关闭钮）防误触 */
@@ -1633,8 +1754,8 @@ function GlobalApplyDialog({
   return (
     <Modal
       open
-      title={`设为全局 · ${profile.name}`}
-      description="写入该 CLI 的全局配置文件，任何终端生效；失败自动回滚"
+      title={`写入 CLI 全局默认 · ${profile.name}`}
+      description="已写入外部 CLI 配置文件；失败已回滚。不改 Mesa 启动预选。"
       onClose={onClose}
       size="lg"
       dismissOnBackdrop={!running}
@@ -1699,6 +1820,8 @@ function GlobalApplyDialog({
 }
 
 export default function ProfilesPage({ visible }: { visible: boolean }) {
+  const connectionLoadError = useAppStore((s) => s.connectionLoadError);
+  const retryConnections = useAppStore((s) => s.loadAll);
   const profiles = useAppStore((s) => s.profiles);
   const profileIssues = useAppStore((s) => s.profileIssues);
   const [driftByAgent, setDriftByAgent] = useState<Record<string, GlobalDriftDto>>({});
@@ -2203,15 +2326,8 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   }
 
   /** 把 profile 事务化写入该 CLI 的全部目标文件，UI 明示影响范围 */
-  async function onApplyGlobal(p: Profile) {
-    if (applyDialog) return; // 已有写入在进行/结果在展示，禁止重入
-    if (
-      !(await confirmDialog(
-        `将把该连接写入 ${labelOf(p.agent)} 的全局配置文件（影响其他终端里的使用）。全部文件会作为一个批次写入，失败会自动回滚；当前内容会先备份。继续？`,
-      ))
-    )
-      return;
-    // 确认后立刻弹进度层：写文件 + doctor 复检要几秒到十几秒，静默等待像没反应
+  async function runApplyGlobal(p: Profile) {
+    setWritePreview(null);
     setApplyDialog({ profile: p, running: true, applied: null, error: null });
     try {
       const applied = await invoke<GlobalApplyResultDto>(
@@ -2221,10 +2337,10 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
         },
       );
       await refreshGlobalBackups();
-      // 后端已把该连接记为「全局生效」（settings.activeGlobalProfiles），重拉设置刷新徽标
       await loadSettings();
       mirrorValidation(p, applied.validation);
       rememberValidation(p.id, applied.validation);
+      await refreshClientRegistrations();
       setApplyDialog({ profile: p, running: false, applied, error: null });
       setError(null);
     } catch (e) {
@@ -2237,13 +2353,59 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
+  async function onApplyGlobal(p: Profile) {
+    if (applyDialog || writePreview) return;
+    if (p.accountType === "official") {
+      if (
+        !(await confirmDialog(
+          `将恢复 ${labelOf(p.agent)} 首次写入前的配置，让官方账号接手外部终端。不会改 Mesa 启动栏预选。已经打开的进程需要新开才会读到。继续？`,
+        ))
+      )
+        return;
+      await runApplyGlobal(p);
+      return;
+    }
+    setWritePreview({
+      profile: p,
+      loading: true,
+      preview: null,
+      error: null,
+      conflict: null,
+    });
+    try {
+      const [preview, conflict] = await Promise.all([
+        invoke<GlobalWritePreviewDto>("preview_profile_global", {
+          profileId: p.id,
+        }),
+        invoke<string | null>("set_global_conflict", { agent: p.agent }).catch(
+          () => null,
+        ),
+      ]);
+      setWritePreview({
+        profile: p,
+        loading: false,
+        preview,
+        error: null,
+        conflict: conflict ?? null,
+      });
+    } catch (e) {
+      setWritePreview({
+        profile: p,
+        loading: false,
+        preview: null,
+        error: String(e),
+        conflict: null,
+      });
+    }
+  }
+
   /** 注册到 Codex 客户端（不切换默认渠道）：只写 config.toml 的 provider 定义块
-      （认证在块内静态 http_headers，不动 auth.json、不影响客户端自身登录态），
+      （认证用 experimental_bearer_token，不动 auth.json、不影响客户端自身登录态），
       之后此网关发起的会话可在桌面客户端续聊；与「设为全局」共用备份，可「撤销上次写入」 */
   async function onRegisterClient(p: Profile) {
     if (
       !(await confirmDialog(
-        "将把此网关的 provider 定义写入 codex 的 config.toml（密钥以静态请求头形式写在定义块内，先备份、可撤销）。**默认渠道不动，auth.json 与客户端登录态也不动**——之后 Ccode 里此网关发起的会话，可以在 Codex 桌面客户端直接打开续聊。继续？",
+        "将把此网关的 provider 定义写入 codex 的 config.toml（密钥写在定义块的 experimental_bearer_token，先备份、可撤销）。**默认渠道不动，auth.json 与客户端登录态也不动**——之后 Mesa 里此网关发起的会话，可以在 Codex / ChatGPT 桌面客户端直接打开续聊。继续？",
       ))
     )
       return;
@@ -2268,7 +2430,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   async function onUnregisterClient(p: Profile) {
     if (
       !(await confirmDialog(
-        "将从 codex 的 config.toml 删除此网关的 provider 定义块（含块内密钥，先备份、可撤销）。之后此网关发起的会话在 Codex 桌面客户端又会无法打开；Ccode 内使用与客户端登录态都不受影响。继续？",
+        "将从 codex 的 config.toml 删除此网关的 provider 定义块（含块内密钥，先备份、可撤销）。之后此网关发起的会话在 Codex 桌面客户端又会无法打开；Mesa 内使用与客户端登录态都不受影响。继续？",
       ))
     )
       return;
@@ -2338,12 +2500,12 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     }
   }
 
-  /** 恢复到「Ccode 首次写入前」的原始状态（永久快照，不参与批次轮换）。
+  /** 恢复到「Mesa 首次写入前」的原始状态（永久快照，不参与批次轮换）。
       当前状态会先存成常规批次，恢复后想反悔可再点「撤销上次写入」 */
   async function onRestoreOriginal(agentId: string) {
     if (
       !(await confirmDialog(
-        `将把 ${labelOf(agentId)} 的全局配置恢复到 Ccode 首次写入前的原始状态（Ccode 当时新建的文件会被删除）。当前状态会先另存为新备份，可用「撤销上次写入」反悔。继续？`,
+        `将把 ${labelOf(agentId)} 的全局配置恢复到 Mesa 首次写入前的原始状态（Mesa 当时新建的文件会被删除）。当前状态会先另存为新备份，可用「撤销上次写入」反悔。继续？`,
       ))
     )
       return;
@@ -2477,9 +2639,17 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
     applied: GlobalApplyResultDto | null;
     error: string | null;
   } | null>(null);
+  const [writePreview, setWritePreview] = useState<{
+    profile: Profile;
+    loading: boolean;
+    preview: GlobalWritePreviewDto | null;
+    error: string | null;
+    conflict: string | null;
+  } | null>(null);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const loadSettings = useAppStore((s) => s.loadSettings);
+  const gateways = useAppStore((s) => s.gateways);
 
   /** 「在终端使用」：新开标签并直接启动（与快速开聊共用 pendingTerminal 链路）。
    *  目录取上次启动过的，没有就交给启动栏留空由用户填 */
@@ -2687,6 +2857,11 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
         )}
         {notice && <p role="status" className="mt-4 text-xs text-ok-text">{notice}</p>}
 
+        {connectionLoadError && <div role="alert" className="my-3 rounded-md border border-hairline p-3 text-xs text-warn-text">
+          <p>连接加载失败，已保留上次成功的数据：{connectionLoadError}</p>
+          <button type="button" className="mt-2 text-l2 hover:underline" onClick={() => void retryConnections().catch(() => {})}>重新读取连接</button>
+        </div>}
+
         {/* agent 分组（可折叠） */}
         <div>
           {visibleAgents.map((agent) => {
@@ -2809,7 +2984,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                         return (
                           <button
                             type="button"
-                            title={`${note}\n点击复制渠道切换命令：${cmd}\n含义：卸载 brew 版本并改装 npm 版本（之后更新走 npm 渠道，Ccode 自动按 npm 检查）`}
+                            title={`${note}\n点击复制渠道切换命令：${cmd}\n含义：卸载 brew 版本并改装 npm 版本（之后更新走 npm 渠道，Mesa 自动按 npm 检查）`}
                             onClick={() =>
                               void navigator.clipboard.writeText(cmd)
                             }
@@ -2969,34 +3144,42 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                           const isGlobal =
                             settings?.activeGlobalProfiles?.[profile.agent] ===
                             profile.id;
-                          // caption 行（名称下方次级辅助文本）：上次使用 · 默认 · 全局生效
+                          // caption：影响范围一句 + 上次使用 + 外部文件被改过
                           const caption: {
                             text: string;
                             tip: string;
                             cls?: string;
                           }[] = [];
+                          const impact = bindingImpactLine({
+                            accountType: profile.accountType,
+                            gatewayName: profile.gatewayId
+                              ? gateways.find((g) => g.id === profile.gatewayId)?.name
+                              : null,
+                            agent: profile.agent,
+                            protocol: profile.protocol,
+                            defaultModel: profile.models[0] ?? null,
+                            mesaLaunchDefault: isDefault,
+                            cliGlobalWritten: isGlobal,
+                          });
+                          caption.push({
+                            text: impact,
+                            tip: "网关 · 协议 · 默认模型 · 影响 Mesa 启动预选还是外部 CLI。设为 Mesa 启动默认只改启动栏；写入 CLI 全局默认才改外部文件。",
+                          });
                           if (profile.lastUsedAt)
                             caption.push({
                               text: `上次使用 ${relTime(profile.lastUsedAt)}`,
                               tip: `上次使用 ${absTime(profile.lastUsedAt)}`,
                             });
-                          if (isDefault)
-                            caption.push({
-                              text: "默认",
-                              tip: "终端启动栏选这个 agent 时默认使用",
-                            });
-                          // 「设为全局」追踪标记：只代表上次由 Ccode 写入全局配置，
-                          // 外部手改配置文件后会失真——tip 照实说明，不声称绝对生效
                           if (isGlobal) {
                             const drift = driftByAgent[profile.agent];
                             const drifted = drift?.status === "drifted";
-                            caption.push({
-                              text: drifted ? "全局生效 · 已被外部修改" : "全局生效",
-                              tip: drifted
-                                ? `磁盘与 Ccode 写入不一致：${(drift?.files ?? []).join("、") || "配置文件"}。可用「设为全局」以 Ccode 为准重写，或「恢复备份」。`
-                                : "上次由 Ccode 写入该 agent 的全局配置：外部终端/其他工具里的该 CLI 用这套。在 Ccode 之外手改配置文件后此标记可能失真",
-                              cls: drifted ? "text-warn-text" : "text-ok-text",
-                            });
+                            if (drifted) {
+                              caption.push({
+                                text: "外部 CLI 文件已被改过",
+                                tip: `磁盘与 Mesa 写入不一致：${(drift?.files ?? []).join("、") || "配置文件"}。可用「写入 CLI 全局默认」以 Mesa 为准重写，或「撤销上次写入」。`,
+                                cls: "text-warn-text",
+                              });
+                            }
                           }
                           if (profile.slotMissing)
                             caption.push({
@@ -3349,9 +3532,9 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
               label:
                 settings?.defaultProfiles?.[rowMenu.profile.agent] ===
                 rowMenu.profile.id
-                  ? "取消默认"
-                  : "设为该 agent 默认",
-              title: "终端启动栏选完这个 agent 后自动预选该配置",
+                  ? "取消 Mesa 启动默认"
+                  : "设为 Mesa 启动默认",
+              title: "只改 Mesa 新启动时的预选，不写外部 CLI 配置，也不改某个项目的默认",
               onSelect: () => void toggleDefaultProfile(rowMenu.profile),
             },
             {
@@ -3364,7 +3547,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                 }),
             },
             {
-              label: rowMenu.profile.accountType === "official" ? "设为全局默认（恢复官方）" : "设为全局默认…",
+              label: rowMenu.profile.accountType === "official" ? "写入 CLI 全局默认（恢复官方）" : "写入 CLI 全局默认…",
               disabled:
                 rowMenu.profile.noAuth ||
                 !!rowMenu.profile.slotMissing ||
@@ -3379,7 +3562,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                   : rowMenu.profile.noAuth
                     ? "无密钥连接不写入全局配置"
                     : (caps[rowMenu.profile.agent]?.setGlobal.reason ??
-                      "把默认渠道切到此配置：写入全局配置文件（先备份、失败自动回滚）；之后外部终端与桌面客户端默认都走它，此连接标记「全局生效」"),
+                      "修改外部 CLI 的配置文件（先备份、失败自动回滚）。不改 Mesa 启动栏预选，也不改项目默认。已打开的进程需要新开才会读到。"),
               onSelect: () => void onApplyGlobal(rowMenu.profile),
             },
             // 轻量版：只注册 provider 定义不切换默认，让此网关的会话能在 Codex 桌面客户端续聊；
@@ -3392,18 +3575,18 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                         label: "移除 Codex 客户端注册…",
                         danger: true,
                         title:
-                          "从 config.toml 删除此网关的 provider 定义块（含块内密钥，先备份、可撤销）；之后此渠道发起的会话在客户端又打不开了，Ccode 内与客户端登录态都不受影响",
+                          "从 config.toml 删除此网关的 provider 定义块（含块内密钥，先备份、可撤销）；之后此渠道发起的会话在客户端又打不开了，Mesa 内与客户端登录态都不受影响",
                         onSelect: () => void onUnregisterClient(rowMenu.profile),
                       }
                     : {
-                        label: "注册到 Codex 客户端（不切换默认）…",
+                        label: "注册到 Codex 客户端（不切换默认渠道）…",
                         disabled:
                           rowMenu.profile.noAuth || !!rowMenu.profile.slotMissing,
                         title: rowMenu.profile.noAuth
                           ? "无密钥连接没有可注册的凭证"
                           : rowMenu.profile.slotMissing
                             ? "这个网关还没配该协议的端点"
-                            : "只把 provider 定义写进 codex 的 config.toml（密钥在块内静态头，先备份、可撤销），默认渠道与客户端登录态都不动；之后此网关发起的会话可在 Codex 桌面客户端直接续聊",
+                            : "只把 provider 定义写进 codex 的 config.toml（密钥用 experimental_bearer_token，先备份、可撤销），默认渠道与客户端登录态都不动；之后此网关发起的会话可在 Codex / ChatGPT 直接续聊",
                         onSelect: () => void onRegisterClient(rowMenu.profile),
                       },
                 ]
@@ -3457,7 +3640,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
               label: "撤销上次写入",
               disabled: !globalBackups[groupMenu.agentId],
               title: globalBackups[groupMenu.agentId]
-                ? "回到最近一次写入（设为全局默认 / 注册到客户端）前的状态；写了几遍就要撤销几遍。想彻底回到 Ccode 介入前的手工配置，用下面的「恢复初始状态」"
+                ? "回到最近一次写入（设为全局默认 / 注册到客户端）前的状态；写了几遍就要撤销几遍。想彻底回到 Mesa 介入前的手工配置，用下面的「恢复初始状态」"
                 : "还没有可撤销的写入",
               onSelect: () => void onRestoreBackup(groupMenu.agentId),
             },
@@ -3465,7 +3648,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
               label: "恢复初始状态",
               disabled: !originalBackups[groupMenu.agentId],
               title: originalBackups[groupMenu.agentId]
-                ? "彻底回到 Ccode 首次写入前的原始配置（永久快照，连续多次写入也一次回到底）"
+                ? "彻底回到 Mesa 首次写入前的原始配置（永久快照，连续多次写入也一次回到底）"
                 : "还没有首次写入前的快照",
               onSelect: () => void onRestoreOriginal(groupMenu.agentId),
             },
@@ -3503,6 +3686,17 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
           profile={previewDialog.profile}
           result={previewDialog.result}
           onClose={() => setPreviewDialog(null)}
+        />
+      )}
+      {writePreview && (
+        <GlobalWritePreviewDialog
+          profile={writePreview.profile}
+          loading={writePreview.loading}
+          preview={writePreview.preview}
+          error={writePreview.error}
+          conflict={writePreview.conflict}
+          onCancel={() => setWritePreview(null)}
+          onConfirm={() => void runApplyGlobal(writePreview.profile)}
         />
       )}
       {applyDialog && (

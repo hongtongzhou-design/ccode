@@ -125,7 +125,7 @@ fn render_git_status(out: &mut String, git: Option<&GitStatusDto>) {
 fn render_handoff_note(out: &mut String, agent: &str) {
     out.push_str("\n## 接力说明\n\n");
     out.push_str(&format!(
-        "- 本简报由 Ccode 从 {agent} 会话生成，非完整记忆。\n"
+        "- 本简报由 Mesa 从 {agent} 会话生成，非完整记忆。\n"
     ));
     out.push_str("- 源会话的完整上下文仍保留在原 Agent 中；请结合项目文件与 git 历史补全背景。\n");
     out.push_str("- 不要假设你知道简报之外的对话细节；不确定时先读代码与相关文件。\n");
@@ -154,7 +154,7 @@ pub(crate) fn render_handoff_brief(
     let mut out = String::new();
     out.push_str(&format!("# 接力简报：{title}\n\n"));
     out.push_str(&format!(
-        "> 本简报由 Ccode 从 {agent} 会话生成（{}），是结构化摘要而非完整记忆。\n\n",
+        "> 本简报由 Mesa 从 {agent} 会话生成（{}），是结构化摘要而非完整记忆。\n\n",
         sessions::now_iso()
     ));
     render_task_info(&mut out, agent, session_id, cwd, &title);
@@ -218,7 +218,7 @@ pub(crate) fn render_digest_brief(
     let mut out = String::new();
     out.push_str(&format!("# 接力简报（AI 提炼）：{title}\n\n"));
     out.push_str(&format!(
-        "> 本简报由 Ccode 用 AI 从 {agent} 会话全文提炼（{}），是结构化摘要而非完整记忆。\n\n",
+        "> 本简报由 Mesa 用 AI 从 {agent} 会话全文提炼（{}），是结构化摘要而非完整记忆。\n\n",
         sessions::now_iso()
     ));
     render_task_info(&mut out, agent, session_id, cwd, &title);
@@ -278,7 +278,7 @@ fn with_handoff_rule(existing: &str) -> Option<String> {
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str("\n# Ccode 接力简报（过程文件，不进版本库）\n.ccode/handoff-*.md\n");
+    content.push_str("\n# Mesa 接力简报（过程文件，不进版本库）\n.ccode/handoff-*.md\n");
     Some(content)
 }
 
@@ -849,7 +849,7 @@ mod tests {
             .contains(".ccode/handoff-*.md"));
         // 无尾换行的存量文件：先换行再追加，不粘连
         let noeol = with_handoff_rule("*.pdf").unwrap();
-        assert!(noeol.contains("*.pdf\n\n# Ccode 接力简报"), "{noeol}");
+        assert!(noeol.contains("*.pdf\n\n# Mesa 接力简报"), "{noeol}");
     }
 
     /// 目标路径：默认落 .ccode/ 下；自定义路径逃出项目根必须拒绝

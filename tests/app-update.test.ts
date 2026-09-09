@@ -21,7 +21,7 @@ test("appUpdateInboxFields：key 带版本，文案含新旧版本", () => {
     appUpdateInboxFields({ version: "0.1.1", currentVersion: "0.1.0" }),
     {
       key: "update:0.1.1",
-      text: "Ccode v0.1.1 可更新（当前 v0.1.0）",
+      text: "Mesa v0.1.1 可更新（当前 v0.1.0）",
     },
   );
 });
@@ -85,14 +85,14 @@ test("appUpdateStatusHint：检查中与开发模式不伪装成已是最新", (
 test("忽略当前版本后换新版本会复现", () => {
   const v1 = {
     key: "update:0.1.1",
-    text: "Ccode v0.1.1 可更新（当前 v0.1.0）",
+    text: "Mesa v0.1.1 可更新（当前 v0.1.0）",
     actionLabel: "去安装",
   };
   const dismissed = { [v1.key]: inboxSignature(v1) };
   assert.equal(filterDismissed([v1], dismissed).length, 0);
   const v2 = {
     key: "update:0.1.2",
-    text: "Ccode v0.1.2 可更新（当前 v0.1.0）",
+    text: "Mesa v0.1.2 可更新（当前 v0.1.0）",
     actionLabel: "去安装",
   };
   assert.equal(

@@ -360,7 +360,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     return [
       ...normal,
       {
-        projectPath: "Ccode 内部 AI 任务",
+        projectPath: "Mesa 内部 AI 任务",
         tokens: internal.reduce((n, p) => n + p.tokens, 0),
         sessions: internal.reduce((n, p) => n + p.sessions, 0),
         costUsd: internal.some((p) => p.costUsd != null)
@@ -382,7 +382,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     return [
       ...normal,
       {
-        model: "Ccode 内部 / 未识别模型",
+        model: "Mesa 内部 / 未识别模型",
         input: internal.reduce((n, m) => n + m.input, 0),
         output: internal.reduce((n, m) => n + m.output, 0),
         costUsd: internal.some((m) => m.costUsd != null)
@@ -462,7 +462,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     <PageFrame width="fluid">
       <PageHeader
         title="用量"
-        meta="只计经 Ccode 记下归属的会话。费用按公开价估算，≥ 含未计价，~ 无价格。"
+        meta="只计经 Mesa 记下归属的会话。费用按公开价估算，≥ 含未计价，~ 无价格。"
       />
       <PageToolbar>
         <SegTabs items={RANGES} value={range} onChange={setRange} />
@@ -584,6 +584,21 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                         )}
                       </>
                     )}
+                </>
+              )}
+              {(stats.cards.officialTokens > 0 || stats.cards.internalTokens > 0) && (
+                <>
+                  {" "}
+                  · 另有{" "}
+                  {[
+                    stats.cards.officialTokens > 0 &&
+                      `订阅 ${compact(stats.cards.officialTokens)}`,
+                    stats.cards.internalTokens > 0 &&
+                      `内部 ${compact(stats.cards.internalTokens)}`,
+                  ]
+                    .filter(Boolean)
+                    .join(" / ")}{" "}
+                  tokens 不计入费用
                 </>
               )}
             </p>

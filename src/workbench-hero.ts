@@ -4,7 +4,15 @@
  */
 import { pathKey, pathWithin, samePath } from "./path-utils.ts";
 import { cwdBasename, buildRunOverview, type RunOverviewInput } from "./run-overview.ts";
-import { isWorkbenchSurfaceRun } from "./run-model.ts";
+import {
+  canonicalizeReuseKey,
+  isRunProcessLive,
+  isWorkbenchSurfaceRun,
+} from "./run-model.ts";
+import { goalBucket } from "./project-tasks.ts";
+import { projectNowLine } from "./project-status.ts";
+import { sessionExcludedFromProjectList } from "./session-filter.ts";
+import { tidySessionTitle } from "./session-title.ts";
 
 export type WorkbenchHeroSource =
   | "running"
@@ -50,6 +58,8 @@ export interface WorkbenchRunChip {
   attention: "confirm" | "working" | "done" | null;
   /** 工作区名 / 分支 / 文档名，不是 CLI 名 */
   taskLabel: string;
+  /** 进程是否还活着；已退出/未启动的保留标签为 false（可继续但不算运行中） */
+  live?: boolean;
 }
 
 export interface WorkbenchHero {
@@ -118,6 +128,7 @@ function toRunChip(run: RunOverviewInput): WorkbenchRunChip {
     agentId: run.agentId,
     attention: run.attention,
     taskLabel: taskLabelForRun(run),
+    live: isRunProcessLive(run),
   };
 }
 
@@ -159,6 +170,42 @@ function attributePath(
     }
   }
   return best?.key ?? null;
+}
+
+/** runId → 项目根、taskId → 项目根的稳定身份归属表（由 Run 记录与 Task 列表现算）。 */
+export interface WorkbenchRunAttribution {
+  runProjects?: Readonly<Record<string, string>>;
+  taskProjects?: Readonly<Record<string, string>>;
+}
+
+/**
+ * 归属一条运行到项目组：先按 runId / taskId 稳定身份（人声明目标的隔离副本 cwd 在
+ * task-runs/<taskId>/<staging> 下，按 cwd 永远落不到项目，会被拆成单独的 UUID 卡），
+ * 都没有再按 cwd 最长前缀。命中归属表但组里没有该项目时返回项目根本身。
+ */
+function attributeRun(
+  run: RunOverviewInput,
+  groups: readonly PathGroup[],
+  isWindows: boolean,
+  attribution?: WorkbenchRunAttribution,
+): string | null {
+  const keyOfRoot = (root: string | undefined): string | null => {
+    if (!root?.trim()) return null;
+    const hit = groups.find((g) => samePath(g.key, root, isWindows));
+    return hit?.key ?? root;
+  };
+  const byRun = keyOfRoot(
+    run.runId ? attribution?.runProjects?.[run.runId] : undefined,
+  );
+  if (byRun) return byRun;
+  const key = canonicalizeReuseKey(run.reuseKey);
+  const taskId =
+    run.taskId ?? (key.startsWith("task:") ? key.slice(5) : undefined);
+  const byTask = keyOfRoot(
+    taskId ? attribution?.taskProjects?.[taskId] : undefined,
+  );
+  if (byTask) return byTask;
+  return attributePath(run.cwd, groups, isWindows);
 }
 
 /** 工作台「最近项目 / 最近对话」最多条数。 */
@@ -329,7 +376,11 @@ export function pickWorkbenchHero(input: {
   recentRepos: readonly WorkbenchRepo[];
   workspaces: readonly WorkbenchWorkspaceRef[];
   runs: readonly RunOverviewInput[];
+  /** 上次选中项目的显示名（contextLabel.project）；同名项目有歧义，仅作无路径时的唯一匹配回落 */
   contextName: string | null;
+  /** 上次选中项目的路径（稳定身份）；有它就不按名字猜 */
+  contextPath?: string | null;
+  attribution?: WorkbenchRunAttribution;
   isWindows?: boolean;
 }): WorkbenchHero | null {
   const isWindows = input.isWindows ?? false;
@@ -343,11 +394,18 @@ export function pickWorkbenchHero(input: {
 
   if (live.length > 0) {
     const top = live[0]!;
-    const key = attributePath(top.cwd, groups, isWindows);
+    const key = attributeRun(top, groups, isWindows, input.attribution);
     const path = key ?? top.cwd;
     const mine = live.filter((run) => {
-      const attributed = attributePath(run.cwd, groups, isWindows);
-      if (key) return attributed === key;
+      const attributed = attributeRun(run, groups, isWindows, input.attribution);
+      if (key) {
+        if (attributed !== null) return samePath(attributed, key, isWindows);
+        // 归属表外的运行退回 cwd 包含判断（如主卡落在已从注册表移除的项目根上）
+        return (
+          pathWithin(run.cwd, path, isWindows) ||
+          pathWithin(path, run.cwd, isWindows)
+        );
+      }
       return (
         pathWithin(run.cwd, path, isWindows) ||
         pathWithin(path, run.cwd, isWindows)
@@ -367,31 +425,60 @@ export function pickWorkbenchHero(input: {
         agentId: pointer.agentId ?? pointed.agentId,
         model: pointed.model,
         attention: pointer.attention ?? pointed.attention,
-        runningCount: runs.length,
+        runningCount: runs.filter((chip) => chip.live).length,
         runs,
       },
     );
   }
 
-  const contextName = input.contextName?.trim() ?? "";
-  if (contextName) {
-    const byProjectName = input.projects.find((p) => p.name === contextName);
-    if (byProjectName) {
+  const contextPath = input.contextPath?.trim() ?? "";
+  if (contextPath) {
+    const byPath = input.projects.find((p) =>
+      samePath(p.path, contextPath, isWindows),
+    );
+    if (byPath) {
       return heroAt(
-        byProjectName.path,
+        byPath.path,
         "context",
         input.projects,
         input.recentRepos,
         isWindows,
       );
     }
-    const byRepoName = input.recentRepos.find((r) => r.name === contextName);
-    if (byRepoName) {
+    const repoByPath = input.recentRepos.find((r) =>
+      samePath(r.path, contextPath, isWindows),
+    );
+    if (repoByPath) {
+      return heroAt(
+        repoByPath.path,
+        "context",
+        input.projects,
+        input.recentRepos,
+        isWindows,
+      );
+    }
+  }
+
+  // 名字只是显示标签：同名项目存在时不猜首项，只有唯一命中才用
+  const contextName = input.contextName?.trim() ?? "";
+  if (contextName) {
+    const nameHits = input.projects.filter((p) => p.name === contextName);
+    if (nameHits.length === 1) {
+      return heroAt(
+        nameHits[0]!.path,
+        "context",
+        input.projects,
+        input.recentRepos,
+        isWindows,
+      );
+    }
+    const repoHits = input.recentRepos.filter((r) => r.name === contextName);
+    if (nameHits.length === 0 && repoHits.length === 1) {
       const registered = input.projects.find((p) =>
-        samePath(p.path, byRepoName.path, isWindows),
+        samePath(p.path, repoHits[0]!.path, isWindows),
       );
       return heroAt(
-        registered?.path ?? byRepoName.path,
+        registered?.path ?? repoHits[0]!.path,
         "context",
         input.projects,
         input.recentRepos,
@@ -441,6 +528,7 @@ function nowRank(opts: {
 export function pickWorkbenchNow(input: {
   seeds: readonly WorkbenchNowSeed[];
   runs: readonly RunOverviewInput[];
+  attribution?: WorkbenchRunAttribution;
   isWindows?: boolean;
 }): WorkbenchNowItem[] {
   const isWindows = input.isWindows ?? false;
@@ -477,7 +565,8 @@ export function pickWorkbenchNow(input: {
   }
 
   for (const run of live) {
-    const key = attributePath(run.cwd, groups, isWindows) ?? run.cwd;
+    const key =
+      attributeRun(run, groups, isWindows, input.attribution) ?? run.cwd;
     const item = ensure(key, "running");
     item.runs.push(toRunChip(run));
   }
@@ -493,16 +582,18 @@ export function pickWorkbenchNow(input: {
     const seed = input.seeds.find((s) => samePath(s.path, item.path, isWindows));
     const runs = sortRunChips(item.runs);
     const pointer = pointerFromRuns(runs);
+    // 运行数只算活进程；已退出/未启动的保留标签留在 runs 里供继续，但不冒充「正在工作」
+    const liveCount = runs.filter((chip) => chip.live).length;
     return {
       ...item,
       runs,
-      runningCount: runs.length,
+      runningCount: liveCount,
       tabId: pointer.tabId,
       agentId: pointer.agentId,
       attention: pointer.attention,
       rank: nowRank({
         attention: pointer.attention,
-        runningCount: runs.length,
+        runningCount: liveCount,
         needsYou: seed?.needsYou ?? false,
       }),
     };
@@ -571,25 +662,63 @@ export function heroStatusLine(opts: {
   return opts.registered ? "准备好从上次位置继续" : "可从最近位置继续";
 }
 
-/** 有实质标题才返回；空标题（界面上的「未命名对话」）返回 null，工作台不列 */
+/** 有实质标题才返回；未命名 / 空标题不列。与项目侧栏同一套清洗。 */
 export function namedSessionTitle(session: {
-  customTitle: string | null;
-  title: string | null;
+  customTitle?: string | null;
+  title?: string | null;
+  summary?: string | null;
 }): string | null {
-  const text = session.customTitle?.trim() || session.title?.trim() || "";
-  return text || null;
+  const shown = tidySessionTitle(session);
+  if (shown.unnamed) return null;
+  return shown.title;
 }
 
-/** 工作台「最近对话」：有标题才列，默认最多 10 条（沿用传入顺序，通常已按 updated_at 降序）。 */
+/** 工作台「最近对话」：先按可见范围过滤（归档 / 内部无头 / 问 AI / 阅读注入不进，
+ *  与 filterProjectSessions 同一口径），再有标题才列，默认最多 10 条
+ *  （沿用传入顺序，通常已按 updated_at 降序）。 */
 export function workbenchRecentSessions<T extends {
   customTitle: string | null;
   title: string | null;
+  summary?: string | null;
+  archived?: boolean;
+  internal?: boolean;
+  source?: string;
+  projectPath?: string;
 }>(sessions: readonly T[], limit = WORKBENCH_RECENT_LIMIT): T[] {
   const out: T[] = [];
   for (const session of sessions) {
+    if (session.archived) continue;
+    if (
+      sessionExcludedFromProjectList({
+        internal: session.internal,
+        source: session.source,
+        projectPath: session.projectPath ?? "",
+        title: session.title,
+        customTitle: session.customTitle,
+      })
+    )
+      continue;
     if (!namedSessionTitle(session)) continue;
     out.push(session);
     if (out.length >= limit) break;
   }
   return out;
+}
+
+/** 正在进行副行：与任务页同一句「项目现在」。没有待验收/进行中/没做完才回落步骤名。 */
+export function workbenchNowSubtitle(input: {
+  tasks: readonly {
+    name: string;
+    status: string;
+    description?: string | null;
+  }[];
+  fallback: string | null;
+}): { subtitle: string | null; needsYou: boolean } {
+  const urgent = input.tasks.filter((task) => {
+    const bucket = goalBucket(task.status);
+    return bucket === "review" || bucket === "running" || bucket === "stuck";
+  });
+  const line = projectNowLine(urgent);
+  if (line) return { subtitle: line, needsYou: true };
+  return { subtitle: input.fallback, needsYou: false };
 }

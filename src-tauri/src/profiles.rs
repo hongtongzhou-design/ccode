@@ -178,6 +178,9 @@ pub struct ProbeRecord {
     pub key_fp: String,
     pub streaming: ProbeStatus,
     pub effort: ProbeStatus,
+    /// 采样参数（temperature/top_p）独立于思考档；旧记录缺省为 never。
+    #[serde(default)]
+    pub sampling: ProbeStatus,
     pub headers: ProbeStatus,
     pub basic: ProbeStatus,
     pub probed_at: String,
@@ -220,6 +223,9 @@ pub struct Gateway {
     /// list 现算，不落盘
     #[serde(default, skip_deserializing, skip_serializing_if = "Vec::is_empty")]
     pub slot_probes: Vec<SlotProbeSummary>,
+    /// list 现算：槽、密钥尾、Header、模型策略的内容指纹
+    #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
+    pub revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +265,8 @@ pub struct GatewayInput {
     #[serde(default)]
     pub models: Vec<GatewayModel>,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub expected_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +309,9 @@ pub struct ProfileInput {
     pub request_policy: RequestPolicy,
     /// 明文密钥，写入 keys.json 后丢弃；空 / None 表示不设置或不修改
     pub api_key: Option<String>,
+    /// 绑定保存时对照的网关内容版本；不匹配则拒绝，避免旧表单覆盖共享网关。
+    #[serde(default)]
+    pub expected_gateway_revision: Option<String>,
 }
 
 /// 取密钥尾号做界面提示，过短的 key 整体打码
@@ -393,7 +404,22 @@ impl ProfileStore {
 
     /// 首次把 profiles.json 拆成 gateways.json + bindings.json。调用方须已持 store_lock。
     pub(crate) fn ensure_split_locked(&self) -> Result<(), String> {
+        let pending = self.path.with_file_name("gateway-split.pending.json");
+        if pending.exists() {
+            let result = serde_json::from_str::<crate::gateway_store::MigrationResult>(
+                &fs::read_to_string(&pending).map_err(|e| e.to_string())?
+            ).map_err(|e| format!("配置迁移恢复记录损坏，拒绝覆盖：{e}"))?;
+            return finish_split_migration(&pending, &result);
+        }
         if crate::gateway_store::split_migrated() {
+            // 旧版曾在写完 bindings 后、迁移 keys 前中断；保留 ID 可无猜测修复引用。
+            let keys_file = keys_path()?;
+            let mut keys = read_keys_at(&keys_file)?;
+            let bindings = crate::gateway_store::load_bindings()?;
+            let gateways = crate::gateway_store::load_gateways()?;
+            if repair_legacy_key_links(&bindings, &gateways, &mut keys) {
+                write_keys_at(&keys_file, &keys)?;
+            }
             return Ok(());
         }
         let old = self.read_legacy_profiles()?;
@@ -417,16 +443,10 @@ impl ProfileStore {
             }
         }
         let result = crate::gateway_store::migrate_from_profiles(old, old_keys);
-        backup_split_sidecars(&self.path, &keys_file);
-        crate::gateway_store::save_gateways(&result.gateways)?;
-        crate::gateway_store::save_bindings(&result.bindings)?;
-        write_keys_at(&keys_file, &result.keys)?;
-        if !result.journal.entries.is_empty() {
-            let text = serde_json::to_string_pretty(&result.journal).map_err(|e| e.to_string())?;
-            atomic_write(&crate::gateway_store::merge_journal_path()?, &text)?;
-        }
-        crate::gateway_store::apply_rewrites_to_settings_and_schedules(&result.rewrites);
-        Ok(())
+        backup_split_sidecars(&self.path, &keys_file)?;
+        let text = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
+        crate::storage::atomic_write(&pending, &text, true)?;
+        finish_split_migration(&pending, &result)
     }
 
     fn materialize_locked(&self, selected_model: Option<&str>) -> Result<Vec<Profile>, String> {
@@ -461,7 +481,7 @@ impl ProfileStore {
     }
 
     pub fn list(&self) -> Result<Vec<Profile>, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.list_locked()
     }
 
@@ -475,7 +495,7 @@ impl ProfileStore {
         id: &str,
         selected_model: Option<&str>,
     ) -> Result<Profile, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.get_locked_with_model(id, selected_model)
     }
 
@@ -510,7 +530,7 @@ impl ProfileStore {
     }
 
     pub fn create(&self, input: ProfileInput) -> Result<Profile, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         if input.account_type == AccountType::Official {
             let mut bindings = crate::gateway_store::load_bindings()?;
@@ -564,6 +584,7 @@ impl ProfileStore {
             catalog_from_slot: None,
             last_probe: Vec::new(),
             slot_probes: Vec::new(),
+            revision: String::new(),
         };
         let slot = crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
         crate::gateway_store::set_slot_url(
@@ -571,9 +592,9 @@ impl ProfileStore {
             slot,
             input.base_url.clone().filter(|s| !s.is_empty()),
         );
-        if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
-            set_key(&gateway.id, &key)?;
-            gateway.key_hint = Some(key_hint_of(&key));
+        let pending_key = input.api_key.filter(|k| !k.is_empty());
+        if let Some(key) = &pending_key {
+            gateway.key_hint = Some(key_hint_of(key));
         }
         let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
@@ -589,22 +610,27 @@ impl ProfileStore {
         };
         let mut profile = crate::gateway_store::materialize(&binding, Some(&gateway), None);
         profile.has_key = gateway.key_hint.is_some();
-        if let Err(error) = crate::profile_validation::validate_profile_fields(&profile) {
-            delete_key(&gateway.id);
-            return Err(error);
-        }
+        crate::profile_validation::validate_profile_fields(&profile)?;
         let mut gateways = crate::gateway_store::load_gateways()?;
         let mut bindings = crate::gateway_store::load_bindings()?;
+        let old_gateways = gateways.clone();
+        let old_bindings = bindings.clone();
+        let gid = gateway.id.clone();
         gateways.push(gateway);
         bindings.push(binding);
-        crate::gateway_store::save_gateways(&gateways)?;
-        crate::gateway_store::save_bindings(&bindings)?;
+        commit_gateway_binding_files(&old_gateways, &old_bindings, &gateways, &bindings)?;
+        if let Some(key) = pending_key {
+            if let Err(error) = set_key(&gid, &key) {
+                let _ = commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
+                return Err(error);
+            }
+        }
         Ok(profile)
     }
 
     /// 复制配置：克隆网关（新 id）再绑到同一 Agent。同一网关不能绑两次。
     pub fn duplicate(&self, id: &str) -> Result<Profile, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let src = self.get_locked(id)?;
         if src.account_type == AccountType::Official {
@@ -625,9 +651,8 @@ impl ProfileStore {
         let existing: Vec<&str> = gateways.iter().map(|g| g.name.as_str()).collect();
         gw.name = copy_name(&existing, &gw.name);
         gw.last_probe.clear();
-        if let Some(key) = get_key_locked(&gid)? {
-            set_key(&gw.id, &key)?;
-        }
+        let pending_key = get_key_locked(&gid)?;
+        let new_gid = gw.id.clone();
         let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
             agent: src.agent.clone(),
@@ -648,21 +673,25 @@ impl ProfileStore {
             last_used_at: None,
         };
         let mut copy = crate::gateway_store::materialize(&binding, Some(&gw), None);
-        copy.has_key = has_key_locked(&gw.id)?;
-        if let Err(error) = crate::profile_validation::validate_profile_fields(&copy) {
-            delete_key(&gw.id);
-            return Err(error);
-        }
+        copy.has_key = pending_key.is_some();
+        crate::profile_validation::validate_profile_fields(&copy)?;
+        let old_gateways = gateways.clone();
+        let old_bindings = bindings.clone();
         gateways.push(gw);
         bindings.push(binding);
-        crate::gateway_store::save_gateways(&gateways)?;
-        crate::gateway_store::save_bindings(&bindings)?;
+        commit_gateway_binding_files(&old_gateways, &old_bindings, &gateways, &bindings)?;
+        if let Some(key) = pending_key {
+            if let Err(error) = set_key(&new_gid, &key) {
+                let _ = commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
+                return Err(error);
+            }
+        }
         Ok(copy)
     }
 
     /// 把该网关绑到目标 Agent。缺槽时把源 URL 填进目标槽（与旧「复制」同 URL 行为）。
     pub fn copy_to_agent(&self, id: &str, target_agent: &str) -> Result<Profile, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let src = self.get_locked(id)?;
         if target_agent == src.agent {
@@ -691,6 +720,8 @@ impl ProfileStore {
             return Err("该 Agent 已经有相同模型选择的绑定".into());
         }
         let mut gateways = crate::gateway_store::load_gateways()?;
+        let old_gateways = gateways.clone();
+        let old_bindings = bindings.clone();
         let gw = gateways
             .iter_mut()
             .find(|g| g.id == gid)
@@ -716,13 +747,12 @@ impl ProfileStore {
         copy.has_key = has_key_locked(&gid)?;
         crate::profile_validation::validate_profile_fields(&copy)?;
         bindings.push(binding);
-        crate::gateway_store::save_gateways(&gateways)?;
-        crate::gateway_store::save_bindings(&bindings)?;
+        commit_gateway_binding_files(&old_gateways, &old_bindings, &gateways, &bindings)?;
         Ok(copy)
     }
 
     pub fn update(&self, id: &str, input: ProfileInput) -> Result<Profile, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let mut bindings = crate::gateway_store::load_bindings()?;
         let idx = bindings
@@ -742,7 +772,7 @@ impl ProfileStore {
         bindings[idx].api_backend = input.api_backend.clone();
         bindings[idx].models = normalize_models(input.models.clone());
         bindings[idx].extra_env = input.extra_env.clone();
-        let mut gateways = crate::gateway_store::load_gateways()?;
+        let gateways = crate::gateway_store::load_gateways()?;
         if bindings[idx].kind == BindingKind::Official {
             if input.account_type != AccountType::Official {
                 return Err("官方账号绑定不能改成 API 连接，请新建".into());
@@ -757,59 +787,24 @@ impl ProfileStore {
             .iter()
             .position(|g| g.id == gid)
             .ok_or("网关不存在")?;
-        let old_url = {
-            let slot =
-                crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
-            crate::gateway_store::slot_url(&gateways[gw_idx].slots, slot).map(str::to_string)
-        };
-        let key_changed = input.api_key.as_deref().is_some_and(|k| !k.is_empty());
-        let no_auth_changed = gateways[gw_idx].no_auth != input.no_auth;
-        gateways[gw_idx].no_auth = input.no_auth;
-        gateways[gw_idx].header_env = input.request_policy.header_env.clone();
-        let slot = crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
-        let new_url = input.base_url.clone().filter(|s| !s.trim().is_empty());
-        crate::gateway_store::set_slot_url(&mut gateways[gw_idx].slots, slot, new_url.clone());
-        if old_url != new_url {
-            crate::gateway_store::invalidate_slot_probes(&mut gateways[gw_idx], slot);
-        }
-        if key_changed || no_auth_changed {
-            crate::gateway_store::invalidate_all_probes(&mut gateways[gw_idx]);
-        }
-        // 绑定名单里没有的模型只补空条目，不覆盖网关库里已设的逐模型策略
-        for id in &bindings[idx].models {
-            if !gateways[gw_idx].models.iter().any(|m| m.id == *id) {
-                gateways[gw_idx].models.push(GatewayModel {
-                    id: id.clone(),
-                    source: "user".into(),
-                    status: "available".into(),
-                    last_seen_at: None,
-                    catalog_slot: None,
-                    temperature: None,
-                    top_p: None,
-                    max_output_tokens: None,
-                    reasoning_effort: None,
-                });
+        if let Some(expected) = input.expected_gateway_revision.as_deref().filter(|s| !s.is_empty()) {
+            let current = crate::gateway_store::gateway_content_revision(&gateways[gw_idx]);
+            if current != expected {
+                return Err("网关已被其他窗口修改，未写入绑定。请关闭后重新打开再保存。".into());
             }
         }
-        if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
-            set_key(&gid, &key)?;
-            gateways[gw_idx].key_hint = Some(key_hint_of(&key));
-        } else if input.no_auth {
-            delete_key(&gid);
-            gateways[gw_idx].key_hint = None;
-        }
+        // 绑定编辑只改绑定字段。端点、密钥、noAuth、Header 只走网关接口，避免旧表单覆盖共享网关。
         let mut profile =
             crate::gateway_store::materialize(&bindings[idx], Some(&gateways[gw_idx]), None);
         profile.has_key = has_key_locked(&gid)?;
         crate::profile_validation::validate_profile_fields(&profile)?;
-        crate::gateway_store::save_gateways(&gateways)?;
         crate::gateway_store::save_bindings(&bindings)?;
         Ok(profile)
     }
 
     /// 解绑。不删网关、不动密钥。
     pub fn delete(&self, id: &str) -> Result<(), String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let mut bindings = crate::gateway_store::load_bindings()?;
         bindings.retain(|b| b.id != id);
@@ -824,7 +819,7 @@ impl ProfileStore {
     }
 
     pub fn clear_key(&self, id: &str) -> Result<(), String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let bindings = crate::gateway_store::load_bindings()?;
         let b = bindings
@@ -834,18 +829,23 @@ impl ProfileStore {
         let Some(gid) = &b.gateway_id else {
             return Ok(());
         };
-        delete_key(gid);
         let mut gateways = crate::gateway_store::load_gateways()?;
+        let old_gateways = gateways.clone();
         if let Some(g) = gateways.iter_mut().find(|g| g.id == *gid) {
             g.key_hint = None;
             crate::gateway_store::invalidate_all_probes(g);
         }
-        crate::gateway_store::save_gateways(&gateways)
+        crate::gateway_store::save_gateways(&gateways)?;
+        if let Err(error) = delete_key(gid) {
+            let _ = crate::gateway_store::save_gateways(&old_gateways);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// 每次用于启动即刷新 last_used_at（§6.12 E）；失败静默，不影响启动
     pub fn touch_last_used(&self, id: &str) {
-        let _g = store_lock();
+        let Ok(_g) = store_lock() else { return };
         let _ = (|| -> Result<(), String> {
             self.ensure_split_locked()?;
             let mut bindings = crate::gateway_store::load_bindings()?;
@@ -858,7 +858,7 @@ impl ProfileStore {
     }
 
     pub fn list_gateways(&self) -> Result<Vec<Gateway>, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let mut items = crate::gateway_store::load_gateways()?;
         for g in &mut items {
@@ -868,12 +868,13 @@ impl ProfileStore {
                 None
             };
             g.slot_probes = crate::gateway_store::slot_probe_summaries(&g.last_probe);
+            g.revision = crate::gateway_store::gateway_content_revision(g);
         }
         Ok(items)
     }
 
     pub fn save_gateway(&self, id: Option<String>, input: GatewayInput) -> Result<Gateway, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         crate::profile_validation::validate_anthropic_slot_url(input.slots.anthropic.as_deref())?;
         let mut gateways = crate::gateway_store::load_gateways()?;
@@ -882,6 +883,12 @@ impl ProfileStore {
                 .iter()
                 .position(|g| g.id == id)
                 .ok_or("网关不存在")?;
+            if let Some(expected) = input.expected_revision.as_deref().filter(|s| !s.is_empty()) {
+                let current = crate::gateway_store::gateway_content_revision(&gateways[idx]);
+                if current != expected {
+                    return Err("网关已被其他窗口修改，未覆盖。请重新打开后再保存。".into());
+                }
+            }
             let old = gateways[idx].clone();
             gateways[idx].name = input.name;
             gateways[idx].no_auth = input.no_auth;
@@ -922,15 +929,28 @@ impl ProfileStore {
             if key_changed || old.no_auth != gateways[idx].no_auth {
                 crate::gateway_store::invalidate_all_probes(&mut gateways[idx]);
             }
-            if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
-                set_key(&id, &key)?;
-                gateways[idx].key_hint = Some(key_hint_of(&key));
-            } else if input.no_auth {
-                delete_key(&id);
+            let pending_key = input.api_key.filter(|k| !k.is_empty());
+            let clear_key = pending_key.is_none() && input.no_auth;
+            if let Some(key) = &pending_key {
+                gateways[idx].key_hint = Some(key_hint_of(key));
+            } else if clear_key {
                 gateways[idx].key_hint = None;
             }
             let saved = gateways[idx].clone();
             crate::gateway_store::save_gateways(&gateways)?;
+            if let Some(key) = pending_key {
+                if let Err(error) = set_key(&id, &key) {
+                    gateways[idx] = old;
+                    let _ = crate::gateway_store::save_gateways(&gateways);
+                    return Err(error);
+                }
+            } else if clear_key {
+                if let Err(error) = delete_key(&id) {
+                    gateways[idx] = old;
+                    let _ = crate::gateway_store::save_gateways(&gateways);
+                    return Err(error);
+                }
+            }
             Ok(saved)
         } else {
             let mut gw = Gateway {
@@ -945,36 +965,50 @@ impl ProfileStore {
                 catalog_from_slot: None,
                 last_probe: Vec::new(),
                 slot_probes: Vec::new(),
+            revision: String::new(),
             };
-            if let Some(key) = input.api_key.filter(|k| !k.is_empty()) {
-                set_key(&gw.id, &key)?;
-                gw.key_hint = Some(key_hint_of(&key));
+            let pending_key = input.api_key.filter(|k| !k.is_empty());
+            if let Some(key) = &pending_key {
+                gw.key_hint = Some(key_hint_of(key));
             }
+            let gid = gw.id.clone();
+            let old_gateways = gateways.clone();
             gateways.push(gw.clone());
             crate::gateway_store::save_gateways(&gateways)?;
+            if let Some(key) = pending_key {
+                if let Err(error) = set_key(&gid, &key) {
+                    let _ = crate::gateway_store::save_gateways(&old_gateways);
+                    return Err(error);
+                }
+            }
             Ok(gw)
         }
     }
 
     pub fn delete_gateway(&self, id: &str) -> Result<(), String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let bindings = crate::gateway_store::load_bindings()?;
         if bindings.iter().any(|b| b.gateway_id.as_deref() == Some(id)) {
             return Err("还有 Agent 绑着这个网关，请先解绑".into());
         }
         let mut gateways = crate::gateway_store::load_gateways()?;
+        let old_gateways = gateways.clone();
         gateways.retain(|g| g.id != id);
         crate::gateway_store::save_gateways(&gateways)?;
-        delete_key(id);
+        if let Err(error) = delete_key(id) {
+            let _ = crate::gateway_store::save_gateways(&old_gateways);
+            return Err(error);
+        }
         crate::model_registry::purge_relay_for_gateway(id);
         Ok(())
     }
 
     pub fn bind_gateway(&self, input: BindingInput) -> Result<Profile, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         if input.kind == BindingKind::Official {
+            drop(_g);
             return self.create(ProfileInput {
                 agent: input.agent,
                 name: "官方账号".into(),
@@ -987,6 +1021,7 @@ impl ProfileStore {
                 extra_env: input.extra_env,
                 request_policy: RequestPolicy::default(),
                 api_key: None,
+                expected_gateway_revision: None,
             });
         }
         let gid = input.gateway_id.clone().ok_or("请选择网关")?;
@@ -1032,15 +1067,23 @@ impl ProfileStore {
     }
 
     pub fn record_probe(&self, gateway_id: &str, rec: ProbeRecord) -> Result<(), String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let mut gateways = crate::gateway_store::load_gateways()?;
         let gw = gateways
             .iter_mut()
             .find(|g| g.id == gateway_id)
             .ok_or("网关不存在")?;
-        gw.last_probe
-            .retain(|p| !(p.slot == rec.slot && p.model == rec.model));
+        if !crate::gateway_store::probe_record_still_valid(gw, &rec) {
+            // 探测期间用户改了地址或密钥：旧回包不得写成新配置的结论。
+            return Ok(());
+        }
+        gw.last_probe.retain(|p| {
+            !(p.slot == rec.slot
+                && p.model == rec.model
+                && p.url_fp == rec.url_fp
+                && p.key_fp == rec.key_fp)
+        });
         gw.last_probe.push(rec);
         crate::gateway_store::save_gateways(&gateways)
     }
@@ -1051,7 +1094,7 @@ impl ProfileStore {
         slot: &str,
         ids: Vec<String>,
     ) -> Result<Gateway, String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
         let mut gateways = crate::gateway_store::load_gateways()?;
         let gw = gateways
@@ -1071,28 +1114,72 @@ impl ProfileStore {
     }
 
     pub fn clear_gateway_key(&self, id: &str) -> Result<(), String> {
-        let _g = store_lock();
+        let _g = store_lock()?;
         self.ensure_split_locked()?;
-        delete_key(id);
         let mut gateways = crate::gateway_store::load_gateways()?;
+        let old_gateways = gateways.clone();
         if let Some(g) = gateways.iter_mut().find(|g| g.id == id) {
             g.key_hint = None;
             crate::gateway_store::invalidate_all_probes(g);
         }
-        crate::gateway_store::save_gateways(&gateways)
+        crate::gateway_store::save_gateways(&gateways)?;
+        if let Err(error) = delete_key(id) {
+            let _ = crate::gateway_store::save_gateways(&old_gateways);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
-/// 迁移前备份 profiles.json 与 keys.json（.json.bak-gateway-split），已存在则覆盖。
-fn backup_split_sidecars(profiles_path: &std::path::Path, keys_path: &std::path::Path) {
-    if profiles_path.exists() {
-        let bak = profiles_path.with_extension("json.bak-gateway-split");
-        let _ = fs::copy(profiles_path, &bak);
+fn repair_legacy_key_links(bindings: &[Binding], gateways: &[Gateway], keys: &mut std::collections::HashMap<String, String>) -> bool {
+    let mut changed = false;
+    for binding in bindings {
+        let Some(gid) = binding.gateway_id.as_ref() else { continue; };
+        if keys.contains_key(gid) || !gateways.iter().any(|gateway| gateway.id == *gid && gateway.key_hint.is_some()) { continue; }
+        if let Some(key) = keys.get(&binding.id).cloned() {
+            keys.insert(gid.clone(), key);
+            changed = true;
+        }
     }
-    if keys_path.exists() {
-        let bak = keys_path.with_extension("json.bak-gateway-split");
-        let _ = fs::copy(keys_path, &bak);
+    changed
+}
+
+/// pending 文件是恢复日志；所有阶段可重放，只有最后一步才删除完成标记。
+fn finish_split_migration(pending: &std::path::Path, result: &crate::gateway_store::MigrationResult) -> Result<(), String> {
+    finish_split_at(pending, result, || crate::gateway_store::apply_rewrites_to_settings_and_schedules(&result.rewrites), |_| Ok(()))
+}
+
+fn finish_split_at(
+    pending: &std::path::Path,
+    result: &crate::gateway_store::MigrationResult,
+    rewrite_refs: impl FnOnce() -> Result<(), String>,
+    mut after_stage: impl FnMut(usize) -> Result<(), String>,
+) -> Result<(), String> {
+    let root = pending.parent().ok_or("迁移日志路径无效")?;
+    crate::storage::atomic_write(&root.join("gateways.json"), &serde_json::to_vec_pretty(&result.gateways).map_err(|e| e.to_string())?, true)?;
+    after_stage(1)?;
+    write_keys_at(&root.join("keys.json"), &result.keys)?;
+    after_stage(2)?;
+    crate::storage::atomic_write(&root.join("bindings.json"), &serde_json::to_vec_pretty(&result.bindings).map_err(|e| e.to_string())?, true)?;
+    after_stage(3)?;
+    if !result.journal.entries.is_empty() {
+        crate::storage::atomic_write(&root.join("gateway-merge.json"), &serde_json::to_vec_pretty(&result.journal).map_err(|e| e.to_string())?, true)?;
     }
+    after_stage(4)?;
+    rewrite_refs()?;
+    after_stage(5)?;
+    fs::remove_file(pending).map_err(|e| format!("完成配置迁移失败：{e}"))
+}
+
+/// 迁移前备份 profiles.json 与 keys.json（.json.bak-gateway-split），已有原始备份不覆盖。
+fn backup_split_sidecars(profiles_path: &std::path::Path, keys_path: &std::path::Path) -> Result<(), String> {
+    for path in [profiles_path, keys_path] {
+        if path.exists() {
+            let bak = path.with_extension("json.bak-gateway-split");
+            if !bak.exists() { crate::storage::atomic_write(&bak, &fs::read(path).map_err(|e| e.to_string())?, true)?; }
+        }
+    }
+    Ok(())
 }
 
 /// 目标名未被占用则沿用，否则追加 -2/-3…
@@ -1156,7 +1243,7 @@ fn keys_path() -> Result<PathBuf, String> {
         .join("keys.json"))
 }
 
-/// 读取 keys.json：文件缺失视为空表；解析失败说明文件损坏——改名备份为
+/// 读取 keys.json：文件缺失视为空表；解析失败说明文件损坏——保留原件并备份为
 /// keys.json.corrupt-<ts> 并返回错误，绝不当作空表继续（否则下次写回会静默清空其余密钥）
 fn read_keys_at(
     path: &std::path::Path,
@@ -1168,8 +1255,11 @@ fn read_keys_at(
     };
     serde_json::from_str(&text).map_err(|e| {
         let backup = corrupt_backup_path(path);
-        let _ = fs::rename(path, &backup);
-        format!("keys.json 已损坏，已备份为 {}: {e}", backup.display())
+        let backup_result = crate::storage::atomic_write(&backup, text.as_bytes(), true);
+        match backup_result {
+            Ok(()) => format!("keys.json 已损坏，原件已保留并备份为 {}: {e}", backup.display()),
+            Err(error) => format!("keys.json 已损坏，原件已保留；备份失败：{error}: {e}"),
+        }
     })
 }
 
@@ -1189,23 +1279,13 @@ fn write_keys_at(
     keys: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     let text = serde_json::to_string_pretty(keys).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("tmp");
-    // 崩溃残留的 keys.tmp 可能带着半截密钥与宽松权限，先清掉
-    match fs::remove_file(&tmp) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("清理 {} 失败: {e}", tmp.display())),
+    let legacy_tmp = path.with_extension("tmp");
+    match fs::remove_file(&legacy_tmp) {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(format!("清理旧密钥临时文件失败：{e}")),
     }
-    fs::write(&tmp, &text).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        // rename 前先把权限收窄到 0600，消除新文件以默认 0644 短暂暴露密钥的窗口；
-        // Windows 无 0600 语义，文件权限由配置目录 ACL 控制，无需对应分支
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("设置 {} 权限失败: {e}", tmp.display()))?;
-    }
-    fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+    crate::storage::atomic_write(path, text.as_bytes(), true)
 }
 
 fn restrict_file_mode(path: &std::path::Path) {
@@ -1224,52 +1304,43 @@ pub(crate) fn atomic_write(path: &std::path::Path, text: &str) -> Result<(), Str
     atomic_write_bytes(path, text.as_bytes())
 }
 
-/// 二进制原子写（会话导入的 jsonl/zst）。临时名挂在原文件名后（`.cwd` → `.cwd.tmp`），
-/// 不用 `with_extension`——那会把 `.cwd` 整段换成 `.tmp`。
+/// 二进制原子写（会话导入的 jsonl/zst）：唯一同目录临时名，保留原文件权限，失败不删除原件。
 pub(crate) fn atomic_write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("创建目录 {} 失败: {e}", parent.display()))?;
-    }
-    let tmp = match path.file_name() {
-        Some(name) => path.with_file_name(format!("{}.tmp", name.to_string_lossy())),
-        None => path.with_extension("tmp"),
-    };
-    fs::write(&tmp, bytes).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
-    let result = rename_replacing(&tmp, path);
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-/// rename 覆盖目标，带两类重试：
-/// - ENOENT：iCloud 等同步目录里新落盘的 tmp 偶发被同步代理瞬时介入，短暂退避后重试一次
-///   （父目录真不存在时第二次照样失败，语义不变）。
-/// - PermissionDenied（仅 Windows）：`MoveFileExW` 对**只读属性**的目标返回
-///   ERROR_ACCESS_DENIED，而 POSIX `rename(2)` 只看父目录权限、不看目标 mode ——
-///   所以这是 Windows 独有的失败。先清掉目标（`remove_file` 能删只读文件）再重试。
-fn rename_replacing(tmp: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
-    match fs::rename(tmp, path) {
-        Ok(()) => return Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        #[cfg(windows)]
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            let _ = fs::remove_file(path);
-        }
-        Err(e) => return Err(format!("替换 {} 失败: {e}", path.display())),
-    }
-    fs::rename(tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+    crate::storage::atomic_write(path, bytes, false)
 }
 
 /// profiles.json / keys.json 的读-改-写序列化锁：多标签页并发保存时防互相覆盖
 /// （原子写只保证单文件不碎，不保证 A读-B读-A写-B写 的丢失更新）
 static STORE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub(crate) fn store_lock() -> std::sync::MutexGuard<'static, ()> {
-    STORE_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+pub(crate) struct StoreGuard {
+    _file: fs::File,
+    _process: std::sync::MutexGuard<'static, ()>,
+}
+
+pub(crate) fn store_lock() -> Result<StoreGuard, String> {
+    let process = STORE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let file = crate::storage::config_lock("profiles")?;
+    Ok(StoreGuard { _process: process, _file: file })
+}
+
+fn commit_gateway_binding_files(
+    old_gateways: &[Gateway],
+    old_bindings: &[Binding],
+    gateways: &[Gateway],
+    bindings: &[Binding],
+) -> Result<(), String> {
+    crate::gateway_store::save_gateways(gateways)?;
+    if let Err(error) = crate::gateway_store::save_bindings(bindings) {
+        if let Err(rollback) = crate::gateway_store::save_gateways(old_gateways) {
+            return Err(format!(
+                "绑定写入失败（{error}），网关回退也失败（{rollback}）。请检查配置目录后重试。"
+            ));
+        }
+        let _ = crate::gateway_store::save_bindings(old_bindings);
+        return Err(format!("绑定写入失败，已回退网关清单：{error}"));
+    }
+    Ok(())
 }
 
 fn key_entry(id: &str) -> Result<keyring::Entry, String> {
@@ -1303,7 +1374,7 @@ fn get_key_locked(id: &str) -> Result<Option<String>, String> {
 
 /// 读取密钥；keys.json 损坏时返回错误而非谎报「无密钥」
 pub fn get_key(id: &str) -> Result<Option<String>, String> {
-    let _g = store_lock();
+    let _g = store_lock()?;
     get_key_locked(id)
 }
 
@@ -1321,17 +1392,17 @@ pub fn get_key_for_profile(profile: &Profile) -> Result<Option<String>, String> 
 /// 仅供后端展示脱敏使用；调用方不得把返回值序列化给前端或写入日志。
 /// 阈值 ≥8 的取舍：更短的「密钥」与普通单词/标识符碰撞率高，全文替换脱敏会误伤会话正文；
 /// 漏遮极短密钥的风险低于破坏全部回放文本，故不收录（如确需覆盖短密钥，降到 6 是下限）。
-/// keys.json 损坏时按空表尽力脱敏：损坏文件已被 read_keys_at 改名备份，
-/// 读写主路径会向用户报错，这里不阻断会话浏览。
+/// 展示脱敏只读文件；解析失败沿用上次成功快照，写入路径另行报错，不在展示路径改名密钥文件。
 pub(crate) fn stored_secrets() -> Vec<String> {
-    let Ok(path) = keys_path() else {
-        return Vec::new();
-    };
-    read_keys_at(&path)
-        .unwrap_or_default()
-        .into_values()
-        .filter(|v| v.chars().count() >= 8)
-        .collect()
+    static LAST_GOOD: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    let cache = LAST_GOOD.get_or_init(Default::default);
+    let loaded = keys_path().ok().and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<std::collections::HashMap<String, String>>(&text).ok());
+    let mut last = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(keys) = loaded {
+        *last = keys.into_values().filter(|v| v.chars().count() >= 8).collect();
+    }
+    last.clone()
 }
 
 /// has_key 的锁内版本：调用方须已持 store_lock
@@ -1339,19 +1410,17 @@ fn has_key_locked(id: &str) -> Result<bool, String> {
     Ok(get_key_locked(id)?.is_some())
 }
 
-/// 删除密钥；调用方须已持 store_lock（delete 持锁调用）；损坏文件上的清理尽力而为
-fn delete_key(id: &str) {
-    if let Ok(path) = keys_path() {
-        if let Ok(mut keys) = read_keys_at(&path) {
-            if keys.remove(id).is_some() {
-                let _ = write_keys_at(&path, &keys);
-            }
-        }
+/// 删除密钥；调用方须已持 store_lock。文件读写失败必须上报，不能假装已清除。
+fn delete_key(id: &str) -> Result<(), String> {
+    let path = keys_path()?;
+    let mut keys = read_keys_at(&path)?;
+    if keys.remove(id).is_some() {
+        write_keys_at(&path, &keys)?;
     }
-    // 顺带清理旧版本可能残留在钥匙串里的条目
     if let Ok(entry) = key_entry(id) {
         let _ = entry.delete_credential();
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1448,6 +1517,7 @@ pub fn import_profiles(
             extra_env: p.extra_env,
             request_policy: p.request_policy,
             api_key: None,
+            expected_gateway_revision: None,
         })?;
         added += 1;
     }
@@ -1590,7 +1660,7 @@ pub fn export_gateways_v2(
     path: String,
     include_keys: bool,
 ) -> Result<(), String> {
-    let _g = store_lock();
+    let _g = store_lock()?;
     store.ensure_split_locked()?;
     let gateways = crate::gateway_store::load_gateways()?;
     let bindings = crate::gateway_store::load_bindings()?;
@@ -1678,6 +1748,7 @@ fn apply_import_v2(
                 catalog_from_slot: None,
                 last_probe: Vec::new(),
                 slot_probes: Vec::new(),
+            revision: String::new(),
             };
             if let Some(k) = incoming.api_key.as_deref().filter(|s| !s.is_empty()) {
                 keys.insert(id.clone(), k.to_string());
@@ -1707,11 +1778,23 @@ fn apply_import_v2(
             skipped.push(format!("绑定 {} 找不到对应网关", b.agent));
             continue;
         };
-        if let Some(existing) = bindings
-            .iter_mut()
-            .find(|x| x.agent == b.agent && x.gateway_id.as_deref() == Some(gid.as_str()))
-        {
-            merge_incoming_binding(existing, &b, &mut skipped);
+        let incoming_models = normalize_models(b.models.clone());
+        if bindings.iter().any(|x| {
+            same_binding_selection(
+                x,
+                &b.agent,
+                &gid,
+                b.protocol.as_deref(),
+                b.api_backend.as_deref(),
+                &incoming_models,
+                &b.extra_env,
+            )
+        }) {
+            skipped.push(format!(
+                "{}「{}」已有相同模型选择，未合并名单",
+                b.agent,
+                b.name.as_deref().unwrap_or(&b.agent)
+            ));
             continue;
         }
         bindings.push(Binding {
@@ -1755,10 +1838,12 @@ pub fn import_gateways_v2(
     if doc.version != 2 {
         return Err("不是 v2 网关导出".into());
     }
-    let _g = store_lock();
+    let _g = store_lock()?;
     store.ensure_split_locked()?;
     let mut gateways = crate::gateway_store::load_gateways()?;
     let mut bindings = crate::gateway_store::load_bindings()?;
+    let old_gateways = gateways.clone();
+    let old_bindings = bindings.clone();
     let mut keys = std::collections::HashMap::new();
     for g in &gateways {
         if let Ok(Some(k)) = get_key_locked(&g.id) {
@@ -1766,13 +1851,15 @@ pub fn import_gateways_v2(
         }
     }
     let result = apply_import_v2(doc, &mut gateways, &mut bindings, &mut keys);
+    commit_gateway_binding_files(&old_gateways, &old_bindings, &gateways, &bindings)?;
     for g in &gateways {
         if let Some(k) = keys.get(&g.id) {
-            let _ = set_key(&g.id, k);
+            if let Err(error) = set_key(&g.id, k) {
+                let _ = commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
+                return Err(error);
+            }
         }
     }
-    crate::gateway_store::save_gateways(&gateways)?;
-    crate::gateway_store::save_bindings(&bindings)?;
     Ok(result)
 }
 
@@ -1824,51 +1911,6 @@ fn merge_incoming_slots(gw: &mut Gateway, incoming: &GatewayExportV2, skipped: &
             }
             Some(existing) if existing == v => {}
             Some(_) => skipped.push(format!("{} 的 Header {k} 冲突，已跳过", gw.name)),
-        }
-    }
-}
-
-fn merge_incoming_binding(
-    existing: &mut Binding,
-    incoming: &BindingExportV2,
-    skipped: &mut Vec<String>,
-) {
-    if let Some(name) = incoming.name.as_deref().filter(|name| !name.trim().is_empty()) {
-        existing.name = name.to_string();
-    }
-    for m in &incoming.models {
-        if !existing.models.contains(m) {
-            existing.models.push(m.clone());
-        }
-    }
-    match (&existing.protocol, &incoming.protocol) {
-        (None, Some(p)) => existing.protocol = Some(p.clone()),
-        (Some(a), Some(b)) if a != b => {
-            skipped.push(format!(
-                "{} 的协议冲突（{a} / {b}），已跳过",
-                incoming.agent
-            ));
-        }
-        _ => {}
-    }
-    // grok 的 api_backend 同协议口径合并：空则补、冲突记 skipped
-    match (&existing.api_backend, &incoming.api_backend) {
-        (None, Some(v)) if incoming.agent == "grok" => existing.api_backend = Some(v.clone()),
-        (Some(a), Some(b)) if a != b => {
-            skipped.push(format!(
-                "{} 的 API 后端冲突（{a} / {b}），已跳过",
-                incoming.agent
-            ));
-        }
-        _ => {}
-    }
-    for (k, v) in &incoming.extra_env {
-        match existing.extra_env.get(k) {
-            None => {
-                existing.extra_env.insert(k.clone(), v.clone());
-            }
-            Some(existing_v) if existing_v == v => {}
-            Some(_) => skipped.push(format!("{} 的 extraEnv {k} 冲突，已跳过", incoming.agent)),
         }
     }
 }
@@ -1929,7 +1971,7 @@ pub fn bind_gateway(
 
 #[tauri::command]
 pub fn unbind_split_merge(store: tauri::State<'_, ProfileStore>) -> Result<usize, String> {
-    let _g = store_lock();
+    let _g = store_lock()?;
     store.ensure_split_locked()?;
     let path = crate::gateway_store::merge_journal_path()?;
     let text = match fs::read_to_string(&path) {
@@ -1944,18 +1986,26 @@ pub fn unbind_split_merge(store: tauri::State<'_, ProfileStore>) -> Result<usize
     }
     let mut gateways = crate::gateway_store::load_gateways()?;
     let mut bindings = crate::gateway_store::load_bindings()?;
+    let old_gateways = gateways.clone();
+    let old_bindings = bindings.clone();
     let (restored, copies) =
         crate::gateway_store::restore_merged_bindings(&journal, &mut gateways, &mut bindings);
+    let mut pending_keys = Vec::new();
     for (from, to) in copies {
         if let Ok(Some(k)) = get_key_locked(&from) {
-            let _ = set_key(&to, &k);
             if let Some(g) = gateways.iter_mut().find(|g| g.id == to) {
                 g.key_hint = Some(key_hint_of(&k));
             }
+            pending_keys.push((to, k));
         }
     }
-    crate::gateway_store::save_gateways(&gateways)?;
-    crate::gateway_store::save_bindings(&bindings)?;
+    commit_gateway_binding_files(&old_gateways, &old_bindings, &gateways, &bindings)?;
+    for (to, k) in pending_keys {
+        if let Err(error) = set_key(&to, &k) {
+            let _ = commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
+            return Err(error);
+        }
+    }
     let _ = fs::remove_file(&path);
     Ok(restored)
 }
@@ -1968,6 +2018,55 @@ pub fn clear_gateway_key(store: tauri::State<'_, ProfileStore>, id: String) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_key_repair_preserves_binding_and_gateway_identity() {
+        let binding: Binding = serde_json::from_value(serde_json::json!({"id":"old-binding", "agent":"codex", "kind":"api", "gatewayId":"new-gateway", "models":[], "extraEnv":{}})).unwrap();
+        let mut gateway: Gateway = serde_json::from_value(serde_json::json!({"id":"new-gateway", "name":"gateway", "keyHint":"tail"})).unwrap();
+        let mut keys = [("old-binding".into(), "synthetic-key".into())].into_iter().collect();
+        assert!(repair_legacy_key_links(&[binding.clone()], &[gateway.clone()], &mut keys));
+        assert_eq!(keys.get("new-gateway").map(String::as_str), Some("synthetic-key"));
+        keys.insert("new-gateway".into(), "newer-key".into());
+        assert!(!repair_legacy_key_links(&[binding.clone()], &[gateway.clone()], &mut keys));
+        assert_eq!(keys.get("new-gateway").map(String::as_str), Some("newer-key"));
+        keys.remove("new-gateway");
+        gateway.key_hint = None;
+        assert!(!repair_legacy_key_links(&[binding], &[gateway], &mut keys), "明确清除的密钥不能被恢复");
+    }
+
+    #[test]
+    fn migration_recovers_every_interrupted_stage_with_stable_keys() {
+        for fail_at in 1..=5 {
+            let root = std::env::temp_dir().join(format!("ccode-migration-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            let pending = root.join("gateway-split.pending.json");
+            let result = crate::gateway_store::MigrationResult {
+                gateways: Vec::new(), bindings: Vec::new(),
+                keys: [("stable-id".to_string(), "synthetic-secret".to_string())].into_iter().collect(),
+                journal: crate::gateway_store::MergeJournal::default(), rewrites: Vec::new(),
+            };
+            crate::storage::atomic_write(&pending, &serde_json::to_vec(&result).unwrap(), true).unwrap();
+            assert!(finish_split_at(&pending, &result, || Ok(()), |stage| if stage == fail_at { Err("injected".into()) } else { Ok(()) }).is_err());
+            assert!(pending.exists());
+            let saved = serde_json::from_str(&fs::read_to_string(&pending).unwrap()).unwrap();
+            finish_split_at(&pending, &saved, || Ok(()), |_| Ok(())).unwrap();
+            assert!(!pending.exists());
+            assert_eq!(read_keys_at(&root.join("keys.json")).unwrap().get("stable-id").map(String::as_str), Some("synthetic-secret"));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn migration_keeps_pending_when_reference_update_fails() {
+        let root = std::env::temp_dir().join(format!("ccode-migration-ref-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let pending = root.join("gateway-split.pending.json");
+        fs::write(&pending, "pending").unwrap();
+        let result = crate::gateway_store::MigrationResult { gateways: vec![], bindings: vec![], keys: Default::default(), journal: Default::default(), rewrites: vec![] };
+        assert!(finish_split_at(&pending, &result, || Err("refs unavailable".into()), |_| Ok(())).is_err());
+        assert!(pending.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     // ===== atomic_write 的两条跨平台前置条件 =====
 
@@ -2037,7 +2136,7 @@ mod tests {
 
         let err = read_keys_at(&path).unwrap_err();
         assert!(err.contains("已损坏"), "报错须说明损坏: {err}");
-        assert!(!path.exists(), "原损坏文件应已改名备份");
+        assert!(path.exists(), "原损坏文件必须保留，防下一次误当空表覆盖");
         let backups: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -2228,7 +2327,7 @@ mod tests {
         let keys = dir.join("keys.json");
         std::fs::write(&profiles, "{\"a\":1}").unwrap();
         std::fs::write(&keys, "{\"k\":\"v\"}").unwrap();
-        backup_split_sidecars(&profiles, &keys);
+        backup_split_sidecars(&profiles, &keys).unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("profiles.json.bak-gateway-split")).unwrap(),
             "{\"a\":1}"
@@ -2256,6 +2355,7 @@ mod tests {
             catalog_from_slot: None,
             last_probe: vec![],
             slot_probes: vec![],
+            revision: String::new(),
         }
     }
 
@@ -2364,15 +2464,15 @@ mod tests {
         };
         let res = apply_import_v2(incoming, &mut gateways, &mut bindings, &mut live_keys);
         assert_eq!(res.added_gateways, 0);
-        assert_eq!(res.added_bindings, 0);
-        assert!(res.skipped_slots.is_empty(), "{:?}", res.skipped_slots);
+        assert_eq!(res.added_bindings, 1, "不同模型选择应保留为第二条绑定");
         assert_eq!(gateways.len(), 1);
-        assert_eq!(bindings.len(), 1);
-        assert!(bindings[0].models.contains(&"m1".into()));
-        assert!(bindings[0].models.contains(&"m2".into()));
-        assert_eq!(bindings[0].protocol.as_deref(), Some("anthropic"));
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].models, vec!["m1".to_string()]);
+        assert_eq!(bindings[1].models, vec!["m2".to_string()]);
+        assert_eq!(bindings[1].name, "另一个连接");
+        assert_eq!(bindings[1].protocol.as_deref(), Some("anthropic"));
         assert_eq!(
-            bindings[0].extra_env.get("HTTPS_PROXY").map(String::as_str),
+            bindings[1].extra_env.get("HTTPS_PROXY").map(String::as_str),
             Some("http://127.0.0.1:7890")
         );
         assert_eq!(

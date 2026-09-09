@@ -2660,14 +2660,14 @@ mod tests {
                 "commit.gpgsign=false",
                 "commit",
                 "-m",
-                "Ccode: 项目档案卡与 gitignore 自动提交",
+                "Mesa: 项目档案卡与 gitignore 自动提交",
             ],
         );
 
         let entries = project_history_sync(dir.to_str().unwrap(), 100).unwrap();
         assert_eq!(entries.len(), 2);
         let latest = &entries[0];
-        assert_eq!(latest.message, "Ccode: 项目档案卡与 gitignore 自动提交");
+        assert_eq!(latest.message, "Mesa: 项目档案卡与 gitignore 自动提交");
         assert!(!latest.merge);
         assert!(latest.merged_branch.is_empty());
         assert!(

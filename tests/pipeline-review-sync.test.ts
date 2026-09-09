@@ -11,11 +11,13 @@ test("示例课题用的英文综述 JSON 与 PIPELINE_TEMPLATES 同步", () => 
   ) as {
     id: string;
     name: string;
+    projectRules?: string[];
     projectSettings: string[];
     steps: unknown;
   };
   assert.equal(disk.id, "review");
   assert.equal(disk.name, tpl!.name);
+  assert.deepEqual(disk.projectRules ?? [], tpl!.projectRules ?? []);
   assert.deepEqual(disk.projectSettings, tpl!.projectSettings ?? []);
   assert.deepEqual(
     disk.steps,

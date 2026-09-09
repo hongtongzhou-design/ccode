@@ -271,61 +271,16 @@ fn run_cmd_full(
     mut cmd: crate::process::BackgroundCommand,
     timeout: Duration,
 ) -> Result<CmdOutput, String> {
-    let mut child = cmd.spawn().map_err(|e| format!("无法启动进程: {e}"))?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let out_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stdout.take() {
-            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-        }
-        buf
-    });
-    let err_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stderr.take() {
-            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-        }
-        buf
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Ok(CmdOutput {
-                    success: status.success(),
-                    code: status.code(),
-                    stdout: out_handle.join().unwrap_or_default(),
-                    stderr: err_handle.join().unwrap_or_default(),
-                    timed_out: false,
-                });
-            }
-            Ok(None) => {
-                if std::time::Instant::now() > deadline {
-                    // 先杀整棵进程树再 kill 自己：Windows 上 `cmd /C <script>` 的真正
-                    // 干活进程是孙进程，只杀 cmd.exe 会留孤儿，而孤儿持有 stdout/stderr
-                    // 管道写端 ⇒ 下面两个读线程永远等不到 EOF。
-                    crate::pty::kill_process_tree(child.id());
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // 即便如此也不无限等：任何漏网的子孙都不该把这个工作线程钉死。
-                    // 放弃的读线程会在管道最终关闭时自行退出。
-                    let grace = Duration::from_secs(2);
-                    let stdout = crate::process::join_with_timeout(out_handle, grace);
-                    let stderr = crate::process::join_with_timeout(err_handle, grace);
-                    return Ok(CmdOutput {
-                        success: false,
-                        code: None,
-                        stdout,
-                        stderr,
-                        timed_out: true,
-                    });
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return Err(format!("等待进程失败: {e}")),
-        }
-    }
+    let captured = crate::process::capture_command(&mut cmd, timeout, 32 * 1024 * 1024)?;
+    if captured.cancelled { return Err("操作已取消".into()); }
+    if captured.truncated { return Err("命令输出超过 32 MB 安全上限，请缩小操作范围".into()); }
+    Ok(CmdOutput {
+        success: !captured.timed_out && captured.status.is_some_and(|s| s.success()),
+        code: captured.status.and_then(|s| s.code()),
+        stdout: captured.stdout,
+        stderr: captured.stderr,
+        timed_out: captured.timed_out,
+    })
 }
 
 /// 成功返回 trim 后 stdout，失败返回 trim 后 stderr
@@ -407,7 +362,7 @@ pub(crate) fn ensure_initial_commit(repo: &Path) -> Result<bool, String> {
     // 与 merge/sync_base 一致：应用内自动提交必须绕过用户全局 commit.gpgsign
     let mut args: Vec<&str> = vec!["-c", "commit.gpgsign=false"];
     if !configured("user.name") {
-        args.extend(["-c", "user.name=Ccode"]);
+        args.extend(["-c", "user.name=Mesa"]);
     }
     if !configured("user.email") {
         args.extend(["-c", "user.email=ccode@localhost"]);
@@ -416,7 +371,7 @@ pub(crate) fn ensure_initial_commit(repo: &Path) -> Result<bool, String> {
         "commit",
         "--allow-empty",
         "-m",
-        "初始化空仓库（Ccode 自动创建）",
+        "初始化空仓库（Mesa 自动创建）",
     ]);
     run_git(repo, &args, T).map_err(|e| format!("空仓库初始化提交失败: {e}"))?;
     Ok(true)
@@ -1003,7 +958,7 @@ fn shell_cmd(script: &str) -> Result<crate::process::BackgroundCommand, String> 
     // 仓库级 setup/archive 钩子是 bash 脚本；cmd /C 逐字执行必失败。
     // Git for Windows 的 bash 是唯一可靠解释器（装 git 做 worktree 时默认带上）。
     let bash = crate::agents::resolve_git_bash().ok_or(
-        "找不到 Git Bash，无法运行项目 setup/archive 钩子（脚本是 bash）。请安装 Git for Windows 后重启 Ccode。",
+        "找不到 Git Bash，无法运行项目 setup/archive 钩子（脚本是 bash）。请安装 Git for Windows 后重启 Mesa。",
     )?;
     let mut c = crate::process::background_command(bash);
     c.args(["-c", script]);
@@ -1224,6 +1179,35 @@ fn merge_impl_with_guard(
             "主仓库有未提交改动（{names}{suffix}），请先提交或 stash 再合并（或改用 PR 流程）"
         ));
     }
+    // 保护路径：验收合并必须让被保护路径保持主仓原样。git 无法只按路径部分合并，
+    // 任务分支改动了被保护路径时拒绝合并并说明，由人先去工作区撤掉这些改动
+    // （或调整保护设置）；配置读不出时 fail-closed，不按「没有保护」合并
+    let protected = crate::projects::protected_paths_at(&repo)?;
+    if !protected.is_empty() {
+        let range = format!("{}...{}", w.base_branch, w.branch);
+        let touched = run_git(&repo, &["diff", "--name-only", &range], Duration::from_secs(30))?;
+        let hits: Vec<&str> = touched
+            .lines()
+            .filter(|rel| crate::projects::path_is_protected(rel, &protected))
+            .collect();
+        if !hits.is_empty() {
+            let names = hits
+                .iter()
+                .take(5)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("、");
+            let suffix = if hits.len() > 5 {
+                format!(" 等 {} 个文件", hits.len())
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "任务分支改动了保护路径下的文件（{names}{suffix}），合并会覆盖主仓中「保持原样」的内容；\
+                 请先在工作区撤掉这些改动，或在项目设置中调整保护路径后再合并"
+            ));
+        }
+    }
     // 应用内自动 merge commit 必须绕过用户全局 commit.gpgsign：无头环境调 gpg 会卡住或失败
     let mut log = match run_git(
         &repo,
@@ -1257,7 +1241,7 @@ fn merge_impl_with_guard(
             ));
         }
     };
-    let salvage = copy_untracked_deliverables(Path::new(&w.worktree_path), &repo);
+    let salvage = copy_untracked_deliverables(Path::new(&w.worktree_path), &repo, &protected);
     if !salvage.is_empty() {
         if !log.is_empty() {
             log.push('\n');
@@ -1281,7 +1265,7 @@ fn merge_impl_with_guard(
             archived: false,
             failed_phase: Some("state".into()),
             message: format!(
-                "代码已合并进 {}，但 Ccode 状态记录失败；不要重复合并：{e}",
+                "代码已合并进 {}，但 Mesa 状态记录失败；不要重复合并：{e}",
                 w.base_branch
             ),
             output: log,
@@ -1371,7 +1355,7 @@ fn pr_impl(
             .unwrap_or_default();
             let lines: Vec<&str> = log.lines().take(50).collect();
             if lines.is_empty() {
-                "由 Ccode 创建".to_string()
+                "由 Mesa 创建".to_string()
             } else {
                 lines.join("\n")
             }
@@ -1640,9 +1624,56 @@ fn rooted_existing_path(root: &Path, rel: &str) -> Option<PathBuf> {
     crate::paths::path_within_path(&candidate, &root).then_some(candidate)
 }
 
+/// Compare record coverage without pretending to validate the records' scientific meaning.
+/// The reference may be inherited; the delivered file must belong to this workspace run.
+fn acceptance_record_ids(
+    root: &Path,
+    path: &str,
+    since: Option<SystemTime>,
+) -> Option<std::collections::HashSet<String>> {
+    let path = rooted_existing_path(root, path)?;
+    let meta = fs::metadata(&path).ok()?;
+    if !meta.is_file()
+        || meta.len() == 0
+        || meta.len() > 4 * 1024 * 1024
+        || since.is_some_and(|start| meta.modified().ok().is_none_or(|t| t < start))
+    {
+        return None;
+    }
+    // Bound the read too: a file can grow between metadata and read.
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, 4 * 1024 * 1024 + 1),
+        &mut bytes,
+    )
+    .ok()?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let rows = value
+        .as_array()
+        .or_else(|| value.get("items").and_then(Value::as_array))
+        .or_else(|| value.get("records").and_then(Value::as_array))
+        .or_else(|| value.get("rows").and_then(Value::as_array))?;
+    if rows.is_empty() || rows.len() > 5000 {
+        return None;
+    }
+    let mut ids = std::collections::HashSet::new();
+    for row in rows {
+        let id = row.get("id")?.as_str()?;
+        if id.trim().is_empty() || !ids.insert(id.to_owned()) {
+            return None;
+        }
+    }
+    Some(ids)
+}
+
 /// 机器验收语法（仅处理显式 `machine:` 条目，普通自然语言条件仍展示给人）：
 /// `machine:file:path`、`machine:glob:path/*.md`、`machine:contains:path::文本`、
-/// `machine:count:path/*.pdf>=N`。路径始终限制在项目根内。
+/// `machine:count:path/*.pdf>=N`、`machine:same-ids:reference.json::delivered.json`。
+/// 路径始终限制在项目根内；same-ids 只核对非空唯一字符串 ID 集合，不验证研究结论。
 fn machine_acceptance_satisfied(root: &Path, criteria: &[String], since: SystemTime) -> bool {
     criteria
         .iter()
@@ -1695,6 +1726,18 @@ fn machine_acceptance_satisfied(root: &Path, criteria: &[String], since: SystemT
                     })
                     .count();
                 return actual >= expected;
+            }
+            if let Some(rest) = rule.strip_prefix("same-ids:") {
+                let Some((reference, delivered)) = rest.split_once("::") else {
+                    return false;
+                };
+                return match (
+                    acceptance_record_ids(root, reference, None),
+                    acceptance_record_ids(root, delivered, Some(since)),
+                ) {
+                    (Some(expected), Some(actual)) => expected == actual,
+                    _ => false,
+                };
             }
             if let Some(rest) = rule.strip_prefix("records:") {
                 let Some((path, fields)) = rest.split_once("::") else {
@@ -2379,8 +2422,8 @@ fn project_root_deliverable_target(target: &str, source: &Path) -> bool {
 const DELIVERABLE_COPY_CAP: usize = 2000;
 
 /// 合并后把工作区里未进 git 的 papers/、产物目录、output/ 拷到主仓同相对路径。
-/// 已存在不覆盖；失败不阻断合并。返回空串表示无事可做。
-fn copy_untracked_deliverables(worktree: &Path, repo: &Path) -> String {
+/// 已存在不覆盖；保护路径下的文件跳过（保持主仓原样）；失败不阻断合并。返回空串表示无事可做。
+fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String]) -> String {
     if crate::paths::same_path(&worktree.to_string_lossy(), &repo.to_string_lossy()) {
         return String::new();
     }
@@ -2438,6 +2481,10 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path) -> String {
                 };
                 let rel_str = rel.to_string_lossy().replace('\\', "/");
                 if rel_str.is_empty() || rel_str.contains("..") {
+                    continue;
+                }
+                if crate::projects::path_is_protected(&rel_str, protected) {
+                    skipped += 1;
                     continue;
                 }
                 let dest = repo.join(rel);
@@ -2587,7 +2634,7 @@ pub async fn import_human_deliverable(
 }
 
 // ===== agent 人工请求（HELP-WANTED.md 约定文件） =====
-// agent 只会写文件，Ccode 负责看见：工作树/主仓 .ccode/help-wanted.md 里每行
+// agent 只会写文件，Mesa 负责看见：工作树/主仓 .ccode/help-wanted.md 里每行
 // 「- 」开头是一条请求，约定每条自带兜底句「若未回复则按 … 继续」（非阻断）。
 // 扫描范围：活跃工作区的工作树 + 其主仓根（聊想法在主仓进行）；无工作区的项目不扫。
 
@@ -3040,7 +3087,7 @@ fn repair_remount_impl(conn: &Connection, id: &str) -> Result<WorkspaceDto, Stri
         "UPDATE workspaces SET status='active', archived_at=NULL WHERE id=?1",
         params![id],
     )
-    .map_err(|e| format!("工作树已修复，但更新 Ccode 记录失败；可重试重新挂载: {e}"))?;
+    .map_err(|e| format!("工作树已修复，但更新 Mesa 记录失败；可重试重新挂载: {e}"))?;
     invalidate_repo_cache();
     get_workspace(conn, id)
 }
@@ -3636,7 +3683,7 @@ pub async fn list_repos() -> Vec<RepoDto> {
 
 const ARTIFACTS_FILE: &str = "artifacts.yaml";
 /// 清单头注释；解析时剔除本行，避免每次重写都再叠一份
-const MANIFEST_HEADER: &str = "# Ccode 提货单：大产物不进 git，本清单随分支提交传递给下一步";
+const MANIFEST_HEADER: &str = "# Mesa 提货单：大产物不进 git，本清单随分支提交传递给下一步";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4254,7 +4301,7 @@ mod tests {
         assert_eq!(w2.port_base, w.port_base + 10);
     }
 
-    /// 空仓库已配置 user.name/email 时，初始提交沿用该身份，不注入 Ccode 临时身份
+    /// 空仓库已配置 user.name/email 时，初始提交沿用该身份，不注入 Mesa 临时身份
     #[test]
     fn create_on_unborn_repo_uses_configured_identity() {
         let Some(fx) = Fixture::new() else { return };
@@ -5331,6 +5378,58 @@ mod tests {
         assert!(!fx.repo.join("x.txt").exists());
     }
 
+    #[test]
+    fn merge_refuses_when_branch_touches_protected_paths() {
+        let Some(fx) = Fixture::new() else { return };
+        fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
+        fs::write(
+            fx.repo.join(".ccode/project.toml"),
+            "protected_paths = [\"数据/raw\"]\n",
+        )
+        .unwrap();
+        sh(&fx.repo, &["add", ".env", ".envrc", ".ccode/project.toml"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "prot").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        // 任务分支改动了保护路径下的文件（中文路径顺带验证 quotepath 口径）
+        fs::create_dir_all(wt.join("数据/raw")).unwrap();
+        fs::write(wt.join("数据/raw/a.csv"), "raw\n").unwrap();
+        fs::write(wt.join("feature.txt"), "done\n").unwrap();
+        commit_all_in_worktree(&wt, "任务完成");
+
+        let err = merge_impl(&fx.conn, &w.id, false).unwrap_err();
+        assert!(err.contains("保护路径"), "{err}");
+        assert!(err.contains("数据/raw/a.csv"), "{err}");
+        // 合并被拒绝：主仓不出现任务改动，工作区保持 active
+        assert!(!fx.repo.join("feature.txt").exists());
+        assert!(!fx.repo.join("数据/raw/a.csv").exists());
+        assert_eq!(get_workspace(&fx.conn, &w.id).unwrap().status, "active");
+    }
+
+    #[test]
+    fn merge_fail_closed_when_project_config_corrupt() {
+        let Some(fx) = Fixture::new() else { return };
+        fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
+        // 损坏的档案卡：保护清单不可信，必须拒绝合并而不是按「没有保护」继续
+        fs::write(fx.repo.join(".ccode/project.toml"), "protected_paths = [\"raw\"\n").unwrap();
+        sh(&fx.repo, &["add", ".env", ".envrc", ".ccode/project.toml"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "corrupt").unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "done\n").unwrap();
+        commit_all_in_worktree(&wt, "任务完成");
+
+        let err = merge_impl(&fx.conn, &w.id, false).unwrap_err();
+        assert!(err.contains("无法确认保护路径"), "{err}");
+        assert!(!fx.repo.join("feature.txt").exists());
+    }
+
     /// 打开 commit.gpgsign 且 gpg 程序不存在：应用内自动 merge/commit 必须仍能完成
     #[test]
     fn auto_merge_and_commit_bypass_gpgsign_config() {
@@ -5610,6 +5709,115 @@ mod tests {
             since
         ));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn machine_acceptance_same_ids_requires_complete_unique_fresh_delivery() {
+        let dir = std::env::temp_dir().join(format!("ccode-coverage-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("plan.json"), r#"[{"id":"a"},{"id":"b"}]"#).unwrap();
+        // The plan is allowed to predate the current run (no wall-clock scheduling assertions).
+        fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("plan.json"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        let rule = vec!["machine:same-ids:plan.json::result.json".into()];
+        let since = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        for valid in [
+            r#"[{"id":"b","status":"failed"},{"id":"a","status":"cancelled"}]"#,
+            r#"{"items":[{"id":"a"},{"id":"b"}]}"#,
+            r#"{"records":[{"id":"a"},{"id":"b"}]}"#,
+            r#"{"rows":[{"id":"b"},{"id":"a"}]}"#,
+        ] {
+            fs::write(dir.join("result.json"), valid).unwrap();
+            assert!(machine_acceptance_satisfied(&dir, &rule, since), "{valid}");
+        }
+        for invalid in [
+            r#"[{"id":"a"}]"#,                       // omission
+            r#"[{"id":"a"},{"id":"b"},{"id":"c"}]"#, // unplanned addition
+            r#"[{"id":"a"},{"id":"a"},{"id":"b"}]"#,
+            r#"[{"id":"a"},{"id":1}]"#,
+            r#"[{"id":"a"},{"id":" "}]"#,
+            r#"[{"id":"a"},{}]"#,
+            "[]",
+            "not json",
+            "{}",
+        ] {
+            fs::write(dir.join("result.json"), invalid).unwrap();
+            assert!(
+                !machine_acceptance_satisfied(&dir, &rule, since),
+                "{invalid}"
+            );
+        }
+        fs::write(dir.join("result.json"), r#"[{"id":"a"},{"id":"b"}]"#).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("result.json"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        assert!(!machine_acceptance_satisfied(&dir, &rule, since));
+        for bad in [
+            "machine:same-ids:missing.json::result.json",
+            "machine:same-ids:plan.json",
+            "machine:same-ids:::result.json",
+        ] {
+            assert!(!machine_acceptance_satisfied(&dir, &[bad.into()], since));
+        }
+        // A malformed/duplicate/empty reference is not a valid coverage baseline either.
+        for invalid in ["[]", r#"[{"id":"a"},{"id":"a"}]"#, r#"[{"id":null}]"#] {
+            fs::write(dir.join("plan.json"), invalid).unwrap();
+            assert!(!machine_acceptance_satisfied(
+                &dir,
+                &rule,
+                SystemTime::UNIX_EPOCH
+            ));
+        }
+        fs::write(
+            dir.join("plan.json"),
+            format!(
+                "[{}]",
+                std::iter::repeat_n(r#"{"id":"a"}"#, 5001)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        )
+        .unwrap();
+        assert!(acceptance_record_ids(&dir, "plan.json", None).is_none());
+        fs::write(dir.join("plan.json"), vec![b' '; 4 * 1024 * 1024 + 1]).unwrap();
+        assert!(acceptance_record_ids(&dir, "plan.json", None).is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_acceptance_same_ids_rejects_outside_paths_and_symlinks() {
+        use std::os::unix::fs::symlink;
+        let base =
+            std::env::temp_dir().join(format!("ccode-coverage-path-{}", uuid::Uuid::new_v4()));
+        let root = base.join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(base.join("outside.json"), r#"[{"id":"a"}]"#).unwrap();
+        fs::write(root.join("local.json"), r#"[{"id":"a"}]"#).unwrap();
+        symlink(base.join("outside.json"), root.join("link.json")).unwrap();
+        for rule in [
+            "machine:same-ids:../outside.json::local.json".to_string(),
+            "machine:same-ids:link.json::local.json".into(),
+            "machine:same-ids:local.json::link.json".into(),
+            format!(
+                "machine:same-ids:{}::local.json",
+                base.join("outside.json").display()
+            ),
+        ] {
+            assert!(!machine_acceptance_satisfied(
+                &root,
+                &[rule],
+                SystemTime::UNIX_EPOCH
+            ));
+        }
+        fs::remove_dir_all(base).ok();
     }
 
     #[cfg(unix)]
@@ -5936,12 +6144,36 @@ mod tests {
         fs::write(wt.join("papers/b.pdf"), b"new-b").unwrap();
         fs::write(wt.join("output/main.pdf"), b"pdf").unwrap();
         fs::write(wt.join("secret.txt"), b"nope").unwrap();
-        let note = copy_untracked_deliverables(&wt, &repo);
+        let note = copy_untracked_deliverables(&wt, &repo, &[]);
         assert!(note.contains("2 个文件"), "{note}");
         assert_eq!(fs::read(repo.join("papers/a.pdf")).unwrap(), b"old-a");
         assert_eq!(fs::read(repo.join("papers/b.pdf")).unwrap(), b"new-b");
         assert_eq!(fs::read(repo.join("output/main.pdf")).unwrap(), b"pdf");
         assert!(!repo.join("secret.txt").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copy_untracked_deliverables_skips_protected_paths() {
+        let dir = std::env::temp_dir().join(format!("ccode-salvage-prot-{}", uuid::Uuid::new_v4()));
+        let wt = dir.join("wt");
+        let repo = dir.join("repo");
+        fs::create_dir_all(wt.join("papers/raw")).unwrap();
+        fs::create_dir_all(wt.join("papers/notes")).unwrap();
+        fs::create_dir_all(repo.join("papers/raw")).unwrap();
+        fs::write(wt.join("papers/raw/new.csv"), b"new").unwrap();
+        fs::write(wt.join("papers/notes/ok.md"), b"ok").unwrap();
+        let note =
+            copy_untracked_deliverables(&wt, &repo, &["papers/raw".to_string()]);
+        assert!(note.contains("1 个文件"), "{note}");
+        assert!(
+            !repo.join("papers/raw/new.csv").exists(),
+            "保护路径下的文件不得拷进主仓"
+        );
+        assert_eq!(
+            fs::read(repo.join("papers/notes/ok.md")).unwrap(),
+            b"ok"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

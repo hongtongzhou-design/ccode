@@ -1,6 +1,6 @@
 //! 一键诊断包：系统/WebView/GPU/输入法、应用日志、功能开关与进程生命周期。
 //!
-//! 进程监控只保留 Ccode 子孙进程，以及系统输入法进程（ctfmon/TextInputHost）；
+//! 进程监控只保留 Mesa 子孙进程，以及系统输入法进程（ctfmon/TextInputHost）；
 //! 不读取子进程环境变量。命令参数在进入环形缓冲前即做密钥脱敏。
 
 #[cfg(windows)]
@@ -370,14 +370,14 @@ try {
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
-public static class CcodeInputLayout {
+public static class MesaInputLayout {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
   [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint threadId);
 }
 '@
-$thread=[CcodeInputLayout]::GetWindowThreadProcessId([CcodeInputLayout]::GetForegroundWindow(),[IntPtr]::Zero)
-$hkl=[CcodeInputLayout]::GetKeyboardLayout($thread).ToInt64()
+$thread=[MesaInputLayout]::GetWindowThreadProcessId([MesaInputLayout]::GetForegroundWindow(),[IntPtr]::Zero)
+$hkl=[MesaInputLayout]::GetKeyboardLayout($thread).ToInt64()
 $langId=[int]($hkl -band 0xffff)
 $culture=try{[System.Globalization.CultureInfo]::GetCultureInfo($langId).Name}catch{$null}
 $active=[pscustomobject]@{threadId=$thread;keyboardLayout=('0x{0:X8}' -f ($hkl -band 0xffffffffL));culture=$culture}
@@ -487,7 +487,7 @@ fn write_bundle(
             "arch": std::env::consts::ARCH,
             "processPollMs": PROCESS_POLL_MS,
             "processHistoryCap": PROCESS_HISTORY_CAP,
-            "offlineAnalysis": "UTF-8 JSON/TXT，可在 macOS/Linux/Windows 直接解压分析，无需 Ccode 或 Windows 专用工具",
+            "offlineAnalysis": "UTF-8 JSON/TXT，可在 macOS/Linux/Windows 直接解压分析，无需 Mesa 或 Windows 专用工具",
             "privacy": "不包含子进程环境变量；命令参数与应用日志已按已保存密钥和常见密钥前缀脱敏。路径、项目名和非密钥参数仍会保留，请发送前按需检查。"
         }),
     )?;
@@ -523,7 +523,7 @@ fn write_bundle(
     add_text(
         &mut writer,
         "README.txt",
-        "Ccode Windows 诊断包\n\n本包用于 Windows 现场采集后带回 macOS 离线分析；全部文件均为 UTF-8 JSON/TXT，不需要安装 Ccode、PowerShell 或 Windows 专用查看器。\n\nsystem.json：Windows、WebView2、显卡、语言与输入法\nfrontend.json：WebView 用户代理、语言、屏幕与 WebGL Renderer\nfeature-flags.json：当前功能开关（不含密钥与 profile id）\nprocess-lifecycle.json：Ccode 子孙进程及输入法进程的开始/结束记录；captureMethod=spawn-hook 表示由启动边界精确登记参数，process-scan 表示进程扫描补充，startTimeEstimated=true 表示开始时间为首次观察时间\nprocess-active.json：导出时仍活动的相关进程\napp-log.json / app-log.txt：应用诊断日志\n\n安全：不采集环境变量；参数与日志会脱敏，但路径和普通参数仍可能包含项目名称。发送给他人前可先解压检查。\n",
+        "Mesa Windows 诊断包\n\n本包用于 Windows 现场采集后带回 macOS 离线分析；全部文件均为 UTF-8 JSON/TXT，不需要安装 Mesa、PowerShell 或 Windows 专用查看器。\n\nsystem.json：Windows、WebView2、显卡、语言与输入法\nfrontend.json：WebView 用户代理、语言、屏幕与 WebGL Renderer\nfeature-flags.json：当前功能开关（不含密钥与 profile id）\nprocess-lifecycle.json：Mesa 子孙进程及输入法进程的开始/结束记录；captureMethod=spawn-hook 表示由启动边界精确登记参数，process-scan 表示进程扫描补充，startTimeEstimated=true 表示开始时间为首次观察时间\nprocess-active.json：导出时仍活动的相关进程\napp-log.json / app-log.txt：应用诊断日志\n\n安全：不采集环境变量；参数与日志会脱敏，但路径和普通参数仍可能包含项目名称。发送给他人前可先解压检查。\n",
     )?;
     let file = writer
         .finish()

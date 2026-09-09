@@ -553,7 +553,7 @@ export default function ChatSurface({
         className="relative min-h-0 flex-1 overflow-auto"
       >
         <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col px-4 pb-6 pt-8 sm:px-5">
-          {hasOlder && onLoadOlder && messages.length > 0 && (
+          {hasOlder && onLoadOlder && (
             <div className="mb-4 flex justify-center">
               <button
                 type="button"

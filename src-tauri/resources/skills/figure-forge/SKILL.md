@@ -62,7 +62,7 @@ outputs: [figures/]
 
 - 出图脚本放 `figures/`（或 `analysis/figures/`），一图一函数，设 `main()` 入口，从 `main` 重跑产出相同图片；
 - 路径集中为模块顶部常量；风格参数（字号/配色/线宽）集中定义，全部图共享；
-- 输出文件命名与正文引用一一对应（如 `fig2-ablation.pdf`）；中间稿不堆积，旧版直接覆盖；
+- 输出文件命名与正文引用一一对应（如 `fig2-ablation.pdf`）；临时中间稿可清理；已接受/发布图按版本留存，新版本不静默覆盖旧证据；
 - 输出文件名与 TASK.md/提货单登记的引用名逐一对账，对不上即报。
 
 ## 交付前复查（两层）
@@ -79,3 +79,7 @@ outputs: [figures/]
 ---
 
 理念参考：figure-style/figure-composer（Anthropic Claude Science，Apache-2.0，经 TTTPOB 提取镜像与 wanshuiyin 转述交叉验证）、Yuan1z0825/nature-skills（Apache-2.0）、Orchestra-Research/AI-Research-SKILLs（MIT）、caylent/tufte-data-viz（MIT）；内容为按 Ccode 科研工作流重写。
+
+## 证据与版本约束
+
+一句话论点只能总结已验收证据，不是先定故事再挑数据。描述性/探索图可直接说明现象和不确定性，无需强凑正向结论。图表须能追溯到数据/规则/代码版本与生成命令，正文、误差、样本单位、颜色和轴范围不夸大差异；最优值不等于显著或重要。上游数据/分析改变后重生成并核验，禁止复用失效图。

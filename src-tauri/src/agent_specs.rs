@@ -55,7 +55,7 @@ pub struct AgentSpec {
     pub effort_levels: Option<(&'static [&'static str], &'static str)>,
     /// TUI 的 Enter 需要 CSI-u 形式（kitty 键盘协议：应用 push flags 后只认 \x1b[13u，
     /// 普通 \r 不提交）。kimi = true（0.36.1 实证）；xterm.js 不支持该协议，
-    /// Ccode 在 xterm 键盘层与状态栏写入两处改写
+    /// Mesa 在 xterm 键盘层与状态栏写入两处改写
     pub submit_csi_u: bool,
     /// 「设为全局默认」写配置文件能力（global_config.rs plan_writes 的分发依据）
     pub set_global: SetGlobalCap,
@@ -490,8 +490,8 @@ static AGENT_SPECS: &[AgentSpec] = &[
             login_cmd: &[],
             auth_file_paths: &[".qwen/oauth_creds.json"],
             // matrix §4 凭证优先级 CLI flags > shell env > .env > settings env：purge 覆盖
-            // Ccode 两条协议注入表的全部变量；DASHSCOPE_*/BAILIAN_* bundle 里存在但
-            // Ccode 不注入、是否压 OAuth 登录态未核实，保守不收
+            // Mesa 两条协议注入表的全部变量；DASHSCOPE_*/BAILIAN_* bundle 里存在但
+            // Mesa 不注入、是否压 OAuth 登录态未核实，保守不收
             env_purge_list: &[
                 "OPENAI_API_KEY",
                 "OPENAI_BASE_URL",
@@ -556,7 +556,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         // opencode 1.18.10 实机调研结论：`opencode auth`（providers 别名）是多 provider 凭证管理器
         //（auth login/logout/list，凭证 ~/.local/share/opencode/auth.json，本机实测 0 credentials），
         // 没有单一「官方账号」语义——opencode zen 只是可登录的 provider 之一，auth login 是
-        // 各家 key/OAuth 的通用入口；且 Ccode 的 OpenCodeInlineConfig（OPENCODE_CONFIG_CONTENT）
+        // 各家 key/OAuth 的通用入口；且 Mesa 的 OpenCodeInlineConfig（OPENCODE_CONFIG_CONTENT）
         // 优先级高于 auth.json，官方账号模式无从对应——保持 None 不硬加
         official_account: None,
         model_switch: ModelSwitch::Picker("/models"),
@@ -634,7 +634,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         effort_levels: Some((&["on", "off"], "/effort {level}")),
         // kitty 键盘协议：kimi TUI 启动即 push flags（\x1b[>7u），之后只认 CSI-u 形式的
         // Enter（\x1b[13u），普通 \r 不提交（2026-08-17 pty 探针实证）——xterm.js 不支持
-        // kitty 协议，Ccode 侧须把 Enter 改写成 CSI-u
+        // kitty 协议，Mesa 侧须把 Enter 改写成 CSI-u
         submit_csi_u: true,
         set_global: SetGlobalCap::Supported,
         mcp_write: McpWriteCap::Full,
@@ -772,7 +772,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         fixed_session_id: true,
         // -r/--resume [ID_OR_TITLE] 按 ID 恢复；-c/--continue 续最近（前端不用）
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
-        // 与 Ccode SSOT 同构（目录 + SKILL.md）；首版未经实机验证，分发强制 copy（见下方 skill_dist 字段）
+        // 与 Mesa SSOT 同构（目录 + SKILL.md）；首版未经实机验证，分发强制 copy（见下方 skill_dist 字段）
         skills_dir: &[".grok", "skills"],
         packaging: PackagingSpec {
             npm_install: Some("@xai-official/grok"),
@@ -908,7 +908,7 @@ pub struct RequestPolicySupportDto {
 /// 取值按**入口**记账（2026-09-01 拆分，此前 supported 一词被求交器误当「启动可注」）：
 /// - "inject" = 启动注入通道（env/flag/内联配置/overlay），内嵌终端拉起即生效
 /// - "persist" = 仅「设为全局默认」写 CLI 配置文件可达（启动注入够不到）
-/// - "tui" = 仅进程内原生命令（如 /effort），Ccode 不携带存储值
+/// - "tui" = 仅进程内原生命令（如 /effort），Mesa 不携带存储值
 /// - "unsupported" = 协议支持但 CLI 无用户入口；"unknown" = 未实证
 pub(crate) fn request_policy_support(agent: &str) -> RequestPolicySupportDto {
     let row = |temperature, top_p, max_output_tokens, reasoning_effort, custom_headers| {
@@ -964,7 +964,7 @@ pub(crate) fn request_policy_support(agent: &str) -> RequestPolicySupportDto {
         "qwen" => row("persist", "persist", "inject", "tui", "unknown"),
         // grok v1.0.5 二进制 + 随附 README 双实证：temperature/top_p/max_completion_tokens
         // （注意键名）/reasoning_effort 与 headers 的通道是 config 不是 env（GROK_* 无此类变量）。
-        // Ccode 侧接线（2026-08-31，grok-build main 源码实证）：GROK_CONFIG overlay 白名单
+        // Mesa 侧接线（2026-08-31，grok-build main 源码实证）：GROK_CONFIG overlay 白名单
         // （config_override.rs OVERLAY_ALLOW_PATHS，fail-closed）只放行 [models] 全局块——
         // 五项全经 [models] 全局默认注入（temperature/top_p/max_completion_tokens/
         // default_reasoning_effort/extra_headers=$VAR 引用，见 agents::grok_config_overlay）；
@@ -982,7 +982,7 @@ fn flag(supported: bool, reason: Option<&'static str>) -> CapabilityFlagDto {
 
 fn readonly_cap(spec: &AgentSpec) -> CapabilityFlagDto {
     if spec.readonly_args.is_empty() {
-        flag(false, Some("没有只读/计划模式参数，只有对话里的软约束"))
+        flag(false, Some("没有只读/计划模式参数，不能以只讨论权限启动"))
     } else {
         flag(true, None)
     }

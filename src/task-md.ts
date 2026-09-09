@@ -1,6 +1,8 @@
 import { litSourceSectionLines } from "./task-md-sections.ts";
 import { decisionPolicyText } from "./step-decisions.ts";
 import { RESOURCE_TYPE_LABELS } from "./pipeline-presets.ts";
+import { effectiveProjectRules } from "./project-context.ts";
+import { stripOptionalTitlePrefix } from "./step-flow.ts";
 import type {
   ArtifactEntryDto,
   ProjectConfigDto,
@@ -22,9 +24,24 @@ export function renderTaskMd(
   if (topic) {
     lines.push("## 课题主题", topic, "");
   }
-  const globals = (cfg.settings ?? []).map((x) => x.trim()).filter(Boolean);
+  const globals = effectiveProjectRules(
+    cfg.settings,
+    cfg.workMode,
+    cfg.rulesOwned,
+  );
   if (globals.length > 0) {
-    lines.push("## 全局设定", ...globals.map((x) => `- ${x}`), "");
+    lines.push("## 项目规则", ...globals.map((x) => `- ${x}`), "");
+  }
+  const protectedPaths = (cfg.protectedPaths ?? [])
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (protectedPaths.length > 0) {
+    lines.push(
+      "## 这些保持原样",
+      "验收把独立副本写回项目时，这些文件夹或文件不改、不另存一份，副本里的改动不写回：",
+      ...protectedPaths.map((x) => `- ${x}`),
+      "",
+    );
   }
   const litLines = litSourceSectionLines(cfg.litSource);
   if (litLines) {
@@ -68,6 +85,14 @@ export function renderTaskMd(
       ...step.expectedArtifacts.map((a) => `- ${a}`),
     );
   }
+  if ((step.decisions?.length ?? 0) > 0) {
+    lines.push(
+      "",
+      "## 决策摘要（先看方案，再由人决定）",
+      "已有上游决策摘要则直接引用，不再抄写。缺少时在现有报告补：待决问题、可行方案、推荐及证据位置、代价/不确定性、等待边界。推荐不是批准；人可选方案、改范围或要求补证据，答案注明版本。",
+      "仅探索/待补的决定不授权正式实验或强结论；不要让人凭空写保证。",
+    );
+  }
   const acceptanceCriteria = (step.acceptanceCriteria ?? [])
     .map((x) => x.trim())
     .filter(Boolean);
@@ -76,7 +101,7 @@ export function renderTaskMd(
       "",
       "## 验收条件",
       ...acceptanceCriteria.map((criterion) => `- ${criterion}`),
-      "逐条核对上述条件；仅文件存在不代表内容合格。无法核对的项标记为待人工确认。",
+      "报告已生成与问题已解决分开；逐项核对，未核验如实记录，人工批准不得由 Agent 代填。",
     );
   }
   const humanTasks = step.humanTasks ?? [];
@@ -90,7 +115,7 @@ export function renderTaskMd(
             ? "收尾"
             : "进行中";
       lines.push(
-        `- [${when}] ${h.title}${h.target ? ` → 交付落点 \`${h.target}\`` : ""}` +
+        `- [${when}] ${h.optional ? stripOptionalTitlePrefix(h.title) : h.title}${h.target ? ` → 交付落点 \`${h.target}\`` : ""}` +
           `${h.optional ? "（可选）" : "（必办）"}` +
           ` · 完成判定：${
             h.completion === "manual"
@@ -104,7 +129,7 @@ export function renderTaskMd(
       );
     }
     lines.push(
-      "上述事项由人完成，交付物会出现在对应落点路径；落点为空前请按既有内容推进可推进的部分。",
+      "上述事项由人完成；有文件不代表已获批准。缺少必要人工确认时暂停受影响操作，只可推进无依赖、可逆的准备。",
       "执行中若另需人协助，把请求逐条写进 .ccode/help-wanted.md（每条一行「- 」开头）；是否继续严格遵守本任务书的「决策暂停策略」。",
     );
   }

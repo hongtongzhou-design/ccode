@@ -91,8 +91,11 @@ export interface GatewayModel {
 export interface ProbeRecord {
   slot: string;
   model: string | null;
+  urlFp: string;
+  keyFp: string;
   streaming: ProbeStatus;
   effort: ProbeStatus;
+  sampling: ProbeStatus;
   headers: ProbeStatus;
   basic: ProbeStatus;
   probedAt: string;
@@ -118,6 +121,7 @@ export interface Gateway {
   catalogFromSlot: string | null;
   lastProbe: ProbeRecord[];
   slotProbes?: SlotProbeSummary[];
+  revision?: string;
 }
 
 export interface GlobalDriftDto {
@@ -151,6 +155,7 @@ export interface GatewayInput {
   headerEnv: Record<string, string>;
   models: GatewayModel[];
   apiKey: string | null;
+  expectedRevision?: string | null;
 }
 
 export interface BindingInput {
@@ -178,6 +183,7 @@ export interface ProfileInput {
   requestPolicy?: RequestPolicy;
   /** 明文密钥，仅保存时提交；编辑时留空表示不修改 */
   apiKey: string | null;
+  expectedGatewayRevision?: string | null;
 }
 
 /** 请求级策略声明。仅在对应 Agent/协议支持时才会实际生效。 */
@@ -242,6 +248,28 @@ export interface ProfileValidationDto {
 export interface GlobalApplyResultDto {
   files: string[];
   validation: ProfileValidationDto;
+}
+
+export interface GlobalWriteChangeDto {
+  path: string;
+  op: string;
+  before: string | null;
+  after: string | null;
+}
+
+export interface GlobalWriteFilePreviewDto {
+  path: string;
+  tag: string;
+  action: string;
+  changes: GlobalWriteChangeDto[];
+  omitted: number;
+}
+
+export interface GlobalWritePreviewDto {
+  files: GlobalWriteFilePreviewDto[];
+  skippedPolicies: string[];
+  restartNote: string;
+  scopeNote: string;
 }
 
 /** 启动计划预览：只展示环境变量名称与脱敏参数，不返回密钥值。 */
@@ -343,9 +371,9 @@ export interface SessionMetaDto {
   summary: string | null;
   /** 后端探测到该会话的 CLI 进程仍存活（外部 live；无终端标签可跳转） */
   live: boolean;
-  /** 会话来源：普通 CLI 为 cli，Ccode 无头 AI 为 ccode-ai。 */
+  /** 会话来源：普通 CLI 为 cli，Mesa 无头 AI 为 ccode-ai。 */
   source: string;
-  /** 后端精确标记的 Ccode 内部 AI 会话。 */
+  /** 后端精确标记的 Mesa 内部 AI 会话。 */
   internal: boolean;
   /** 接力来源（P3 机制四）：该会话接自哪个 agent 的哪个会话；非接力会话为 null */
   handoffFromAgent: string | null;
@@ -353,10 +381,10 @@ export interface SessionMetaDto {
   /** 归入的任务卡（卡片 = 对话的文件夹）；后端按项目回填卡片名，卡片删除后两者回落 null */
   taskId: string | null;
   taskName: string | null;
-  /** Codex rollout 元信息的 model_provider："ccode" = Ccode 内联 provider 启动的会话，
+  /** Codex rollout 元信息的 model_provider："ccode" = Mesa 内联 provider 启动的会话，
    *  恢复时只能用带 Base URL 的配置（否则 codex 报 provider not found）；其他 agent 为 null */
   provider?: string | null;
-  /** Ccode profile used to start this session, when the launch was observed by Ccode. */
+  /** Mesa profile used to start this session, when the launch was observed by Mesa. */
   profileId: string | null;
 }
 
@@ -535,6 +563,41 @@ export interface WsSettingsDto {
   setup: string | null;
   archive: string | null;
   run: RunScriptDto[];
+}
+
+export interface ResearchRunDto {
+  id: string;
+  workspaceId: string;
+  worktreePath: string;
+  command: string[];
+  entry: string;
+  entryRevision: string | null;
+  input: string;
+  outputDir: string;
+  status: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  outputs: string[];
+  resultFile: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface ResearchAcceptedFile {
+  path: string;
+  revision: string;
+}
+
+export interface ResearchAcceptanceDto {
+  verdict: "accept" | "accept_with_conditions" | "return" | string;
+  stepName: string;
+  workspaceId: string;
+  files: ResearchAcceptedFile[];
+  conclusionScope: string;
+  openBlockers: string[];
+  runId: string | null;
+  createdAt: string;
 }
 
 export interface GitFileDto {
@@ -737,7 +800,7 @@ export interface SkillDto {
   id: string;
   name: string;
   description: string;
-  /** builtin | ccode（Ccode 新建）| local（本地导入；旧数据含早期自建）| zip | github | discovered */
+  /** builtin | ccode（Mesa 新建）| local（本地导入；旧数据含早期自建）| zip | github | discovered */
   source: string;
   repo: string | null;
   repoRef: string | null;
@@ -807,11 +870,16 @@ export interface UsageCardsDto {
   cacheRead: number;
   cacheWrite: number;
   sessions: number;
+  /** 计费范围（不含官方账号与内部活动）内已计价模型的份额合计 */
   costUsd: number | null;
-  /** true = 桶里另含未计价模型的用量，costUsd 只是已计价份额 */
+  /** true = 计费桶里另含未计价模型的用量，costUsd 只是已计价份额 */
   costPartial: boolean;
-  /** 已计价模型的缓存读相对全价输入省下的钱（官方账号不计）；无定价缓存为 null */
+  /** 计费范围内已计价模型的缓存读相对全价输入省下的钱；无定价缓存为 null */
   cacheSavingsUsd: number | null;
+  /** 官方账号（订阅制）用量的 token 量：单列展示，不计入费用 */
+  officialTokens: number;
+  /** 内部活动（无头 AI / 定时巡检）的 token 量：单列展示，不计入费用 */
+  internalTokens: number;
 }
 
 export interface UsageTrendDayDto {
@@ -1030,12 +1098,22 @@ export interface ProjectStepDto {
   seedComplete?: boolean;
 }
 
+export interface TaskDraftDto {
+  relPath: string;
+  text: string | null;
+  revision: string | null;
+}
+
 export interface ProjectConfigDto {
   /** 课题主题：一键开步写进 TASK.md「课题主题」段；可空 */
   topic?: string | null;
-  /** 全局设定（v3.89）：贯穿全程的决定（综述角度/篇幅/读者/去向），每条一行「问题：答案」。
-   *  它们决定后面每一步，故挂项目层而非某个步骤；随 TASK.md 下发给每一步 */
+  /** 项目规则：贯穿全程的决定（综述角度/篇幅/读者/文风，以及默认行为规则）。
+   *  每条一行；随 Context Pack / TASK.md 下发。 */
   settings?: string[];
+  /** 人在规则编辑器里保存过完整列表。未置位时启动仍补工作方式默认规则。 */
+  rulesOwned?: boolean;
+  /** 验收写回时拒绝覆盖的相对路径（目录或文件）。 */
+  protectedPaths?: string[];
   artifactDir: string;
   resources: ProjectResourceDto[];
   steps: ProjectStepDto[];
@@ -1053,6 +1131,16 @@ export interface ProjectConfigDto {
   litWatchFilter?: LitWatchFilterDto | null;
   /** 工作方式：research / coding / office；缺省 research */
   workMode?: string;
+}
+
+export interface AcceptedGoalStatusDto {
+  name: string;
+  outputs: string[];
+  note?: string;
+}
+
+export interface ProjectStatusDto {
+  accepted: AcceptedGoalStatusDto[];
 }
 
 /** 文献雷达筛选（存 project.toml；指标未知的条目放行不误伤，口径见 lit-watch.ts entryPassesFilter） */
@@ -1289,6 +1377,10 @@ export interface McpHealthDto {
   error: string | null;
   /** stdio = serverInfo.name@version；remote = HTTP 状态行 */
   detail: string | null;
+  /** 状态细分（闭集，与 src-tauri/src/mcp.rs McpHealthDto 同源）：
+   *  handshake = MCP initialize 握手成功；reachable = 地址可达但握手未确认；
+   *  auth = 认证失败（401/403）；not_found = 路径错误（404）；error = 其余失败 */
+  status: "handshake" | "reachable" | "auth" | "not_found" | "error";
 }
 
 // ===== 能力表（src-tauri/src/agent_specs.rs agent_capabilities） =====
@@ -1367,6 +1459,16 @@ export interface TaskDto {
   updatedAt: string;
   /** 人在「新建任务」里声明的步骤。会话/开步自动登记的为 false。 */
   declared?: boolean;
+  /** 最近一次验收写回的相对路径。 */
+  adoptedPaths?: string[];
+}
+
+export interface RunEventDto {
+  id: string;
+  runId: string;
+  eventType: string;
+  payload: string | null;
+  createdAt: string;
 }
 
 export interface TaskOutputChangeDto {
@@ -1434,6 +1536,7 @@ export interface RunRecordDto {
   /** 定时任务（serde camelCase）；默认 lit-watch，也可运行技能库中的其它技能 */
 export interface ScheduleDto {
   id: string;
+  runningRunId?: string | null;
   name: string;
   /** 项目根绝对路径（任务 cwd） */
   projectRoot: string;

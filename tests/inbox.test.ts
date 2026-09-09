@@ -27,9 +27,11 @@ test("inboxCategoryOf：key 前缀推导类别，confirm: 与 live: 合并为待
   assert.equal(inboxCategoryOf("update:0.1.1"), "update");
 });
 
-test("inboxTaskLine：去「任务」做什么", () => {
-  assert.equal(inboxTaskLine("文献精读", "看待确认"), "去「文献精读」看待确认");
-  assert.equal(inboxTaskLine("  ", "解决冲突"), "去「这项工作」解决冲突");
+test("inboxTaskLine：名字紧贴状态，和项目现在同一句式", () => {
+  assert.equal(inboxTaskLine("文献精读", "待确认"), "文献精读待确认");
+  assert.equal(inboxTaskLine("  ", "有冲突"), "这项工作有冲突");
+  assert.equal(inboxTaskLine("示例课题", "有3条新命中待评审"), "示例课题有3条新命中待评审");
+  assert.equal(inboxTaskLine("对话", "待发送"), "对话待发送");
 });
 
 test("inboxTaskLabel：工作区名优先，占位标题回落目录", () => {

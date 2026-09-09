@@ -2,7 +2,7 @@
 
 | 字段 | 值 |
 |---|---|
-| 作者 | Ccode |
+| 作者 | Mesa |
 | 日期 | 2026-09-03 |
 | 状态 | Accepted（v3.202） |
 | 范围 | `work_mode = coding` 的项目页（`CodingProjectView` + `coding.rs`），不改科研工作区库 |
@@ -13,13 +13,13 @@
 
 ## Overview
 
-编程页今天已经能从基准拉出「新分支 + 独立工作树」、fetch/push/pull、本地合并进基准、在终端改动面板里暂存/逐 hunk/提交。用户仍然觉得「没有从 main 建分支」，GitHub Desktop 看不到 Agent 的改动，页上也不知道仓库有没有连上远程。根因不是缺 `git branch`，而是 **心智模型与外部工具绑的是「一个文件夹的当前检出」**，而 Ccode 用的是 **共享 `.git` 的多工作副本**。
+编程页今天已经能从基准拉出「新分支 + 独立工作树」、fetch/push/pull、本地合并进基准、在终端改动面板里暂存/逐 hunk/提交。用户仍然觉得「没有从 main 建分支」，GitHub Desktop 看不到 Agent 的改动，页上也不知道仓库有没有连上远程。根因不是缺 `git branch`，而是 **心智模型与外部工具绑的是「一个文件夹的当前检出」**，而 Mesa 用的是 **共享 `.git` 的多工作副本**。
 
 本设计把编程页收成一条职业级、但刻意不做成 Git 客户端的闭环：
 
 **从基准拉分支并开工 → Agent 只在该工作树目录里改 → 改动面板提交 → 推到远程 → 用 `gh --web` 或 compare URL 开 PR。**
 
-提交与第一次 `push -u` 发生在 **`GitPanel`（`git_commit` / `git_push`）**，不是项目页那组「拉取·推送」。项目页负责工作树生命周期、远程身份、以及「打开 Pull Request」常驻入口。次路径：把远程上已有的分支检出为一棵工作树继续。GitHub Desktop / 访达始终作为外部工具：Ccode 只把 **那一棵工作树的绝对路径** 交给 **文档化的 `github` CLI**（不是已删除的 URL 协议，也不是 Windows 下给 exe 传路径）。
+提交与第一次 `push -u` 发生在 **`GitPanel`（`git_commit` / `git_push`）**，不是项目页那组「拉取·推送」。项目页负责工作树生命周期、远程身份、以及「打开 Pull Request」常驻入口。次路径：把远程上已有的分支检出为一棵工作树继续。GitHub Desktop / 访达始终作为外部工具：Mesa 只把 **那一棵工作树的绝对路径** 交给 **文档化的 `github` CLI**（不是已删除的 URL 协议，也不是 Windows 下给 exe 传路径）。
 
 ---
 
@@ -58,14 +58,14 @@
 典型仓：`origin = git@github.com:org/repo.git` 或 HTTPS。页上不显示 origin、不知道 `gh` 是否登录、push 第一次 `-u` 没有人话、push 之后没有开 PR 的下一步。`coding_fetch` 藏在 `⋯` 且标签仍是英文 `fetch`。远程-only 分支无法「检出为工作树」。非 GitHub 远程（Gitee/GitLab）仍应能 fetch/push，但不能把所有远程都叫「GitHub」。
 
 **Pain C — GitHub Desktop 只显示它打开的那个文件夹的当前检出。**  
-这是 Desktop 的正确行为，不是 Ccode 的 bug：
+这是 Desktop 的正确行为，不是 Mesa 的 bug：
 
 - Desktop 绑定 **一份工作副本**。该文件夹里的 `git status` = 那一份的 HEAD。
 - Agent 写在 `~/ccode/worktrees/<仓>/feature/login`，与主仓共享 `.git`，但是 **第二份工作副本**。
 - 用户若把 Desktop 开在项目根（主仓仍在 `master` 且干净），Agent 的文件不可见。
 - 若把功能分支 **检出到主仓文件夹**，Desktop 能看见——同时第二个 Agent / 主线工作会撞车。这正是 v3.179 选择 worktree 的原因。
 
-Ccode 不得去改 GitHub Desktop 内部 LevelDB，也不得取代它。正确动作是：用 **Desktop 文档化的 CLI** 打开 **那一棵工作树路径**，并在可点击入口旁用一句话说清。
+Mesa 不得去改 GitHub Desktop 内部 LevelDB，也不得取代它。正确动作是：用 **Desktop 文档化的 CLI** 打开 **那一棵工作树路径**，并在可点击入口旁用一句话说清。
 
 当前 Desktop 源码（desktop/desktop `parse-app-url.ts`，development）只处理 `oauth` 与 `openrepo`（远程 GitHub URL）。`openLocalRepo` 已从 **URL 协议处理器** 删除（desktop#19733）：网页暴露面缩小后，本机打开只走 CLI。`x-github-client://openLocalRepo/...` 仍可能把 Desktop **启动起来**，但动作被当成 unknown **静默忽略**——比 fail-loud 更糟。Windows 把路径传给 `GitHubDesktop.exe` **不会切换仓库**（desktop#8646），只会打开上次的仓库（通常是主仓），正好强化 Pain C。
 
@@ -315,13 +315,12 @@ export function codingFactChips(facts: {
 
 | key | 条件 | 标签 | tip（`hostKind==github` / 其它） |
 |---|---|---|---|
-| `dirty` | dirty | `N 个未提交` / `有改动` | `有未提交的改动` |
-| `ahead` | ahead>0（相对基准） | `待合入 N` | `比基准 <base> 多 N 个提交，可以合并` |
-| `behind` | behind>0（相对基准） | `落后基准 N` | `基准 <base> 有 N 个新提交` |
-| `remote` | !hasUpstream | `无上游` | `还没推到 GitHub，第一次推送会设上游` / `还没推到远程，第一次推送会设上游` |
-| `remote` | unpushed>0 | `未推送` / `未推送 N` | `比 GitHub 上该分支多 N 个提交` / `比远程该分支多 N 个提交` |
-| `upstreamBehind` | upstreamBehind>0 | `远程有更新 N` | `GitHub 上该分支有 N 个新提交，可拉取` / `远程该分支有 N 个新提交，可拉取` |
-| `remote` | 已推送且（dirty 或 ahead） | `已推送` | `该分支已推到 GitHub` / `该分支已推到远程` |
+| `dirty` | dirty | `*N` / `*` | `N 个未提交` / `有未提交的改动` |
+| `ahead` | ahead>0（相对基准） | `⇡N` | `待合入：比基准 <base> 多 N 个提交` |
+| `behind` | behind>0（相对基准） | `⇣N` | `落后基准 <base> N 个提交` |
+| `remote` | !hasUpstream | `∅` | `还没推到 GitHub，第一次推送会设上游` / `还没推到远程，第一次推送会设上游` |
+| `remote` | unpushed>0 | `↑N` | `未推送：比 GitHub 上该分支多 N 个提交` / `未推送：比远程该分支多 N 个提交` |
+| `upstreamBehind` | upstreamBehind>0 | `↓N` | `GitHub 上该分支有 N 个新提交，可拉取` / `远程该分支有 N 个新提交，可拉取` |
 
 `deriveCodingKind` 的坐标 **保持相对基准**（`behind>0 → 需同步`，`ahead>0 → 等待合并`）。不要改成相对 origin，否则「已推送但未合入 main」会从「等待合并」掉成「未开始」。
 
@@ -407,7 +406,7 @@ v1 **不下发** `remotes[]`（没有第二远程 UI，少测一个字段）。
 1. `agents::resolve_binary("github")`，没有则用应用捆绑的 CLI（macOS：`GitHub Desktop.app/Contents/Resources/app/static/github.sh`，不必先在 Desktop 菜单里「Install Command Line Tool」）。候选目录另加 Windows `%LOCALAPPDATA%\GitHubDesktop\bin`。argv **锁死**为 `[absPath]`。**不要**把 `--cli-open=` 交给 `github` / `github.bat` / `github.sh`（那是 Desktop **应用**的内部参数；CLI 自己会转）。
 2. macOS 捆绑 CLI 也没有：`open -n <GitHub Desktop.app 绝对路径> --args --cli-open=<abs>`（与官方 `cli.js` 同款）。**不要** `open -a "GitHub Desktop"` 且不加 `-n`：已在运行时只激活窗口，`--args` 被丢掉，看起来「跳进软件但没切仓库」。**不要** `open -a GitHub Desktop <path>`。
 3. Windows：找不到 `github` → fail-loud `请在 GitHub Desktop 菜单里安装命令行工具，再打开这一棵工作树。` **不要**启动 `GitHubDesktop.exe` 并传路径。
-4. Linux：官方没有 Desktop。不探测第三方 fork。`Linux 没有官方 GitHub Desktop。请用「显示」打开这个目录，或继续用 Ccode 改动面板。`
+4. Linux：官方没有 Desktop。不探测第三方 fork。`Linux 没有官方 GitHub Desktop。请用「显示」打开这个目录，或继续用 Mesa 改动面板。`
 
 成功标准：
 
@@ -703,7 +702,7 @@ export interface CodingWorktreeDto {
 
 ## 能力矩阵
 
-| 行业常见能力 | Ccode 今天 | v1 | later | never |
+| 行业常见能力 | Mesa 今天 | v1 | later | never |
 |---|---|---|---|---|
 | 从默认分支建功能分支 | 有（文案不像；同名静默挂） | 主 CTA 人话 **与** fromBase fail-loud 同 PR | — | — |
 | 并行 Agent 各一份工作副本 | worktree 已有 | 心智模型 + CLI 打开该树 | — | 改回主仓切分支 |
@@ -736,7 +735,7 @@ export interface CodingWorktreeDto {
 否决。并行 Agent 会共用一份工作区与同一 HEAD。Pain C 若用 A「解决」，只是把碰撞换成两个 Agent 互踩。
 
 **B. 做成完整 Git GUI。**  
-否决。Ccode 是 Agent 启动器 + 工作树管理器。提交已在改动面板。
+否决。Mesa 是 Agent 启动器 + 工作树管理器。提交已在改动面板。
 
 **C. 只改 CTA 文案，不做 GitHub 环、不做 Desktop CLI。**  
 不足。且若只改文案、后端仍静默 attach，Pain A 会更糟。文案必须与 `fromBase` fail-loud 同 PR。
@@ -925,3 +924,7 @@ PR 1 ∥ PR 2 可并行。**PR 4/5/6 依赖 PR 2**（共用 `CodingOpDto`，禁�
 - **影响文件：** `docs/user-guide.md`、`docs/architecture.md` §10、`docs/conventions/pipeline.md`、`design-system.md`、`safety.md`、`Agents.md`
 - **依赖：** PR 1–6 行为稳定后
 - **内容：** 从基准开工、芯片、Desktop 用 CLI 打开 **这一目录**、hostKind 文案、无 gh 降级。不写操作流水账。
+
+### 运行中删除与外部启动器（2026-09-08）
+
+编程工作树删除在后端核验活跃 PTY 与 Run；用户确认强删也不能跳过运行保护，先停止再删。GitHub Desktop/浏览器启动器是外部应用入口：空 stdin/stdout/stderr、有界等待直接子进程，不纳入 kill-on-close 捕获 Job，不因 Mesa 关闭而杀用户打开的外部窗口。

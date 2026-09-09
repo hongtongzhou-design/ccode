@@ -288,6 +288,18 @@ export function sourceDisplayName(source: string): string {
   }
 }
 
+/** 新命中收起态第二行：中文一句话 · 期刊/来源。英文摘要不进这一行。 */
+export function watchEntryScanLine(
+  entry: Pick<WatchEntryDto, "zhSummary" | "journal" | "source">,
+): string {
+  const parts: string[] = [];
+  const zh = entry.zhSummary.trim();
+  if (zh) parts.push(zh);
+  const src = sourceDisplayName((entry.journal ?? entry.source).trim());
+  if (src) parts.push(src);
+  return parts.join(" · ");
+}
+
 // ===== 周趋势（迷你柱状图） =====
 
 export interface WeekBucket {
@@ -686,6 +698,33 @@ export function filterLitDismissed<T extends { id: string }>(
 }
 
 // ---- localStorage 薄层（以下依赖 DOM，不进 node 测试） ----
+
+/** 雷达卡片展开：按项目记住，切换项目不默认打开。 */
+export function litWatchBodyOpenKey(projectRoot: string): string {
+  return `ccode.litWatch.bodyOpen.${projectRoot.replace(/[\\/]+$/, "")}`;
+}
+
+export function parseLitWatchBodyOpen(raw: string | null | undefined): boolean {
+  return raw === "1";
+}
+
+export function readLitWatchBodyOpen(projectRoot: string): boolean {
+  try {
+    return parseLitWatchBodyOpen(
+      localStorage.getItem(litWatchBodyOpenKey(projectRoot)),
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function writeLitWatchBodyOpen(projectRoot: string, open: boolean): void {
+  try {
+    localStorage.setItem(litWatchBodyOpenKey(projectRoot), open ? "1" : "0");
+  } catch {
+    /* 隐私模式写不进就只靠本次 */
+  }
+}
 
 /** 命中条目忽略表的 localStorage 键：字符串数组（内容哈希 id） */
 export const LIT_DISMISSED_KEY = "ccode.litDismissed";

@@ -5,8 +5,8 @@ use crate::agents;
 use crate::profiles::{self, Profile, ProfileStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -85,12 +85,86 @@ pub struct GlobalApplyResultDto {
     pub validation: crate::profile_validation::ProfileValidationDto,
 }
 
+/// Codex「设为全局」挡路：live 被 cc-switch / custom 占用，或本机有 cc-switch。
+pub const CODEX_SET_GLOBAL_CONFLICT: &str = "\
+这会把 ChatGPT 和外部 Codex 的默认渠道切到此连接。\n\
+\n\
+当前 config.toml 里已有 cc-switch 的配置（custom 渠道或它的模型目录），或本机装着 cc-switch。不要两边同时改默认渠道。\n\
+\n\
+要在 ChatGPT 里续 Mesa 开的对话，用「注册到客户端」，不必设为全局。\n\
+\n\
+仍要设为全局？";
+
+/// 其他 Agent「设为全局」挡路：本机有 cc-switch。
+pub const SET_GLOBAL_CC_SWITCH_CONFLICT: &str = "\
+这会把该 CLI 的默认配置切到此连接，外部终端都会走它。\n\
+\n\
+本机检测到 cc-switch。不要两边同时改同一个 Agent 的全局配置。\n\
+\n\
+仍要设为全局？";
+
+/// 磁盘 Codex 配置是否像被 cc-switch（或其他 custom 渠道）占用默认位。
+pub fn codex_other_switcher_marks(config: &str) -> bool {
+    if config.contains("cc-switch-model-catalog") {
+        return true;
+    }
+    let Ok(doc) = config.parse::<toml_edit::DocumentMut>() else {
+        return config.contains("[model_providers.custom]");
+    };
+    if doc.get("model_provider").and_then(|i| i.as_str()) == Some("custom") {
+        return true;
+    }
+    doc.get("model_providers")
+        .and_then(|i| i.as_table())
+        .and_then(|t| t.get("custom"))
+        .is_some()
+}
+
+pub fn cc_switch_dir_present(home: &std::path::Path) -> bool {
+    home.join(".cc-switch").is_dir()
+}
+
+/// 纯判定：本机有 cc-switch，或 Codex live 已被 custom/cc-switch 占用。
+pub fn set_global_conflict_reason(
+    agent: &str,
+    cc_switch_present: bool,
+    codex_live: Option<&str>,
+) -> Option<&'static str> {
+    match agent {
+        "cursor" => None,
+        "codex" => {
+            let live_hit = codex_live.is_some_and(codex_other_switcher_marks);
+            (live_hit || cc_switch_present).then_some(CODEX_SET_GLOBAL_CONFLICT)
+        }
+        _ => cc_switch_present.then_some(SET_GLOBAL_CC_SWITCH_CONFLICT),
+    }
+}
+
+/// 连接页 / 托盘共用：有冲突返回挡路文案。
+pub fn set_global_conflict_message(agent: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let cc = cc_switch_dir_present(&home);
+    let live = if agent == "codex" {
+        fs::read_to_string(home.join(".codex/config.toml")).ok()
+    } else {
+        None
+    };
+    set_global_conflict_reason(agent, cc, live.as_deref()).map(str::to_string)
+}
+
+#[tauri::command]
+pub fn set_global_conflict(agent: String) -> Option<String> {
+    set_global_conflict_message(&agent)
+}
+
 /// 每个 agent 的全局配置目标文件（tag, 相对 home 路径），restore/has_backup 共用
 fn target_specs(agent: &str) -> Vec<(&'static str, &'static str)> {
     match agent {
         "claude-code" => vec![("settings.json", ".claude/settings.json")],
         "codex" => vec![
             ("config.toml", ".codex/config.toml"),
+            // 仅给旧批次恢复用：v3.249 起「设为全局」不再写 auth.json。
+            // 清单恢复按当时写过的文件走；无清单回落仍可能碰到旧 auth.json 备份。
             ("auth.json", ".codex/auth.json"),
         ],
         "gemini" => vec![
@@ -176,20 +250,31 @@ fn patch_claude_settings(
     }
     if let Some(m) = models.first() {
         env.insert("ANTHROPIC_MODEL".into(), json!(m));
+    } else {
+        env.remove("ANTHROPIC_MODEL");
     }
-    // 与注入模式一致：模型列表注册进 /model 选择器（前 4 个别名槽 + 第 5 个自定义槽）
+    // 与注入模式一致：模型列表注册进 /model 选择器（前 4 个别名槽 + 第 5 个自定义槽）。
+    // Mesa 管理的槽必须完整替换：名单变短或变空时清掉上一份配置留下的槽。
     const SLOTS: [&str; 4] = ["SONNET", "OPUS", "HAIKU", "FABLE"];
-    for (m, slot) in models.iter().take(4).zip(SLOTS) {
-        env.insert(format!("ANTHROPIC_DEFAULT_{slot}_MODEL"), json!(m));
-        env.insert(format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"), json!(m));
+    for (i, slot) in SLOTS.iter().enumerate() {
+        if let Some(m) = models.get(i) {
+            env.insert(format!("ANTHROPIC_DEFAULT_{slot}_MODEL"), json!(m));
+            env.insert(format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"), json!(m));
+        } else {
+            env.remove(&format!("ANTHROPIC_DEFAULT_{slot}_MODEL"));
+            env.remove(&format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"));
+        }
     }
     if let Some(fifth) = models.get(4) {
         env.insert("ANTHROPIC_CUSTOM_MODEL_OPTION".into(), json!(fifth));
         env.insert("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME".into(), json!(fifth));
+    } else {
+        env.remove("ANTHROPIC_CUSTOM_MODEL_OPTION");
+        env.remove("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME");
     }
     // claude 对不认识的第三方模型按 200K 上下文假设；注册表确知更大的（如 kimi-k3 1M）
     // 必须显式写 CLAUDE_CODE_MAX_CONTEXT_TOKENS，否则长会话提前 compact（cc-switch 同口径）。
-    // 不需要时清掉旧值：该键随「设为全局」归 Ccode 管，留着过期大值比没有更有害
+    // 不需要时清掉旧值：该键随「设为全局」归 Mesa 管，留着过期大值比没有更有害
     let max_ctx = models
         .first()
         .map(|m| crate::model_registry::model_context_size_for(m, gateway_id));
@@ -209,7 +294,7 @@ fn patch_claude_settings(
     } else {
         env.remove("CLAUDE_CODE_EFFORT_LEVEL");
     }
-    // Remove the legacy Ccode subagent override when updating a global profile.
+    // Remove the legacy Mesa subagent override when updating a global profile.
     env.remove("CLAUDE_CODE_SUBAGENT_MODEL");
     // 不写 CLAUDE_CODE_SUBAGENT_MODEL：Claude Code 默认让 Task 子 agent 继承主模型，
     // 同时保留 Task 参数/frontmatter 的原生覆盖能力。写入该环境变量会压过这些选择，
@@ -310,12 +395,18 @@ fn patch_qwen_settings(
     to_pretty(&v)
 }
 
-fn patch_codex_auth(existing: Option<&str>, key: &str) -> Result<String, String> {
-    let mut v = parse_json_doc(existing)?;
-    v.as_object_mut()
-        .unwrap()
-        .insert("OPENAI_API_KEY".into(), json!(key));
-    to_pretty(&v)
+/// Codex 自定义 provider 的认证：写 `experimental_bearer_token`（ChatGPT 自带
+/// Codex 的 ModelProviderInfo 认这个字段）。不写 auth.json（官方登录单槽），
+/// 也不写 `http_headers`——那是 MCP 字段，写在 provider 上 ChatGPT 会加载失败，
+/// 对话串报 Model provider not found。requires_openai_auth = false 明确不走 auth.json。
+fn set_codex_provider_static_auth(blk: &mut toml_edit::Item, key: &str) {
+    use toml_edit::value;
+    if let Some(t) = blk.as_table_mut() {
+        t.remove("env_key");
+        t.remove("http_headers");
+    }
+    blk["requires_openai_auth"] = value(false);
+    blk["experimental_bearer_token"] = value(key);
 }
 
 /// gemini 的 settings.json：补 security.auth.selectedType = "gemini-api-key"——
@@ -469,10 +560,10 @@ fn patch_codex_config(
     catalog: Option<&std::path::Path>,
     provider_id: &str,
     effort: Option<&str>,
+    key: &str,
 ) -> Result<String, String> {
     use toml_edit::value;
     let mut doc = parse_toml_doc(existing)?;
-    // 认证走 requires_openai_auth = true：自定义 provider 改用 auth.json 的 OPENAI_API_KEY。
     let providers = sub_table(doc.as_item_mut(), "model_providers")?;
     if provider_id != crate::provider_id::LEGACY {
         if let Some(t) = providers.as_table_mut() {
@@ -480,28 +571,28 @@ fn patch_codex_config(
         }
     }
     let ccode = sub_table(providers, provider_id)?;
-    ccode["name"] = value("Ccode");
+    ccode["name"] = value("Mesa");
     if let Some(u) = base_url {
         ccode["base_url"] = value(u);
     }
-    if let Some(t) = ccode.as_table_mut() {
-        t.remove("env_key");
-        // 「注册到客户端」写入的静态认证头一并清掉：两条认证路线互斥
-        // （requires_openai_auth 与静态 Authorization 并存时的优先级未实证）
-        t.remove("http_headers");
-    }
-    ccode["requires_openai_auth"] = value(true);
+    set_codex_provider_static_auth(ccode, key);
     ccode["wire_api"] = value("responses");
     doc["model_provider"] = value(provider_id);
-    if let Some(m) = model {
+    if let Some(m) = model.filter(|s| !s.is_empty()) {
         doc["model"] = value(m);
+    } else {
+        doc.remove("model");
     }
-    // /model 选择器的模型目录（仅启动时读取）
+    // /model 选择器的模型目录（仅启动时读取）；空名单必须撤掉上一份引用。
     if let Some(p) = catalog {
         doc["model_catalog_json"] = value(p.to_string_lossy().as_ref());
+    } else {
+        doc.remove("model_catalog_json");
     }
     if let Some(e) = effort.filter(|s| !s.is_empty()) {
         doc["model_reasoning_effort"] = value(e);
+    } else {
+        doc.remove("model_reasoning_effort");
     }
     Ok(doc.to_string())
 }
@@ -510,11 +601,7 @@ fn patch_codex_config(
 /// 顶层 model_provider/model 一律不动——matrix §2：[model_providers.x] 只有显式设为
 /// 默认才接管请求；客户端续聊会话只需要定义可查（查不到才报「Model provider not found」）
 ///
-/// 认证走块内静态 http_headers.Authorization（2026-09-02 本机 0.151.0 实测：无 auth.json /
-/// env_key / requires_openai_auth 时 codex 照常发请求并只带静态头；auth.json 里有另一把
-/// key 也不会被顶用）。不写 auth.json——OPENAI_API_KEY 是单槽共享凭证，写它会顶掉客户端
-/// 自己的 API-Key 登录态（用户实测自动退出登录）。代价 = 密钥明文落 config.toml（codex
-/// 无通用插值、客户端读不到 env 引用，静态头是唯一通道），属「设为全局」同类先例
+/// 认证与「设为全局」同一条：experimental_bearer_token，不写 auth.json。
 fn patch_codex_config_register(
     existing: Option<&str>,
     base_url: Option<&str>,
@@ -525,19 +612,11 @@ fn patch_codex_config_register(
     let mut doc = parse_toml_doc(existing)?;
     let providers = sub_table(doc.as_item_mut(), "model_providers")?;
     let blk = sub_table(providers, provider_id)?;
-    blk["name"] = value("Ccode");
+    blk["name"] = value("Mesa");
     if let Some(u) = base_url {
         blk["base_url"] = value(u);
     }
-    if let Some(t) = blk.as_table_mut() {
-        // 旧版注册/「设为全局」遗留的认证键清掉：env_key 客户端读不到 env；
-        // requires_openai_auth 与静态头并存时的优先级未实证，两条认证路线互斥
-        t.remove("env_key");
-        t.remove("requires_openai_auth");
-    }
-    let mut headers = toml_edit::Table::new();
-    headers["Authorization"] = value(format!("Bearer {key}"));
-    blk["http_headers"] = toml_edit::Item::Table(headers);
+    set_codex_provider_static_auth(blk, key);
     blk["wire_api"] = value("responses");
     Ok(doc.to_string())
 }
@@ -556,6 +635,18 @@ fn patch_codex_config_unregister(
         .map(|t| t.remove(provider_id).is_some())
         .unwrap_or(false);
     Ok((doc.to_string(), removed))
+}
+
+fn codex_default_is(existing: &Option<String>, provider_id: &str) -> bool {
+    existing
+        .as_deref()
+        .and_then(|t| t.parse::<toml_edit::DocumentMut>().ok())
+        .and_then(|doc| {
+            doc.get("model_provider")
+                .and_then(|i| i.as_str())
+                .map(|s| s == provider_id)
+        })
+        .unwrap_or(false)
 }
 
 /// kimi 模型别名：清洗为 TOML 裸键字符集 [A-Za-z0-9_-]，无需引号
@@ -652,10 +743,10 @@ fn patch_kimi_config(
 /// overlay 一致：temperature/top_p/max_completion_tokens/default_reasoning_effort）；
 /// Header 写 $VAR 引用——grok 读磁盘配置同样过 expand_env_vars_in_toml
 ///（loader.rs load_toml_file 实证），密文不落盘。
-/// 与 claude 的 Ccode 专有键（EFFORT_LEVEL 随写随清）不同：[models] 这些是通用键，
+/// 与 claude 的 Mesa 专有键（EFFORT_LEVEL 随写随清）不同：[models] 这些是通用键，
 /// 用户手写的同名值也可能是本意——只设不删，过期值靠「撤销上次写入/恢复初始状态」兜底。
 /// 逐模型 [model.<id>] 段（2026-09-01 起）：绑定设了 API 后端（api_backend，overlay
-/// 白名单够不到、全局写入是 Ccode 侧唯一通道）或权威层确知 context_window 时才建段，
+/// 白名单够不到、全局写入是 Mesa 侧唯一通道）或权威层确知 context_window 时才建段，
 /// name 随段写（配置名 · 模型，选择器口径一致）；权威层 = 用户覆盖/网关实测缓存
 ///（model_context_size_authoritative_for——config 优先级高于中转目录，估值层不配写）。
 /// 段键 = 目录模型 id，含 / 或 . 的 id 依赖 toml_edit 自动加引号（测试锁死）。
@@ -768,8 +859,15 @@ fn patch_env_file(existing: Option<&str>, pairs: &[(String, String)]) -> Result<
 
 // ===== 计划与执行 =====
 
-fn read_existing(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok()
+fn read_existing(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "读取 {} 失败，已停止写入以免覆盖成空白配置: {error}",
+            path.display()
+        )),
+    }
 }
 
 /// 计算要写入的全部文件内容；home 显式传入以便测试不碰真实主目录
@@ -781,7 +879,7 @@ fn plan_writes(
 ) -> Result<Vec<PlannedWrite>, String> {
     if profile.account_type == crate::profiles::AccountType::Official {
         return Err(
-            "官方账号不支持「设为全局」；请在 CLI 内登录，Ccode 只在启动时复现账号状态".into(),
+            "官方账号不支持「设为全局」；请在 CLI 内登录，Mesa 只在启动时复现账号状态".into(),
         );
     }
     if profile.no_auth {
@@ -814,7 +912,7 @@ fn plan_writes(
         "claude-code" => {
             let path = home.join(".claude/settings.json");
             let content = patch_claude_settings(
-                read_existing(&path).as_deref(),
+                read_existing(&path)?.as_deref(),
                 base_url,
                 key,
                 models,
@@ -840,21 +938,19 @@ fn plan_writes(
                 Some(path)
             };
             let path = home.join(".codex/config.toml");
+            let key = key.ok_or("该配置没有已保存的密钥")?;
             let content = patch_codex_config(
-                read_existing(&path).as_deref(),
+                read_existing(&path)?.as_deref(),
                 base_url,
                 model,
                 catalog.as_deref(),
                 &profile.provider_name(),
                 profile.request_policy.reasoning_effort.as_deref(),
+                key,
             )?;
             push("config.toml", path, content);
-            // 密钥不写 config.toml，走 auth.json 合并
-            if let Some(k) = key {
-                let path = home.join(".codex/auth.json");
-                let content = patch_codex_auth(read_existing(&path).as_deref(), k)?;
-                push("auth.json", path, content);
-            }
+            // 密钥在 provider 块内 experimental_bearer_token；不写 auth.json，
+            // 也不写 http_headers（ChatGPT 自带 Codex 不认这个字段）
         }
         "gemini" => {
             let pairs: Vec<(String, String)> = [
@@ -868,14 +964,14 @@ fn plan_writes(
             let path = home.join(".gemini/.env");
             // 没有任何可写值且文件不存在时，不创建空文件
             if !pairs.is_empty() || path.exists() {
-                let content = patch_env_file(read_existing(&path).as_deref(), &pairs)?;
+                let content = patch_env_file(read_existing(&path)?.as_deref(), &pairs)?;
                 push(".env", path, content);
             }
             // 认证方式落盘（见 patch_gemini_settings 注释：没有它 headless 起不来）；
             // 顺带登记自定义模型进 /model 选择器（experimental 段，重启生效）
             let path = home.join(".gemini/settings.json");
             let content = patch_gemini_settings(
-                read_existing(&path).as_deref(),
+                read_existing(&path)?.as_deref(),
                 &profile.name,
                 &profile.models,
                 profile.gateway_id.as_deref(),
@@ -884,7 +980,7 @@ fn plan_writes(
         }
         "qwen" => {
             let path = home.join(".qwen/settings.json");
-            let content = patch_qwen_settings(read_existing(&path).as_deref(), key, profile)?;
+            let content = patch_qwen_settings(read_existing(&path)?.as_deref(), key, profile)?;
             push("settings.json", path, content);
         }
         "opencode" => {
@@ -892,7 +988,7 @@ fn plan_writes(
             overlay_opencode_per_model(&mut provider, profile);
             let path = home.join(".config/opencode/opencode.json");
             let content = patch_opencode_config(
-                read_existing(&path).as_deref(),
+                read_existing(&path)?.as_deref(),
                 provider,
                 model,
                 &profile.provider_name(),
@@ -902,7 +998,7 @@ fn plan_writes(
         "codebuddy" => {
             let path = home.join(".codebuddy/settings.json");
             let content =
-                patch_codebuddy_settings(read_existing(&path).as_deref(), base_url, key, model)?;
+                patch_codebuddy_settings(read_existing(&path)?.as_deref(), base_url, key, model)?;
             push("settings.json", path, content);
         }
         "kimi" => {
@@ -923,7 +1019,7 @@ fn plan_writes(
             for (tag, path) in targets {
                 // 新版 0.31+ 要求 max_context_size；旧版 kimi-cli 不写（未知字段可能报错）
                 let content = patch_kimi_config(
-                    read_existing(&path).as_deref(),
+                    read_existing(&path)?.as_deref(),
                     provider_type,
                     &profile.name,
                     base_url,
@@ -938,7 +1034,7 @@ fn plan_writes(
         }
         "grok" => {
             let path = home.join(".grok/config.toml");
-            let content = patch_grok_config(read_existing(&path).as_deref(), key, profile)?;
+            let content = patch_grok_config(read_existing(&path)?.as_deref(), key, profile)?;
             push("config.toml", path, content);
         }
         // 防御兜底：能力表标 Supported 但这里漏了 arm（两表漂移），属内部错误
@@ -949,6 +1045,296 @@ fn plan_writes(
         }
     }
     Ok(plans)
+}
+
+const PREVIEW_CHANGE_CAP: usize = 24;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalWriteChangeDto {
+    pub path: String,
+    pub op: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalWriteFilePreviewDto {
+    pub path: String,
+    pub tag: String,
+    pub action: String,
+    pub changes: Vec<GlobalWriteChangeDto>,
+    pub omitted: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalWritePreviewDto {
+    pub files: Vec<GlobalWriteFilePreviewDto>,
+    pub skipped_policies: Vec<String>,
+    pub restart_note: String,
+    pub scope_note: String,
+}
+
+fn preview_redact(value: &str) -> String {
+    crate::sessions::redact_sensitive_text(value)
+}
+
+fn secret_field(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.contains("api_key")
+        || p.contains("apikey")
+        || p.contains("auth_token")
+        || p.contains("authtoken")
+        || p.contains("bearer")
+        || p.contains("secret")
+        || p.ends_with(".key")
+        || p.contains("experimental_bearer")
+}
+
+fn preview_value(path: &str, raw: &str) -> String {
+    if secret_field(path) {
+        return "（已脱敏）".into();
+    }
+    let redacted = preview_redact(raw);
+    if redacted.chars().count() > 80 {
+        let cut: String = redacted.chars().take(77).collect();
+        format!("{cut}…")
+    } else {
+        redacted
+    }
+}
+
+fn flatten_json(value: &Value, prefix: &str, out: &mut BTreeMap<String, String>) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map {
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_json(v, &path, out);
+            }
+        }
+        Value::Array(items) => {
+            if items.iter().all(|v| !v.is_object() && !v.is_array()) {
+                let joined = items
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.insert(prefix.to_string(), joined);
+            } else {
+                out.insert(prefix.to_string(), value.to_string());
+            }
+        }
+        Value::Null => {
+            out.insert(prefix.to_string(), "null".into());
+        }
+        other => {
+            let text = match other {
+                Value::String(s) => s.clone(),
+                _ => other.to_string(),
+            };
+            out.insert(prefix.to_string(), text);
+        }
+    }
+}
+
+fn flatten_toml_item(item: &toml_edit::Item, prefix: &str, out: &mut BTreeMap<String, String>) {
+    match item {
+        toml_edit::Item::None => {}
+        toml_edit::Item::Value(val) => {
+            if let Some(table) = val.as_inline_table() {
+                for (k, v) in table {
+                    let path = if prefix.is_empty() {
+                        k.to_string()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    flatten_toml_item(&toml_edit::Item::Value(v.clone()), &path, out);
+                }
+            } else {
+                let text = val
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| val.to_string());
+                out.insert(prefix.to_string(), text);
+            }
+        }
+        toml_edit::Item::Table(table) => {
+            for (k, v) in table.iter() {
+                let path = if prefix.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_toml_item(v, &path, out);
+            }
+        }
+        toml_edit::Item::ArrayOfTables(arr) => {
+            out.insert(prefix.to_string(), format!("({} 段)", arr.len()));
+        }
+    }
+}
+
+fn flatten_env(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            out.insert(k.trim().to_string(), v.to_string());
+        }
+    }
+    out
+}
+
+fn flatten_content(path: &Path, text: &str) -> BTreeMap<String, String> {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name.ends_with(".json") {
+        if let Ok(v) = serde_json::from_str::<Value>(text) {
+            let mut out = BTreeMap::new();
+            flatten_json(&v, "", &mut out);
+            return out;
+        }
+    }
+    if name.ends_with(".toml") {
+        if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
+            let mut out = BTreeMap::new();
+            flatten_toml_item(doc.as_item(), "", &mut out);
+            return out;
+        }
+    }
+    if name == ".env" || name.ends_with(".env") {
+        return flatten_env(text);
+    }
+    let mut out = BTreeMap::new();
+    out.insert("(全文)".into(), text.to_string());
+    out
+}
+
+fn diff_maps(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> (Vec<GlobalWriteChangeDto>, usize) {
+    let mut keys: Vec<&String> = before.keys().chain(after.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    let mut changes = Vec::new();
+    for key in keys {
+        let old = before.get(key);
+        let new = after.get(key);
+        if old == new {
+            continue;
+        }
+        let op = match (old, new) {
+            (None, Some(_)) => "add",
+            (Some(_), None) => "remove",
+            _ => "modify",
+        };
+        changes.push(GlobalWriteChangeDto {
+            path: key.clone(),
+            op: op.into(),
+            before: old.map(|v| preview_value(key, v)),
+            after: new.map(|v| preview_value(key, v)),
+        });
+    }
+    let omitted = changes.len().saturating_sub(PREVIEW_CHANGE_CAP);
+    changes.truncate(PREVIEW_CHANGE_CAP);
+    (changes, omitted)
+}
+
+fn preview_plans(
+    home: &Path,
+    plans: &[PlannedWrite],
+    skipped_policies: Vec<String>,
+) -> GlobalWritePreviewDto {
+    let mut files = Vec::new();
+    for plan in plans {
+        let existing = read_existing(&plan.path).ok().flatten();
+        let action = if existing.is_none() {
+            "create"
+        } else if existing.as_deref() == Some(plan.content.as_str()) {
+            "unchanged"
+        } else {
+            "modify"
+        };
+        if action == "unchanged" {
+            continue;
+        }
+        let before = existing
+            .as_deref()
+            .map(|t| flatten_content(&plan.path, t))
+            .unwrap_or_default();
+        let after = flatten_content(&plan.path, &plan.content);
+        let (changes, omitted) = diff_maps(&before, &after);
+        files.push(GlobalWriteFilePreviewDto {
+            path: display_path(home, &plan.path),
+            tag: plan.tag.to_string(),
+            action: action.into(),
+            changes,
+            omitted,
+        });
+    }
+    GlobalWritePreviewDto {
+        files,
+        skipped_policies,
+        restart_note: "已经打开的 Mesa 终端和外部 CLI 不会自动重读配置，需要新开才会生效。"
+            .into(),
+        scope_note: "只改外部 CLI 的配置文件。不会改 Mesa 启动栏预选，也不会改某个项目的默认配置。"
+            .into(),
+    }
+}
+
+fn skipped_policy_notes(profile: &Profile) -> Vec<String> {
+    let surface = crate::combo::surface_for_profile(profile, None);
+    let mut notes = Vec::new();
+    let mut push = |channel: &str, stored: bool, name: &str| {
+        if !stored {
+            return;
+        }
+        match channel {
+            "tui" => notes.push(format!(
+                "{name}只在会话里用原生命令生效，写入全局配置不会带上"
+            )),
+            "unsupported" => notes.push(format!("{name}这个 CLI 不支持，写入全局配置不会带上")),
+            "unknown" => notes.push(format!("{name}未证实能写入全局配置，不会带上")),
+            _ => {}
+        }
+    };
+    push(
+        surface.channel_effort,
+        profile.request_policy.reasoning_effort.is_some(),
+        "思考档",
+    );
+    push(
+        surface.channel_temperature,
+        profile.request_policy.temperature.is_some(),
+        "温度",
+    );
+    push(
+        surface.channel_top_p,
+        profile.request_policy.top_p.is_some(),
+        "top_p",
+    );
+    push(
+        surface.channel_max_tokens,
+        profile.request_policy.max_output_tokens.is_some(),
+        "输出上限",
+    );
+    if !profile.extra_env.is_empty() {
+        notes.push("附加环境变量只在 Mesa 启动时注入，不写入 CLI 全局文件".into());
+    }
+    notes
 }
 
 fn backups_root() -> Result<PathBuf, String> {
@@ -1044,22 +1430,7 @@ fn manifest_path(dir: &Path, id: &str) -> PathBuf {
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("同步 {} 失败: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("设置 {} 权限失败: {e}", path.display()))?;
-    }
-    Ok(())
+    crate::storage::atomic_write(path, bytes, true)
 }
 
 fn write_manifest(dir: &Path, manifest: &BackupManifest) -> Result<(), String> {
@@ -1198,15 +1569,9 @@ fn restore_original(path: &Path, original: &Option<Vec<u8>>, id: &str) -> Result
     }
 }
 
-/// Unix rename 可原子覆盖；Windows 不允许覆盖已有文件，先移除后替换，失败时由事务回滚恢复。
+/// 跨平台替换不得先删原文件；只读属性和失败恢复由共享写入原语处理。
 fn replace_staged(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        if to.exists() {
-            fs::remove_file(to)?;
-        }
-    }
-    fs::rename(from, to)
+    crate::storage::replace(from, to).map_err(std::io::Error::other)
 }
 
 fn commit_actions_with<F>(
@@ -1335,7 +1700,7 @@ fn apply_plans(
 // ===== 「首次写入前」原始快照（永久保留，不参与 5 份轮换） =====
 //
 // 动机：常规批次备份每个 tag 只留 5 份、清单也只留 5 份——连续「设为全局」几次后，
-// 最早的「Ccode 动手之前」的状态就被轮换掉了，「恢复备份」只能回到上一次写入前，
+// 最早的「Mesa 动手之前」的状态就被轮换掉了，「恢复备份」只能回到上一次写入前，
 // 用户真正想要的「恢复默认」永远够不到。original/ 子目录在首次 apply 时落一份，
 // 之后任何 apply/restore 都不碰（prune 只扫扁平的 <tag>.*.bak 与 batch.*.json）。
 
@@ -1388,7 +1753,7 @@ fn ensure_original_snapshot(
     }
 }
 
-/// 恢复到「Ccode 首次写入前」的原始状态：快照里不存在的文件 = 当时是 Ccode 新建的，
+/// 恢复到「Mesa 首次写入前」的原始状态：快照里不存在的文件 = 当时是 Mesa 新建的，
 /// 恢复即删除（transact 会先把当前状态存成常规批次，可再恢复回来）
 fn restore_from_original(backups_dir: &Path, home: &Path) -> Result<Vec<String>, String> {
     let dir = original_dir(backups_dir);
@@ -1525,6 +1890,25 @@ pub fn check_global_drift(
 }
 
 #[tauri::command]
+pub fn preview_profile_global(
+    store: tauri::State<'_, ProfileStore>,
+    profile_id: String,
+) -> Result<GlobalWritePreviewDto, String> {
+    let mut profile = store.get_with_model(&profile_id, None)?;
+    if profile.account_type == crate::profiles::AccountType::Official {
+        return Err("官方账号「设为全局」是恢复初始配置，不是写入这份连接".into());
+    }
+    let skipped = skipped_policy_notes(&profile);
+    let first = profile.models.first().cloned();
+    crate::combo::apply_to_profile(&mut profile, first.as_deref());
+    let key = profiles::get_key_for_profile(&profile)?;
+    crate::agents::ensure_launch_credentials(&profile, key.as_deref())?;
+    let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
+    let plans = plan_writes(&home, &profile, key.as_deref(), &profile.models)?;
+    Ok(preview_plans(&home, &plans, skipped))
+}
+
+#[tauri::command]
 pub async fn apply_profile_global(
     app: tauri::AppHandle,
     store: tauri::State<'_, ProfileStore>,
@@ -1537,9 +1921,10 @@ pub async fn apply_profile_global(
             let _guard = GLOBAL_CONFIG_MUTEX
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::config_lock("global-config")?;
             let dir = backups_root()?.join(&agent);
             if !dir.join("original").join("manifest.json").is_file() {
-                return Err("当前全局文件不是 Ccode 写的，无需恢复".into());
+                return Err("当前全局文件不是 Mesa 写的，无需恢复".into());
             }
             let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
             let files = restore_from_original(&dir, &home)?;
@@ -1575,6 +1960,7 @@ pub async fn apply_profile_global(
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::config_lock("global-config")?;
         let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
         let plans = plan_writes(&home, &profile, key.as_deref(), &profile.models)?;
         let backups_dir = backups_root()?.join(&profile.agent);
@@ -1593,8 +1979,8 @@ pub async fn apply_profile_global(
 }
 
 /// 注册到 Codex 客户端（不切换默认渠道）：只写 config.toml 的 provider 定义块
-/// （含块内静态 http_headers 认证，**不动 auth.json**——单槽密钥是客户端自身登录态的
-/// 凭证），之后 Ccode 里此网关发起的会话可在 Codex 桌面客户端直接续聊（深链
+/// （认证与「设为全局」相同：experimental_bearer_token，**不动 auth.json**），之后
+/// Mesa 里此网关发起的会话可在 Codex 桌面客户端直接续聊（深链
 /// codex://threads/<id>）。与「设为全局」共用备份/原子写/事务回滚，后悔走
 /// 「撤销上次写入」；不 record_active_global——没有切换默认渠道，不产生「全局生效」语义
 #[tauri::command]
@@ -1637,15 +2023,16 @@ pub(crate) fn register_codex_client_provider_named(
     let _guard = GLOBAL_CONFIG_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::config_lock("global-config")?;
     let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
     let cfg_path = home.join(".codex/config.toml");
-    // 只写 config.toml：认证在 provider 块内静态 http_headers，auth.json 完全不碰
+    // 只写 config.toml：认证在 provider 块内 experimental_bearer_token，auth.json 完全不碰
     // （单槽 OPENAI_API_KEY 是客户端自身 API-Key 登录态的凭证，写它会顶掉登录）
     let plans = vec![PlannedWrite {
         tag: "config.toml",
         path: cfg_path.clone(),
         content: patch_codex_config_register(
-            read_existing(&cfg_path).as_deref(),
+            read_existing(&cfg_path)?.as_deref(),
             profile.base_url.as_deref(),
             &block_name,
             &key,
@@ -1658,7 +2045,7 @@ pub(crate) fn register_codex_client_provider_named(
 /// 移除 Codex 客户端注册（注册的逆操作）：只删 config.toml 里该网关的 provider 定义块
 /// （块内静态认证头随块一起删除，即完成密钥清理）。
 /// 移除后客户端回到「Model provider not found」——此渠道的会话又无法在客户端续聊，
-/// Ccode 内启动注入不受影响。与注册共用备份/原子写
+/// Mesa 内启动注入不受影响。与注册共用备份/原子写
 #[tauri::command]
 pub async fn codex_unregister_client_provider(
     store: tauri::State<'_, ProfileStore>,
@@ -1672,12 +2059,18 @@ pub async fn codex_unregister_client_provider(
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::config_lock("global-config")?;
         let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
         let cfg_path = home.join(".codex/config.toml");
-        let (content, removed) = patch_codex_config_unregister(
-            read_existing(&cfg_path).as_deref(),
-            &profile.provider_name(),
-        )?;
+        let existing = read_existing(&cfg_path)?;
+        if codex_default_is(&existing, &profile.provider_name()) {
+            return Err(
+                "此渠道是 Codex 当前默认（「设为全局」写入）。只删定义块会让 ChatGPT 报 Model provider not found。请用「撤销上次写入」或「恢复初始状态」。"
+                    .into(),
+            );
+        }
+        let (content, removed) =
+            patch_codex_config_unregister(existing.as_deref(), &profile.provider_name())?;
         if !removed {
             return Err("该渠道未注册到客户端（config.toml 里找不到它的定义块）".into());
         }
@@ -1721,6 +2114,7 @@ pub async fn restore_global_backup(
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::config_lock("global-config")?;
         let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
         let dir = backups_root()?.join(&agent);
         let restored = restore_from(&dir, &home, &agent)?;
@@ -1759,6 +2153,7 @@ pub async fn restore_original_backup(
         let _guard = GLOBAL_CONFIG_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::config_lock("global-config")?;
         let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
         let dir = backups_root()?.join(&agent);
         let restored = restore_from_original(&dir, &home)?;
@@ -1854,6 +2249,71 @@ mod tests {
     }
 
     #[test]
+    fn claude_patch_replaces_model_slots_instead_of_leaving_previous() {
+        let existing = r#"{
+          "env": {
+            "ANTHROPIC_MODEL": "old-default",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "m1",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "m1",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "m2",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "m2",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "m3",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "m3",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "m4",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "m4",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": "m5",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "m5"
+          }
+        }"#;
+        let out = patch_claude_settings(
+            Some(existing),
+            None,
+            None,
+            &["only-one".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["env"]["ANTHROPIC_MODEL"], "only-one");
+        assert_eq!(v["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "only-one");
+        assert!(v["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
+        assert!(v["env"].get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
+        assert!(v["env"].get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none());
+        assert!(v["env"].get("ANTHROPIC_CUSTOM_MODEL_OPTION").is_none());
+    }
+
+    #[test]
+    fn codex_patch_clears_effort_and_empty_catalog() {
+        let existing = "model = \"old-model\"\nmodel_catalog_json = \"/old.json\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"ccode\"\n";
+        let out = patch_codex_config(
+            Some(existing),
+            Some("https://r.example.com/v1"),
+            None,
+            None,
+            "ccode",
+            None,
+            "sk-secret",
+        )
+        .unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert!(doc.get("model").is_none());
+        assert!(doc.get("model_catalog_json").is_none());
+        assert!(doc.get("model_reasoning_effort").is_none());
+        assert_eq!(doc["model_provider"].as_str(), Some("ccode"));
+    }
+
+    #[test]
+    fn read_existing_stops_on_undecodable_file() {
+        let dir = tmpdir("read-existing-binary");
+        let path = dir.join("settings.json");
+        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+        let err = read_existing(&path).unwrap_err();
+        assert!(err.contains("已停止写入"), "{err}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn claude_patch_from_missing_file_creates_env_only() {
         let out = patch_claude_settings(None, None, None, &[], None, None).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -1892,19 +2352,22 @@ mod tests {
             Some(std::path::Path::new("/cfg/ccode/catalogs/codex-p1.json")),
             "ccode",
             None,
+            "sk-secret",
         )
         .unwrap();
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert_eq!(doc["other"]["keep"].as_integer(), Some(1));
         let ccode = &doc["model_providers"]["ccode"];
-        assert_eq!(ccode["name"].as_str(), Some("Ccode"));
+        assert_eq!(ccode["name"].as_str(), Some("Mesa"));
         assert_eq!(ccode["base_url"].as_str(), Some("https://r.example.com/v1"));
-        // 认证改走 requires_openai_auth（auth.json 的 OPENAI_API_KEY 直接可用）；
-        // 旧版写入遗留的 env_key 行被清掉（自定义 provider 的 env_key 只认环境变量）；
-        // 「注册到客户端」遗留的静态认证头同样清掉（两条认证路线互斥）
+        // 认证走 experimental_bearer_token；旧 env_key / http_headers 清掉，不写 auth.json
         assert!(ccode.get("env_key").is_none());
         assert!(ccode.get("http_headers").is_none());
-        assert_eq!(ccode["requires_openai_auth"].as_bool(), Some(true));
+        assert_eq!(ccode["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(
+            ccode["experimental_bearer_token"].as_str(),
+            Some("sk-secret")
+        );
         assert_eq!(ccode["wire_api"].as_str(), Some("responses"));
         // 表内既有键不被清掉
         assert_eq!(ccode["old"].as_str(), Some("x"));
@@ -1914,8 +2377,38 @@ mod tests {
             doc["model_catalog_json"].as_str(),
             Some("/cfg/ccode/catalogs/codex-p1.json")
         );
-        // 密钥绝不进 config.toml
-        assert!(!out.contains("sk-secret"));
+    }
+
+    #[test]
+    fn codex_plan_writes_does_not_touch_auth_json() {
+        let home = tmpdir("codex-no-auth");
+        let mut p = profile("codex");
+        p.models.clear();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(
+            home.join(".codex/auth.json"),
+            r#"{"tokens":{"id_token":"keep"}}"#,
+        )
+        .unwrap();
+        let plans = plan_writes(&home, &p, Some("sk-secret"), &[]).unwrap();
+        assert!(
+            plans.iter().all(|w| !w.path.ends_with("auth.json")),
+            "设为全局不得改 auth.json"
+        );
+        let cfg = plans
+            .iter()
+            .find(|w| w.path.ends_with("config.toml"))
+            .expect("应写 config.toml");
+        assert!(cfg.content.contains("experimental_bearer_token"));
+        assert!(cfg.content.contains("sk-secret"));
+        assert!(cfg.content.contains("model_provider"));
+        assert!(!cfg.content.contains("http_headers"));
+        assert_eq!(
+            fs::read_to_string(home.join(".codex/auth.json")).unwrap(),
+            r#"{"tokens":{"id_token":"keep"}}"#,
+            "plan 阶段不得改磁盘 auth.json"
+        );
+        fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -1946,13 +2439,14 @@ mod tests {
             blk["base_url"].as_str(),
             Some("https://relay.example.com/v1")
         );
-        // 认证 = 块内静态 Authorization 头；旧路线的 requires_openai_auth/env_key 被清掉
+        // 认证 = experimental_bearer_token；旧 requires_openai_auth=true / env_key 被清掉
         assert_eq!(
-            blk["http_headers"]["Authorization"].as_str(),
-            Some("Bearer sk-relay-key")
+            blk["experimental_bearer_token"].as_str(),
+            Some("sk-relay-key")
         );
-        assert!(blk.get("requires_openai_auth").is_none());
+        assert_eq!(blk["requires_openai_auth"].as_bool(), Some(false));
         assert!(blk.get("env_key").is_none());
+        assert!(blk.get("http_headers").is_none());
         assert_eq!(blk["wire_api"].as_str(), Some("responses"));
         // 空文档也能建块；无 model_provider 的文档不会被补出开关行
         let out2 =
@@ -1997,12 +2491,59 @@ mod tests {
     }
 
     #[test]
-    fn codex_auth_patch_merges() {
-        let existing = r#"{"tokens": {"id_token": "abc"}}"#;
-        let out = patch_codex_auth(Some(existing), "sk-secret").unwrap();
-        let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["OPENAI_API_KEY"], "sk-secret");
-        assert_eq!(v["tokens"]["id_token"], "abc");
+    fn codex_other_switcher_marks_catalog_and_custom() {
+        assert!(codex_other_switcher_marks(
+            "model_catalog_json = \"cc-switch-model-catalog.json\"\n"
+        ));
+        assert!(codex_other_switcher_marks(
+            "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://a\"\n"
+        ));
+        assert!(codex_other_switcher_marks(
+            "[model_providers.custom]\nbase_url = \"https://a\"\n"
+        ));
+        assert!(!codex_other_switcher_marks(
+            "model_provider = \"ccode-abcd\"\n[model_providers.ccode-abcd]\nbase_url = \"https://a\"\n"
+        ));
+        assert!(!codex_other_switcher_marks("model = \"gpt-5\"\n"));
+    }
+
+    #[test]
+    fn set_global_conflict_reason_all_agents() {
+        assert!(set_global_conflict_reason("claude-code", true, None).is_some());
+        assert!(set_global_conflict_reason("gemini", true, None).is_some());
+        assert!(set_global_conflict_reason("qwen", true, None).is_some());
+        assert!(set_global_conflict_reason("kimi", true, None).is_some());
+        assert!(set_global_conflict_reason("grok", true, None).is_some());
+        assert!(set_global_conflict_reason("claude-code", false, None).is_none());
+        assert!(set_global_conflict_reason("cursor", true, None).is_none());
+        assert_eq!(
+            set_global_conflict_reason("codex", true, None),
+            Some(CODEX_SET_GLOBAL_CONFLICT)
+        );
+        assert_eq!(
+            set_global_conflict_reason(
+                "codex",
+                false,
+                Some("[model_providers.custom]\nbase_url = \"https://a\"\n")
+            ),
+            Some(CODEX_SET_GLOBAL_CONFLICT)
+        );
+        assert!(set_global_conflict_reason("codex", false, Some("model = \"gpt-5\"\n")).is_none());
+        assert_eq!(
+            set_global_conflict_reason("opencode", true, None),
+            Some(SET_GLOBAL_CC_SWITCH_CONFLICT)
+        );
+    }
+
+    #[test]
+    fn codex_unregister_blocked_when_provider_is_default() {
+        let existing = Some(
+            "model_provider = \"ccode-a1b2c3d4\"\n\n[model_providers.ccode-a1b2c3d4]\nbase_url = \"https://a\"\n"
+                .into(),
+        );
+        assert!(codex_default_is(&existing, "ccode-a1b2c3d4"));
+        assert!(!codex_default_is(&existing, "custom"));
+        assert!(!codex_default_is(&None, "ccode-a1b2c3d4"));
     }
 
     #[test]
@@ -2360,7 +2901,7 @@ mod tests {
     #[test]
     fn grok_config_patch_set_only_never_removes_user_keys() {
         // [models] 是通用键表：策略未设时只设不删——用户手写的 temperature 保留
-        //（过期 Ccode 值靠「撤销上次写入/恢复初始状态」兜底，不靠静默删除）
+        //（过期 Mesa 值靠「撤销上次写入/恢复初始状态」兜底，不靠静默删除）
         let existing = "[models]\ntemperature = 0.3\ndefault = \"grok-4.5\"\n";
         let mut p = profile("grok");
         p.models = vec!["grok-code-fast-1".into()];
@@ -2528,7 +3069,7 @@ mod tests {
         let target_dir = home.join(".claude");
         fs::create_dir_all(&target_dir).unwrap();
         let target = target_dir.join("settings.json");
-        // Ccode 动手前的原始内容
+        // Mesa 动手前的原始内容
         fs::write(&target, r#"{"env": {"OTHER": "1"}}"#).unwrap();
         let p = profile("claude-code");
         // 连续 7 次 apply：常规批次窗口（5 份）被烧穿，原始快照必须始终在场
@@ -2618,5 +3159,69 @@ mod tests {
         };
         assert!(!disk_matches_plans(&[planned2]));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preview_lists_removed_claude_slots_and_redacts_token() {
+        let dir = tmpdir("preview-claude");
+        let path = dir.join(".claude/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+          "env": {
+            "ANTHROPIC_MODEL": "old-default",
+            "ANTHROPIC_AUTH_TOKEN": "sk-secret-abcdef",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "m1",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "m2",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "m3"
+          }
+        }"#,
+        )
+        .unwrap();
+        let planned = patch_claude_settings(
+            Some(&fs::read_to_string(&path).unwrap()),
+            None,
+            Some("sk-secret-abcdef"),
+            &["only-one".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+        let preview = preview_plans(
+            &dir,
+            &[PlannedWrite {
+                tag: "settings.json",
+                path: path.clone(),
+                content: planned,
+            }],
+            vec![],
+        );
+        assert_eq!(preview.files.len(), 1);
+        assert_eq!(preview.files[0].action, "modify");
+        assert!(preview.files[0].changes.iter().any(|c| {
+            c.path.contains("ANTHROPIC_DEFAULT_OPUS_MODEL") && c.op == "remove"
+        }));
+        let token = preview
+            .files[0]
+            .changes
+            .iter()
+            .find(|c| c.path.contains("AUTH_TOKEN"));
+        if let Some(c) = token {
+            assert_eq!(c.after.as_deref(), Some("（已脱敏）"));
+        }
+        assert!(preview.restart_note.contains("新开"));
+        assert!(preview.scope_note.contains("不会改 Mesa 启动栏"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn skipped_policy_notes_cover_tui_and_extra_env() {
+        let mut p = profile("qwen");
+        p.request_policy.reasoning_effort = Some("high".into());
+        p.extra_env.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
+        let notes = skipped_policy_notes(&p);
+        assert!(notes.iter().any(|n| n.contains("思考档")));
+        assert!(notes.iter().any(|n| n.contains("附加环境变量")));
     }
 }

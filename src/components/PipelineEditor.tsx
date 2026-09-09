@@ -20,6 +20,7 @@ import {
   PIPELINE_TEMPLATES,
   pipelineStepsForTemplate,
   RESOURCE_TYPE_LABELS,
+  settingsForTemplateApply,
   type SubmissionMode,
 } from "../pipeline-presets";
 import type {
@@ -163,7 +164,7 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
         manifestPath: t.manifestPath?.trim() || undefined,
       })),
     discussionSeeds: d.discussionSeeds.map((x) => x.trim()).filter(Boolean),
-    // 与后端解析同一口径：问题与选项都非空才留（没有选项的题该写成讨论种子）
+    // 与后端一致：空选项保留为需手写依据的决策，不能静默删掉硬暂停条件。
     decisions: d.decisions
       .map((x) => ({
         q: x.q.trim(),
@@ -172,7 +173,7 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
           .map((o) => o.trim())
           .filter(Boolean),
       }))
-      .filter((x) => x.q && x.options.length > 0),
+      .filter((x) => x.q),
     asksLitSource: d.asksLitSource,
     seedComplete: d.seedComplete,
   };
@@ -371,6 +372,7 @@ export default function PipelineEditor({
       name: string;
       steps: ProjectStepDto[];
       id?: string;
+      projectRules?: string[];
       projectSettings?: string[];
     },
     mode: SubmissionMode = "initial",
@@ -402,7 +404,7 @@ export default function PipelineEditor({
         {
           projectRoot: projectPath,
           steps: submissionSteps,
-          projectSettings: tpl.projectSettings ?? [],
+          projectSettings: settingsForTemplateApply(tpl),
           strategy: "append",
           topic: null,
           submissionMode: tpl.id === "submission-rebuttal" ? mode : null,
@@ -881,7 +883,7 @@ export default function PipelineEditor({
 
         <div className="mb-2">
           <span className="mb-1 block text-xs text-l3">
-            决策项（答案可枚举的拍板点，在流程线上点选即答、不用开会话；第一个选项即推荐值）
+            决策项（有选项可点选，首项为推荐值；留空选项则必须手写依据，不提供默认批准）
           </span>
           {d.decisions.map((dec, di) => (
             <div key={di} className="mb-1 flex items-center gap-1">
@@ -907,7 +909,7 @@ export default function PipelineEditor({
                     ),
                   })
                 }
-                placeholder="选项，逗号分隔，如 只要高质量期刊/顶会, 含观察性研究与预印本"
+                placeholder="选项以逗号分隔；需人填写批准依据时留空"
               />
               <button
                 type="button"

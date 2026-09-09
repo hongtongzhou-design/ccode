@@ -1,16 +1,33 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  acceptedGoalOutputs,
+  canSaveDeclaredGoal,
   canSubmitDeclaredTask,
+  continueGoalPrompt,
   declaredTaskKindsForMode,
+  goalBucket,
+  goalDisplayName,
+  nextGoalHint,
+  goalRevisionLabel,
+  goalTimeline,
+  goalTimelineLabel,
+  groupGoalsByBucket,
+  markForProjectFile,
   isDeclaredTask,
   isDeclaredTaskName,
   isTaskMaterialNoise,
   joinRunPath,
+  parseProtectedPathDraft,
   pathCoveredBySelection,
+  pathIsProtected,
+  protectableEntries,
+  folderProtectLocked,
+  toggleProtectedFolder,
   pruneNestedPaths,
   relativeProjectPath,
   selectedChangePaths,
+  suggestProtectedPaths,
   taskChangeKindLabel,
   taskFileBadge,
   taskInputLabel,
@@ -95,7 +112,31 @@ test("declaredTaskKindsForMode only office and lite research use declared tasks"
   assert.deepEqual([...declaredTaskKindsForMode("office")], ["office_doc"]);
   assert.deepEqual([...declaredTaskKindsForMode("research")], ["free_research"]);
   assert.equal(declaredTaskKindsForMode("coding").size, 0);
-  assert.equal(taskStatusLabel("pending_review"), "待审核");
+  assert.equal(taskStatusLabel("pending_review"), "待验收");
+  assert.equal(taskStatusLabel("pending"), "尚未开始");
+  assert.equal(goalBucket("pending"), "open");
+  assert.equal(goalBucket("failed"), "stuck");
+});
+
+test("canSaveDeclaredGoal does not require an Agent yet", () => {
+  assert.equal(
+    canSaveDeclaredGoal({
+      name: "写综述",
+      scope: "whole",
+      selectedPaths: [],
+      permission: "write_tree",
+    }),
+    true,
+  );
+  assert.equal(
+    canSaveDeclaredGoal({
+      name: "",
+      scope: "whole",
+      selectedPaths: [],
+      permission: "write_tree",
+    }),
+    false,
+  );
 });
 
 test("canSubmitDeclaredTask requires a name, profile, and explicit materials", () => {
@@ -135,7 +176,8 @@ test("task labels stay human for scoped materials and discuss", () => {
   assert.equal(taskInputLabel(["."]), "整个项目");
   assert.equal(taskInputLabel([]), "不带入现有文件");
   assert.equal(taskInputLabel(["notes", "papers/a.pdf"]), "notes、papers/a.pdf");
-  assert.equal(taskOutputLabel(["."], true), "审核后写回项目");
+  assert.equal(taskOutputLabel(["."], true), "验收后写入项目");
+  assert.equal(taskOutputLabel(["."], true, "office"), "验收后写入文档");
   assert.equal(taskOutputLabel([], false), "只讨论，不改项目文件");
   assert.equal(taskChangeKindLabel("added"), "新增");
   assert.equal(taskChangeKindLabel("modified"), "修改");
@@ -144,6 +186,7 @@ test("task labels stay human for scoped materials and discuss", () => {
 test("isTaskMaterialNoise skips VCS, Ccode, and dependency directories", () => {
   assert.equal(isTaskMaterialNoise(".git"), true);
   assert.equal(isTaskMaterialNoise("Library", true), true);
+  assert.equal(isTaskMaterialNoise("artifacts.yaml"), true);
   assert.equal(isTaskMaterialNoise("notes"), false);
 });
 
@@ -175,10 +218,160 @@ test("taskFileBadge only marks specific outputs, not whole-project scope", () =>
   assert.equal(taskFileBadge(["notes/a.md"], "src/main.ts"), null);
 });
 
+test("goalRevisionLabel only appears from the second execution", () => {
+  assert.equal(goalRevisionLabel(0), null);
+  assert.equal(goalRevisionLabel(1), null);
+  assert.equal(goalRevisionLabel(2), "第 2 版");
+});
+
+test("continueGoalPrompt keeps the goal and appends review notes", () => {
+  assert.equal(continueGoalPrompt("写综述", ""), "写综述");
+  assert.match(continueGoalPrompt("写综述", "引用太少"), /上一版的修改意见/);
+  assert.match(continueGoalPrompt("写综述", "引用太少"), /引用太少/);
+});
+
+test("markForProjectFile flags pending review files under a goal", () => {
+  const marks = [
+    { relative: "论文/综述.md", goalName: "写综述", pending: true },
+  ];
+  assert.deepEqual(markForProjectFile("论文/综述.md", marks), {
+    goalName: "写综述",
+    pending: true,
+  });
+  assert.equal(markForProjectFile("notes/a.md", marks), null);
+});
+
 test("joinRunPath keeps isolation files addressable", () => {
   assert.equal(
     joinRunPath("/tmp/task-runs/abc", "notes/a.md"),
     "/tmp/task-runs/abc/notes/a.md",
   );
   assert.equal(joinRunPath("/tmp/task-runs/abc/", ""), "/tmp/task-runs/abc");
+});
+
+test("goalTimeline is generate → notes → revision → accepted", () => {
+  const items = goalTimeline({
+    status: "completed",
+    runs: [
+      { id: "r1", status: "completed", createdAt: "2026-09-01T00:00:00Z" },
+      { id: "r2", status: "completed", createdAt: "2026-09-02T00:00:00Z" },
+    ],
+    events: [
+      {
+        runId: "r1",
+        eventType: "task.review_notes",
+        payload: JSON.stringify({ feedback: "引用太少" }),
+        createdAt: "2026-09-01T01:00:00Z",
+      },
+    ],
+  });
+  assert.equal(goalTimelineLabel(items), "生成 → 意见：引用太少 → 第 2 版 → 已接受");
+});
+
+test("groupGoalsByBucket splits open / running / review / done", () => {
+  const groups = groupGoalsByBucket([
+    { status: "pending", name: "设计实验" },
+    { status: "stopped", name: "优化表格" },
+    { status: "running", name: "写综述" },
+    { status: "pending_review", name: "整理数据" },
+    { status: "completed", name: "研究问题" },
+  ]);
+  assert.deepEqual(
+    groups.open.map((item) => item.name),
+    ["设计实验"],
+  );
+  assert.deepEqual(
+    groups.stuck.map((item) => item.name),
+    ["优化表格"],
+  );
+  assert.deepEqual(
+    groups.running.map((item) => item.name),
+    ["写综述"],
+  );
+  assert.deepEqual(
+    groups.review.map((item) => item.name),
+    ["整理数据"],
+  );
+  assert.deepEqual(
+    groups.done.map((item) => item.name),
+    ["研究问题"],
+  );
+});
+
+test("suggestProtectedPaths only offers data or contract-like folders", () => {
+  assert.deepEqual(
+    suggestProtectedPaths("research", ["papers", "notes", "数据", "src"]),
+    ["数据"],
+  );
+  assert.deepEqual(
+    suggestProtectedPaths("office", ["合同", "Chatbox", "周报"]),
+    ["合同"],
+  );
+  assert.deepEqual(suggestProtectedPaths("coding", ["src", "data"]), []);
+});
+
+test("protectableEntries lists top-level folders and files, data-like first", () => {
+  const rows = protectableEntries(
+    [
+      { name: "papers", isDir: true },
+      { name: "数据", isDir: true },
+      { name: ".ccode", isDir: true },
+      { name: "readme.md", isDir: false },
+    ],
+    ["notes/keep.md", "数据/raw"],
+    "research",
+  );
+  assert.deepEqual(
+    rows.map((row) => [row.path, row.isDir]),
+    [
+      ["数据", true],
+      ["papers", true],
+      ["readme.md", false],
+      ["notes/keep.md", false],
+    ],
+  );
+});
+
+test("toggleProtectedFolder checks parent and locks children", () => {
+  assert.deepEqual(toggleProtectedFolder(["数据/raw"], "数据", true), ["数据"]);
+  assert.deepEqual(toggleProtectedFolder(["数据"], "数据", false), []);
+  assert.equal(folderProtectLocked("数据/raw", ["数据"]), true);
+  assert.equal(folderProtectLocked("数据", ["数据"]), false);
+});
+
+test("protected paths cover descendants and reject whole-project", () => {
+  assert.equal(pathIsProtected("数据/raw/a.csv", ["数据/raw"]), true);
+  assert.equal(pathIsProtected("论文/综述.md", ["数据/raw"]), false);
+  assert.equal(parseProtectedPathDraft("数据/raw\n.\n").error, "保护路径不能是整个项目");
+  assert.deepEqual(parseProtectedPathDraft("数据/raw\n数据/raw/a.csv").paths, [
+    "数据/raw",
+  ]);
+});
+
+test("nextGoalHint says what to do first", () => {
+  assert.equal(nextGoalHint("research", []), "");
+  assert.equal(nextGoalHint("office", []), "");
+  assert.match(
+    nextGoalHint("office", [
+      { name: "1", status: "stopped", description: "优化表格" },
+    ]),
+    /没做完，点重试/,
+  );
+  assert.match(
+    nextGoalHint("research", [{ name: "写综述", status: "pending_review" }]),
+    /验收/,
+  );
+});
+
+test("goalDisplayName prefers the longer description", () => {
+  assert.equal(
+    goalDisplayName({ name: "1", description: "优化表格" }),
+    "优化表格",
+  );
+  assert.equal(goalDisplayName({ name: "写综述", description: "写综述" }), "写综述");
+});
+
+test("acceptedGoalOutputs prefers adopted files over whole-project scope", () => {
+  assert.deepEqual(acceptedGoalOutputs(["."], ["论文/综述.md"]), ["论文/综述.md"]);
+  assert.deepEqual(acceptedGoalOutputs(["notes"], []), ["notes"]);
 });

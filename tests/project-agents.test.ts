@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildProjectAgentRoster,
   currentProfileLine,
+  projectAgentsEmptyWorkHint,
   projectAgentsHint,
   resolvedTaskAgentId,
 } from "../src/project-agents.ts";
@@ -74,7 +75,7 @@ test("roster lists every configured agent with its own default profile", () => {
   assert.equal(rows.find((row) => row.agentId === "codex")?.profiles.length, 2);
 });
 
-test("declared tasks attach to the assigned agent and show materials", () => {
+test("declared tasks attach to the assigned agent and show status", () => {
   const { rows, unassigned } = buildProjectAgentRoster({
     catalog,
     profiles,
@@ -101,11 +102,11 @@ test("declared tasks attach to the assigned agent and show materials", () => {
   });
   const codex = rows.find((row) => row.agentId === "codex");
   const claude = rows.find((row) => row.agentId === "claude-code");
-  assert.deepEqual(codex?.works.map((work) => `${work.name}:${work.materials}`), [
-    "整理筛选清单:notes",
+  assert.deepEqual(codex?.works.map((work) => `${work.name}:${work.statusLabel}`), [
+    "整理筛选清单:尚未开始",
   ]);
-  assert.deepEqual(claude?.works.map((work) => `${work.name}:${work.materials}`), [
-    "起草回复:不带入现有文件",
+  assert.deepEqual(claude?.works.map((work) => `${work.name}:${work.statusLabel}`), [
+    "起草回复:尚未开始",
   ]);
   assert.equal(unassigned.length, 0);
 });
@@ -175,10 +176,13 @@ test("an assigned agent still appears even if it currently has no connection", (
 });
 
 test("hints stay short and never promise routing", () => {
-  assert.equal(projectAgentsHint("office"), "谁在这个项目里干活。分派在目标里做。");
-  assert.equal(projectAgentsHint("coding"), "谁给这个项目干活。工作树里选 Agent。");
+  assert.match(projectAgentsHint("office"), /只改这个项目的默认/);
+  assert.match(projectAgentsHint("coding"), /工作树/);
   assert.match(projectAgentsHint("research"), /目标或开步/);
-  assert.equal(taskStatusLabel("pending_review"), "待审核");
+  assert.equal(projectAgentsEmptyWorkHint("research"), "新建目标或开步时指定谁干。");
+  assert.equal(projectAgentsEmptyWorkHint("office"), "新建目标时指定谁写文档。");
+  assert.equal(projectAgentsEmptyWorkHint("coding"), "在工作树里选谁开工。");
+  assert.equal(taskStatusLabel("pending_review"), "待验收");
   assert.equal(taskStatusLabel("running"), "进行中");
 });
 

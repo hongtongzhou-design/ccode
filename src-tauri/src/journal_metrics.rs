@@ -279,7 +279,7 @@ fn compute_status() -> JournalMetricsStatusDto {
 async fn fetch_csv(file_name: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         .timeout(DOWNLOAD_TIMEOUT)
-        .user_agent("Ccode journal-metrics (https://github.com/hongtongzhou-design/ccode)")
+        .user_agent("Mesa journal-metrics (https://github.com/hongtongzhou-design/ccode)")
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
     let urls = [
@@ -290,11 +290,7 @@ async fn fetch_csv(file_name: &str) -> Result<Vec<u8>, String> {
     for url in &urls {
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                return resp
-                    .bytes()
-                    .await
-                    .map(|b| b.to_vec())
-                    .map_err(|e| format!("读取下载内容失败: {e}"));
+                return crate::storage::response_bytes(resp, 32 * 1024 * 1024).await;
             }
             Ok(resp) => last_err = format!("HTTP {}", resp.status()),
             Err(e) => last_err = format!("{e}"),
@@ -378,7 +374,7 @@ fn upstream_is_newer(upstream: &str, local: &str) -> bool {
 pub async fn check_journal_metrics_update() -> Result<JournalMetricsUpdateDto, String> {
     let client = reqwest::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
-        .user_agent("Ccode journal-metrics (https://github.com/hongtongzhou-design/ccode)")
+        .user_agent("Mesa journal-metrics (https://github.com/hongtongzhou-design/ccode)")
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
     let url =
@@ -391,10 +387,8 @@ pub async fn check_journal_metrics_update() -> Result<JournalMetricsUpdateDto, S
     if !resp.status().is_success() {
         return Err(format!("查询上游更新失败: HTTP {}", resp.status()));
     }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取上游响应失败: {e}"))?;
+    let bytes = crate::storage::response_bytes(resp, 1024 * 1024).await?;
+    let body = String::from_utf8_lossy(&bytes);
     let upstream = parse_upstream_commit_date(&body);
     let has_update = match (&upstream, local_downloaded_at()) {
         (Some(up), Some(local)) => upstream_is_newer(up, &local),

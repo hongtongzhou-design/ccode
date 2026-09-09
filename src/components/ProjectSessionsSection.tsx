@@ -1,7 +1,13 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MessageSquare, PanelRightClose, PanelRightOpen } from "lucide-react";
+import {
+  Archive,
+  MessageSquare,
+  PanelRightClose,
+  PanelRightOpen,
+} from "lucide-react";
 import { confirmDialog } from "./ConfirmDialog";
+import ContextMenu from "./ContextMenu";
 import {
   compactPrimaryActionClass,
   FoldMark,
@@ -14,11 +20,13 @@ import { useAppStore } from "../store";
 import { IS_WINDOWS } from "../hotkeys";
 import { absTime, relTime } from "../rel-time";
 import { imeBlocksEnter } from "../ime-guard";
-import { LIST_PREVIEW_CAP } from "../lit-list";
-import { ListPreviewToggle } from "./FolderGroupedList";
 import { filterProjectSessions } from "../project-status";
 import { metadataMatchesQuery, tokenizeSearchQuery } from "../session-search";
-import { tidySessionTitle } from "../session-title";
+import {
+  projectSessionLabel,
+  splitRecentItems,
+  tidySessionTitle,
+} from "../session-title";
 import { resumeSessionInTerminal } from "./QuickChatModal";
 import type { SessionMetaDto } from "../types";
 
@@ -53,7 +61,7 @@ export default function ProjectSessionsSection({
   variant = "section",
   collapsed = false,
   fold = true,
-  title = "本项目会话",
+  title = "这个项目的对话",
   empty,
   extra,
   onNewChat,
@@ -82,7 +90,12 @@ export default function ProjectSessionsSection({
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const [open, setOpen] = useState(defaultOpen || !fold);
   const [query, setQuery] = useState("");
-  const [showAll, setShowAll] = useState(false);
+  const [olderOpen, setOlderOpen] = useState(false);
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    session: SessionMetaDto;
+  } | null>(null);
   const [editing, setEditing] = useState<{
     agent: string;
     sessionId: string;
@@ -95,16 +108,18 @@ export default function ProjectSessionsSection({
     () =>
       filterProjectSessions(sessions, projectPath, extraRoots, {
         isWindows: IS_WINDOWS,
-        limit: variant === "sidebar" ? 80 : 12,
       }),
-    [sessions, projectPath, extraRoots, variant],
+    [sessions, projectPath, extraRoots],
   );
   const visible = useMemo(
     () => rows.filter((s) => sessionMatchesQuery(s, query)),
     [rows, query],
   );
-  const listed =
-    query.trim() || showAll ? visible : visible.slice(0, LIST_PREVIEW_CAP);
+  const searching = !!query.trim();
+  const { recent, older } = useMemo(
+    () => (searching ? { recent: visible, older: [] } : splitRecentItems(visible, 8)),
+    [searching, visible],
+  );
 
   if (hideIfEmpty && rows.length === 0) return null;
 
@@ -138,7 +153,7 @@ export default function ProjectSessionsSection({
         ＋ 发起新对话
       </button>
     ) : (
-      <p className="px-1 py-2 text-xs text-l4">本项目会话 · 还没有</p>
+      <p className="px-1 py-2 text-xs text-l4">这个项目还没有对话</p>
     ));
 
   function openSession(s: SessionMetaDto) {
@@ -201,6 +216,21 @@ export default function ProjectSessionsSection({
     }
   }
 
+  async function toggleArchive(s: SessionMetaDto) {
+    try {
+      await invoke("set_session_meta", {
+        agent: s.agent,
+        sessionId: s.sessionId,
+        customTitle: s.customTitle,
+        tags: s.tags,
+        archived: !s.archived,
+      });
+      await loadSessions(true);
+    } catch (e) {
+      onError?.(String(e));
+    }
+  }
+
   async function removeSession(s: SessionMetaDto) {
     if (!(await confirmDialog(deleteSessionPrompt(s), { danger: true }))) return;
     try {
@@ -222,7 +252,7 @@ export default function ProjectSessionsSection({
         className="flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
         onClick={onToggle}
         aria-expanded={false}
-        title="展开本项目会话"
+        title="展开这个项目的对话"
       >
         <PanelRightOpen size={14} strokeWidth={1.8} />
         <MessageSquare size={14} strokeWidth={1.8} />
@@ -317,9 +347,10 @@ export default function ProjectSessionsSection({
           <p className="px-1 py-2 text-xs text-l4">没有匹配</p>
         ) : (
           <div className={sidebar ? undefined : projectWellClass}>
-          <ul className="space-y-0.5">
-            {listed.map((s) => {
+          <ul className={sidebar ? "max-h-[min(70vh,28rem)] space-y-0.5 overflow-auto" : "space-y-0.5"}>
+            {(olderOpen ? visible : recent).map((s) => {
               const shown = tidySessionTitle(s);
+              const label = projectSessionLabel(shown);
               const isEditing =
                 editing?.agent === s.agent && editing.sessionId === s.sessionId;
               return (
@@ -376,9 +407,9 @@ export default function ProjectSessionsSection({
                       >
                         <span
                           className="min-w-0 flex-1 truncate text-sm text-l2"
-                          title={shown.title}
+                          title={shown.unnamed ? undefined : shown.title}
                         >
-                          {shown.title}
+                          {label}
                         </span>
                         {shown.interrupted && (
                           <span className="shrink-0 rounded-full bg-warn px-1.5 py-px text-micro text-warn-text">
@@ -407,40 +438,30 @@ export default function ProjectSessionsSection({
                         >
                           ▶
                         </button>
-                        {!s.pinned && (
-                          <button
-                            type="button"
-                            className={`${ghostActionClass} whitespace-nowrap`}
-                            title="保留"
-                            aria-label="保留"
-                            onClick={() => void togglePin(s)}
-                          >
-                            ⚑
-                          </button>
-                        )}
                         <button
                           type="button"
                           className={`${ghostActionClass} whitespace-nowrap`}
-                          title="重命名"
-                          aria-label="重命名"
-                          onClick={() =>
-                            setEditing({
-                              agent: s.agent,
-                              sessionId: s.sessionId,
-                              title: s.customTitle ?? shown.title,
-                            })
-                          }
+                          title="归档"
+                          aria-label="归档"
+                          onClick={() => void toggleArchive(s)}
                         >
-                          ✎
+                          <Archive size={14} strokeWidth={1.8} />
                         </button>
                         <button
                           type="button"
-                          className={`${ghostActionClass} whitespace-nowrap text-err-text`}
-                          title="删除"
-                          aria-label="删除"
-                          onClick={() => void removeSession(s)}
+                          className={`${ghostActionClass} whitespace-nowrap`}
+                          title="更多"
+                          aria-label="更多"
+                          onClick={(e) => {
+                            const r = e.currentTarget.getBoundingClientRect();
+                            setMenu({
+                              x: r.right,
+                              y: r.bottom + 4,
+                              session: s,
+                            });
+                          }}
                         >
-                          删除
+                          ⋯
                         </button>
                       </div>
                     </div>
@@ -448,20 +469,51 @@ export default function ProjectSessionsSection({
                 </li>
               );
             })}
-          </ul>
-          {!sidebar &&
-            !query.trim() &&
-            visible.length > LIST_PREVIEW_CAP && (
-              <ListPreviewToggle
-                className="mt-2"
-                open={showAll}
-                hidden={visible.length - LIST_PREVIEW_CAP}
-                unit="条"
-                onToggle={() => setShowAll((v) => !v)}
-              />
+            {older.length > 0 && !olderOpen && !searching && (
+              <li>
+                <button
+                  type="button"
+                  className="flex h-8 w-full items-center px-2 text-xs text-l4 hover:text-l2"
+                  onClick={() => setOlderOpen(true)}
+                >
+                  更早 {older.length}
+                </button>
+              </li>
             )}
+          </ul>
           </div>
         ))}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          alignRight
+          onClose={() => setMenu(null)}
+          items={[
+            {
+              label: menu.session.pinned ? "取消保留" : "保留",
+              onSelect: () => void togglePin(menu.session),
+            },
+            {
+              label: "重命名",
+              onSelect: () =>
+                setEditing({
+                  agent: menu.session.agent,
+                  sessionId: menu.session.sessionId,
+                  title:
+                    menu.session.customTitle ??
+                    tidySessionTitle(menu.session).title,
+                }),
+            },
+            { separator: true },
+            {
+              label: "删除",
+              danger: true,
+              onSelect: () => void removeSession(menu.session),
+            },
+          ]}
+        />
+      )}
     </section>
   );
 }

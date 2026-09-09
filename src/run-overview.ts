@@ -21,6 +21,8 @@ export interface RunOverviewInput {
   reuseKey?: string;
   /** 第 1 期 Run 身份；无头不进此列表 */
   runId?: string;
+  /** 人声明目标身份（task:<id> 的 id 部分；重启恢复的标签 reuseKey 不在白名单里，靠它归属项目） */
+  taskId?: string;
 }
 
 /** Resolve a Run only from the already-mirrored terminal identity, never by

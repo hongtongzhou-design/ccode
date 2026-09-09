@@ -1,4 +1,4 @@
-//! 全局配置漂移：只比对 Ccode 写入的键集合（子集），CLI 自升级多出来的无关字段不算漂移。
+//! 全局配置漂移：只比对 Mesa 写入的键集合（子集），CLI 自升级多出来的无关字段不算漂移。
 
 use serde::Serialize;
 use serde_json::Value;
