@@ -155,7 +155,7 @@ test("pack lists project skills with content version and contract", () => {
       { name: "ghost-skill", missing: true },
     ],
   });
-  assert.match(pack, /项目技能（开工时记录内容版本；按需使用/);
+  assert.match(pack, /项目技能（工具箱，不是任务清单——列出 ≠ 要用/);
   assert.match(pack, /data-clean（版本 a1b2c3d4）：数据清洗规范（读取 data\/；产出 artifacts\/）/);
   assert.match(pack, /ghost-skill（未安装，可在技能页新建或导入）/);
 });

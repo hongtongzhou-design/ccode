@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Play, Plus, RotateCw, Trash2 } from "lucide-react";
 import { runInboxAction, useAppStore } from "../store";
 import {
@@ -172,6 +173,18 @@ export default function ProjectUserTasksView({
     const timer = window.setInterval(() => void load(), 2500);
     return () => window.clearInterval(timer);
   }, [eligible, load]);
+
+  // 待验收提升是后端事件（goal-review-ready）：立即刷新，不等 2.5s 轮询
+  useEffect(() => {
+    if (!eligible) return;
+    let unlisten: (() => void) | undefined;
+    listen<{ projectRoot: string }>("goal-review-ready", (e) => {
+      if (e.payload.projectRoot === project.path) void load();
+    })
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    return () => unlisten?.();
+  }, [eligible, load, project.path]);
 
   useEffect(() => {
     if (!taskReviewReq || !eligible) return;
@@ -991,6 +1004,12 @@ function ReviewOutputsModal({
   const [payloadDir, setPayloadDir] = useState<string | null>(null);
   const [reviewSeq, setReviewSeq] = useState<number | null>(null);
   const [contextSnapshot, setContextSnapshot] = useState<TaskContextDto | null>(null);
+  // 勾选只初始化一次：之后任何刷新（含 protectedPaths 晚到触发的重拉）都合并而不是重置，
+  // 用户取消的勾选不能被抹掉；初始化后才出现的新变更不自动勾上（人还没看过）
+  const selectionReadyRef = useRef(false);
+  useEffect(() => {
+    selectionReadyRef.current = false;
+  }, [run?.id]);
 
   useEffect(() => {
     if (!run) return;
@@ -1051,15 +1070,18 @@ function ReviewOutputsModal({
         setPayloadDir(review.payloadDir);
         setReviewSeq(review.seq ?? null);
         setChanges(review.changes);
-        setSelected(
-          new Set(
-            review.changes
-              .filter(
-                (row) => row.kind !== "deleted" && !pathIsProtected(row.path, protectedPaths),
-              )
-              .map((row) => row.path),
-          ),
-        );
+        setSelected((prev) => {
+          const next = new Set(prev);
+          for (const row of review.changes) {
+            if (row.kind === "deleted" || pathIsProtected(row.path, protectedPaths)) {
+              next.delete(row.path);
+            } else if (!selectionReadyRef.current) {
+              next.add(row.path);
+            }
+          }
+          selectionReadyRef.current = true;
+          return next;
+        });
       })
       .catch((reason) => {
         if (!stale) onError(`读取变更失败：${String(reason)}`);

@@ -208,7 +208,7 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
   }
   const skills = input.skills ?? [];
   if (skills.length) {
-    lines.push("", "项目技能（开工时记录内容版本；按需使用，不是每步都必须套用）：");
+    lines.push("", "项目技能（工具箱，不是任务清单——列出 ≠ 要用；开工时记录内容版本）：");
     for (const skill of skills) {
       if (skill.missing) {
         lines.push(`- ${skill.name}（未安装，可在技能页新建或导入）`);
@@ -227,11 +227,12 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
       );
     }
   }
-  // 技能纪律（实机反馈：Agent 会把简单目标套进重型技能流程）。技能分发在 CLI 全局目录里
-  // 撤不掉，能约束的是这条明示——上方列出或用户点名才用，简单任务直接做。
+  // 技能纪律（实机反馈：Agent 会把简单目标套进重型技能流程，且把「项目技能」列出误读为
+  // 必须执行）。技能分发在 CLI 全局目录里撤不掉，能约束的是这条明示——列出只是可用，
+  // 目标不需要就一个都不用；简单任务直接做完。
   lines.push(
     "",
-    "技能纪律：只做目标要求的事，范围以目标为准。技能只在上方「项目技能」列出或我点名时才套用；简单任务直接做完，不要自行引入额外流程、模板或重型技能。",
+    "技能纪律：只做目标要求的事，范围以目标为准。技能（包括上方列出的）只是可用工具，不是要求——先判断目标是否真的需要；不需要就一个都不用。简单任务直接做完，不要自行引入额外流程、模板或重型技能（如文献检索/精读/综述流程）。",
   );
   const goal = input.goal?.trim();
   if (goal) {
