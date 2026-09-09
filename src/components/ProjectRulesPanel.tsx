@@ -45,7 +45,7 @@ export default function ProjectRulesPanel({
   const [error, setError] = useState<string | null>(null);
   const [protectOpen, setProtectOpen] = useState(false);
   const [showAllFolders, setShowAllFolders] = useState(false);
-  const [showFiles, setShowFiles] = useState(false);
+  const [fileDraft, setFileDraft] = useState("");
   const [skillNames, setSkillNames] = useState<string[]>([]);
   const [librarySkills, setLibrarySkills] = useState<SkillDto[]>([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
@@ -192,7 +192,7 @@ export default function ProjectRulesPanel({
   const protectedFiles = files.filter((entry) =>
     pathIsProtected(entry.path, protectedPaths),
   );
-  const visibleFiles = showFiles ? files : protectedFiles;
+  // 文件级保护只显示「已勾的」，不平铺全部文件——文献项目根下几十个 PDF 铺出来没法看
   const summary = [
     ruleCount ? `${ruleCount}` : "默认",
     showProtect && protectedPaths.length ? `⊘${protectedPaths.length}` : null,
@@ -261,10 +261,13 @@ export default function ProjectRulesPanel({
                   <p className="mt-1.5 text-micro text-l4">项目里还没有可勾的项。</p>
                 ) : (
                   <>
-                    {(visibleFolders.length > 0 || visibleFiles.length > 0) && (
+                    <p className="mt-1.5 text-micro text-l4">
+                      长期保护：验收写回时不改这些路径。（单次任务给 Agent
+                      看什么，在新建目标的「资料」里选，那是另一回事。）
+                    </p>
+                    {visibleFolders.length > 0 && (
                     <ul className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5">
                       {visibleFolders.map(renderProtectRow)}
-                      {visibleFiles.map(renderProtectRow)}
                     </ul>
                     )}
                     {extraFolders.length > 0 && (
@@ -278,15 +281,38 @@ export default function ProjectRulesPanel({
                           : `其余文件夹 ${extraFolders.length}…`}
                       </button>
                     )}
-                    {!showFiles && files.length > protectedFiles.length && (
-                      <button
-                        type="button"
-                        className="mt-1 text-micro text-l4 hover:text-l2"
-                        onClick={() => setShowFiles(true)}
-                      >
-                        文件 {files.length}…
-                      </button>
+                    {protectedFiles.length > 0 && (
+                      <ul className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5">
+                        {protectedFiles.map(renderProtectRow)}
+                      </ul>
                     )}
+                    <input
+                      className={`${fieldClass} mt-1.5 text-micro`}
+                      value={fileDraft}
+                      onChange={(event) => setFileDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") return;
+                        event.preventDefault();
+                        const path = fileDraft
+                          .trim()
+                          .replace(/\\+/g, "/")
+                          .replace(/^\/+|\/+$/g, "");
+                        setFileDraft("");
+                        if (
+                          !path ||
+                          path === "." ||
+                          path.split("/").some((part) => !part || part === "..") ||
+                          pathIsProtected(path, protectedPaths)
+                        ) {
+                          return;
+                        }
+                        const next = [...protectedPaths, path];
+                        setProtectedPaths(next);
+                        void save(rulesDraft, next, skillNames);
+                      }}
+                      placeholder="添加单个文件保护：输入相对路径后回车"
+                      aria-label="添加单个文件保护"
+                    />
                   </>
                 ))}
             </div>
@@ -314,7 +340,7 @@ export default function ProjectRulesPanel({
                   <p className="mt-1 text-micro text-l4">
                     勾选的技能随项目上下文下发给 Agent，开工快照会记录当时的内容版本。
                   </p>
-                  <ul className="mt-1.5 space-y-0.5">
+                  <ul className="mt-1.5 max-h-56 space-y-0.5 overflow-auto">
                     {librarySkills.map((skill) => (
                       <li key={skill.id}>
                         <Checkbox
