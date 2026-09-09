@@ -155,9 +155,21 @@ test("pack lists project skills with content version and contract", () => {
       { name: "ghost-skill", missing: true },
     ],
   });
-  assert.match(pack, /项目技能（开工时记录内容版本）/);
+  assert.match(pack, /项目技能（开工时记录内容版本；按需使用/);
   assert.match(pack, /data-clean（版本 a1b2c3d4）：数据清洗规范（读取 data\/；产出 artifacts\/）/);
   assert.match(pack, /ghost-skill（未安装，可在技能页新建或导入）/);
+});
+
+test("pack always carries skill discipline line against over-engineering", () => {
+  const pack = renderProjectContextPack({
+    name: "p",
+    path: "/tmp/p",
+    workMode: "research",
+    topLevel: [],
+  });
+  // 没选技能也要有纪律线：技能分发在 CLI 全局目录，Agent 看得见
+  assert.match(pack, /技能纪律：只做目标要求的事/);
+  assert.match(pack, /不要自行引入额外流程、模板或重型技能/);
 });
 
 test("coding rules warn against writing the primary tree", () => {
