@@ -467,6 +467,8 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 
 - **验收入口与进程退出状态解绑（2026-09-09，已落地）**：有冻结证据的 Run，审核与采纳不再要求 `completed`——失败/停止的 Run 冻结到可审成果时，目标同样提升为 `pending_review`（`review_status_for`，无可审成果保持 failed/stopped），评审弹层对非正常完成显示「部分成果已冻结」横幅。未冻结的旧 Run 维持 completed 门槛。「接受」仍是人拍板目标完成的唯一途径；Run 状态机未新增字段，Result Readiness 目前由「快照是否存在 + 是否有可审变更」表达。未做 Mesa Dev 实机界面验收。
 
+- **回合结束即冻结 + 实机性能修正（2026-09-09，实机走查驱动，已落地）**：实机确认交互式 CLI（Codex 等）交付一轮后停在提示符不退出，「等进程死亡才待验收」永远不触发。改为：终端侦测到回合结束（attention → 已回复）调 `task_freeze_turn`——冻结当前成果（`freeze_or_refresh`：同 Run 可再冻结、seq 递增、payload.new 暂存构建成功才换入）、有可审成果即把目标从 running 提升 pending_review、并发 `goal-review-ready` 事件（App.tsx 发 OS 通知，复用长任务通知开关）；`close_at` 不再覆盖 pending_review；采纳新增 `expectSeq` 绑定，看过之后又有新版本则拒绝并要求重看。性能：基线与冻结判定从全量 sha256 改为 stat 快路径（size+mtime，git 同源口径），小文件（≤8MB）保留内容哈希兜底「保存未改」，大文件 stat-only——47 个 PDF 的项目开工 14 秒的退化不得回退。
+
 - **Run 可以没有 Goal（2026-09-09，已落地，审计 §4.7 前半）**：随手聊（scratch）、沉浸阅读（reader）、办公文件闲聊（office_doc 自动会话）不再经 `ensure_task_at` 强制登记 tasks 行，`runs.task_id` 直接落 NULL（读取侧原本就容忍 NULL）。自动登记只保留给有归属语义的对象（科研步骤/编程车道/定时巡检，`run_needs_task`）；声明目标始终显式带 task_id。§4.7 后半「TaskCard 与工作目标共享任务身份」是 UI 命名层的产品决策，待拍板。未做 Mesa Dev 实机界面验收。
 
 - **有效上下文快照（2026-09-09，已落地，审计 §4.8）**：普通目标与「验收后写入」开聊在 `task_prepare_run` 时把前端**实际拼装**的下发文本（Context Pack + 目标行）经 `contextText` 传入并冻结为 `review/<run>/context.json`（全文 + sha256，写入拒绝改写，读取校验哈希，写失败 = 开工失败）。评审弹层「本次工作环境」折叠区可核对这版成果基于什么材料。快照记的是实际下发的文本而非后端重建，避免双轨漂移；科研流水线以工作区 TASK.md 落盘为等价凭证，不重复冻结。经审核的知识沉淀（Memory Proposal）仍未做。未做 Mesa Dev 实机界面验收。

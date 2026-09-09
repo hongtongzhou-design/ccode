@@ -4833,6 +4833,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
   }, [statuses, notificationsEnabled]);
 
+  // 目标 Run 回合结束（→ 已回复）即冻结当前成果并提升待验收（审计 §4.4 实机验证：
+  // 交互式 CLI 交付后停在提示符不退出，验收不能等进程死亡）。只发 invoke，
+  // 是否可审/要不要提升由后端按 task 判定；旧 Run 无基线时后端直接跳过。
+  const turnPrevRef = useRef(new Map<string, TabStatus["attention"]>());
+  useEffect(() => {
+    for (const id of [...turnPrevRef.current.keys()]) {
+      if (!(id in statuses)) turnPrevRef.current.delete(id);
+    }
+    for (const [tabId, s] of Object.entries(statuses)) {
+      const prev = turnPrevRef.current.get(tabId);
+      turnPrevRef.current.set(tabId, s.attention);
+      if (prev === undefined || prev === "done" || s.attention !== "done") continue;
+      if (!s.runId) continue;
+      invoke("task_freeze_turn", { runId: s.runId }).catch(() => {});
+    }
+  }, [statuses]);
+
   // 可见性门控（优化 2）：只有可见 pane 的 PTY 推流，其余（含整页隐藏时全部）进后台缓冲。
   // 分屏时左右两个 pane 都可见，都推流。PTY 被替换（agent→shell 回落换新 id）时
   // statuses 变化会触发重新标记。

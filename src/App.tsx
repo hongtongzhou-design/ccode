@@ -328,6 +328,27 @@ function App() {
     return () => unlisten?.();
   }, []);
 
+  // 目标产出待验收 → OS 通知（runs.rs 的 goal-review-ready；回合结束冻结后提升待验收时发出）。
+  // 交互式 CLI 交付后不退出进程，没有这个通知用户无从知道可以验收了。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ taskId: string; runId: string; goalName: string; projectRoot: string }>(
+      "goal-review-ready",
+      (e) => {
+        const enabled = useAppStore.getState().settings?.notificationsEnabled ?? true;
+        if (!enabled) return;
+        void fireScheduleNotification(
+          `目标「${e.payload.goalName}」的产出待验收`,
+          "Agent 已完成一轮，去看看要不要写进项目",
+          { projectRoot: e.payload.projectRoot, taskId: e.payload.taskId },
+        );
+      },
+    )
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
+
   // 启动页与导航形态（设置页可选）：设置载入后只应用一次，之后用户手动切换不受影响。
   const startPageAppliedRef = useRef(false);
   useEffect(() => {

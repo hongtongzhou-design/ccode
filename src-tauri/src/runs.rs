@@ -1187,6 +1187,10 @@ fn freeze_task_run_evidence(run_id: &str) {
             return Ok(false);
         }
         let dir = task_review_dir(&task.id, &run.id)?;
+        // 回合冻结（task_freeze_turn）已产出最新版快照时，收尾不再重复构建
+        if crate::task_review::load_snapshot(&dir)?.is_some() {
+            return Ok(false);
+        }
         let Some(snapshot) = crate::task_review::freeze(
             &dir,
             &run.id,
@@ -1234,6 +1238,8 @@ pub struct TaskReviewDto {
     pub frozen: bool,
     /// 冻结内容副本目录（预览/采纳的数据源）；未冻结时为 None。
     pub payload_dir: Option<String>,
+    /// 冻结版本号（回合再冻结会递增）；采纳时回传绑定「看过的那版」。
+    pub seq: Option<u32>,
     pub changes: Vec<TaskOutputChangeDto>,
 }
 
@@ -1267,6 +1273,7 @@ fn task_output_changes_impl(run_id: &str) -> Result<TaskReviewDto, String> {
         return Ok(TaskReviewDto {
             frozen: true,
             payload_dir: Some(dir.join("payload").to_string_lossy().into_owned()),
+            seq: Some(snapshot.seq),
             changes,
         });
     }
@@ -1274,6 +1281,7 @@ fn task_output_changes_impl(run_id: &str) -> Result<TaskReviewDto, String> {
     Ok(TaskReviewDto {
         frozen: false,
         payload_dir: None,
+        seq: None,
         changes: list_output_changes(Path::new(&run.isolation_path), Path::new(&root), &task.output_paths)?,
     })
 }
@@ -1283,6 +1291,74 @@ pub async fn task_output_changes(run_id: String) -> Result<TaskReviewDto, String
     tauri::async_runtime::spawn_blocking(move || task_output_changes_impl(&run_id))
         .await
         .map_err(|e| format!("读取任务变更失败：{e}"))?
+}
+
+/// 回合结束即冻结（§4.4 交互式形态）：Agent 答完一轮但 CLI 进程不退出——
+/// 终端侦测到回合结束后调这里，把当前成果冻成「当前可审版本」并把目标提升待验收。
+/// 返回 true = 本次调用让目标新进入待验收（前端据此发通知）。
+#[tauri::command]
+pub async fn task_freeze_turn(app: tauri::AppHandle, run_id: String) -> Result<bool, String> {
+    use tauri::Emitter;
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db()?;
+        let Some(run) = get_run_at(&conn, &run_id)? else {
+            return Ok(false);
+        };
+        // 已收尾的 Run 由收尾冻结接管；无目标/无头/非普通目标不审
+        if run.closed_at.is_some()
+            || run.internal
+            || !matches!(run.task_kind.as_str(), "free_research" | "office_doc")
+            || run.task_id.is_empty()
+        {
+            return Ok(false);
+        }
+        let task = task_by_id(&conn, &run.task_id)?;
+        if !task.review_required {
+            return Ok(false);
+        }
+        let dir = task_review_dir(&task.id, &run.id)?;
+        let Some(snapshot) = crate::task_review::freeze_or_refresh(
+            &dir,
+            &run.id,
+            Path::new(&run.isolation_path),
+            &task.output_paths,
+            &now_rfc3339(),
+        )?
+        else {
+            return Ok(false); // 无基线（旧 Run）不伪造
+        };
+        if !snapshot.changes.iter().any(|change| change.kind != "deleted") {
+            return Ok(false); // 没有可审成果不打扰
+        }
+        record_event(
+            &conn,
+            &run.id,
+            "task.review_ready",
+            Some(&serde_json::json!({ "seq": snapshot.seq }).to_string()),
+        )?;
+        let promoted = conn
+            .execute(
+                "UPDATE tasks SET status='pending_review', updated_at=?2 WHERE id=?1 AND status='running'",
+                params![task.id, now_rfc3339()],
+            )
+            .map_err(|e| format!("更新 Task 状态失败: {e}"))?
+            > 0;
+        if promoted {
+            let root = task.project_root.clone().unwrap_or_default();
+            let _ = app.emit(
+                "goal-review-ready",
+                serde_json::json!({
+                    "taskId": task.id,
+                    "runId": run.id,
+                    "goalName": task.name,
+                    "projectRoot": root,
+                }),
+            );
+        }
+        Ok(promoted)
+    })
+    .await
+    .map_err(|e| format!("冻结回合成果失败：{e}"))?
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1321,6 +1397,7 @@ fn task_adopt_outputs_impl(
     run_id: &str,
     paths: Option<Vec<String>>,
     note: Option<String>,
+    expect_seq: Option<u32>,
 ) -> Result<TaskDto, String> {
     let conn = db()?;
     let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
@@ -1385,6 +1462,15 @@ fn task_adopt_outputs_impl(
         }
     }
     if let Some(snapshot) = &snapshot {
+        // 版本绑定：人看过的 seq 与当前冻结不一致 = 看过之后又有新成果，拒绝并要求重看
+        if let Some(expect) = expect_seq {
+            if snapshot.seq != expect {
+                return Err(format!(
+                    "你看过之后这版结果又更新了（第 {expect} 版 → 第 {} 版），请重新过一遍再采纳",
+                    snapshot.seq
+                ));
+            }
+        }
         // 冻结路径：三向判定（项目现读 vs 开工基线 vs 冻结内容），写入源只认 payload 副本；
         // 「看过的版本」与「写入的版本」由此逐字节绑定。
         let baseline = crate::task_review::load_baseline(&dir)?;
@@ -1448,10 +1534,13 @@ pub async fn task_adopt_outputs(
     run_id: String,
     paths: Option<Vec<String>>,
     note: Option<String>,
+    expect_seq: Option<u32>,
 ) -> Result<TaskDto, String> {
-    tauri::async_runtime::spawn_blocking(move || task_adopt_outputs_impl(&run_id, paths, note))
-        .await
-        .map_err(|e| format!("采纳输出失败：{e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        task_adopt_outputs_impl(&run_id, paths, note, expect_seq)
+    })
+    .await
+    .map_err(|e| format!("采纳输出失败：{e}"))?
 }
 #[tauri::command]
 pub fn task_list(project_root: Option<String>) -> Result<Vec<TaskDto>, String> {
@@ -1923,7 +2012,7 @@ fn close_at(
                 _ => "pending",
             };
             conn.execute(
-                "UPDATE tasks SET status=?2, updated_at=?3 WHERE id=?1",
+                "UPDATE tasks SET status=?2, updated_at=?3 WHERE id=?1 AND status <> 'pending_review'",
                 params![task_id, task_status, now_rfc3339()],
             )
             .map_err(|e| e.to_string())?;

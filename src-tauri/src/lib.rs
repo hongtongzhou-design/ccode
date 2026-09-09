@@ -182,6 +182,7 @@ pub fn run() {
             runs::task_prepare_run,
             runs::task_output_changes,
             runs::task_run_context,
+            runs::task_freeze_turn,
             runs::task_adopt_outputs,
             custom_runtime::list_custom_runtimes,
             custom_runtime::save_custom_runtime,

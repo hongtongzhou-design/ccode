@@ -1487,6 +1487,8 @@ export interface TaskOutputChangeDto {
 export interface TaskReviewDto {
   frozen: boolean;
   payloadDir: string | null;
+  /** 冻结版本号（回合再冻结递增）；采纳时回传绑定「看过的那版」 */
+  seq?: number | null;
   changes: TaskOutputChangeDto[];
 }
 

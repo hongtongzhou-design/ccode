@@ -978,6 +978,7 @@ function ReviewOutputsModal({
   const [protectedPaths, setProtectedPaths] = useState<string[]>([]);
   const [frozen, setFrozen] = useState(true);
   const [payloadDir, setPayloadDir] = useState<string | null>(null);
+  const [reviewSeq, setReviewSeq] = useState<number | null>(null);
   const [contextSnapshot, setContextSnapshot] = useState<TaskContextDto | null>(null);
 
   useEffect(() => {
@@ -1037,6 +1038,7 @@ function ReviewOutputsModal({
         if (stale) return;
         setFrozen(review.frozen);
         setPayloadDir(review.payloadDir);
+        setReviewSeq(review.seq ?? null);
         setChanges(review.changes);
         setSelected(
           new Set(
@@ -1069,6 +1071,7 @@ function ReviewOutputsModal({
           (path) => !pathIsProtected(path, protectedPaths),
         ),
         note: feedback.trim() || null,
+        expectSeq: reviewSeq,
       });
       onAdopted();
     } catch (reason) {
