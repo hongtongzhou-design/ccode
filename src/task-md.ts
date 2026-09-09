@@ -211,19 +211,20 @@ export function renderTaskMd(
     );
   }
   if (cfg.artifactDir?.trim()) {
-    const artifactAbs = `${projectRoot}/${cfg.artifactDir.replace(/^[/\\]+/, "")}`;
+    const artifactRel = cfg.artifactDir.replace(/^[/\\]+/, "").replace(/[/\\]+$/, "");
     lines.push(
       "",
       "## 产物目录",
-      `大型产物（清洗后数据、实验原始结果、渲染 PDF）写入 \`${artifactAbs}\`，文献 PDF 写入 \`${projectRoot}/papers/\`，渲染成品写入 \`${projectRoot}/output/\`。`,
-      "这些路径都在项目根下，不要写本工作区、不要提交进 git。本工作区只提交源稿、脚本与清单。",
+      `大型派生产物（清洗后数据、实验原始结果、渲染成品）写入本工作区的 \`${artifactRel}/\` 或 \`output/\`（相对路径），不进 git；评审合并进主仓时自动带到项目根同名目录。`,
+      `文献 PDF 是外部获取的原始资料，直接写入 \`${projectRoot}/papers/\`（项目根绝对路径），不进 git。`,
+      "清单/摘要里记录产物一律用项目根相对路径（如 artifacts/xxx.csv），不要写本工作区绝对路径。本工作区只提交源稿、脚本与清单。",
     );
   }
   lines.push(
     "",
     "## 收尾",
     "完成时把本步源稿、脚本与清单全部 git 提交——不提交，系统会认为这一步仍在进行中。",
-    "PDF / 数据 / 渲染成品必须落在上方项目根对应目录；写在本工作区的，合并后下一步看不见。",
+    "派生产物只写本工作区产物目录（评审合并后自动进项目根对应目录）；文献 PDF 写项目根 papers/。绕开这两条（例如派生产物直写项目根）的产物属于未验收产物，不保证保留。",
   );
   return `${lines.join("\n")}\n`;
 }

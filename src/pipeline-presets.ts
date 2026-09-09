@@ -233,7 +233,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献、严禁新造键；\n" +
       "3. 对照表用 markdown 真表，不假装已绘图；概念图/流程图可占位「图 N：…（待绘制）」，不虚构数据；\n" +
       "4. 没有文献支撑的论断不得下；必须保留的判断在句末标 [待核实]；\n" +
-      "5. 用本步骤 run 脚本渲染 PDF/docx（环境检查与产物登记按 quarto-render 技能），产物写入项目根 output/。\n" +
+      "5. 用本步骤 run 脚本渲染 PDF/docx（环境检查与产物登记按 quarto-render 技能），产物写入本工作区 output/（评审合并后进项目根）。\n" +
       "完成标准：manuscript/draft.md 覆盖大纲全部章节，引用键全部可在 references.bib 中解析，run 脚本渲染通过。\n" +
       QUALITY_STATUS,
     expectedArtifacts: ["manuscript/draft.md", "output/draft.pdf", "output/draft.docx"],
@@ -255,7 +255,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "3. 语言润色按 review-writing 技能阶段三：语法、用词、句式与段落衔接，保持学术语气；只改表达，不改学术观点；图表占位编号连续；发现内容性错误标 [待核实]，不得自行改写事实；\n" +
       "4. 产出 manuscript/review-final.md 候选定稿（文末 References 节按 references.bib 生成完整文献列表）与 manuscript/changelog.md（逐条列出主要修改点及对应 citation-check.md 条目；未补的「待绘制」占位列入 changelog，不得假装已绘）；\n" +
       "5. 收尾再按 bib-check 复核 review-final.md，结论追加进 citation-check.md；\n" +
-      "6. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入项目根 output/。\n" +
+      "6. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入本工作区 output/（评审合并后进项目根）。\n" +
       "完成标准：review-final.md 无语法硬伤、引用键全部可解析；citation-check.md 如实报告；核心支持性缺口未关闭时仅交待审稿，不标通过；changelog.md 已提交；run 脚本渲染通过。\n" +
       RELEASE_GATE + QUALITY_STATUS,
     expectedArtifacts: [
@@ -396,9 +396,9 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "输入：design.md 的实验矩阵（已随 main 合并在本工作区内）。\n" +
       "1. 按 design.md 实现实验代码，放入 experiments/（脚本可重复执行，参数集中在文件头或配置文件）。先在已获授权的资料范围内做最小试验，未通过 G3 不扩规模；试跑一组估算单次耗时与显存/内存占用，若整个矩阵在本机跑不完（超过批准的总资源预算或内存不足；8 小时仅本机估算提示，不是科学停止规则），把估算值与建议写进 .ccode/help-wanted.md 问用户要不要上集群（未回复只保留试跑和估算，不启动未经批准的矩阵子集）；\n" +
       "2. 逐项跑实验矩阵；仅经人批准取消的组合跳过并在结果记录中保留 id、理由与批准依据；\n" +
-      "3. 原始结果与日志写入项目根产物目录（见上方「产物目录」绝对路径），不要写本工作区、不要提交进 git；工作区内只提交代码与 results/summary.md（每行一项实验：配置、主指标数值、产物目录中的绝对路径）；\n" +
+      "3. 原始结果与日志写入本工作区产物目录（见上方「产物目录」，相对路径），不进 git，评审合并后自动进项目根同名目录；工作区内只提交代码与 results/summary.md（每行一项实验：配置、主指标数值、产物的项目根相对路径）；\n" +
       "4. 失败的实验不删除日志：在 results/summary.md 标注「失败」与原因，按 design.md 风险清单的备选方案重跑一次，仍失败则记录后继续下一项。遵守 design.md 的停止规则，不得看到结果后改主指标。\n" +
-      "完成标准：矩阵中每项都有明确结果或失败记录；同步写 results/matrix.json，每个组合一条稳定唯一字符串 id、configuration、status 记录；experiments/ 与 results/summary.md 已提交，原始数据全部落在项目根产物目录。\n" +
+      "完成标准：矩阵中每项都有明确结果或失败记录；同步写 results/matrix.json，每个组合一条稳定唯一字符串 id、configuration、status 记录；experiments/ 与 results/summary.md 已提交，原始数据全部落在本工作区产物目录（评审合并后进项目根）。\n" +
       EXECUTION_GATE + QUALITY_STATUS,
     // experiments/ 是实现目录，不作为完成证明；summary.md 才是矩阵逐项结果的唯一入口。
     expectedArtifacts: ["results/summary.md", "results/matrix.json", "results/implementation-check.md", "results/run-manifest.json", "experiments/reproduce.py"],
@@ -438,9 +438,9 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     role: "both",
     workspaceName: "exp-analysis",
     brief:
-      "输入：results/summary.md 与产物目录中的原始结果（路径见 summary.md 逐行记录）。\n" +
+      "输入：results/summary.md 与产物目录中的原始结果（项目根相对路径见 summary.md 逐行记录，按项目根绝对路径读取）。\n" +
       "1. 汇总各实验主指标，与基线逐项对比，产出 analysis/results-table.md（表格：方法 × 指标，同时报告不确定性；最优值不等于重要或显著）；\n" +
-      "2. 关键对比生成图表写入 figures/（出图按 figure-forge 技能：可复现脚本、主交付 SVG 或 PNG 以便进 git，投稿用 PDF 副本写入项目根 output/figures/；色盲友好、图题含指标与实验条件）；\n" +
+      "2. 关键对比生成图表写入 figures/（出图按 figure-forge 技能：可复现脚本、主交付 SVG 或 PNG 以便进 git，投稿用 PDF 副本写入本工作区 output/figures/（合并后进项目根）；色盲友好、图题含指标与实验条件）；\n" +
       "3. 逐项解读：哪些结果支持、不支持或尚不能判断假设、与基线差异的可能原因；下结论只用表格中的数字，没有数据支撑的解读标 [推测]；涉及统计显著性的表述按 stats-check 技能口径报告（p 值给具体值、附效应量与置信区间）；统计审查问题另写入 analysis/stats-check-results.md。\n" +
       "4. 异常结果（失败/离群）单独一节说明，不删除不美化；结果不如预期时，先基于实际异常、补实验成本与 design.md 的停止规则写入 .ccode/help-wanted.md 问用户，不得事后改主指标；\n" +
       "5. 分析结论写入 analysis/findings.md：按实际证据列出，可少于 3 条或结论为证据不足；每条对应 results-table.md 中的具体数字。\n" +
@@ -478,7 +478,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献；\n" +
       "3. 数字与结论必须与 analysis/results-table.md 一致，不得新造实验结果；缺少的数据在文中标 [待补实验]；\n" +
       "4. 图表引用已有 figures/ 文件（「Figure 1: …」），图片文件不复制进 manuscript/；缺图用占位并在文中标明待补；\n" +
-      "5. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入项目根 output/。\n" +
+      "5. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入本工作区 output/（评审合并后进项目根）。\n" +
       "完成标准：manuscript/draft.md 覆盖 IMRaD 四节，引用键全部可在 references.bib 解析，数字与 analysis/ 一致，run 脚本渲染通过。\n" +
       QUALITY_STATUS,
     inputs: [
@@ -522,7 +522,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "3. 统计报告自查（按 stats-check 技能的投稿前口径）：p 值给具体值并附效应量与置信区间、多重比较校正已说明、图注中的检验方法与显著性标记同正文一致；结果写入 analysis/stats-check.md，只列问题不改稿；\n" +
       "4. 产出 manuscript/paper-final.md 候选定稿与 manuscript/changelog.md（逐条列出主要修改点）；\n" +
       "5. 投稿前清单写入 submission/pre-submission-checklist.md：目标期刊/会议（按主题匹配给出 2-3 个候选及理由）、cover letter 要点、图表源文件清单、代码/数据可用性占位、作者信息与利益声明占位；未知信息一律占位「待填」，不编造；\n" +
-      "6. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入项目根 output/。\n" +
+      "6. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入本工作区 output/（评审合并后进项目根）。\n" +
       "完成标准：paper-final.md 引用闭环；manuscript/citation-check.md 与 analysis/stats-check.md 各节齐全，问题逐条处置；阻塞项未关闭时只交草稿，预清单注明不可投稿；changelog.md 与 submission/pre-submission-checklist.md 已提交；[待补实验] 不得仅删除标记；有证据补齐或经人确认撤回/缩窄对应主张，否则阻塞。\n" +
       RELEASE_GATE + QUALITY_STATUS,
     expectedArtifacts: [
@@ -618,7 +618,7 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       "1. **先报数再定规则**：统计各字段缺失率、重复行数、表间关系与行数量级，把「缺失率 Top5 字段 / 建议的处理方式 / 建议的分析粒度 / 要不要合表」写进 .ccode/help-wanted.md 问用户一句（附兜底：未回复只画像和生成规则草案，不应用影响主分析的待确认规则），写完仅推进无依赖、可逆的准备。；\n" +
       "2. 清洗规则逐项写死再动手：缺失值处理（删除/填充及填充值）、去重键、异常值边界、类型转换，写入 cleaning/rules.md，每条规则注明依据，不允许含糊执行规则；未批准的规则标阻塞且不得应用；\n" +
       "3. 清洗脚本放入 cleaning/（可重复执行；输入只读原始数据，不原地修改）；\n" +
-      "4. 处理后的数据写入项目根产物目录（见上方「产物目录」绝对路径），不进 git、不要写本工作区；同时产出 cleaning/cleaned-data-manifest.md，记录源文件、字节数/hash、输出文件绝对路径、行列数与生成命令；\n" +
+      "4. 处理后的数据写入本工作区产物目录（见上方「产物目录」，相对路径），不进 git，评审合并后自动进项目根同名目录；同时产出 cleaning/cleaned-data-manifest.md，记录源文件、字节数/hash、输出文件的项目根相对路径、行列数与生成命令；\n" +
       "5. 清洗报告 cleaning/cleaning-report.md：每条规则影响的行数、丢弃数据的清单与原因、清洗前后规模对比，[待确认] 规则单列一节。\n" +
       "完成标准：rules.md 执行规则明确，关键待确认项未批准则阻塞；同步写 cleaning/fields.json，每个源字段保留 data/fields.json 的 id，记录 name/rule/status，删除或排除也留一条；新增派生字段另列在报告不混入源字段对账；脚本可重复跑通，manifest 与报告数字和产物目录结果一致，原始数据字节级未被改动。\n" +
       QUALITY_STATUS,
@@ -657,7 +657,7 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
     decisionMode: "hard_pause",
     decisions: [{ q: "批准用于分析的清洗规则与数据版本（影响主分析的待确认规则必须先解决）", options: [] }],
     brief:
-      "输入：cleaning/cleaned-data-manifest.md、项目根产物目录中清洗后的数据与 cleaning/rules.md（已随 main 合并在本工作区内）。全程按 data-eda 技能执行：分布/相关/异常全覆盖不挑选、图表可复现、发现可回溯。\n" +
+      "输入：cleaning/cleaned-data-manifest.md 与 cleaning/rules.md（已随 main 合并在本工作区内）、项目根产物目录中清洗后的数据（按 manifest 的项目根相对路径读取）。全程按 data-eda 技能执行：分布/相关/异常全覆盖不挑选、图表可复现、发现可回溯。\n" +
       "1. 分析与出图脚本放入 analysis/，交付 analysis/reproduce.py（明确 --input/--output，只读冻结数据，核对输入版本、重建主要表图/数字并比较参考值和容差；失败非零退出）；实际运行命令和结果写 stats-check-eda.md，缺环境则标未验证；\n" +
       "2. 分布分析：按变量类型选择图/摘要，ID 不强画分布；高维数据可分组并列未逐项覆盖范围，不按结果好看与否挑选；图表写入 figures/（英文标注，文件名与报告引用一一对应）；\n" +
       "3. 相关分析：按变量类型和问题选择相关/关联分析，排除 ID、无序类别等不适用字段并说明；报告选择口径、比较范围和多重性，不以固定 |r| 阈值筛选发现；\n" +
@@ -831,9 +831,9 @@ const THESIS_STEPS: ProjectStepDto[] = [
     brief:
       "输入：design.md 的实验矩阵、chapters/methodology.md（已随 main 合并在本工作区内）。\n" +
       "1. 实验代码放入 experiments/（可重复执行，参数集中在文件头或配置文件），逐项跑实验矩阵；\n" +
-      "2. 原始结果与日志写入项目根产物目录（见上方「产物目录」绝对路径），不进 git、不要写本工作区；results/summary.md 逐项记录：配置、指标数值、产物目录绝对路径；\n" +
+      "2. 原始结果与日志写入本工作区产物目录（见上方「产物目录」，相对路径），不进 git，评审合并后自动进项目根同名目录；results/summary.md 逐项记录：配置、指标数值、产物的项目根相对路径；\n" +
       "3. 失败实验在 summary.md 标注原因并按 design.md 的备选方案重跑一次，仍失败则记录后继续；\n" +
-      "完成标准：同步写 results/matrix.json，每个计划 id 一条 configuration/status；矩阵每项都有结果或失败记录，experiments/ 与 results/summary.md 已提交，原始结果全部落在项目根产物目录。\n" +
+      "完成标准：同步写 results/matrix.json，每个计划 id 一条 configuration/status；矩阵每项都有结果或失败记录，experiments/ 与 results/summary.md 已提交，原始结果全部落在本工作区产物目录（评审合并后进项目根）。\n" +
       EXECUTION_GATE + QUALITY_STATUS,
     expectedArtifacts: ["results/summary.md", "results/matrix.json", "results/implementation-check.md", "results/run-manifest.json", "experiments/reproduce.py"],
     acceptanceCriteria: [
@@ -870,8 +870,8 @@ const THESIS_STEPS: ProjectStepDto[] = [
     role: "both",
     workspaceName: "thesis-exp-analysis",
     brief:
-      "输入：上一步 results/summary.md 与项目根产物目录中的原始结果（路径见 summary.md）。\n" +
-      "1. 汇总各实验主指标，与基线逐项对比，产出 chapters/results.md：表格（方法 × 指标，同时报告不确定性；最优值不等于重要或显著）+ 关键图表（figures/ 主交付 SVG 或 PNG，投稿用 PDF 副本写项目根 output/figures/，出图按 figure-forge 技能）+ 逐项解读；\n" +
+      "输入：上一步 results/summary.md 与项目根产物目录中的原始结果（项目根相对路径见 summary.md，按项目根绝对路径读取）。\n" +
+      "1. 汇总各实验主指标，与基线逐项对比，产出 chapters/results.md：表格（方法 × 指标，同时报告不确定性；最优值不等于重要或显著）+ 关键图表（figures/ 主交付 SVG 或 PNG，投稿用 PDF 副本写本工作区 output/figures/（合并后进项目根），出图按 figure-forge 技能）+ 逐项解读；\n" +
       "2. 只用 summary.md 中的数字下结论，推测性内容标 [推测]；失败/离群结果单独说明，不删除不美化；涉及统计显著性的表述按 stats-check 技能口径（p 值给具体值、附效应量与置信区间），问题清单写入 analysis/thesis-results-stats-check.md；\n" +
       "3. 对照 proposal/proposal.md 的创新点：哪些被结果支撑、哪些要降级或改口，写进 chapters/results.md 末尾；结果不如预期时，先基于实际异常、补实验成本与 design.md 的停止规则写入 .ccode/help-wanted.md 问用户；不得在看到结果前预设换方向。\n" +
       "完成标准：chapters/results.md、analysis/thesis-results-stats-check.md、figures/ 已提交，每条结论可追溯到 summary.md 的数字。\n" +
@@ -998,7 +998,7 @@ const SUBMISSION_INITIAL_STEPS: ProjectStepDto[] = [
       "4. 字数或摘要超限时不得自行删内容：在 formatted.md 原位标注超出量，把可选裁剪方案（砍哪节、砍多少）逐条写进 submission/format-notes.md 由用户定夺；\n" +
       "5. 引用完整性自查（按 bib-check 技能）：报告写入 submission/citation-check.md；并把需要用户处理的摘要同步写入 submission/format-notes.md；\n" +
       "6. 作者单位/基金号/通讯邮箱等未知信息一律占位「待填」，不编造；所有未决项汇总进 submission/format-notes.md；\n" +
-      "7. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入项目根 output/formatted.pdf 与 formatted.docx。\n" +
+      "7. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入本工作区 output/formatted.pdf 与 formatted.docx（评审合并后进项目根）。\n" +
       "完成标准：submission/formatted.md、submission/target-journal.md、submission/citation-check.md 与 submission/format-notes.md 均已提交；format-notes.md 逐项给出处理结论；run 脚本渲染通过。\n" +
       "格式适配只核对期刊要求及记录证据缺口，引用上游有效审查；不重复复算或代替 G5。未解决项交下一步投稿材料统一关闭。\n" + QUALITY_STATUS,
     expectedArtifacts: [

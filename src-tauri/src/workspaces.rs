@@ -2441,7 +2441,10 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String
     };
     let prefixes = ["papers".to_string(), artifact_dir, "output".to_string()];
     let mut copied = 0usize;
-    let mut skipped = 0usize;
+    let mut protected_skipped = 0usize;
+    let mut failed = 0usize;
+    // 主仓已存在同名文件 = 内容可能冲突；不静默跳过，点名交人对比。
+    let mut conflicts: Vec<String> = Vec::new();
     let mut walked = 0usize;
     for prefix in &prefixes {
         let src_root = worktree.join(prefix);
@@ -2484,7 +2487,7 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String
                     continue;
                 }
                 if crate::projects::path_is_protected(&rel_str, protected) {
-                    skipped += 1;
+                    protected_skipped += 1;
                     continue;
                 }
                 let dest = repo.join(rel);
@@ -2492,29 +2495,49 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String
                     continue;
                 }
                 if dest.exists() {
-                    skipped += 1;
+                    conflicts.push(rel_str.clone());
                     continue;
                 }
                 if ensure_copy_dest_safe(repo, &rel_str).is_err() {
-                    skipped += 1;
+                    failed += 1;
                     continue;
                 }
                 match fs::copy(&path, &dest) {
                     Ok(_) => copied += 1,
-                    Err(_) => skipped += 1,
+                    Err(_) => failed += 1,
                 }
             }
         }
     }
-    if copied == 0 && skipped == 0 {
+    if copied == 0 && protected_skipped == 0 && failed == 0 && conflicts.is_empty() {
         return String::new();
     }
-    let skip_note = if skipped > 0 {
-        format!("，跳过 {skipped} 个已存在或无法拷贝")
-    } else {
-        String::new()
-    };
-    format!("已把工作区未进 git 的文献/数据/渲染成品拷到主文件夹（{copied} 个文件{skip_note}）")
+    let mut note =
+        format!("已把工作区未进 git 的文献/数据/渲染成品拷到主文件夹（{copied} 个文件");
+    if protected_skipped > 0 {
+        note.push_str(&format!("，保护路径保持原样 {protected_skipped} 个"));
+    }
+    if failed > 0 {
+        note.push_str(&format!("，{failed} 个拷贝失败"));
+    }
+    note.push('）');
+    if !conflicts.is_empty() {
+        let names = conflicts
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、");
+        let suffix = if conflicts.len() > 5 {
+            format!(" 等 {} 个", conflicts.len())
+        } else {
+            String::new()
+        };
+        note.push_str(&format!(
+            "。{names}{suffix}在主文件夹已存在同名文件，未覆盖——请对比后手动决定保留哪份"
+        ));
+    }
+    note
 }
 
 /// target → 目标目录与文件名策略：目录/通配 = 目录取静态前缀、文件名用源文件 basename；
@@ -6174,6 +6197,26 @@ mod tests {
             fs::read(repo.join("papers/notes/ok.md")).unwrap(),
             b"ok"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copy_untracked_deliverables_names_conflicts_instead_of_silent_skip() {
+        let dir = std::env::temp_dir().join(format!("ccode-salvage-conflict-{}", uuid::Uuid::new_v4()));
+        let wt = dir.join("wt");
+        let repo = dir.join("repo");
+        fs::create_dir_all(wt.join("papers")).unwrap();
+        fs::create_dir_all(repo.join("papers")).unwrap();
+        fs::write(wt.join("papers/dup.pdf"), b"worktree-version").unwrap();
+        fs::write(repo.join("papers/dup.pdf"), b"main-version").unwrap();
+        fs::write(wt.join("papers/new.pdf"), b"new").unwrap();
+        let note = copy_untracked_deliverables(&wt, &repo, &[]);
+        assert!(note.contains("1 个文件"), "{note}");
+        assert!(note.contains("papers/dup.pdf"), "{note}");
+        assert!(note.contains("未覆盖"), "{note}");
+        // 冲突文件保持主仓版本，不被工作区覆盖
+        assert_eq!(fs::read(repo.join("papers/dup.pdf")).unwrap(), b"main-version");
+        assert_eq!(fs::read(repo.join("papers/new.pdf")).unwrap(), b"new");
         fs::remove_dir_all(&dir).ok();
     }
 

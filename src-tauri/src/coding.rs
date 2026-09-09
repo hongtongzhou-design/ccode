@@ -1201,6 +1201,29 @@ fn merge_at(repo: &Path, branch: &str) -> Result<CodingMergeDto, String> {
     if target.dirty {
         return Err("基准工作树有未提交改动，先提交或丢弃再合并".into());
     }
+    // 保护路径：与科研验收合并同一口径（workspaces.rs）——分支改动了被保护路径时拒绝合并，
+    // 由人先撤掉这些改动或调整保护设置；配置读不出时 fail-closed
+    let protected = crate::projects::protected_paths_at(&repo)?;
+    if !protected.is_empty() {
+        let range = format!("{base}...{branch}");
+        let touched = git_long(&repo, &["diff", "--name-only", &range])?;
+        let hits: Vec<&str> = touched
+            .lines()
+            .filter(|rel| crate::projects::path_is_protected(rel, &protected))
+            .collect();
+        if !hits.is_empty() {
+            let names = hits.iter().take(5).copied().collect::<Vec<_>>().join("、");
+            let suffix = if hits.len() > 5 {
+                format!(" 等 {} 个文件", hits.len())
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "分支改动了保护路径下的文件（{names}{suffix}），合并会覆盖主仓中「保持原样」的内容；\
+                 请先在工作树撤掉这些改动，或在项目设置中调整保护路径后再合并"
+            ));
+        }
+    }
     let cwd = PathBuf::from(&target.path);
     match git_long(
         &cwd,
@@ -1893,6 +1916,55 @@ mod tests {
         let out = merge_at(&repo, "feat").unwrap();
         assert!(out.merged, "{}", out.message);
         assert!(!out.conflict);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn merge_refuses_branch_touching_protected_paths() {
+        let Some(_) = git_bin() else {
+            return;
+        };
+        let dir = tmp("mprot");
+        let repo = dir.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-b", "main"]);
+        git_ok(&repo, &["config", "user.email", "t@t.dev"]);
+        git_ok(&repo, &["config", "user.name", "t"]);
+        fs::write(repo.join("a.txt"), "a\n").unwrap();
+        fs::create_dir_all(repo.join(".ccode")).unwrap();
+        fs::write(
+            repo.join(".ccode/project.toml"),
+            "protected_paths = [\"data\"]\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        git_ok(&repo, &["checkout", "-b", "feat"]);
+        fs::create_dir_all(repo.join("data")).unwrap();
+        fs::write(repo.join("data/x.csv"), "v2\n").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "feat"],
+        );
+        git_ok(&repo, &["checkout", "main"]);
+        // 分支动了保护路径：与科研验收合并同口径，拒绝并点名
+        let err = merge_at(&repo, "feat").unwrap_err();
+        assert!(err.contains("保护路径"), "{err}");
+        assert!(err.contains("data/x.csv"), "{err}");
+        assert!(!repo.join("data").exists(), "被拒绝的合并不得触碰主仓");
+        // 撤掉保护设置后可合并（配置的改动本身先提交，否则基准工作树是脏的）
+        fs::write(repo.join(".ccode/project.toml"), "protected_paths = []\n").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "unprotect"],
+        );
+        let out = merge_at(&repo, "feat").unwrap();
+        assert!(out.merged, "{}", out.message);
         fs::remove_dir_all(&dir).ok();
     }
 }
