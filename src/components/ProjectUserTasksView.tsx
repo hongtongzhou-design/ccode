@@ -1120,13 +1120,16 @@ function ReviewOutputsModal({
     invoke<TaskReviewDto>("task_output_changes", { runId: run.id })
       .then((review) => {
         if (stale) return;
-        setFrozen(review.frozen);
-        setPayloadDir(review.payloadDir);
-        setReviewSeq(review.seq ?? null);
-        setChanges(review.changes);
+        // 版本错位防线：后端旧版返回的是数组而不是 TaskReviewDto，
+        // 直接把 review.changes 当数组用会在渲染期炸进错误边界
+        const rows = Array.isArray(review?.changes) ? review.changes : [];
+        setFrozen(review?.frozen === true);
+        setPayloadDir(review?.payloadDir ?? null);
+        setReviewSeq(review?.seq ?? null);
+        setChanges(rows);
         setSelected((prev) => {
           const next = new Set(prev);
-          for (const row of review.changes) {
+          for (const row of rows) {
             if (row.kind === "deleted" || pathIsProtected(row.path, protectedPaths)) {
               next.delete(row.path);
             } else if (!selectionReadyRef.current) {

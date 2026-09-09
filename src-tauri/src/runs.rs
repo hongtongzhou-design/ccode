@@ -961,7 +961,7 @@ pub fn task_create(input: CreateTaskInput) -> Result<TaskDto, String> {
     }
     conn.execute(
         "INSERT INTO tasks(id,identity_key,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,agent,profile_id,skills,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11,?12,?14,?15,?15)",
+         VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11,?12,?13,?14,?14)",
         params![
             id,
             identity,
