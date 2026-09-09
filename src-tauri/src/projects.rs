@@ -19,6 +19,10 @@ const RESOURCE_TYPES: [&str; 4] = ["paper", "dataset", "reference", "other"];
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDto {
+    /// 稳定身份（审计 §4.6）：project.toml 顶层 `id`（uuid），跟随文件夹移动/备份；
+    /// 空串 = 旧项目尚未分配（注册/配置写入时补齐）。路径只是当前位置，不是永久身份。
+    #[serde(default)]
+    pub id: String,
     pub path: String, // canonical 绝对路径，注册表主键
     pub name: String,
     pub created_at: Option<String>,
@@ -193,6 +197,9 @@ pub struct ProjectConfigDto {
     pub lit_watch_filter: Option<LitWatchFilterDto>,
     /// 工作方式：research / coding / office。缺省 research（旧档案卡 = 科研）
     pub work_mode: String,
+    /// 项目级选用技能名单（技能库 name，审计 §4.9）：进入项目上下文包并随执行快照
+    /// 记录内容版本；空 = 不注入技能段（有流程科研仍按步骤挂载，与本字段互补）
+    pub skills: Vec<String>,
 }
 
 /// 文献来源合法值；非法值解析期归一为 search
@@ -225,6 +232,7 @@ impl Default for ProjectConfigDto {
             submission_round: None,
             lit_watch_filter: None,
             work_mode: "research".into(),
+            skills: Vec::new(),
         }
     }
 }
@@ -302,6 +310,11 @@ fn db_at(path: &Path) -> Result<Connection, String> {
         )
         .map_err(|e| format!("升级 projects 表失败: {e}"))?;
     }
+    // §4.6：稳定项目身份；旧行在注册/配置写入/列表读到档案卡 id 时回填
+    if !columns.iter().any(|c| c == "id") {
+        conn.execute("ALTER TABLE projects ADD COLUMN id TEXT", [])
+            .map_err(|e| format!("升级 projects 表失败: {e}"))?;
+    }
     Ok(conn)
 }
 
@@ -338,11 +351,66 @@ fn register_at(
     } else {
         name.trim().to_string()
     };
+    // 稳定身份（§4.6）：档案卡 id 跟随文件夹；同一 id 出现在新路径 = 目录被移动过，
+    // 把注册行改到新路径（保留 created_at 与项目默认配置），不建新行
+    let toml_id = project_id_at(path);
+    if let Some(pid) = toml_id.as_deref() {
+        let moved: Option<String> = conn
+            .query_row(
+                "SELECT path FROM projects WHERE id=?1 AND path<>?2",
+                params![pid, key],
+                |r| r.get(0),
+            )
+            .ok();
+        if moved.is_some() {
+            conn.execute(
+                "UPDATE projects SET path=?2, name=?3, last_opened_at=?4 WHERE id=?1",
+                params![pid, key, name, now],
+            )
+            .map_err(|e| format!("重连已移动项目失败: {e}"))?;
+            let created_at: Option<String> = conn
+                .query_row(
+                    "SELECT created_at FROM projects WHERE path=?1",
+                    params![key],
+                    |r| r.get(0),
+                )
+                .ok();
+            return Ok(attach_work_mode(ProjectDto {
+                id: pid.to_string(),
+                path: key.clone(),
+                name,
+                created_at,
+                last_opened_at: Some(now.to_string()),
+                work_mode: "research".into(),
+                default_agent: conn
+                    .query_row(
+                        "SELECT default_agent FROM projects WHERE path=?1",
+                        params![key],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                    .flatten(),
+                default_profiles: conn
+                    .query_row(
+                        "SELECT default_profiles FROM projects WHERE path=?1",
+                        params![key],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_default(),
+            }));
+        }
+    }
+    let id = match toml_id {
+        Some(pid) => pid,
+        None => ensure_project_id_at(path)?,
+    };
     // 重复注册：保留 created_at，更新 name 与 last_opened_at
     conn.execute(
-        "INSERT INTO projects(path, name, created_at, last_opened_at) VALUES(?1, ?2, ?3, ?4)
-         ON CONFLICT(path) DO UPDATE SET name=?2, last_opened_at=?4",
-        params![key, name, now, now],
+        "INSERT INTO projects(path, name, created_at, last_opened_at, id) VALUES(?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(path) DO UPDATE SET name=?2, last_opened_at=?4, id=?5",
+        params![key, name, now, now, id],
     )
     .map_err(|e| format!("注册项目失败: {e}"))?;
     let created_at: Option<String> = conn
@@ -353,6 +421,7 @@ fn register_at(
         )
         .ok();
     Ok(attach_work_mode(ProjectDto {
+        id,
         path: key.clone(),
         name,
         created_at,
@@ -386,13 +455,14 @@ fn attach_work_mode(mut p: ProjectDto) -> ProjectDto {
 pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles FROM projects
+            "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles, id FROM projects
              ORDER BY last_opened_at DESC, path ASC",
         )
         .map_err(|e| format!("读取项目列表失败: {e}"))?;
     let rows = stmt
         .query_map([], |r| {
             Ok(ProjectDto {
+                id: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 path: r.get(0)?,
                 name: r.get(1)?,
                 created_at: r.get(2)?,
@@ -406,7 +476,21 @@ pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, Str
             })
         })
         .map_err(|e| format!("读取项目列表失败: {e}"))?;
-    Ok(rows.flatten().map(attach_work_mode).collect())
+    let mut projects: Vec<ProjectDto> = rows.flatten().collect();
+    // 旧行 id 回填：档案卡里已有 id 的只补注册表（纯 DB 写，不动文件）；
+    // 档案卡也没有 id 的保持空串，等注册/配置写入时分配（list 不做文件副作用）
+    for project in &mut projects {
+        if project.id.is_empty() {
+            if let Some(pid) = project_id_at(Path::new(&project.path)) {
+                let _ = conn.execute(
+                    "UPDATE projects SET id=?2 WHERE path=?1",
+                    params![project.path, pid],
+                );
+                project.id = pid;
+            }
+        }
+    }
+    Ok(projects.into_iter().map(attach_work_mode).collect())
 }
 
 /// 注册项目根：cwd 落在哪个项目里（最长前缀）。scratch / 未注册返回 None。
@@ -731,6 +815,40 @@ fn with_project_toml_header(text: String) -> String {
     format!("{PROJECT_TOML_HEADER}\n{rest}")
 }
 
+/// 读档案卡里的稳定项目 id（无文件/无 id 行 = None）。
+pub(crate) fn project_id_at(project: &Path) -> Option<String> {
+    let text = fs::read_to_string(config_path(project)).ok()?;
+    let value = text.parse::<toml::Value>().ok()?;
+    value
+        .get("id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// 读取或分配项目 id：分配即在档案卡顶部加 `id` 行（原子写，其余内容不动）。
+pub(crate) fn ensure_project_id_at(project: &Path) -> Result<String, String> {
+    if let Some(id) = project_id_at(project) {
+        return Ok(id);
+    }
+    if !project.is_dir() {
+        return Err("项目目录不存在，无法分配项目 id".into());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = config_path(project);
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let mut doc = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("project.toml 解析失败，无法写入项目 id: {e}"))?;
+    doc["id"] = toml_edit::value(id.clone());
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
+    }
+    crate::profiles::atomic_write(&path, &with_project_toml_header(doc.to_string()))?;
+    Ok(id)
+}
+
 // 解析模型：未知键忽略（前向兼容），风格同 ws_settings.rs
 // 坏字段不整体失败：先解析成 toml::Value，再逐条 try_into，坏条目跳过并记 warning。
 
@@ -955,6 +1073,23 @@ fn parse_config(text: &str) -> (ProjectConfigDto, Vec<String>) {
             );
         }
         Some(_) => warnings.push("protected_paths 不是字符串数组，已忽略".to_string()),
+    }
+    match value.get("skills") {
+        None => {}
+        Some(toml::Value::Array(arr)) => {
+            if arr.iter().any(|v| v.as_str().is_none()) {
+                warnings.push("skills 含非字符串项，已忽略这些项".to_string());
+            }
+            let mut skills: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
+            skills.dedup();
+            config.skills = skills;
+        }
+        Some(_) => warnings.push("skills 不是字符串数组，已忽略".to_string()),
     }
     match value.get("artifact_dir") {
         None => {}
@@ -1436,6 +1571,16 @@ fn render_config(existing: Option<&str>, config: &ProjectConfigDto) -> Result<St
         }
         doc["protected_paths"] = value(arr);
     }
+    // skills 空 = 不写行（同 protected_paths 口径）
+    if config.skills.is_empty() {
+        doc.remove("skills");
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for skill in &config.skills {
+            arr.push(skill.as_str());
+        }
+        doc["skills"] = value(arr);
+    }
     let artifact_dir = if config.artifact_dir.trim().is_empty() {
         DEFAULT_ARTIFACT_DIR
     } else {
@@ -1713,21 +1858,59 @@ pub(crate) fn record_accepted_goal_at(
     crate::profiles::atomic_write(&project_status_path(root), &text)
 }
 
-pub(crate) fn remove_accepted_goal_at(root: &Path, name: &str) -> Result<(), String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Ok(());
-    }
-    let mut status = read_project_status_at(root);
-    let before = status.accepted.len();
-    status.accepted.retain(|item| item.name != name);
-    if status.accepted.len() == before {
+/// 长期接受账本（`.ccode/acceptance-log.jsonl`，append-only JSONL）：
+/// project-status.json 是按目标名替换、最多 20 条的「最近摘要」，会轮换、曾被目标删除连带清掉；
+/// 账本回答「这份文件是哪次验收写进来的」——目标删除、摘要轮换都不动它。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AcceptanceLogEntry {
+    pub goal_id: String,
+    pub goal_name: String,
+    pub run_id: String,
+    pub paths: Vec<String>,
+    pub note: String,
+    /// true = 采纳的是冻结快照（review-freeze），false = 旧路径目录现读。
+    pub frozen: bool,
+    pub decided_at: String,
+}
+
+pub(crate) fn acceptance_log_path(root: &Path) -> PathBuf {
+    root.join(".ccode").join("acceptance-log.jsonl")
+}
+
+pub(crate) fn read_acceptance_log_at(root: &Path) -> Vec<AcceptanceLogEntry> {
+    let Ok(text) = fs::read_to_string(acceptance_log_path(root)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+/// 追加一条接受记录；同一 Run 已记过则跳过（采纳重试幂等）。
+/// 并发口径：普通目标采纳全程持有该项目 adopt.lock，追加不会发生并发交错。
+pub(crate) fn append_acceptance_log_at(root: &Path, entry: &AcceptanceLogEntry) -> Result<(), String> {
+    use std::io::Write;
+    let existed = read_acceptance_log_at(root);
+    if existed
+        .iter()
+        .any(|item| item.run_id == entry.run_id && item.goal_id == entry.goal_id)
+    {
         return Ok(());
     }
     let dir = root.join(".ccode");
     fs::create_dir_all(&dir).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
-    let text = serde_json::to_string_pretty(&status).map_err(|e| e.to_string())?;
-    crate::profiles::atomic_write(&project_status_path(root), &text)
+    let mut line = serde_json::to_string(entry).map_err(|e| e.to_string())?;
+    line.push('\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(acceptance_log_path(root))
+        .map_err(|e| format!("打开接受记录失败: {e}"))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("写入接受记录失败: {e}"))?;
+    file.sync_all().map_err(|e| format!("落盘接受记录失败: {e}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1737,6 +1920,12 @@ pub fn read_project_status(path: String) -> Result<ProjectStatusDto, String> {
 }
 
 pub(crate) fn write_config_at(project: &Path, config: &ProjectConfigDto) -> Result<(), String> {
+    // 配置写入是档案卡的写时刻：项目目录真实存在时先保证稳定 id（新建卡片不能没有身份）；
+    // 目录不存在的是纯拼装调用方（模板渲染/测试），跳过分配。render_config 基于现有文档
+    // 增量编辑，id 行在后续改写中天然保留
+    if project.is_dir() {
+        ensure_project_id_at(project)?;
+    }
     let path = config_path(project);
     let existing = if path.exists() {
         Some(
@@ -3122,6 +3311,7 @@ fn demo_project_config() -> ProjectConfigDto {
         },
         rules_owned: false,
         protected_paths: Vec::new(),
+        skills: Vec::new(),
         artifact_dir: DEFAULT_ARTIFACT_DIR.into(),
         resources: vec![
             ResourceDto {
@@ -3174,10 +3364,11 @@ fn seed_demo_task_card(root: &Path) -> Result<(), String> {
 /// 按 canonical 主键查注册表；未注册返回 None
 fn demo_registered(conn: &Connection, key: &str) -> Result<Option<ProjectDto>, String> {
     match conn.query_row(
-        "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles FROM projects WHERE path=?1",
+        "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles, id FROM projects WHERE path=?1",
         params![key],
         |r| {
             Ok(attach_work_mode(ProjectDto {
+                id: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 path: r.get(0)?,
                 name: r.get(1)?,
                 created_at: r.get(2)?,
@@ -4022,6 +4213,7 @@ mod tests {
             settings: Vec::new(),
             rules_owned: false,
             protected_paths: Vec::new(),
+            skills: Vec::new(),
             artifact_dir: "outputs".into(),
             resources: vec![
                 ResourceDto {
@@ -4294,6 +4486,7 @@ type = "paper"
             settings: Vec::new(),
             rules_owned: false,
             protected_paths: Vec::new(),
+            skills: Vec::new(),
             artifact_dir: "new-out".into(),
             resources: vec![ResourceDto {
                 name: "新资源".into(),
@@ -4421,6 +4614,71 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
     }
 
     #[test]
+    fn project_skills_roundtrip_and_empty_omits_line() {
+        let (config, warnings) = parse_config("skills = [\"lit-search\", \" lit-search \", \"data-eda\"]\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // 去空白 + 去重
+        assert_eq!(config.skills, vec!["lit-search".to_string(), "data-eda".to_string()]);
+        let rendered = render_config(None, &config).unwrap();
+        assert!(rendered.contains("skills"), "{rendered}");
+        let back = parse_config(&rendered).0;
+        assert_eq!(back.skills, config.skills);
+        // 空名单不写行
+        let cleared = ProjectConfigDto { skills: Vec::new(), ..config };
+        let rendered = render_config(Some(&rendered), &cleared).unwrap();
+        assert!(!rendered.contains("skills"));
+        // 非数组类型进 warnings 不阻断
+        let (_, warnings) = parse_config("skills = \"oops\"\n");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn register_assigns_stable_id_and_relinks_moved_project() {
+        let dir = temp_dir("project-id");
+        let proj_a = dir.join("a");
+        std::fs::create_dir_all(&proj_a).unwrap();
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        let first = register_at(&conn, &proj_a, "课题", "2026-09-09T00:00:00Z").unwrap();
+        assert!(!first.id.is_empty(), "注册应分配稳定 id");
+        // id 写进档案卡，跟随文件夹
+        let toml = std::fs::read_to_string(proj_a.join(".ccode/project.toml")).unwrap();
+        assert!(toml.contains(&format!("id = \"{}\"", first.id)), "{toml}");
+        // 重复注册：id 稳定
+        let again = register_at(&conn, &proj_a, "课题", "2026-09-09T01:00:00Z").unwrap();
+        assert_eq!(again.id, first.id);
+        // 目录移动：同一 id 在新路径注册 = 同一项目（路径改写、不建新行、created_at 保留）
+        let proj_b = dir.join("b");
+        std::fs::create_dir_all(proj_b.join(".ccode")).unwrap();
+        std::fs::write(proj_b.join(".ccode/project.toml"), &toml).unwrap();
+        let moved = register_at(&conn, &proj_b, "课题", "2026-09-09T02:00:00Z").unwrap();
+        assert_eq!(moved.id, first.id);
+        assert_eq!(moved.created_at, first.created_at);
+        let list = list_projects_in(&conn).unwrap();
+        assert_eq!(list.len(), 1, "移动重连不得产生第二行");
+        assert_eq!(list[0].path, canonical_key(&proj_b));
+        assert_eq!(list[0].id, first.id);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_config_assigns_and_preserves_project_id() {
+        let dir = temp_dir("project-id-write");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = ProjectConfigDto::default();
+        write_config_at(&root, &config).unwrap();
+        let id = project_id_at(&root).expect("配置写入应分配 id");
+        // 后续改写不丢 id 行
+        let changed = ProjectConfigDto {
+            topic: Some("t".into()),
+            ..config
+        };
+        write_config_at(&root, &changed).unwrap();
+        assert_eq!(project_id_at(&root).as_deref(), Some(id.as_str()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn protected_paths_at_fail_closed_on_broken_config() {
         // 档案卡不存在 = 没配保护，正常放行
         let dir = temp_dir("protected-ok");
@@ -4468,10 +4726,44 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         assert_eq!(status.accepted[0].name, "数据清洗");
         assert_eq!(status.accepted[1].name, "研究综述");
         assert_eq!(status.accepted[1].note, "已补");
-        remove_accepted_goal_at(&root, "研究综述").unwrap();
-        let status = read_project_status_at(&root);
-        assert_eq!(status.accepted.len(), 1);
-        assert_eq!(status.accepted[0].name, "数据清洗");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn acceptance_log_appends_and_dedupes_by_run() {
+        let dir = temp_dir("acceptance-log");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = |run: &str| AcceptanceLogEntry {
+            goal_id: "goal-1".into(),
+            goal_name: "研究综述".into(),
+            run_id: run.into(),
+            paths: vec!["论文/综述.md".into()],
+            note: "已补引用".into(),
+            frozen: true,
+            decided_at: "2026-09-09T00:00:00Z".into(),
+        };
+        append_acceptance_log_at(&root, &entry("run-1")).unwrap();
+        // 同一 Run 重试采纳：幂等跳过，不产生重复行
+        append_acceptance_log_at(&root, &entry("run-1")).unwrap();
+        append_acceptance_log_at(&root, &entry("run-2")).unwrap();
+        let log = read_acceptance_log_at(&root);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].run_id, "run-1");
+        assert_eq!(log[1].run_id, "run-2");
+        assert!(log[0].frozen);
+        assert_eq!(log[0].paths, vec!["论文/综述.md".to_string()]);
+        // 损坏行不拖垮整本账
+        std::fs::write(
+            acceptance_log_path(&root),
+            format!(
+                "{}{}",
+                std::fs::read_to_string(acceptance_log_path(&root)).unwrap(),
+                "not-json\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(read_acceptance_log_at(&root).len(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 

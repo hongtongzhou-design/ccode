@@ -48,6 +48,7 @@ mod session_transfer;
 mod sessions;
 mod settings;
 mod storage;
+mod task_review;
 mod sheet_preview;
 mod skills;
 mod tray;
@@ -180,6 +181,7 @@ pub fn run() {
             runs::task_delete,
             runs::task_prepare_run,
             runs::task_output_changes,
+            runs::task_run_context,
             runs::task_adopt_outputs,
             custom_runtime::list_custom_runtimes,
             custom_runtime::save_custom_runtime,
@@ -413,6 +415,7 @@ pub fn run() {
             ai::ai_prompt,
             ai::ai_commit_message,
             ai::ai_summarize_session,
+            ai::ai_auto_title_session,
             ai::ai_draft_pr,
             ai::ai_conflict_advice,
             ai::ai_distill_skill,

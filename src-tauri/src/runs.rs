@@ -323,6 +323,13 @@ fn task_json_paths(value: &[String]) -> Result<String, String> {
     serde_json::to_string(value).map_err(|e| format!("任务文件路径无法保存: {e}"))
 }
 
+/// 哪些执行需要在 tasks 表登记（§4.7）：声明目标显式带 task_id，不走这里；
+/// 自动登记只留给有归属语义的对象（科研步骤/编程车道/定时巡检）。
+/// 随手聊、阅读、办公文件闲聊是沟通记录不是目标——Run 直接落 NULL task_id。
+fn run_needs_task(kind: &str) -> bool {
+    matches!(kind, "pipeline_step" | "coding_lane" | "watch" | "free_research")
+}
+
 fn prune_nested_rel_paths(paths: &[String]) -> Vec<String> {
     let mut items = paths.to_vec();
     items.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
@@ -977,6 +984,10 @@ pub struct PrepareTaskRunInput {
     /// 验收意见，记在上一版 Run 上，供时间线与下一版 Context Pack。
     #[serde(default)]
     pub feedback: Option<String>,
+    /// 开工一刻实际下发给 Agent 的上下文全文（前端拼装的 Context Pack + 目标行）。
+    /// 有就冻结成快照（审计 §4.8）；写失败 = 开工失败，不静默降级。
+    #[serde(default)]
+    pub context_text: Option<String>,
 }
 
 #[tauri::command]
@@ -984,6 +995,14 @@ pub async fn task_prepare_run(input: PrepareTaskRunInput) -> Result<RunDto, Stri
     tauri::async_runtime::spawn_blocking(move || task_prepare_run_impl(input))
         .await
         .map_err(|e| format!("准备任务失败：{e}"))?
+}
+
+/// 启动失败的收尾清理：只允许删除本次调用新建的 staging 目录；
+/// reuse_isolation 复用的上一版目录里有旧成果，绝不能进清理分支。
+fn cleanup_failed_prepare(created_here: bool, run_root: &Path) {
+    if created_here {
+        let _ = fs::remove_dir_all(run_root);
+    }
 }
 
 fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
@@ -1018,6 +1037,7 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
     .into_iter()
     .next();
     let previous_id = previous.as_ref().map(|run| run.id.clone());
+    let mut created_here = false;
     let run_root = if reuse_isolation {
         let previous = previous.ok_or("还没有上一版，不能在原副本上继续")?;
         let existing = PathBuf::from(&previous.isolation_path);
@@ -1026,6 +1046,7 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
         }
         existing
     } else {
+        created_here = true;
         let staging_id = uuid::Uuid::new_v4().to_string();
         let run_root = task_runs_root()?.join(&task.id).join(&staging_id);
         fs::create_dir_all(&run_root).map_err(|e| format!("创建 Task 独立目录失败：{e}"))?;
@@ -1053,7 +1074,7 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
     let run = open_run_impl(OpenRunInput {
         id: None,
         task_id: Some(task.id.clone()),
-        project_root: Some(root),
+        project_root: Some(root.clone()),
         task_kind: Some(task.kind.clone()),
         task_ref: Some(task.name.clone()),
         isolation_path: run_root.to_string_lossy().into_owned(),
@@ -1070,7 +1091,7 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
     let run = match run {
         Ok(run) => run,
         Err(error) => {
-            let _ = fs::remove_dir_all(&run_root);
+            cleanup_failed_prepare(created_here, &run_root);
             return Err(error);
         }
     };
@@ -1094,15 +1115,131 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
             )?;
         }
     }
+    // 开工基线：需要人审的目标在 Run 登记后立即落哈希清单（评审三向判定的起点）。
+    // 写失败 = 这版没法可信验收，按「开工合同失败即停」直接失败并把这 Run 记为 failed，
+    // 不静默降级成无基线运行。
+    if task.review_required {
+        let dir = task_review_dir(&task.id, &run.id)?;
+        if let Err(error) = crate::task_review::write_baseline(
+            &dir,
+            &run.id,
+            &run_root,
+            Path::new(&root),
+            &now_rfc3339(),
+        ) {
+            let _ = close_run_with_result(&run.id, None, "failed", None, Some("评审基线写入失败"));
+            return Err(format!("记录开工基线失败，未启动：{error}"));
+        }
+    }
+    // 有效上下文快照：前端实际拼装的下发文本，有就冻结；写失败同样开工失败
+    if let Some(text) = input
+        .context_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        let dir = task_review_dir(&task.id, &run.id)?;
+        if let Err(error) =
+            crate::task_review::write_context_snapshot(&dir, &run.id, text, &now_rfc3339())
+        {
+            let _ = close_run_with_result(&run.id, None, "failed", None, Some("上下文快照写入失败"));
+            return Err(format!("记录上下文快照失败，未启动：{error}"));
+        }
+    }
     Ok(run)
 }
 
-fn task_output_changes_impl(run_id: &str) -> Result<Vec<TaskOutputChangeDto>, String> {
+/// 评审证据目录：随任务隔离目录同生命周期（task_delete 整树清掉）。
+fn task_review_dir(task_id: &str, run_id: &str) -> Result<PathBuf, String> {
+    Ok(task_runs_root()?
+        .join(task_id)
+        .join("review")
+        .join(run_id))
+}
+
+/// 结果可审与进程成败解绑（§4.4）：失败/停止的 Run 若冻结到可审成果，
+/// 目标同样进入待验收；没有可审成果则保持 failed/stopped 原状。
+fn review_status_for(run_status: &str, has_adoptable_changes: bool) -> Option<&'static str> {
+    if matches!(run_status, "failed" | "stopped") && has_adoptable_changes {
+        Some("pending_review")
+    } else {
+        None
+    }
+}
+
+/// Run 收尾时冻结评审证据：只有「需要人审的普通目标」参与；旧 Run 没有基线则跳过不伪造；
+/// 冻结失败只记日志与事件，不反向影响收尾登记。
+fn freeze_task_run_evidence(run_id: &str) {
+    let result = (|| -> Result<bool, String> {
+        let conn = db()?;
+        let Some(run) = get_run_at(&conn, run_id)? else {
+            return Ok(false);
+        };
+        if run.internal || !matches!(run.task_kind.as_str(), "free_research" | "office_doc") {
+            return Ok(false);
+        }
+        if run.task_id.is_empty() {
+            // 无目标 Run（办公文件闲聊等）：没有任务可审，直接跳过
+            return Ok(false);
+        }
+        let task = task_by_id(&conn, &run.task_id)?;
+        if !task.review_required {
+            return Ok(false);
+        }
+        let dir = task_review_dir(&task.id, &run.id)?;
+        let Some(snapshot) = crate::task_review::freeze(
+            &dir,
+            &run.id,
+            Path::new(&run.isolation_path),
+            &task.output_paths,
+            &now_rfc3339(),
+        )?
+        else {
+            return Ok(false);
+        };
+        record_event(
+            &conn,
+            &run.id,
+            "task.snapshot_frozen",
+            Some(&serde_json::json!({ "changes": snapshot.changes.len() }).to_string()),
+        )?;
+        let has_adoptable = snapshot.changes.iter().any(|change| change.kind != "deleted");
+        if let Some(status) = review_status_for(&run.status, has_adoptable) {
+            conn.execute(
+                "UPDATE tasks SET status=?2, updated_at=?3 WHERE id=?1 AND status IN ('failed','stopped')",
+                params![task.id, status, now_rfc3339()],
+            )
+            .map_err(|e| format!("更新 Task 状态失败: {e}"))?;
+        }
+        Ok(true)
+    })();
+    match result {
+        Ok(_) => {}
+        Err(error) => {
+            crate::logbuf::record(
+                "error",
+                "runs",
+                &format!("Run {run_id} 冻结评审证据失败：{error}"),
+            );
+            if let Ok(conn) = db() {
+                let _ = record_event(&conn, run_id, "task.snapshot_failed", Some(&error));
+            }
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskReviewDto {
+    /// true = 变更来自收尾时的冻结副本；false = 旧 Run 或冻结失败，退回目录现算。
+    pub frozen: bool,
+    /// 冻结内容副本目录（预览/采纳的数据源）；未冻结时为 None。
+    pub payload_dir: Option<String>,
+    pub changes: Vec<TaskOutputChangeDto>,
+}
+
+fn task_output_changes_impl(run_id: &str) -> Result<TaskReviewDto, String> {
     let conn = db()?;
     let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
-    if run.status != "completed" {
-        return Err("只有已完成的 Run 才能审核输出".into());
-    }
     let task = task_by_id(&conn, &run.task_id)?;
     if !task.review_required {
         return Err("该任务不需要审核输出".into());
@@ -1111,14 +1248,73 @@ fn task_output_changes_impl(run_id: &str) -> Result<Vec<TaskOutputChangeDto>, St
         task.project_root.as_deref().ok_or("Task 没有关联项目")?,
         "项目根目录",
     )?;
-    list_output_changes(Path::new(&run.isolation_path), Path::new(&root), &task.output_paths)
+    let dir = task_review_dir(&task.id, &run.id)?;
+    let snapshot = crate::task_review::load_snapshot(&dir)?;
+    // 有冻结证据的 Run 不看进程退出状态（部分成果同样可审）；未冻结的旧 Run 维持 completed 门槛
+    if run.status != "completed" && snapshot.is_none() {
+        return Err("只有已完成的 Run 才能审核输出（这次运行没有冻结证据）".into());
+    }
+    if let Some(snapshot) = snapshot {
+        let changes = snapshot
+            .changes
+            .iter()
+            .map(|change| TaskOutputChangeDto {
+                path: change.path.clone(),
+                kind: change.kind.clone(),
+                bytes: change.size,
+            })
+            .collect();
+        return Ok(TaskReviewDto {
+            frozen: true,
+            payload_dir: Some(dir.join("payload").to_string_lossy().into_owned()),
+            changes,
+        });
+    }
+    // 旧 Run 或冻结失败：退回目录现算，由前端明示「未冻结」。
+    Ok(TaskReviewDto {
+        frozen: false,
+        payload_dir: None,
+        changes: list_output_changes(Path::new(&run.isolation_path), Path::new(&root), &task.output_paths)?,
+    })
 }
 
 #[tauri::command]
-pub async fn task_output_changes(run_id: String) -> Result<Vec<TaskOutputChangeDto>, String> {
+pub async fn task_output_changes(run_id: String) -> Result<TaskReviewDto, String> {
     tauri::async_runtime::spawn_blocking(move || task_output_changes_impl(&run_id))
         .await
         .map_err(|e| format!("读取任务变更失败：{e}"))?
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskContextDto {
+    pub run_id: String,
+    pub created_at: String,
+    pub sha256: String,
+    pub text: String,
+}
+
+/// 开工时冻结的有效上下文快照（§4.8）；旧 Run / 未下发快照返回 None。
+#[tauri::command]
+pub async fn task_run_context(run_id: String) -> Result<Option<TaskContextDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db()?;
+        let run = get_run_at(&conn, &run_id)?.ok_or("Run 不存在")?;
+        if run.task_id.is_empty() {
+            return Ok(None);
+        }
+        let dir = task_review_dir(&run.task_id, &run.id)?;
+        crate::task_review::load_context_snapshot(&dir).map(|snapshot| {
+            snapshot.map(|snapshot| TaskContextDto {
+                run_id: snapshot.run_id,
+                created_at: snapshot.created_at,
+                sha256: snapshot.sha256,
+                text: snapshot.text,
+            })
+        })
+    })
+    .await
+    .map_err(|e| format!("读取上下文快照失败：{e}"))?
 }
 
 fn task_adopt_outputs_impl(
@@ -1128,22 +1324,35 @@ fn task_adopt_outputs_impl(
 ) -> Result<TaskDto, String> {
     let conn = db()?;
     let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
-    if run.status != "completed" {
-        return Err("只有已完成的 Run 才能采纳输出".into());
-    }
     let task = task_by_id(&conn, &run.task_id)?;
     let root = validate_existing_dir(
         task.project_root.as_deref().ok_or("Task 没有关联项目")?,
         "项目根目录",
     )?;
-    let run_root = Path::new(&run.isolation_path);
-    let available = list_output_changes(run_root, Path::new(&root), &task.output_paths)?;
+    let dir = task_review_dir(&task.id, &run.id)?;
+    let snapshot = crate::task_review::load_snapshot(&dir)?;
+    // 有冻结证据的 Run 不看进程退出状态（部分成果同样可采纳）；未冻结的旧 Run 维持 completed 门槛
+    if run.status != "completed" && snapshot.is_none() {
+        return Err("只有已完成的 Run 才能采纳输出（这次运行没有冻结证据）".into());
+    }
+    // 可采纳集合：已冻结 = 快照里 added/modified 且未超上限的；未冻结（旧 Run/冻结失败）退回目录现算。
+    let available: Vec<String> = match &snapshot {
+        Some(snapshot) => snapshot
+            .changes
+            .iter()
+            .filter(|change| change.kind != "deleted" && !change.too_large)
+            .map(|change| change.path.clone())
+            .collect(),
+        None => list_output_changes(Path::new(&run.isolation_path), Path::new(&root), &task.output_paths)?
+            .iter()
+            .map(|change| change.path.clone())
+            .collect(),
+    };
     let selected = match paths {
-        None => available.iter().map(|change| change.path.clone()).collect::<Vec<_>>(),
+        None => available.clone(),
         Some(list) if list.is_empty() => Vec::new(),
         Some(list) => {
-            let allowed: std::collections::HashSet<_> =
-                available.iter().map(|change| change.path.clone()).collect();
+            let allowed: std::collections::HashSet<_> = available.iter().cloned().collect();
             let mut selected = Vec::new();
             for raw in list {
                 let relative = validate_output_rel(&raw)?;
@@ -1175,7 +1384,40 @@ fn task_adopt_outputs_impl(
             }
         }
     }
-    adopt_selected_files(run_id, run_root, Path::new(&root), &selected)?;
+    if let Some(snapshot) = &snapshot {
+        // 冻结路径：三向判定（项目现读 vs 开工基线 vs 冻结内容），写入源只认 payload 副本；
+        // 「看过的版本」与「写入的版本」由此逐字节绑定。
+        let baseline = crate::task_review::load_baseline(&dir)?;
+        let planned =
+            crate::task_review::check_adoption(&dir, snapshot, baseline.as_ref(), &selected, Path::new(&root))?;
+        let planned_paths: Vec<String> = planned.iter().map(|(path, _)| path.clone()).collect();
+        adopt_selected_files(run_id, &dir.join("payload"), Path::new(&root), &planned_paths)?;
+    } else {
+        adopt_selected_files(run_id, Path::new(&run.isolation_path), Path::new(&root), &selected)?;
+    }
+    // 文件已写入项目。长期接受账本必须落盘：失败要可诊断、可恢复——
+    // 返回错误引导重试（重试幂等：已写入的文件自动跳过，账本按 run_id 去重）。
+    let note = note.unwrap_or_default();
+    let entry = crate::projects::AcceptanceLogEntry {
+        goal_id: task.id.clone(),
+        goal_name: task.name.clone(),
+        run_id: run_id.to_string(),
+        paths: selected.clone(),
+        note: note.clone(),
+        frozen: snapshot.is_some(),
+        decided_at: now_rfc3339(),
+    };
+    if let Err(error) = crate::projects::append_acceptance_log_at(Path::new(&root), &entry) {
+        crate::logbuf::record(
+            "error",
+            "runs",
+            &format!("Run {run_id} 验收记录落盘失败：{error}"),
+        );
+        let _ = record_event(&conn, run_id, "task.accept_record_failed", Some(&error));
+        return Err(format!(
+            "文件已写入项目，但验收记录落盘失败：{error}。请再执行一次采纳以补记（已写入的文件会自动跳过）。"
+        ));
+    }
     conn.execute(
         "UPDATE tasks SET status='completed', adopted_paths=?3, updated_at=?2 WHERE id=?1",
         params![task.id, now_rfc3339(), task_json_paths(&selected)?],
@@ -1185,15 +1427,19 @@ fn task_adopt_outputs_impl(
         &conn,
         run_id,
         "task.outputs_adopted",
-        Some(&serde_json::json!({"taskId": task.id, "paths": selected}).to_string()),
+        Some(&serde_json::json!({"taskId": task.id, "paths": selected, "frozen": snapshot.is_some()}).to_string()),
     )?;
-    let note = note.unwrap_or_default();
-    let _ = crate::projects::record_accepted_goal_at(
-        Path::new(&root),
-        &task.name,
-        &selected,
-        &note,
-    );
+    // project-status.json 是账本的「最近摘要」投影；失败不再静默吞掉，记日志与事件供诊断。
+    if let Err(error) =
+        crate::projects::record_accepted_goal_at(Path::new(&root), &task.name, &selected, &note)
+    {
+        crate::logbuf::record(
+            "error",
+            "runs",
+            &format!("Run {run_id} 验收摘要写入失败：{error}"),
+        );
+        let _ = record_event(&conn, run_id, "task.accept_summary_failed", Some(&error));
+    }
     task_by_id(&conn, &run.task_id)
 }
 
@@ -1252,9 +1498,9 @@ pub fn task_delete(id: String) -> Result<(), String> {
             let _ = fs::remove_dir_all(&isolation);
         }
     }
-    if let Some(root) = task.project_root.as_deref() {
-        let _ = crate::projects::remove_accepted_goal_at(Path::new(root), &task.name);
-    }
+    // 删除目标只清工作数据（Run/事件/隔离目录）；验收来源不动：
+    // acceptance-log.jsonl 是长期账本，project-status.json 摘要里被接受的产出
+    // 仍真实存在于项目中，不能因为目标条目没了就抹掉「它从哪来」。
     Ok(())
 }
 
@@ -1560,28 +1806,33 @@ fn open_at(conn: &Connection, input: OpenRunInput) -> Result<RunDto, String> {
         if task.kind != kind {
             return Err("Task 类型与 Run 不匹配".into());
         }
-        task
-    } else {
-        ensure_task_at(
+        Some(task)
+    } else if run_needs_task(kind) {
+        Some(ensure_task_at(
             conn,
             input.project_root.as_deref(),
             kind,
             input.task_ref.as_deref(),
             &input.isolation_path,
-        )?
+        )?)
+    } else {
+        // Run 可以没有 Goal（§4.7）：随手聊/阅读/办公文件闲聊不是目标，不再强制登记 Task 行
+        None
     };
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_rfc3339();
     conn.execute("INSERT INTO runs(id,project_root,task_kind,task_ref,isolation_path,runtime,agent,profile_id,permission,reuse_key,session_id,internal,sentinel,created_at,status,task_id,custom_runtime_id)
         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'created',?15,?16)",
         params![id,input.project_root,kind,input.task_ref,input.isolation_path,runtime,input.agent,input.profile_id,
-            input.permission.unwrap_or_else(|| "write_tree".into()),reuse,input.session_id,internal,input.sentinel.unwrap_or(false),now,task.id,input.custom_runtime_id])
+            input.permission.unwrap_or_else(|| "write_tree".into()),reuse,input.session_id,internal,input.sentinel.unwrap_or(false),now,task.as_ref().map(|task| task.id.clone()),input.custom_runtime_id])
         .map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE tasks SET updated_at=?2 WHERE id=?1",
-        params![task.id, now],
-    )
-    .map_err(|e| e.to_string())?;
+    if let Some(task) = &task {
+        conn.execute(
+            "UPDATE tasks SET updated_at=?2 WHERE id=?1",
+            params![task.id, now],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     record_event(conn, &id, "run.created", None)?;
     get_run_at(conn, &id)?.ok_or("Run 写入后读回失败".into())
 }
@@ -1708,6 +1959,7 @@ pub fn close_run_with_result(
     // 进程侧已经结束时必须放开存活锁，否则账本失败会把 Run 钉在「仍在运行」。
     leases().lock().unwrap_or_else(|e| e.into_inner()).remove(id);
     crate::coding::clear_lane_current_run(id);
+    freeze_task_run_evidence(id);
     if let Err(error) = &outcome {
         crate::logbuf::record(
             "error",
@@ -2091,6 +2343,32 @@ mod tests {
     }
 
     #[test]
+    fn review_status_promotes_failed_run_only_with_adoptable_changes() {        // 失败/停止 + 有可审成果 → 待验收；没有成果保持原状；completed 不走这条提升
+        assert_eq!(review_status_for("failed", true), Some("pending_review"));
+        assert_eq!(review_status_for("stopped", true), Some("pending_review"));
+        assert_eq!(review_status_for("failed", false), None);
+        assert_eq!(review_status_for("stopped", false), None);
+        assert_eq!(review_status_for("completed", true), None);
+        assert_eq!(review_status_for("running", true), None);
+    }
+
+    #[test]
+    fn failed_prepare_cleanup_never_deletes_reused_isolation_dir() {        let base = std::env::temp_dir().join(format!("ccode-prepare-cleanup-{}", uuid::Uuid::new_v4()));
+        let reused = base.join("reused");
+        let staging = base.join("staging");
+        fs::create_dir_all(&reused).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(reused.join("draft.md"), "旧成果").unwrap();
+        // 复用上一版目录（reuse_isolation=true）：启动失败不得删旧成果
+        cleanup_failed_prepare(false, &reused);
+        assert!(reused.join("draft.md").is_file());
+        // 本次新建的 staging：失败时照常清理
+        cleanup_failed_prepare(true, &staging);
+        assert!(!staging.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn startup_reconciliation_skips_live_run_and_closes_stale_run() {
         let dir = std::env::temp_dir().join(format!("ccode-run-reconcile-{}", uuid::Uuid::new_v4()));
         let conn = Connection::open_in_memory().unwrap();
@@ -2152,6 +2430,45 @@ mod tests {
         assert!(requires_isolated_write_tree("pipeline_step", false));
         assert!(requires_isolated_write_tree("watch", false));
         assert!(!requires_isolated_write_tree("watch", true));
+    }
+
+    #[test]
+    fn scratch_and_reader_runs_have_no_goal_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let input = |kind: &str, path: &str| OpenRunInput {
+            id: None,
+            task_id: None,
+            project_root: None,
+            task_kind: Some(kind.into()),
+            task_ref: None,
+            isolation_path: path.into(),
+            runtime: Some("local_cli".into()),
+            agent: "claude-code".into(),
+            profile_id: None,
+            permission: Some("write_tree".into()),
+            reuse_key: None,
+            session_id: None,
+            custom_runtime_id: None,
+            internal: Some(false),
+            sentinel: Some(false),
+        };
+        // 随手聊/阅读/办公文件闲聊：Run 可以没有 Goal，不再自动登记 Task 行
+        for (kind, path) in [
+            ("scratch", "/tmp/ccode-scratch/a"),
+            ("reader", "/tmp/ccode-reader/b"),
+            ("office_doc", "/tmp/ccode-office/c"),
+        ] {
+            let run = open_at(&conn, input(kind, path)).unwrap();
+            assert!(run.task_id.is_empty(), "{kind} 不应有 Task");
+        }
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "无目标执行不得在 tasks 表留行");
+        // 归属类执行（科研步骤/编程车道）仍登记 Task
+        let lane = open_at(&conn, input("coding_lane", "/tmp/ccode-worktrees/r/feat")).unwrap();
+        assert!(!lane.task_id.is_empty());
     }
 
     #[test]

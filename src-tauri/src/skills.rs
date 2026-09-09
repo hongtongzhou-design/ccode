@@ -67,6 +67,10 @@ pub struct SkillDto {
     /// inputs/outputs 来自正文推断而非 frontmatter 声明（外部技能常见；前端按「推断」口径提示）
     #[serde(default)]
     pub interface_inferred: bool,
+    /// 库目录内容摘要（dir_manifest_hash，list 时现算，不入库文件）：
+    /// 项目上下文与执行快照以此记录「本次用的是技能的哪个版本」（审计 §4.9）。
+    #[serde(default)]
+    pub content_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,6 +186,7 @@ fn new_skill(
         outputs: Vec::new(),
         inputs: Vec::new(),
         interface_inferred: false,
+        content_digest: None,
     }
 }
 
@@ -1582,6 +1587,8 @@ fn list_skills_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>) -> Vec<
         s.stale_copies = stale_agents(store, dirs, s);
         s.app_modes = app_modes(dirs, s);
         s.mentions_mcp = mentions_mcp(&store.skill_dir(&s.name).join("SKILL.md"));
+        // 版本摘要：执行快照与项目上下文按它记录技能版本（与漂移检测同一哈希口径）
+        s.content_digest = dir_manifest_hash(&store.skill_dir(&s.name));
         // 接口口径（outputs/inputs）：frontmatter 声明优先；外部技能未声明时从正文推断兜底
         // （interface_inferred = true 供前端标注「推断」，不回写 SKILL.md）
         let md = store.skill_dir(&s.name).join("SKILL.md");
@@ -2501,6 +2508,25 @@ mod tests {
             Some("skills".to_string())
         );
         assert_eq!(github_repo_category("owner/"), None);
+    }
+
+    #[test]
+    fn list_skills_carries_content_digest_that_tracks_content() {
+        let fx = Fx::new();
+        fx.add_lib_skill("digest-demo", "版本记录");
+        let listed = list_skills_impl(&fx.store, &fx.agents);
+        let digest = listed[0].content_digest.clone().expect("list 应带内容摘要");
+        assert!(!digest.is_empty());
+        // 内容不变摘要不变；改了 SKILL.md 摘要必须变（快照按它认版本）
+        let again = list_skills_impl(&fx.store, &fx.agents);
+        assert_eq!(again[0].content_digest.as_deref(), Some(digest.as_str()));
+        fs::write(
+            fx.store.skill_dir("digest-demo").join("SKILL.md"),
+            "---\nname: digest-demo\ndescription: v2\n---\nnew body\n",
+        )
+        .unwrap();
+        let after = list_skills_impl(&fx.store, &fx.agents);
+        assert_ne!(after[0].content_digest.as_deref(), Some(digest.as_str()));
     }
 
     #[test]
