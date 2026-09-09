@@ -378,7 +378,7 @@ export interface SessionMetaDto {
   /** 接力来源（P3 机制四）：该会话接自哪个 agent 的哪个会话；非接力会话为 null */
   handoffFromAgent: string | null;
   handoffFromSession: string | null;
-  /** 归入的任务卡（卡片 = 对话的文件夹）；后端按项目回填卡片名，卡片删除后两者回落 null */
+  /** 归入的话题（卡片 = 对话的文件夹）；后端按项目回填卡片名，卡片删除后两者回落 null */
   taskId: string | null;
   taskName: string | null;
   /** Codex rollout 元信息的 model_provider："ccode" = Mesa 内联 provider 启动的会话，
@@ -1159,7 +1159,7 @@ export interface LitWatchFilterDto {
   topOnly?: boolean;
 }
 
-/** 任务卡（list_task_cards 等）：挂在项目下的「对话文件夹」，无独立状态机 */
+/** 话题（list_task_cards 等）：挂在项目下的「对话文件夹」，无独立状态机 */
 export interface TaskCardDto {
   /** "t-<短随机>"，项目内唯一 */
   id: string;
@@ -1469,6 +1469,8 @@ export interface TaskDto {
   adoptedPaths?: string[];
   /** 本目标点名的技能（新建目标时从项目技能池勾选）；空 = 不点名 */
   skills?: string[];
+  /** 项目稳定 id（双写中；旧数据可能为空） */
+  projectId?: string | null;
 }
 
 export interface RunEventDto {

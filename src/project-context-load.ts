@@ -51,6 +51,12 @@ export async function loadProjectContextPack(input: {
   }
   let accepted: { name: string; outputs: string[]; note?: string }[] = [];
   let openGoals: string[] = [];
+  let memory = "";
+  try {
+    memory = await invoke<string>("read_project_memory", { path: input.path });
+  } catch {
+    /* 没有长期知识文件时为空 */
+  }
   try {
     const status = await invoke<ProjectStatusDto>("read_project_status", {
       path: input.path,
@@ -127,6 +133,7 @@ export async function loadProjectContextPack(input: {
     openGoals,
     protectedPaths,
     feedback: input.feedback,
+    memory,
     skills,
   });
 }

@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Checkbox, primaryActionClass, secondaryActionClass, fieldClass } from "./PageFrame";
+import {
+  Checkbox,
+  MenuSelect,
+  primaryActionClass,
+  secondaryActionClass,
+  surfaceFieldClass,
+} from "./PageFrame";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { AGENTS, type RunDto, type SessionMetaDto } from "../types";
 import { agentBrandBadgeStyle } from "../agent-colors";
@@ -287,7 +293,7 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal open title="快速开聊" description="不建项目，直接开个终端聊。" onClose={onClose} size="sm">
+    <Modal open title="快速开聊" description="不建项目，直接开个终端聊。" onClose={onClose} size="md">
 
         <form
           onSubmit={(e) => {
@@ -295,45 +301,38 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
             void start();
           }}
         >
-        <label className="mb-2 block">
-          <span className="mb-1 block text-xs text-l3">Agent</span>
-          <select
-            className={fieldClass}
+        <label className="mb-3 block">
+          <span className="mb-1.5 block text-xs text-l3">Agent</span>
+          <MenuSelect
+            aria-label="Agent"
             value={agentId}
-            onChange={(e) => setAgentId(e.target.value)}
-          >
-            {agentOptions.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.label}
-                {installed.has(a.id) ? "" : "（未检测到）"}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="mb-2 block">
-          <span className="mb-1 block text-xs text-l3">配置</span>
-          <select
-            className={fieldClass}
-            value={profileId}
-            onChange={(e) => setProfileId(e.target.value)}
-          >
-            {agentProfiles.length === 0 ? (
-              <option value="">该 agent 还没有配置</option>
-            ) : (
-              agentProfiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))
-            )}
-          </select>
+            onChange={setAgentId}
+            options={agentOptions.map((a) => ({
+              value: a.id,
+              label: installed.has(a.id) ? a.label : `${a.label}（未检测到）`,
+            }))}
+          />
         </label>
 
         <label className="mb-3 block">
-          <span className="mb-1 block text-xs text-l3">目录</span>
+          <span className="mb-1.5 block text-xs text-l3">连接</span>
+          <MenuSelect
+            aria-label="连接"
+            value={profileId}
+            onChange={setProfileId}
+            placeholder="该 Agent 还没有连接"
+            options={agentProfiles.map((p) => ({
+              value: p.id,
+              label: p.name,
+            }))}
+            disabled={agentProfiles.length === 0}
+          />
+        </label>
+
+        <label className="mb-3 block">
+          <span className="mb-1.5 block text-xs text-l3">目录</span>
           <input
-            className={`${fieldClass} font-mono text-xs`}
+            className={`${surfaceFieldClass} font-mono text-xs`}
             value={homeDir ? abbrevHome(cwd, homeDir, IS_WINDOWS) : cwd}
             onChange={(e) => {
               const v = e.target.value;
@@ -351,7 +350,7 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
           className="mb-3 text-xs text-l3"
           checked={alwaysAsk}
           onChange={setAlwaysAsk}
-          label="每次都先问我"
+          label="下次仍显示此窗口"
         />
 
         <div className="flex items-center justify-end gap-2">
@@ -385,36 +384,14 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
                 查看全部 →
               </button>
             </div>
-            {latest && (
-              <button
-                type="button"
-                onClick={() => resumeSession(latest)}
-                title={`${sessionDisplayTitle(latest)}\n点按恢复该对话`}
-                className="mb-1 flex h-8 w-full items-center gap-2 rounded-md border border-field bg-strip px-2.5 text-left text-xs text-l2 transition-colors hover:bg-inset hover:text-l1"
-              >
-                <span
-                  className="shrink-0 rounded-sm px-1 py-0.5 text-micro"
-                  style={agentBrandBadgeStyle(latest.agent)}
-                >
-                  {AGENTS.find((a) => a.id === latest.agent)?.label ?? latest.agent}
-                </span>
-                <span className="min-w-0 flex-1 truncate">
-                  {sessionDisplayTitle(latest)}
-                </span>
-                <span className="shrink-0 text-micro text-l4">
-                  {relTime(latest.updatedAt)}
-                </span>
-              </button>
-            )}
-            {older.length > 0 && (
-            <ul className="max-h-40 space-y-0.5 overflow-auto">
-              {older.map((s) => (
+            <ul className="max-h-44 space-y-0.5 overflow-auto">
+              {(latest ? [latest, ...older] : older).map((s) => (
                 <li key={`${s.agent}:${s.sessionId}`}>
                   <button
                     type="button"
                     onClick={() => resumeSession(s)}
                     title={`${sessionDisplayTitle(s)}\n${AGENTS.find((a) => a.id === s.agent)?.label ?? s.agent} · ${s.projectPath}\n点按恢复该对话`}
-                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-hover"
+                    className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left hover:bg-hover"
                   >
                     <span
                       className="shrink-0 rounded-sm px-1 py-0.5 text-micro"
@@ -432,7 +409,6 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
                 </li>
               ))}
             </ul>
-            )}
           </div>
         )}
     </Modal>

@@ -166,6 +166,7 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         ("profile_id", "TEXT"),
         ("adopted_paths", "TEXT NOT NULL DEFAULT '[]'"),
         ("skills", "TEXT NOT NULL DEFAULT '[]'"),
+        ("project_id", "TEXT"),
     ] {
         if !columns.iter().any(|c| c == column) {
             conn.execute(
@@ -188,6 +189,7 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         ("close_reason", "TEXT"),
         ("task_id", "TEXT"),
         ("custom_runtime_id", "TEXT"),
+        ("project_id", "TEXT"),
     ] {
         if !run_columns.iter().any(|c| c == column) {
             conn.execute(
@@ -198,7 +200,12 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         }
     }
     // 一次回填旧 Run；不重写任何 CLI 会话文件，也不合并两套 worktree 库。
-    let legacy = query_runs(conn, "WHERE task_id IS NULL", [])?;
+    // 只回填有归属语义的 kind（§4.7 起 scratch/reader/office 闲聊的 task_id 落 NULL 是设计，不是遗留）
+    let legacy = query_runs(
+        conn,
+        "WHERE task_id IS NULL AND task_kind IN ('pipeline_step','coding_lane','watch','free_research','office_doc')",
+        [],
+    )?;
     for run in legacy {
         let task = ensure_task_at(
             conn,
@@ -210,9 +217,48 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         conn.execute("UPDATE runs SET task_id=?2, status=CASE WHEN closed_at IS NOT NULL AND status='running' THEN 'completed' ELSE status END WHERE id=?1",
             params![run.id, task.id]).map_err(|e| e.to_string())?;
     }
+    backfill_project_ids(conn)?;
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id, created_at);")
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// §4.6 二期地基：tasks/runs 双写 project_id，旧行按路径回填（projects 表在同一个 app.db）。
+/// 读取侧仍按路径（迁移渐进）；纯净测试库没有 projects 表时跳过。
+fn backfill_project_ids(conn: &Connection) -> Result<(), String> {
+    let has_projects: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| e.to_string())?
+        > 0;
+    if !has_projects {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE tasks SET project_id=(SELECT id FROM projects WHERE projects.path=tasks.project_root) WHERE project_id IS NULL AND project_root IS NOT NULL",
+        [],
+    )
+    .map_err(|e| format!("回填 tasks.project_id 失败: {e}"))?;
+    conn.execute(
+        "UPDATE runs SET project_id=(SELECT id FROM projects WHERE projects.path=runs.project_root) WHERE project_id IS NULL AND project_root IS NOT NULL",
+        [],
+    )
+    .map_err(|e| format!("回填 runs.project_id 失败: {e}"))?;
+    Ok(())
+}
+
+/// 按注册路径查项目稳定 id（查不到 = 未注册或旧行未分配，返回 None 不伪造）
+fn project_id_for(conn: &Connection, root: Option<&str>) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM projects WHERE path=?1",
+        [root?],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
 }
 
 fn db() -> Result<Connection, String> {
@@ -265,6 +311,9 @@ pub struct TaskDto {
     /// 本目标点名的技能（新建目标时勾选；与项目级 skills 名单互补：项目=工具箱，目标=点名）
     #[serde(default)]
     pub skills: Vec<String>,
+    /// 项目稳定 id（§4.6 二期双写；旧行可能未回填 = None）
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
     let input_paths: String = r.get(7)?;
@@ -289,9 +338,10 @@ fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
         declared: identity_key.starts_with("user:"),
         adopted_paths: serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default(),
         skills: serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default(),
+        project_id: r.get(18)?,
     })
 }
-const TASK_COLS: &str = "id,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,archived_at,agent,profile_id,created_at,updated_at,identity_key,adopted_paths,skills";
+const TASK_COLS: &str = "id,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,archived_at,agent,profile_id,created_at,updated_at,identity_key,adopted_paths,skills,project_id";
 fn ensure_task_at(
     conn: &Connection,
     root: Option<&str>,
@@ -302,9 +352,10 @@ fn ensure_task_at(
     let key = serde_json::to_string(&(root, kind, task_ref.unwrap_or(isolation)))
         .map_err(|e| e.to_string())?;
     let now = now_rfc3339();
+    let project_id = project_id_for(conn, root);
     conn.execute(
-        "INSERT INTO tasks(id,identity_key,project_root,kind,task_ref,name,created_at,updated_at)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?7) ON CONFLICT(identity_key) DO NOTHING",
+        "INSERT INTO tasks(id,identity_key,project_root,kind,task_ref,name,project_id,created_at,updated_at)
+        VALUES(?1,?2,?3,?4,?5,?6,?8,?7,?7) ON CONFLICT(identity_key) DO NOTHING",
         params![
             uuid::Uuid::new_v4().to_string(),
             key,
@@ -312,7 +363,8 @@ fn ensure_task_at(
             kind,
             task_ref,
             task_ref.unwrap_or(isolation),
-            now
+            now,
+            project_id
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -883,6 +935,7 @@ pub fn task_create(input: CreateTaskInput) -> Result<TaskDto, String> {
     }
     let conn = db()?;
     let project = crate::projects::canonical_key(Path::new(&root));
+    let project_id = project_id_for(&conn, Some(&project));
     let registered = conn
         .query_row(
             "SELECT COUNT(*) FROM projects WHERE path=?1",
@@ -960,8 +1013,8 @@ pub fn task_create(input: CreateTaskInput) -> Result<TaskDto, String> {
         }
     }
     conn.execute(
-        "INSERT INTO tasks(id,identity_key,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,agent,profile_id,skills,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11,?12,?13,?14,?14)",
+        "INSERT INTO tasks(id,identity_key,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,agent,profile_id,skills,project_id,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10,?11,?12,?13,?14,?15,?15)",
         params![
             id,
             identity,
@@ -980,6 +1033,7 @@ pub fn task_create(input: CreateTaskInput) -> Result<TaskDto, String> {
                 .map(str::trim)
                 .filter(|id| !id.is_empty()),
             task_json_paths(&skills)?,
+            project_id,
             now
         ],
     )
@@ -1413,6 +1467,7 @@ fn task_adopt_outputs_impl(
     paths: Option<Vec<String>>,
     note: Option<String>,
     expect_seq: Option<u32>,
+    memorize: Option<bool>,
 ) -> Result<TaskDto, String> {
     let conn = db()?;
     let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
@@ -1541,6 +1596,19 @@ fn task_adopt_outputs_impl(
         );
         let _ = record_event(&conn, run_id, "task.accept_summary_failed", Some(&error));
     }
+    // 人勾选「沉淀进项目知识」才写 memory.md（Agent 自称的结论不进；Memory Proposal 最小闭环）
+    if memorize.unwrap_or(false) && !note.trim().is_empty() {
+        if let Err(error) =
+            crate::projects::append_project_memory_at(Path::new(&root), &task.name, &note)
+        {
+            crate::logbuf::record(
+                "error",
+                "runs",
+                &format!("Run {run_id} 项目知识沉淀失败：{error}"),
+            );
+            let _ = record_event(&conn, run_id, "task.memory_failed", Some(&error));
+        }
+    }
     task_by_id(&conn, &run.task_id)
 }
 
@@ -1550,9 +1618,10 @@ pub async fn task_adopt_outputs(
     paths: Option<Vec<String>>,
     note: Option<String>,
     expect_seq: Option<u32>,
+    memorize: Option<bool>,
 ) -> Result<TaskDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        task_adopt_outputs_impl(&run_id, paths, note, expect_seq)
+        task_adopt_outputs_impl(&run_id, paths, note, expect_seq, memorize)
     })
     .await
     .map_err(|e| format!("采纳输出失败：{e}"))?
@@ -1587,24 +1656,13 @@ pub fn task_delete(id: String) -> Result<(), String> {
     if !open.is_empty() {
         return Err("先停掉正在跑的 Agent，再删这个目标".into());
     }
+    // 删除即归档（2026-09-09 拍板）：目标从列表消失，但 Run/事件/隔离目录/评审证据/账本全部保留——
+    // 「文件留下来了，它从哪来」不被抹掉。UI 暂无恢复入口（归档案面留后续）。
     conn.execute(
-        "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id=?1)",
-        [&task.id],
+        "UPDATE tasks SET archived_at=?2, updated_at=?2 WHERE id=?1",
+        params![id, now_rfc3339()],
     )
-    .map_err(|e| format!("清理目标记录失败: {e}"))?;
-    conn.execute("DELETE FROM runs WHERE task_id=?1", [&task.id])
-        .map_err(|e| format!("清理目标记录失败: {e}"))?;
-    conn.execute("DELETE FROM tasks WHERE id=?1", [&task.id])
-        .map_err(|e| format!("删除目标失败: {e}"))?;
-    if let Ok(dir) = task_runs_root() {
-        let isolation = dir.join(&task.id);
-        if isolation.is_dir() {
-            let _ = fs::remove_dir_all(&isolation);
-        }
-    }
-    // 删除目标只清工作数据（Run/事件/隔离目录）；验收来源不动：
-    // acceptance-log.jsonl 是长期账本，project-status.json 摘要里被接受的产出
-    // 仍真实存在于项目中，不能因为目标条目没了就抹掉「它从哪来」。
+    .map_err(|e| format!("归档目标失败: {e}"))?;
     Ok(())
 }
 
@@ -1649,6 +1707,8 @@ pub struct RunDto {
     pub close_reason: Option<String>,
     pub task_id: String,
     pub custom_runtime_id: Option<String>,
+    /// 项目稳定 id（§4.6 二期双写；旧行可能未回填 = None）
+    pub project_id: Option<String>,
     pub capabilities: crate::runtime::RuntimeCapabilities,
 }
 #[derive(Debug, Deserialize)]
@@ -1694,9 +1754,10 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunDto> {
         close_reason: row.get(17)?,
         task_id: row.get::<_, Option<String>>(18)?.unwrap_or_default(),
         custom_runtime_id: row.get(19)?,
+        project_id: row.get(20)?,
     })
 }
-const COLS: &str = "id,project_root,task_kind,task_ref,isolation_path,runtime,agent,profile_id,permission,reuse_key,session_id,internal,sentinel,created_at,closed_at,status,exit_code,close_reason,task_id,custom_runtime_id";
+const COLS: &str = "id,project_root,task_kind,task_ref,isolation_path,runtime,agent,profile_id,permission,reuse_key,session_id,internal,sentinel,created_at,closed_at,status,exit_code,close_reason,task_id,custom_runtime_id,project_id";
 fn query_runs<P: rusqlite::Params>(
     conn: &Connection,
     clause: &str,
@@ -1931,10 +1992,15 @@ fn open_at(conn: &Connection, input: OpenRunInput) -> Result<RunDto, String> {
     };
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_rfc3339();
-    conn.execute("INSERT INTO runs(id,project_root,task_kind,task_ref,isolation_path,runtime,agent,profile_id,permission,reuse_key,session_id,internal,sentinel,created_at,status,task_id,custom_runtime_id)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'created',?15,?16)",
+    // §4.6 二期双写：优先跟任务的 project_id，无任务时按 project_root 查注册表
+    let project_id = task
+        .as_ref()
+        .and_then(|task| task.project_id.clone())
+        .or_else(|| project_id_for(conn, input.project_root.as_deref()));
+    conn.execute("INSERT INTO runs(id,project_root,task_kind,task_ref,isolation_path,runtime,agent,profile_id,permission,reuse_key,session_id,internal,sentinel,created_at,status,task_id,custom_runtime_id,project_id)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'created',?15,?16,?17)",
         params![id,input.project_root,kind,input.task_ref,input.isolation_path,runtime,input.agent,input.profile_id,
-            input.permission.unwrap_or_else(|| "write_tree".into()),reuse,input.session_id,internal,input.sentinel.unwrap_or(false),now,task.as_ref().map(|task| task.id.clone()),input.custom_runtime_id])
+            input.permission.unwrap_or_else(|| "write_tree".into()),reuse,input.session_id,internal,input.sentinel.unwrap_or(false),now,task.as_ref().map(|task| task.id.clone()),input.custom_runtime_id,project_id])
         .map_err(|e| e.to_string())?;
     if let Some(task) = &task {
         conn.execute(
@@ -2571,6 +2637,28 @@ mod tests {
             .query_row("SELECT status FROM tasks WHERE id='task'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(status, "running", "恢复 Run 后目标不能停在 failed/重试");
+    }
+
+    #[test]
+    fn project_id_backfills_from_projects_by_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS projects(path TEXT PRIMARY KEY, name TEXT NOT NULL, id TEXT);").unwrap();
+        conn.execute("INSERT INTO projects(path,name,id) VALUES('/p','课题','pid-1')", []).unwrap();
+        conn.execute("INSERT INTO tasks(id,identity_key,kind,name,project_root,created_at,updated_at) VALUES('t','user:x','free_research','x','/p','n','n')", []).unwrap();
+        conn.execute("INSERT INTO runs(id,task_id,task_kind,isolation_path,runtime,agent,permission,created_at,status,project_root) VALUES('r','t','free_research','/tmp/x','local_cli','a','write_tree','n','completed','/p')", []).unwrap();
+        backfill_project_ids(&conn).unwrap();
+        let tid: Option<String> = conn
+            .query_row("SELECT project_id FROM tasks WHERE id='t'", [], |r| r.get(0))
+            .unwrap();
+        let rid: Option<String> = conn
+            .query_row("SELECT project_id FROM runs WHERE id='r'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tid.as_deref(), Some("pid-1"));
+        assert_eq!(rid.as_deref(), Some("pid-1"));
+        // 无 projects 表的纯净库跳过不报错
+        let bare = Connection::open_in_memory().unwrap();
+        ensure_schema(&bare).unwrap();
     }
 
     #[test]

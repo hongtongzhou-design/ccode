@@ -5,6 +5,7 @@ import {
   continueWorkbenchTarget,
   firstOpenStepName,
   heroStatusLine,
+  workbenchNowSectionTitle,
   namedSessionTitle,
   pickWorkbenchHero,
   pickWorkbenchNow,
@@ -291,6 +292,12 @@ test("firstOpenStepName 取第一个未合并步骤，全完成回末步", () =>
   );
 });
 
+test("区块标题：没在跑不算正在进行", () => {
+  assert.equal(workbenchNowSectionTitle(0), "继续工作");
+  assert.equal(workbenchNowSectionTitle(1), "正在进行");
+  assert.equal(workbenchNowSectionTitle(3), "正在进行");
+});
+
 test("heroStatusLine 只描述这张卡上的 Agent", () => {
   assert.equal(
     heroStatusLine({
@@ -438,24 +445,24 @@ test("最近项目包含没有会话的已添加项目，新建排在前面", ()
   );
 });
 
-test("最近项目和最近对话默认最多 10 条", () => {
-  assert.equal(WORKBENCH_RECENT_LIMIT, 10);
+test("最近项目和最近对话默认最多 6 条", () => {
+  assert.equal(WORKBENCH_RECENT_LIMIT, 6);
   const projects = Array.from({ length: 12 }, (_, i) => ({
     path: `/p/${String(i).padStart(2, "0")}`,
     name: `项目${i}`,
     lastOpenedAt: `2026-09-03T00:00:${String(i).padStart(2, "0")}Z`,
   }));
   const rows = workbenchRecentRows({ recentRepos: [], projects });
-  assert.equal(rows.length, 10);
+  assert.equal(rows.length, 6);
   assert.equal(rows[0]?.name, "项目11");
-  assert.equal(rows[9]?.name, "项目2");
+  assert.equal(rows[5]?.name, "项目6");
 
   const sessions = Array.from({ length: 12 }, (_, i) => ({
     customTitle: i === 0 ? null : `对话${i}`,
     title: i === 0 ? "  " : `对话${i}`,
   }));
   const listed = workbenchRecentSessions(sessions);
-  assert.equal(listed.length, 10);
+  assert.equal(listed.length, 6);
   assert.equal(listed[0]?.customTitle, "对话1");
 });
 

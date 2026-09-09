@@ -686,7 +686,33 @@ pub(crate) const WATCH_ADOPT_FILES: &[&str] = &[
     "notes/references.bib",
 ];
 
-fn watch_rel_ok(rel: &str) -> bool {
+/// 某次巡检的可采纳契约（§4.9 后半）：四类文献台账是基线；非 lit-watch 技能并上其
+/// SKILL.md frontmatter 声明的产出（outputs；目录带尾斜杠）。契约外路径永不自动采纳。
+pub(crate) fn watch_adopt_patterns_for(skill: &str) -> Vec<String> {
+    let mut patterns: Vec<String> = WATCH_ADOPT_FILES.iter().map(|s| s.to_string()).collect();
+    if skill != "lit-watch" {
+        for out in crate::skills::skill_declared_outputs(skill) {
+            let rel = out.trim().replace('\\', "/");
+            if watch_rel_ok(&rel) && !patterns.contains(&rel) {
+                patterns.push(rel);
+            }
+        }
+    }
+    patterns
+}
+
+/// 契约命中：字面路径相等，或目录模式（尾 /）的前缀命中。
+pub(crate) fn watch_pattern_allows(patterns: &[String], rel: &str) -> bool {
+    patterns.iter().any(|pattern| {
+        if let Some(dir) = pattern.strip_suffix('/') {
+            rel.starts_with(&format!("{dir}/"))
+        } else {
+            pattern == rel
+        }
+    })
+}
+
+pub(crate) fn watch_rel_ok(rel: &str) -> bool {
     let t = rel.trim();
     !t.is_empty()
         && !t.starts_with('/')
@@ -788,9 +814,11 @@ pub fn adopt_watch_run(app: tauri::AppHandle, run_id: String) -> Result<Vec<Stri
         let _guard = sched_lock()?;
         read_schedules_at(&schedules_path()?)?
     };
-    if !records.iter().any(|task| task.history.iter().any(|record| record.run_id.as_deref() == Some(&run_id) && record.status == "ok")) {
+    let schedule = records.iter().find(|task| task.history.iter().any(|record| record.run_id.as_deref() == Some(&run_id) && record.status == "ok"));
+    let Some(schedule) = schedule else {
         return Err("没有成功的运行历史，不能自动采纳；请手动对比冻结证据后合并".into());
-    }
+    };
+    let patterns = watch_adopt_patterns_for(&schedule.skill);
     let project = run
         .project_root
         .as_deref()
@@ -809,7 +837,7 @@ pub fn adopt_watch_run(app: tauri::AppHandle, run_id: String) -> Result<Vec<Stri
     }
     // 保护清单读不出来 = 不可信，fail-closed 拒绝采纳（与 runs.rs 验收写回同一口径）
     let protected = crate::projects::protected_paths_at(&project)?;
-    let copied = crate::watch_review::adopt_at(&crate::watch_review::review_dir()?, &snapshot, &project, &protected)?;
+    let copied = crate::watch_review::adopt_at(&crate::watch_review::review_dir()?, &snapshot, &project, &protected, &patterns)?;
     mark_run_adopted(&run_id).map_err(|e| format!("文件已采纳，但更新历史标记失败：{e}；重试不会重复覆盖相同内容"))?;
     let _ = app.emit("watch-run-adopted", &run_id);
     Ok(copied)
@@ -978,7 +1006,10 @@ fn execute_one(id: &str) -> RunDonePayload {
             "write_tree",
         )?;
         run_id = Some(run.id.clone());
-        let evidence = crate::watch_review::prepare(&run.id, Path::new(&task.project_root), root)?;
+        // 可采纳契约 = 四类文献台账 + 该技能声明的产出（§4.9 后半）
+        let patterns = watch_adopt_patterns_for(&task.skill);
+        let evidence =
+            crate::watch_review::prepare(&run.id, Path::new(&task.project_root), root, &patterns)?;
         // 自定义巡检靠技能目录里的 SKILL.md；未分发则无头跑找不到规范。
         // lit-watch 的 prompt 自带完整口径，不拦存量任务。
         if task.skill != "lit-watch" {
@@ -996,7 +1027,7 @@ fn execute_one(id: &str) -> RunDonePayload {
         )
         .and_then(|(output, id)| {
             run_id = Some(id);
-            crate::watch_review::freeze_at(&crate::watch_review::review_dir()?, evidence, root)
+            crate::watch_review::freeze_at(&crate::watch_review::review_dir()?, evidence, root, &patterns)
                 .map_err(|e| format!("任务执行完成，但冻结产物证据失败，未开放自动采纳：{e}"))?;
             Ok(output)
         })
@@ -2029,12 +2060,12 @@ mod tests {
         assert!(isolation.join("papers/watchlist.md").is_file());
         assert!(isolation.join("notes/inbox.md").is_file());
         let id = uuid::Uuid::new_v4().to_string();
-        let evidence = crate::watch_review::prepare(&id, &project, &isolation).unwrap();
+        let evidence = crate::watch_review::prepare(&id, &project, &isolation, &watch_adopt_patterns_for("lit-watch")).unwrap();
         std::fs::write(isolation.join("notes/inbox.md"), "## old\n## new\n").unwrap();
         let reviews = root.join("reviews");
-        crate::watch_review::freeze_at(&reviews, evidence, &isolation).unwrap();
+        crate::watch_review::freeze_at(&reviews, evidence, &isolation, &watch_adopt_patterns_for("lit-watch")).unwrap();
         let snapshot = crate::watch_review::load_at(&reviews, &id).unwrap();
-        let copied = crate::watch_review::adopt_at(&reviews, &snapshot, &project, &[]).unwrap();
+        let copied = crate::watch_review::adopt_at(&reviews, &snapshot, &project, &[], &watch_adopt_patterns_for("lit-watch")).unwrap();
         assert!(copied.iter().any(|p| p == "notes/inbox.md"));
         assert_eq!(
             std::fs::read_to_string(project.join("notes/inbox.md")).unwrap(),

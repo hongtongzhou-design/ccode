@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  idleTabTitle,
   isTerminalIdle,
   welcomeCwdActionLabel,
   welcomeCwdLine,
@@ -27,6 +28,13 @@ test("空态目录短名：空串和裸 ~ 都显示 ~，家目录折 ~", () => {
     welcomeCwdShown("C:\\Users\\me\\proj", "C:\\Users\\me", true),
     "~/proj",
   );
+});
+
+test("未启动且目录是 ~ 时标签写成未启动", () => {
+  assert.equal(idleTabTitle("~", true), "未启动");
+  assert.equal(idleTabTitle("", true), "未启动");
+  assert.equal(idleTabTitle("/Users/me/src", true), null);
+  assert.equal(idleTabTitle("~", false), null);
 });
 
 test("空态目录行：启动与恢复各一句", () => {

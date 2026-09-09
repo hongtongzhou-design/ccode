@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Play, Plus, RotateCw, Trash2 } from "lucide-react";
+import { Archive, Play, Plus, RotateCw } from "lucide-react";
 import { runInboxAction, useAppStore } from "../store";
 import {
   AGENTS,
@@ -16,19 +16,18 @@ import {
 import {
   Checkbox,
   compactPrimaryActionClass,
+  EmptyState,
   FoldMark,
   ghostActionClass,
   primaryActionClass,
-  projectWellClass,
   rowActionClass,
   secondaryActionClass,
   SegTabs,
 } from "./PageFrame";
 import { Modal } from "./Modal";
 import { agentBrand } from "../agent-colors";
-import ProjectSessionsSection, {
-  sessionsAsideOpenClass,
-} from "./ProjectSessionsSection";
+import ProjectSessionsSection from "./ProjectSessionsSection";
+import { useProjectSessionsOpen } from "../project-sessions-layout";
 import ScheduleSection from "./ScheduleSection";
 import { beginProjectChat } from "./AskAiModal";
 import { confirmDialog } from "./ConfirmDialog";
@@ -112,7 +111,7 @@ export default function ProjectUserTasksView({
   const [error, setError] = useState<string | null>(null);
   const [startingId, setStartingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [sessionsOpen, setSessionsOpen] = useState(true);
+  const [sessionsOpen, setSessionsOpen] = useProjectSessionsOpen();
   const withSessions = !embed && project.workMode === "office";
   const [configReady, setConfigReady] = useState(
     embed || project.workMode !== "research",
@@ -289,10 +288,10 @@ export default function ProjectUserTasksView({
   async function deleteGoal(task: TaskDto) {
     const name = goalDisplayName(task);
     const ok = await confirmDialog(
-      `删除目标「${name}」？不会改项目里已验收的文件；验收记录会保留在项目档案（.ccode）里，谁接受的、接受了哪一版仍可查。`,
+      `归档目标「${name}」？它会从列表收起；产出文件、会话和验收记录全部保留，之后想找回可以让我恢复。`,
       {
         danger: true,
-        confirmText: "删除",
+        confirmText: "归档",
       },
     );
     if (!ok) return;
@@ -303,7 +302,7 @@ export default function ProjectUserTasksView({
       setError(null);
       await load();
     } catch (reason) {
-      setError(`删除目标失败：${String(reason)}`);
+      setError(`归档目标失败：${String(reason)}`);
     } finally {
       setDeletingId(null);
     }
@@ -311,8 +310,12 @@ export default function ProjectUserTasksView({
 
   return (
     <>
-    <div className="mb-4 flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-0">
-      <section className={`min-w-0 flex-1 ${projectWellClass} ${withSessions && sessionsOpen ? "lg:pr-6" : ""}`}>
+    <div
+      className={`mb-4 flex flex-row items-start${
+        withSessions ? " ccode-project-work-well" : ""
+      }${withSessions && sessionsOpen ? " ccode-project-sessions-open" : ""}`}
+    >
+      <section className="ccode-project-work-main min-w-0 flex-1">
         <div className="mb-3 flex items-center gap-2">
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-medium text-l1">目标</h2>
@@ -332,16 +335,34 @@ export default function ProjectUserTasksView({
               />
             </div>
           )}
-          <button type="button" className={primaryActionClass} onClick={() => setCreateOpen(true)}>
-            <Plus size={13} aria-hidden="true" />
-            新建目标
-          </button>
+          {tasks.length > 0 && (
+            <button type="button" className={primaryActionClass} onClick={() => setCreateOpen(true)}>
+              <Plus size={13} aria-hidden="true" />
+              新建目标
+            </button>
+          )}
           <button type="button" className={rowActionClass} onClick={() => void load()} title="刷新任务">
             <RotateCw size={13} aria-hidden="true" />
           </button>
         </div>
         {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
-        {tasks.length === 0 ? null : (
+        {tasks.length === 0 ? (
+          <EmptyState
+            compact
+            title="为这个项目定义第一个目标"
+            detail="明确要交付什么，再选择材料和 Agent。"
+            action={
+              <button
+                type="button"
+                className={primaryActionClass}
+                onClick={() => setCreateOpen(true)}
+              >
+                <Plus size={13} aria-hidden="true" />
+                新建目标
+              </button>
+            }
+          />
+        ) : (
           <div className="space-y-4">
             {GOAL_BUCKET_ORDER.map((bucket) => {
               const rows = buckets[bucket];
@@ -378,7 +399,7 @@ export default function ProjectUserTasksView({
                         !!run &&
                         (task.status === "pending_review" || task.status === "completed");
                       return (
-                        <li key={task.id} className="group rounded-md bg-raised/45 px-3 py-2">
+                        <li key={task.id} className="group rounded-md px-1 py-2 hover:bg-hover">
                           <div className="flex items-start gap-3">
                             <span className="min-w-0 flex-1">
                               <span className="flex flex-wrap items-center gap-2">
@@ -450,13 +471,13 @@ export default function ProjectUserTasksView({
                               disabled={deletingId === task.id || task.status === "running"}
                               title={
                                 task.status === "running"
-                                  ? "先停掉正在跑的 Agent，再删"
-                                  : "删除这个目标"
+                                  ? "先停掉正在跑的 Agent，再归档"
+                                  : "归档这个目标（记录都保留）"
                               }
                               onClick={() => void deleteGoal(task)}
                             >
-                              <Trash2 size={12} aria-hidden="true" />
-                              {deletingId === task.id ? "删除中…" : "删除"}
+                              <Archive size={12} aria-hidden="true" />
+                              {deletingId === task.id ? "归档中…" : "归档"}
                             </button>
                           </div>
                         </li>
@@ -479,7 +500,7 @@ export default function ProjectUserTasksView({
       </section>
       {withSessions && sessionsOpen && (
         <aside
-          className={`${sessionsAsideOpenClass} ccode-project-sessions-rail ${
+          className={`ccode-project-sessions-rail ${
             sessionsOpen ? "ccode-project-sessions-rail-open" : ""
           }`}
         >
@@ -1053,6 +1074,7 @@ function ReviewOutputsModal({
   const [busy, setBusy] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [feedback, setFeedback] = useState("");
+  const [memorize, setMemorize] = useState(false);
   const [protectedPaths, setProtectedPaths] = useState<string[]>([]);
   const [frozen, setFrozen] = useState(true);
   const [payloadDir, setPayloadDir] = useState<string | null>(null);
@@ -1162,6 +1184,7 @@ function ReviewOutputsModal({
         ),
         note: feedback.trim() || null,
         expectSeq: reviewSeq,
+        memorize,
       });
       onAdopted();
     } catch (reason) {
@@ -1311,6 +1334,17 @@ function ReviewOutputsModal({
             placeholder={copy.continuePlaceholder}
           />
         </label>
+        <Checkbox
+          checked={memorize}
+          onChange={setMemorize}
+          disabled={!feedback.trim()}
+          label={
+            <span className="text-xs text-l3">
+              接受后把这条意见沉淀进项目长期知识
+              <span className="text-l4">（下次开工带给 Agent；只有这里确认过的才进）</span>
+            </span>
+          }
+        />
         {selectedCount > 0 && (
           <p className="text-micro text-l4">{copy.rememberLine}</p>
         )}

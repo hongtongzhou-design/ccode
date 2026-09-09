@@ -868,27 +868,54 @@ body {
   .ccode-review-rail { width: min(292px, 30vw); }
 }
 
+/* 项目任务井：主区不够宽时对话栏改抽屉，不按视口把主内容挤窄。 */
+.ccode-project-work-well {
+  container-type: inline-size;
+  container-name: project-work;
+  position: relative;
+}
+.ccode-project-work-well .ccode-project-sessions-rail {
+  position: absolute;
+  inset: 0 0 auto auto;
+  z-index: 30;
+  width: min(20rem, 88%);
+  max-height: calc(100dvh - 5rem);
+  overflow: auto;
+  border-left: 1px solid var(--color-hairline);
+  background: var(--color-rail2);
+  padding-left: 1rem;
+  box-shadow: -12px 0 30px rgb(0 0 0 / 0.24);
+  transform: translateX(100%);
+  transition: transform 150ms var(--ccode-motion-ease);
+}
+.ccode-project-work-well .ccode-project-sessions-rail.ccode-project-sessions-rail-open {
+  transform: translateX(0);
+}
+@container project-work (min-width: 56rem) {
+  .ccode-project-work-well .ccode-project-sessions-rail {
+    position: sticky;
+    top: 3rem;
+    inset: auto;
+    z-index: auto;
+    width: 20rem;
+    flex-shrink: 0;
+    align-self: flex-start;
+    max-height: none;
+    overflow: visible;
+    transform: none;
+    box-shadow: none;
+    background: transparent;
+    padding-left: 1.25rem;
+  }
+  .ccode-project-work-well.ccode-project-sessions-open > .ccode-project-work-main {
+    padding-right: 1.5rem;
+  }
+}
+
 /* 1024px 以下进入“主内容 + 可召回次栏”模式；桌面宽屏保持原有并排布局。 */
 @media (max-width: 1023px) {
   .ccode-mobile-sessions-trigger {
     display: block;
-  }
-  .ccode-project-sessions-rail {
-    position: absolute;
-    inset: 0 0 auto auto;
-    z-index: 30;
-    width: min(20rem, 88vw);
-    max-height: calc(100dvh - 5rem);
-    overflow: auto;
-    border-left: 1px solid var(--color-hairline);
-    background: var(--color-rail2);
-    padding-left: 1rem;
-    box-shadow: -12px 0 30px rgb(0 0 0 / 0.24);
-    transform: translateX(100%);
-    transition: transform 150ms var(--ccode-motion-ease);
-  }
-  .ccode-project-sessions-rail.ccode-project-sessions-rail-open {
-    transform: translateX(0);
   }
   .ccode-skill-preview {
     position: absolute;

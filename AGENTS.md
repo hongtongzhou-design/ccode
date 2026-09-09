@@ -688,9 +688,11 @@ src-tauri/src/
   §4.9 前半（`SkillDto.contentDigest` + 档案卡 `skills` 名单 + 规则面板「项目技能」勾选，
   版本随快照记录）；§4.6 首期稳定 ProjectId（档案卡顶层 `id` 跟随文件夹，移动后重新添加即认回，
   路径降为当前位置；tasks/runs/会话等按路径的关联迁移留下一期）。
-  P1 剩余（Result Readiness 独立字段、Memory Proposal、TaskCard 命名分离、
-  目标删除即归档语义、§4.6 关联迁移、§4.9 后半定时通用采纳契约等）方案未拍板，动手前先出设计稿进
-  `docs/architecture.md` §10，不把审计建议当已决架构实施。
+  P1 剩余（Result Readiness 独立字段、归档案面/恢复入口、§4.6 引用迁移全量收口等）方案未拍板，
+  动手前先出设计稿进 `docs/architecture.md` §10，不把审计建议当已决架构实施。
+  第二波已落地（2026-09-09）：TaskCard 改名「话题」、目标删除即归档（archived_at，数据全保留）、
+  Memory Proposal 最小闭环（.ccode/memory.md 只进人确认内容、进上下文包）、定时巡检采纳契约
+  扩展（四类基线 + 技能声明产出）、tasks/runs 双写 project_id + 回填。
 - P0 收尾当前批次：批次 A（文献雷达应用层，v3.95）、批次 B（沉浸阅读区，v3.96）与批次 E（LaTeX 支持，v3.97）
   均已落地；后续只保留文档/回归走查与发布动作，不把历史批次重复列为功能未完成。
   批次顺序为用户拍板：E 先行，批次 C（实验数据分析）/D（表征分析）转待办；场景 4（agent 辅助做图）不做独立产品能力，改由按需挂载的 origin-plot 技能承接、

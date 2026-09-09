@@ -1608,6 +1608,15 @@ fn list_skills_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>) -> Vec<
     skills
 }
 
+/// 技能声明的产物契约（frontmatter outputs；目录带尾斜杠）。定时巡检采纳白名单用（§4.9 后半）。
+pub(crate) fn skill_declared_outputs(name: &str) -> Vec<String> {
+    let Ok(store) = SkillStore::default_paths() else {
+        return Vec::new();
+    };
+    let md = store.skill_dir(name).join("SKILL.md");
+    parse_skill_md(&md).outputs
+}
+
 #[tauri::command]
 pub async fn resync_skill_copies(id: String) -> Result<Vec<String>, String> {
     let store = SkillStore::default_paths()?;

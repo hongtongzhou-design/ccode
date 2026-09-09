@@ -40,7 +40,7 @@ function launchBarAgent(): string {
 }
 
 /**
- * 任务卡区（项目详情，流水线步进器下方）：卡片 = 对话的归档文件夹（任务书沉淀统一走草稿）。
+ * 话题区（项目详情，流水线步进器下方）：卡片 = 对话的归档文件夹（任务书沉淀统一走草稿）。
  * 恒为单步骤聚焦视图（v3.81 起无总览态）：头部 ‹ › 箭头与步进器大圆同口径切步骤；
  * 行主动作 = 聊想法（未绑工作区）/ 开工（挂步骤的卡，走一键开步链路）/ 继续（已绑工作区，开终端预填「阅读 TASK.md 并继续任务」）。
  * 展开手风琴按卡片 id 记忆在本组件内——ProjectGroup 以项目 key 挂载，切项目自然清空。
@@ -562,7 +562,7 @@ export default function TaskCardsSection({
       <div className="flex items-center gap-2">
         {!focusStep && (
           <span className="text-xs text-l3">
-            任务卡{cards && cards.length > 0 ? `（${cards.length}）` : ""}
+            话题{cards && cards.length > 0 ? `（${cards.length}）` : ""}
           </span>
         )}
         {/* 主仓改动协同提醒（与开工弹层同款口径，只提醒不阻断）：小 chip 降噪，点击跳改动面板 */}

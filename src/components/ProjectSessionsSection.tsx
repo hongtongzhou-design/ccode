@@ -41,9 +41,8 @@ function deleteSessionPrompt(s: SessionMetaDto): string {
   return "删除该对话的本地文件？源文件将移入系统回收站（可找回）。";
 }
 
-/** 右侧会话栏展开：占 20rem 竖分界。收起时不渲染本栏，展开钮放项目名那一行右上。 */
-export const sessionsAsideOpenClass =
-  "lg:sticky lg:top-12 lg:w-[20rem] lg:shrink-0 lg:self-start lg:border-l lg:border-hairline lg:pl-5";
+/** @deprecated 宽度改由 `.ccode-project-work-well` 容器查询承担，勿再加 lg: 宽度类。 */
+export const sessionsAsideOpenClass = "";
 
 function sessionMatchesQuery(s: SessionMetaDto, query: string): boolean {
   const tokens = tokenizeSearchQuery(query);

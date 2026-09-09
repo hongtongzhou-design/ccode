@@ -9,7 +9,6 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
-  AppWindow,
   ArrowDownToLine,
   ArrowUpToLine,
   CloudOff,
@@ -19,7 +18,6 @@ import {
   FolderOpen,
   GitBranch,
   GitCompare,
-  GitPullRequest,
   Plus,
   RefreshCw,
   Terminal,
@@ -37,7 +35,7 @@ import {
   rowActionClass,
 } from "./PageFrame";
 import { useAppStore } from "../store";
-import { abbrevHome, pathWithin } from "../path-utils";
+import { pathWithin } from "../path-utils";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import {
   nextLaneBranchName,
@@ -70,9 +68,8 @@ import {
 import { codingStatusLine } from "../project-status";
 import { beginProjectChat } from "./AskAiModal";
 import ProjectRulesPanel from "./ProjectRulesPanel";
-import ProjectSessionsSection, {
-  sessionsAsideOpenClass,
-} from "./ProjectSessionsSection";
+import ProjectSessionsSection from "./ProjectSessionsSection";
+import { useProjectSessionsOpen } from "../project-sessions-layout";
 import ScheduleSection from "./ScheduleSection";
 import PortsSection from "./PortsSection";
 import { AGENTS } from "../types";
@@ -382,7 +379,6 @@ type LaneTree = CodingWorktreeDto & { lane: LaneOverlay };
 export default function CodingProjectView({
   project,
   repoPath,
-  homeDir,
   onError,
   onNotice,
 }: {
@@ -405,7 +401,7 @@ export default function CodingProjectView({
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [initNote, setInitNote] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useState(true);
+  const [sessionsOpen, setSessionsOpen] = useProjectSessionsOpen();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [groupingPath, setGroupingPath] = useState<string | null>(null);
@@ -918,8 +914,12 @@ export default function CodingProjectView({
   );
 
   return (
-    <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-0">
-      <div className={`min-w-0 flex-1 space-y-5 ${sessionsOpen ? "lg:pr-6" : ""}`}>
+    <div
+      className={`flex flex-row items-start ccode-project-work-well${
+        sessionsOpen ? " ccode-project-sessions-open" : ""
+      }`}
+    >
+      <div className="ccode-project-work-main min-w-0 flex-1 space-y-5">
         <section>
           <p className="flex flex-wrap items-center gap-2 text-xs text-l3">
             {base && (
@@ -1169,6 +1169,55 @@ export default function CodingProjectView({
                       onSelect: () => void abortMerge(),
                     });
                   }
+                  if (!w.isPrimary && !w.detached) {
+                    moreItems.push({
+                      label: "再开一条",
+                      onSelect: () => {
+                        const next = nextLaneBranchName(
+                          w.branch || "feature/work",
+                        );
+                        if (!next) return;
+                        setBranchName(next);
+                        branchInputRef.current?.focus();
+                        branchInputRef.current?.scrollIntoView({
+                          block: "nearest",
+                        });
+                      },
+                    });
+                  }
+                  if (hostKind === "github") {
+                    moreItems.push({
+                      label: w.hasUpstream
+                        ? busy === `pr:${w.path}`
+                          ? "打开中…"
+                          : "打开 Pull Request"
+                        : "先推送才能开 PR",
+                      disabled: !!busy || !w.hasUpstream,
+                      onSelect: () => void openPr(w.path),
+                    });
+                  }
+                  moreItems.push({
+                    label: "复制路径",
+                    onSelect: () => {
+                      void navigator.clipboard
+                        .writeText(w.path)
+                        .catch(() => onError("复制路径失败"));
+                    },
+                  });
+                  moreItems.push({
+                    label: revealFolderLabel(),
+                    onSelect: () => {
+                      void revealItemInDir(w.path).catch((e) =>
+                        onError(String(e)),
+                      );
+                    },
+                  });
+                  moreItems.push({
+                    label: w.isPrimary
+                      ? "在 GitHub Desktop 打开主仓这一目录"
+                      : "用 GitHub Desktop 打开这一目录",
+                    onSelect: () => void openDesktop(w.path),
+                  });
                   if (customRuntimes.length === 0) {
                     moreItems.push({
                       label: "用自定义运行时…",
@@ -1215,7 +1264,10 @@ export default function CodingProjectView({
                     <li key={w.path} className={projectWellClass}>
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="min-w-0 flex-1">
-                          <p className="flex min-w-0 items-center gap-2 text-sm font-medium text-l1">
+                          <p
+                            className="flex min-w-0 items-center gap-2 text-sm font-medium text-l1"
+                            title={w.path}
+                          >
                             <span className="shrink-0">{displayName}</span>
                             {!w.isPrimary &&
                               w.lane.branch &&
@@ -1236,6 +1288,11 @@ export default function CodingProjectView({
                             {merging && (
                               <span className="text-xs text-warn-text">
                                 有冲突
+                              </span>
+                            )}
+                            {!merging && w.dirty && (
+                              <span className="text-xs text-warn-text">
+                                有未提交改动
                               </span>
                             )}
                           </p>
@@ -1259,54 +1316,36 @@ export default function CodingProjectView({
                               >
                                 <Terminal size={13} strokeWidth={1.8} />
                               </IconBtn>
-                              {!w.isPrimary && !w.detached && (
-                                <IconBtn
-                                  label="再开一条"
-                                  onClick={() => {
-                                    const next = nextLaneBranchName(
-                                      w.branch || "feature/work",
-                                    );
-                                    if (!next) return;
-                                    setBranchName(next);
-                                    branchInputRef.current?.focus();
-                                    branchInputRef.current?.scrollIntoView({
-                                      block: "nearest",
-                                    });
-                                  }}
-                                >
-                                  <Plus size={13} strokeWidth={1.8} />
-                                </IconBtn>
-                              )}
                               <IconBtn
                                 label="查看改动"
                                 onClick={() => openGit(w.path, label)}
                               >
                                 <GitCompare size={13} strokeWidth={1.8} />
                               </IconBtn>
+                              <IconBtn
+                                label="拉取"
+                                disabled={!!busy}
+                                onClick={() =>
+                                  void runRemote("coding_pull", w.path, "已拉取")
+                                }
+                              >
+                                <ArrowDownToLine size={13} strokeWidth={1.8} />
+                              </IconBtn>
+                              <IconBtn
+                                label={
+                                  w.hasUpstream
+                                    ? `推送到 origin/${w.branch || "HEAD"}`
+                                    : "第一次会推到 origin 并设上游"
+                                }
+                                disabled={!!busy}
+                                onClick={() =>
+                                  void runRemote("coding_push", w.path, "已推送")
+                                }
+                              >
+                                <ArrowUpToLine size={13} strokeWidth={1.8} />
+                              </IconBtn>
                             </>
                           )}
-                          <IconBtn
-                            label="拉取"
-                            disabled={!!busy}
-                            onClick={() =>
-                              void runRemote("coding_pull", w.path, "已拉取")
-                            }
-                          >
-                            <ArrowDownToLine size={13} strokeWidth={1.8} />
-                          </IconBtn>
-                          <IconBtn
-                            label={
-                              w.hasUpstream
-                                ? `推送到 origin/${w.branch || "HEAD"}`
-                                : "第一次会推到 origin 并设上游"
-                            }
-                            disabled={!!busy}
-                            onClick={() =>
-                              void runRemote("coding_push", w.path, "已推送")
-                            }
-                          >
-                            <ArrowUpToLine size={13} strokeWidth={1.8} />
-                          </IconBtn>
                           {moreItems.length > 0 && (
                           <button
                             type="button"
@@ -1327,21 +1366,6 @@ export default function CodingProjectView({
                           baseBranch={base}
                           hostKind={hostKind}
                         />
-                        {hostKind === "github" && (
-                          <IconBtn
-                            label={
-                              w.hasUpstream
-                                ? busy === `pr:${w.path}`
-                                  ? "打开中…"
-                                  : "打开 Pull Request"
-                                : "先推送才能开 PR"
-                            }
-                            disabled={!!busy || !w.hasUpstream}
-                            onClick={() => void openPr(w.path)}
-                          >
-                            <GitPullRequest size={13} strokeWidth={1.8} />
-                          </IconBtn>
-                        )}
                       </p>
                       {groupingPath === w.path && (
                         <form
@@ -1375,29 +1399,12 @@ export default function CodingProjectView({
                           </button>
                         </form>
                       )}
-                      <p className="mt-1.5 flex min-w-0 items-center gap-1.5 font-mono text-micro text-l4">
+                      <p className="mt-1.5 font-mono text-micro text-l4">
                         <span title={absTime(w.lastCommitAt ?? null)}>
                           {w.lastCommitAt
                             ? relTime(w.lastCommitAt)
                             : "还没有提交"}
                         </span>
-                        <span aria-hidden="true">·</span>
-                        <span className="min-w-0 truncate" title={w.path}>
-                          {homeDir
-                            ? abbrevHome(w.path, homeDir, IS_WINDOWS)
-                            : w.path}
-                        </span>
-                        <PathActions path={w.path} onError={onError} />
-                        <IconBtn
-                          label={
-                            w.isPrimary
-                              ? "在 GitHub Desktop 打开主仓这一目录"
-                              : "用 GitHub Desktop 打开这一目录"
-                          }
-                          onClick={() => void openDesktop(w.path)}
-                        >
-                          <AppWindow size={13} strokeWidth={1.8} />
-                        </IconBtn>
                       </p>
                     </li>
                   );
@@ -1517,7 +1524,7 @@ export default function CodingProjectView({
 
       {ov?.isRepo && sessionsOpen && (
         <aside
-          className={`${sessionsAsideOpenClass} ccode-project-sessions-rail ${
+          className={`ccode-project-sessions-rail ${
             sessionsOpen ? "ccode-project-sessions-rail-open" : ""
           }`}
         >

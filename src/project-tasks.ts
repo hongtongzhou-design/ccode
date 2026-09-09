@@ -113,11 +113,16 @@ export function isDeclaredTask(task: { declared?: boolean; name: string }): bool
   return isDeclaredTaskName(task.name);
 }
 
-export function visibleDeclaredTasks<T extends { kind: string; name: string; declared?: boolean }>(
+export function visibleDeclaredTasks<
+  T extends { kind: string; name: string; declared?: boolean; archivedAt?: string | null },
+>(
   tasks: readonly T[],
   kinds: ReadonlySet<string>,
 ): T[] {
-  return tasks.filter((task) => kinds.has(task.kind) && isDeclaredTask(task));
+  // 已归档（archivedAt）的目标不出列表：删除即归档后数据还在，只是不再出现
+  return tasks.filter(
+    (task) => kinds.has(task.kind) && isDeclaredTask(task) && !task.archivedAt,
+  );
 }
 
 export function declaredTaskKindsForMode(

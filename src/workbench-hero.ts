@@ -209,7 +209,7 @@ function attributeRun(
 }
 
 /** 工作台「最近项目 / 最近对话」最多条数。 */
-export const WORKBENCH_RECENT_LIMIT = 10;
+export const WORKBENCH_RECENT_LIMIT = 6;
 
 function laterIso(a?: string | null, b?: string | null): string | null {
   const left = a?.trim() || "";
@@ -640,6 +640,11 @@ export function firstOpenStepName(
     if (!done) return step.name;
   }
   return steps[steps.length - 1]!.name;
+}
+
+/** 区块标题：有活进程才叫「正在进行」，可恢复但不在跑叫「继续工作」。 */
+export function workbenchNowSectionTitle(runningCount: number): "正在进行" | "继续工作" {
+  return runningCount > 0 ? "正在进行" : "继续工作";
 }
 
 export function heroStatusLine(opts: {

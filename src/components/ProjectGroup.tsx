@@ -18,9 +18,8 @@ import LitWatchCard from "./LitWatchCard";
 import ResourceListSection from "./ResourceListSection";
 import ProjectUserTasksView from "./ProjectUserTasksView";
 import ProjectRulesPanel from "./ProjectRulesPanel";
-import ProjectSessionsSection, {
-  sessionsAsideOpenClass,
-} from "./ProjectSessionsSection";
+import ProjectSessionsSection from "./ProjectSessionsSection";
+import { useProjectSessionsOpen } from "../project-sessions-layout";
 import KickoffConfirmDialog from "./KickoffConfirmDialog";
 import { HoverTip, useHoverTip } from "./HoverTip";
 import {
@@ -1164,7 +1163,7 @@ export default function ProjectGroup({
     cfg?.pipelineOptOut &&
     (cfg.steps?.length ?? 0) === 0
   );
-  const [sessionsOpen, setSessionsOpen] = useState(true);
+  const [sessionsOpen, setSessionsOpen] = useProjectSessionsOpen();
   const [urgentGoals, setUrgentGoals] = useState(false);
 
   useEffect(() => {
@@ -1398,14 +1397,16 @@ export default function ProjectGroup({
     <section
       className={
         liteResearch
-          ? "mb-5 flex flex-col lg:flex-row lg:items-start lg:gap-0"
+          ? `mb-5 flex flex-row items-start ccode-project-work-well${
+              sessionsOpen ? " ccode-project-sessions-open" : ""
+            }`
           : "mb-5"
       }
     >
       <div
         className={
           liteResearch
-            ? `min-w-0 flex-1 ${sessionsOpen ? "lg:pr-6" : ""}`
+            ? "ccode-project-work-main min-w-0 flex-1"
             : undefined
         }
       >
@@ -1820,7 +1821,7 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 任务卡区（研究流程步进器下方）：对话的归档文件夹（任务书沉淀统一走草稿）；无独立状态机，不碰工作区/评审流程。
+      {/* 话题区（研究流程步进器下方）：对话的归档文件夹（任务书沉淀统一走草稿）；无独立状态机，不碰工作区/评审流程。
           v3.70 起按 focusStep 聚焦：恒为单步骤视图，点大圆或卡片区头部 ‹ › 箭头切步骤（v3.81 起无总览态） */}
       {registered && cfg && (!liteResearch || (taskCards?.length ?? 0) > 0) && (
         <TaskCardsSection
@@ -1873,7 +1874,7 @@ export default function ProjectGroup({
         />
       )}
 
-      {/* ◔ 文献雷达卡片（工作段，任务卡与工作区卡之间）：新命中 + 精读清单双页签；
+      {/* ◔ 文献雷达卡片（工作段，话题与工作区卡之间）：新命中 + 精读清单双页签；
           「◔ 定时」开项目设置抽屉滚到定时区块（定时任务本体仍在抽屉里，单一入口不复制） */}
       {!liteResearch && registered && cfg && (
         <div ref={litWatchRef} className="rounded-lg transition-shadow">
@@ -2306,7 +2307,7 @@ export default function ProjectGroup({
 
       {liteResearch && sessionsOpen && (
         <aside
-          className={`${sessionsAsideOpenClass} ccode-project-sessions-rail ${
+          className={`ccode-project-sessions-rail ${
             sessionsOpen ? "ccode-project-sessions-rail-open" : ""
           }`}
         >

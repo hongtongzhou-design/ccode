@@ -39,6 +39,8 @@ export type ProjectContextInput = {
   protectedPaths?: readonly string[];
   decisions?: readonly string[];
   feedback?: string | null;
+  /** 项目长期知识（.ccode/memory.md 全文；只含人确认过的结论） */
+  memory?: string | null;
   skills?: readonly ProjectSkillPack[];
 };
 
@@ -242,6 +244,11 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
   const goal = input.goal?.trim();
   if (goal) {
     lines.push("", "当前目标：", goal);
+  }
+  const memory = input.memory?.trim();
+  if (memory) {
+    const trimmed = memory.length > 1500 ? `${memory.slice(0, 1500)}\n…（更多见 .ccode/memory.md）` : memory;
+    lines.push("", "项目长期知识（人确认过的结论，保持一致，不要与之矛盾）：", trimmed);
   }
   const accepted = (input.accepted ?? [])
     .map((item) => formatAcceptedGoalLine(item))

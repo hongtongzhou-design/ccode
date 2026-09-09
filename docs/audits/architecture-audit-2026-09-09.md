@@ -39,10 +39,10 @@
 | 4.3 | P0 | `task_prepare_run_impl` 复用上一版目录时，`open_run_impl` 失败会 `remove_dir_all` 删掉旧成果（runs.rs） | **已修复（2026-09-09）**：`cleanup_failed_prepare` 只清本次新建目录，回归测试 `failed_prepare_cleanup_never_deletes_reused_isolation_dir` |
 | 4.4 | P1 | 目标「能否验收」被进程退出状态控制：只有 completed Run 可查看采纳；Execution Status / Result Readiness / Goal Completion 未分离 | **入口侧已解绑（2026-09-09）**：冻结证据存在即可审可采纳（含失败/停止的部分成果），目标随冻结提升待验收；Run 状态机与显式验收条件对象仍未做 |
 | 4.5 | P1 | 回流四步（写文件→更新 Task→Run 事件→项目状态）无一致性边界，项目状态写入错误被忽略；删除目标连带删除 Run/事件/隔离目录，成果来源被抹掉 | **已修复（2026-09-09）**：append-only 账本 `.ccode/acceptance-log.jsonl` 必写、失败可见可重试；摘要降级为投影；删除目标不再抹验收来源 |
-| 4.6 | P1 | Project 身份 = 路径主键，无稳定 ProjectId 串起全部引用 | **首期已修（2026-09-09）**：档案卡顶层 `id` 为稳定身份并跟随文件夹；移动目录后重新添加即认回（路径改写不建新行）；tasks/runs/会话等按路径的关联迁移留下一期 |
-| 4.7 | P1 | Task 语义过载：用户目标 / 自动建 Task / 科研 Step / 编程 Lane / 讨论卡共用一个身份；无目标执行被 `ensure_task_at` 强制入 Task | **前半已修（2026-09-09）**：scratch/reader/办公闲聊不再登记 Task，`runs.task_id` 可空；TaskCard 命名分离待拍板 |
+| 4.6 | P1 | Project 身份 = 路径主键，无稳定 ProjectId 串起全部引用 | **首期+二期地基已修（2026-09-09）**：档案卡 `id` 稳定身份 + 移动认回；tasks/runs 双写 project_id 并按路径回填；读取侧按路径的全量迁移留下一期 |
+| 4.7 | P1 | Task 语义过载：用户目标 / 自动建 Task / 科研 Step / 编程 Lane / 讨论卡共用一个身份；无目标执行被 `ensure_task_at` 强制入 Task | **已修（2026-09-09）**：scratch/reader/办公闲聊不再登记 Task；TaskCard 用户可见文案统一为「话题」 |
 | 4.8 | P1 | Context 是启动时动态拼接文本，无「本次实际使用的文件/规则/技能版本」快照；TASK.md 与 Context Pack 两套体系 | **已修普通目标侧（2026-09-09）**：实际下发文本冻结为 context.json（全文+哈希），评审可核对；科研侧 TASK.md 落盘即等价凭证；Memory Proposal 未做 |
-| 4.9 | P1 | 技能挂载只有「全局→Agent」「科研 Step→技能」；定时采纳固定四类文献台账，不认任意 Skill 输出；科研复现验收绑定科研 workspace_id | **前半已修（2026-09-09）**：SkillDto.contentDigest + 项目 skills 名单 + 上下文包「项目技能」段随快照记版本；定时通用采纳契约与复现解绑未做 |
+| 4.9 | P1 | 技能挂载只有「全局→Agent」「科研 Step→技能」；定时采纳固定四类文献台账，不认任意 Skill 输出；科研复现验收绑定科研 workspace_id | **已修（2026-09-09）**：contentDigest + 项目技能池 + 目标点名 + 快照记版本；定时采纳 = 四类基线 + 技能声明产出契约；科研复现解绑 workspace_id 未做 |
 | 4.10 | P1 | 「准备环境—启动—收尾—回流」链散落在各页面（ProjectUserTasksView / 科研开步 / 编程页 / 对话弹层 / scheduler），新增入口易再实现一份 | **普通目标链已收口（2026-09-09）**：`src/goal-run.ts` 共享启动链，ProjectUserTasksView 与 AskAiModal 双入口复用；科研开步本有 pipeline-start.ts 单一出处；编程/定时入口保留各自实现 |
 
 ## 重构方向边界（审计给出的取舍，供拍板时参考）

@@ -12,7 +12,7 @@ import {
   SquareArrowOutUpRight,
 } from "lucide-react";
 import { useAppStore, runInboxAction, visibleInboxItems } from "../store";
-import { abbrevHome, pathWithin, samePath } from "../path-utils";
+import { pathWithin, samePath } from "../path-utils";
 import { IS_WINDOWS } from "../hotkeys";
 import {
   canOpenCodexClient,
@@ -40,6 +40,7 @@ import {
   namedSessionTitle,
   pickWorkbenchHero,
   pickWorkbenchNow,
+  workbenchNowSectionTitle,
   workbenchNowSubtitle,
   workbenchRecentRows,
   workbenchRecentSessions,
@@ -139,7 +140,6 @@ function WorkbenchPage({
   const [projects, setProjects] = useState<ProjectDto[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceDto[]>([]);
   const [steps, setSteps] = useState<ProjectStepDto[]>([]);
-  const [homeDir, setHomeDir] = useState("");
   const [codingByPath, setCodingByPath] = useState<
     Record<string, CodingOverviewDto>
   >({});
@@ -160,12 +160,6 @@ function WorkbenchPage({
       toast("最近项目加载失败，可稍后重试", "warning");
     });
   }, [loadRecentRepos, visible]);
-
-  useEffect(() => {
-    void invoke<string>("home_dir")
-      .then(setHomeDir)
-      .catch(() => toast("无法读取主目录，部分路径提示可能不完整", "warning"));
-  }, []);
 
   const runCwdSig = terminalRunInputs
     .filter((item) => item.running || item.attention === "confirm")
@@ -604,7 +598,7 @@ function WorkbenchPage({
           <div className="mb-2.5 flex items-center gap-2 px-1">
             <CircleDot size={14} strokeWidth={1.8} className="text-nav-accent" aria-hidden="true" />
             <h2 className="text-xs font-medium text-l2">
-              {nowItems.length > 1 ? "正在进行" : "继续当前工作"}
+              {workbenchNowSectionTitle(runningBadge)}
             </h2>
             {runningBadge > 0 && (
               <span className="rounded-full bg-ok px-2 py-0.5 text-micro text-ok-text">
@@ -618,7 +612,10 @@ function WorkbenchPage({
             <div className="rounded-lg border border-hairline bg-raised/55 p-5 shadow-[0_1px_0_rgb(255_255_255_/_.02)]">
               <div className="flex flex-wrap items-start justify-between gap-5">
                 <div className="min-w-0">
-                  <p className="truncate text-xl font-medium tracking-tight text-l1">
+                  <p
+                    className="truncate text-xl font-medium tracking-tight text-l1"
+                    title={hero.path}
+                  >
                     {hero.name}
                   </p>
                   {hero.workMode ? (
@@ -629,14 +626,6 @@ function WorkbenchPage({
                   {stepName && (
                     <p className="mt-1 text-sm text-l3">{stepName}</p>
                   )}
-                  <p
-                    className="mt-3 truncate font-mono text-micro text-l4"
-                    title={hero.path}
-                  >
-                    {homeDir
-                      ? abbrevHome(hero.path, homeDir, IS_WINDOWS)
-                      : hero.path}
-                  </p>
                 </div>
                 <button
                   type="button"
@@ -763,22 +752,13 @@ function WorkbenchPage({
                 title="从一个项目开始"
                 detail="添加项目后，Mesa 会从上次停下的地方继续。"
                 action={
-                  <div className="flex items-center justify-center gap-2">
-                    <button
-                      type="button"
-                      className={primaryActionClass}
-                      onClick={() => setPage("workspaces")}
-                    >
-                      添加项目
-                    </button>
-                    <button
-                      type="button"
-                      className={secondaryActionClass}
-                      onClick={() => setPage("terminal")}
-                    >
-                      打开运行
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    className={primaryActionClass}
+                    onClick={() => setPage("workspaces")}
+                  >
+                    添加项目
+                  </button>
                 }
               />
             </div>

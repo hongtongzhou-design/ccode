@@ -223,12 +223,19 @@
   工具栏 + 主体”结构，标题栏只保留唯一主动作；工作台页面可维持自身分栏，但分隔、密度和状态语言必须与共享框架一致。
   借鉴外部工作台只学对象列表/上下文栏/三栏机制，不得把配置中心重新设为首页。**侧栏收展完全手动**（品牌区点击，
   localStorage 记忆；v3.38 的按页面自动收展被用户否决，v3.43 删除）。
+  **项目任务井优先于右侧对话栏（2026-09-09）**：无流程科研 / 编程 / 办公的主区包在 `.ccode-project-work-well`
+  （container 56rem）。窄于此时「这个项目的对话」用已有抽屉，不并排挤主区；开关写入 `ccode.projectSessionsOpen`，
+  缺省为开。全局导航与项目列表的手动收展不动。空目标走 `EmptyState`（「为这个项目定义第一个目标」+ 一个新建按钮），
+  禁止 `tasks.length === 0` 渲染成空白。目标列表铺在画布上，不套 `ccode-well` 再套 raised 行。
+  **浮层/卡片禁用原生 `<select>`**：系统菜单在 macOS 上是蓝条，和主题脱节。用 `MenuSelect`（portal +
+  `.ccode-float-surface`）。浮层输入用 `surfaceFieldClass`（strip 底），不要 `fieldClass` 的 canvas 底在 raised 上挖黑块。
+  未勾选 Checkbox 用透明底，不用 canvas。流程线命中计数用 `text-l4`，不用 `text-done` 绿字。
 - **对话页三栏固定（P1a）**：应用导航 ｜ 会话列表栏（375px，rail2 底：标题+「当前 N · 总计 M」副题 + 深色次按钮 + 搜索框 +
   折叠分类筛选——v3.37 定稿单列纵向手风琴：点 agent 只展开/收起项目子列表（左侧缩进线表达层级），「全部项目」/单项目行
   落筛选且面板保持展开（v3.43：边筛边浏览，选中不收起），计数保持）｜回放区（canvas 底，常驻，未选中为空态）；列表与回放并列常驻，禁止恢复“列表/回放二选一”
   整列切换。会话行双行（标题行带相对时间 + meta 行），选中行 bg-rail-sel 浅填充。`ConversationView`：用户消息右对齐气泡
-  （bg-bubble，max-w 70%）、AI 直接排版、``` 围栏代码块 inset+hairline 带 ⧉ 复制、连续 tool_use/tool_result 折叠为「▸ N 次
-  工具调用」行；底部为只读展示态圆角输入条（chip 显示 agent 名）。有界尾窗/向前分页保持滚动位置（scrollRef 必须挂在滚动
+  （bg-bubble，max-w 70%）、AI 直接排版、``` 围栏代码块 inset+hairline 带 ⧉ 复制、连续 tool_use/tool_result
+  （含跨消息的纯工具助手回合）折叠为「执行记录 · N 次工具调用」行，失败/权限确认/中断不并入；底部为只读展示态圆角输入条（chip 显示 agent 名）。有界尾窗/向前分页保持滚动位置（scrollRef 必须挂在滚动
   容器上）。**v3.92 控制区瘦身**：快筛 chips 只常驻 保留/进行中/今天，近 7 天/内部 AI/已归档收进「更多 ▾」（激活的提到行内
   常显）；「显示已归档」页头按钮删除——归档开关唯一控点是「已归档」chip（toggleQuick 同时写 quick 与 showArchived，
   旧实现单点 chip 会被 archiveVisible 兜底过滤等于无效）；分类筛选是快筛下方整行「范围」，点开后用选择面替换会话列表（不浮层挡住对话）；点 Agent 展开或收起该 Agent 下的项目，筛这家点「全部项目」；Agent 列表下方「按项目」跨 Agent 按目录筛选，点项目/全部即回到列表。

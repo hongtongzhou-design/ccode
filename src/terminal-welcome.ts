@@ -41,3 +41,13 @@ export function welcomeCwdActionLabel(
 ): string {
   return welcomeCwdLine(cwd, home, restored ? "恢复" : "启动", isWindows);
 }
+
+/** 未启动且目录是家/裸 ~ 时，标签不要显示成 ~。 */
+export function idleTabTitle(cwd: string, idle: boolean): string | null {
+  if (!idle) return null;
+  const raw = cwd.trim() || "~";
+  if (raw === "~") return "未启动";
+  const base = raw.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? raw;
+  if (base === "~") return "未启动";
+  return null;
+}

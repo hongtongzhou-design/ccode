@@ -66,6 +66,12 @@ test("已短的标题不动；空格后的正事也留下", () => {
   );
 });
 
+test("展示标题去掉 markdown 装饰，不把符号当主题", () => {
+  assert.equal(tidySessionText("# 当 Agent 越来越强"), "当 Agent 越来越强");
+  assert.equal(tidySessionText("**修好登录**"), "修好登录");
+  assert.equal(tidySessionText("用 `git status` 看改动"), "用 git status 看改动");
+});
+
 test("剥掉 user_query 标签，标题留完整句子", () => {
   assert.equal(unwrapPromptTags("<user_query>\n你好\n</user_query>"), "你好");
   assert.equal(

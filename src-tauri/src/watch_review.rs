@@ -35,9 +35,9 @@ fn snapshot_path(dir: &Path, id: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{id}.json")))
 }
 
-// 只允许固定产物；即使父目录是 symlink 也不能越出给定根。
-fn checked_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
-    if !crate::scheduler::WATCH_ADOPT_FILES.contains(&rel) {
+// 只允许契约内的路径；即使父目录是 symlink 也不能越出给定根。
+fn checked_path(root: &Path, rel: &str, patterns: &[String]) -> Result<PathBuf, String> {
+    if !crate::scheduler::watch_pattern_allows(patterns, rel) {
         return Err(format!("不允许采纳此路径：{rel}"));
     }
     let root = crate::paths::canonicalize_plain(root).map_err(|e| format!("目录不可用：{e}"))?;
@@ -65,8 +65,8 @@ fn checked_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-fn read_text(root: &Path, rel: &str) -> Result<Option<String>, String> {
-    let path = checked_path(root, rel)?;
+fn read_text(root: &Path, rel: &str, patterns: &[String]) -> Result<Option<String>, String> {
+    let path = checked_path(root, rel, patterns)?;
     match fs::metadata(&path) {
         Ok(meta) if !meta.is_file() => return Err(format!("产物不是普通文件：{rel}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -93,17 +93,86 @@ fn read_text(root: &Path, rel: &str) -> Result<Option<String>, String> {
         .map_err(|_| format!("{rel} 不是 UTF-8 文本"))
 }
 
+/// 把采纳契约展开成具体文件清单：字面路径 + 目录模式（尾 /）下两侧根的现有文本文件。
+/// 只收 ≤2MB 的 UTF-8 文本（冻结证据是文本比对模型；二进制产物不自动采纳）；
+/// 最多 200 个，防技能把契约写成巨目录。
+fn expand_contract(
+    project: &Path,
+    isolation: &Path,
+    patterns: &[String],
+) -> Result<Vec<String>, String> {
+    const EXPAND_CAP: usize = 200;
+    let mut out: Vec<String> = Vec::new();
+    for pattern in patterns {
+        if !pattern.ends_with('/') {
+            out.push(pattern.clone());
+        }
+    }
+    for pattern in patterns.iter().filter(|p| p.ends_with('/')) {
+        let prefix = pattern.trim_end_matches('/');
+        for root in [project, isolation] {
+            let base = root.join(prefix);
+            if !base.is_dir() {
+                continue;
+            }
+            let mut stack = vec![base];
+            while let Some(dir) = stack.pop() {
+                let entries = fs::read_dir(&dir)
+                    .map_err(|e| format!("读取契约目录失败：{e}"))?
+                    .flatten();
+                for entry in entries {
+                    let path = entry.path();
+                    let Ok(meta) = fs::symlink_metadata(&path) else {
+                        continue;
+                    };
+                    if meta.file_type().is_symlink() {
+                        continue;
+                    }
+                    if meta.is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    if !meta.is_file() || meta.len() > FILE_CAP {
+                        continue;
+                    }
+                    // 只收 UTF-8 文本；二进制产物留在隔离目录，不进自动采纳
+                    let Ok(bytes) = fs::read(&path) else {
+                        continue;
+                    };
+                    if std::str::from_utf8(&bytes).is_err() {
+                        continue;
+                    }
+                    let Ok(rel) = path.strip_prefix(root) else {
+                        continue;
+                    };
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if !rel.is_empty() && !rel.contains("..") {
+                        out.push(rel);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    if out.len() > EXPAND_CAP {
+        return Err(format!("产物契约展开超过 {EXPAND_CAP} 个文件，不能自动采纳"));
+    }
+    Ok(out)
+}
+
 pub(crate) fn prepare(
     run_id: &str,
     project: &Path,
     isolation: &Path,
+    patterns: &[String],
 ) -> Result<WatchSnapshot, String> {
     let mut files = Vec::new();
-    for rel in crate::scheduler::WATCH_ADOPT_FILES {
+    for rel in expand_contract(project, isolation, patterns)? {
         files.push(WatchFile {
-            path: (*rel).into(),
-            before: read_text(project, rel)?,
-            initial: read_text(isolation, rel)?,
+            path: rel.clone(),
+            before: read_text(project, &rel, patterns)?,
+            initial: read_text(isolation, &rel, patterns)?,
             after: None,
         });
     }
@@ -147,9 +216,22 @@ pub(crate) fn freeze_at(
     dir: &Path,
     mut snapshot: WatchSnapshot,
     isolation: &Path,
+    patterns: &[String],
 ) -> Result<(), String> {
+    // 收尾时再展开一次契约：运行期间新出现的契约文件（新产出）并入证据，before/initial 记 None
+    let wanted = expand_contract(Path::new(&snapshot.project_root), isolation, patterns)?;
+    for rel in wanted {
+        if !snapshot.files.iter().any(|file| file.path == rel) {
+            snapshot.files.push(WatchFile {
+                path: rel,
+                before: None,
+                initial: None,
+                after: None,
+            });
+        }
+    }
     for file in &mut snapshot.files {
-        file.after = read_text(isolation, &file.path)?;
+        file.after = read_text(isolation, &file.path, patterns)?;
     }
     let _lock = adopt_lock(dir)?;
     let path = snapshot_path(dir, &snapshot.run_id)?;
@@ -178,12 +260,17 @@ pub(crate) fn load_at(dir: &Path, id: &str) -> Result<WatchSnapshot, String> {
     if snapshot.run_id != id {
         return Err("产物证据与运行编号不一致".into());
     }
-    if snapshot.files.len() != crate::scheduler::WATCH_ADOPT_FILES.len() {
-        return Err("产物证据清单不完整".into());
+    // 结构校验：路径非空、形态合法、不重复（契约清单本身随技能变化，不作固定数量校验）
+    if snapshot.files.is_empty() {
+        return Err("产物证据清单为空".into());
     }
-    for rel in crate::scheduler::WATCH_ADOPT_FILES {
-        if snapshot.files.iter().filter(|f| f.path == *rel).count() != 1 {
-            return Err("产物证据路径不完整或重复".into());
+    let mut seen = std::collections::HashSet::new();
+    for file in &snapshot.files {
+        if !crate::scheduler::watch_rel_ok(&file.path) {
+            return Err(format!("产物证据路径不合法：{}", file.path));
+        }
+        if !seen.insert(&file.path) {
+            return Err(format!("产物证据路径重复：{}", file.path));
         }
     }
     Ok(snapshot)
@@ -209,8 +296,9 @@ pub(crate) fn adopt_at(
     snapshot: &WatchSnapshot,
     project: &Path,
     protected: &[String],
+    patterns: &[String],
 ) -> Result<Vec<String>, String> {
-    adopt_with_writer(dir, snapshot, project, protected, replace_text)
+    adopt_with_writer(dir, snapshot, project, protected, patterns, replace_text)
 }
 
 fn adopt_with_writer(
@@ -218,6 +306,7 @@ fn adopt_with_writer(
     snapshot: &WatchSnapshot,
     project: &Path,
     protected: &[String],
+    patterns: &[String],
     mut write: impl FnMut(&Path, &[u8]) -> Result<(), String>,
 ) -> Result<Vec<String>, String> {
     let _lock = adopt_lock(dir)?;
@@ -226,11 +315,13 @@ fn adopt_with_writer(
         if file.initial == file.after {
             continue;
         }
+        // 契约再校验：快照是写入时刻的清单，采纳时按当下契约再过一遍
+        checked_path(project, &file.path, patterns)?;
         // 与 runs.rs 验收写回同一判定（含大小写折叠）：保护 NOTES/ 时 notes/ 下写回也要拦
         if crate::projects::path_is_protected(&file.path, protected) {
             return Err(format!("保护路径不可覆盖：{}", file.path));
         }
-        let current = read_text(project, &file.path)?;
+        let current = read_text(project, &file.path, patterns)?;
         if current == file.after {
             continue;
         }
@@ -263,20 +354,20 @@ fn adopt_with_writer(
     let mut written: Vec<&WatchFile> = Vec::new();
     for file in pending {
         let result = (|| {
-            if read_text(project, &file.path)? != file.before {
+            if read_text(project, &file.path, patterns)? != file.before {
                 return Err(format!("{} 在采纳期间变化", file.path));
             }
-            let target = checked_path(project, &file.path)?;
+            let target = checked_path(project, &file.path, patterns)?;
             write(&target, file.after.as_deref().unwrap().as_bytes())
         })();
         if let Err(error) = result {
             let mut rollback_errors = Vec::new();
             for old in written.iter().rev() {
                 let rollback = (|| {
-                    if read_text(project, &old.path)? != old.after {
+                    if read_text(project, &old.path, patterns)? != old.after {
                         return Err("文件再次被外部修改，未强制回滚".to_string());
                     }
-                    let target = checked_path(project, &old.path)?;
+                    let target = checked_path(project, &old.path, patterns)?;
                     match &old.before {
                         Some(text) => replace_text(&target, text.as_bytes()),
                         None => fs::remove_file(target).map_err(|e| e.to_string()),
@@ -328,6 +419,10 @@ pub async fn watch_run_snapshot(run_id: String) -> Result<WatchSnapshot, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn base_patterns() -> Vec<String> {
+        crate::scheduler::watch_adopt_patterns_for("lit-watch")
+    }
     struct Fixture {
         root: PathBuf,
         project: PathBuf,
@@ -355,9 +450,9 @@ mod tests {
             }
         }
         fn freeze(&self) -> WatchSnapshot {
-            let evidence = prepare(&self.id, &self.project, &self.isolation).unwrap();
+            let evidence = prepare(&self.id, &self.project, &self.isolation, &base_patterns()).unwrap();
             fs::write(self.isolation.join("notes/inbox.md"), "result").unwrap();
-            freeze_at(&self.reviews, evidence, &self.isolation).unwrap();
+            freeze_at(&self.reviews, evidence, &self.isolation, &base_patterns()).unwrap();
             load_at(&self.reviews, &self.id).unwrap()
         }
     }
@@ -383,16 +478,16 @@ mod tests {
                 .as_deref(),
             Some("result")
         );
-        let paths = adopt_at(&f.reviews, &snapshot, &f.project, &[]).unwrap();
+        let paths = adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns()).unwrap();
         assert_eq!(paths, vec!["notes/inbox.md"]);
         assert_eq!(
             fs::read_to_string(f.project.join("notes/inbox.md")).unwrap(),
             "result"
         );
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[])
+        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
             .unwrap()
             .is_empty());
-        assert!(freeze_at(&f.reviews, snapshot, &f.isolation).is_err());
+        assert!(freeze_at(&f.reviews, snapshot, &f.isolation, &base_patterns()).is_err());
         assert!(f.reviews.join("backups").join(&f.id).is_dir());
     }
 
@@ -401,7 +496,7 @@ mod tests {
         let f = Fixture::new();
         let snapshot = f.freeze();
         fs::write(f.project.join("notes/inbox.md"), "human edits").unwrap();
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[])
+        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
             .unwrap_err()
             .contains("冲突"));
         assert_eq!(
@@ -415,13 +510,42 @@ mod tests {
         let f = Fixture::new();
         fs::write(f.project.join("notes/inbox.md"), "main newer").unwrap();
         let snapshot = f.freeze();
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[])
+        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
             .unwrap_err()
             .contains("冲突"));
         assert_eq!(
             fs::read_to_string(f.project.join("notes/inbox.md")).unwrap(),
             "main newer"
         );
+    }
+
+    #[test]
+    fn contract_dir_pattern_carries_new_text_outputs() {
+        let f = Fixture::new();
+        // 契约 = 四类台账 + results/ 目录（技能声明的产出）
+        let mut patterns = base_patterns();
+        patterns.push("results/".to_string());
+        let evidence = prepare(&f.id, &f.project, &f.isolation, &patterns).unwrap();
+        fs::create_dir_all(f.isolation.join("results")).unwrap();
+        fs::write(f.isolation.join("results/summary.md"), "r").unwrap();
+        freeze_at(&f.reviews, evidence, &f.isolation, &patterns).unwrap();
+        let snapshot = load_at(&f.reviews, &f.id).unwrap();
+        assert!(snapshot.files.iter().any(|file| file.path == "results/summary.md"));
+        let copied = adopt_at(&f.reviews, &snapshot, &f.project, &[], &patterns).unwrap();
+        assert!(copied.contains(&"results/summary.md".to_string()));
+        assert_eq!(
+            fs::read_to_string(f.project.join("results/summary.md")).unwrap(),
+            "r"
+        );
+        // 契约外路径仍拒绝（快照里混入契约外文件 = 采纳直接失败）
+        let mut bad = load_at(&f.reviews, &f.id).unwrap();
+        bad.files.push(WatchFile {
+            path: "evil.md".into(),
+            before: None,
+            initial: None,
+            after: Some("x".into()),
+        });
+        assert!(adopt_at(&f.reviews, &bad, &f.project, &[], &patterns).is_err());
     }
 
     #[test]
@@ -438,7 +562,8 @@ mod tests {
             &f.reviews,
             &snapshot,
             &f.project,
-            &["notes/references.bib".into()]
+            &["notes/references.bib".into()],
+            &base_patterns()
         )
         .is_err());
         assert_eq!(
@@ -460,7 +585,7 @@ mod tests {
             .find(|x| x.path == "notes/references.bib")
             .unwrap()
             .after = Some("refs".into());
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &["NOTES".into()]).is_err());
+        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &["NOTES".into()], &base_patterns()).is_err());
         assert!(!f.project.join("notes/references.bib").exists());
     }
 
@@ -468,14 +593,15 @@ mod tests {
     fn refuses_deleted_outputs_and_missing_snapshot() {
         let f = Fixture::new();
         assert!(load_at(&f.reviews, &f.id).unwrap_err().contains("没有冻结"));
-        let evidence = prepare(&f.id, &f.project, &f.isolation).unwrap();
+        let evidence = prepare(&f.id, &f.project, &f.isolation, &base_patterns()).unwrap();
         fs::remove_file(f.isolation.join("notes/inbox.md")).unwrap();
-        freeze_at(&f.reviews, evidence, &f.isolation).unwrap();
+        freeze_at(&f.reviews, evidence, &f.isolation, &base_patterns()).unwrap();
         assert!(adopt_at(
             &f.reviews,
             &load_at(&f.reviews, &f.id).unwrap(),
             &f.project,
-            &[]
+            &[],
+            &base_patterns()
         )
         .is_err());
         assert_eq!(
@@ -502,7 +628,7 @@ mod tests {
         let outside = f.root.join("outside");
         fs::rename(f.project.join("notes"), &outside).unwrap();
         std::os::unix::fs::symlink(&outside, f.project.join("notes")).unwrap();
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[]).is_err());
+        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns()).is_err());
         assert_eq!(
             fs::read_to_string(outside.join("inbox.md")).unwrap(),
             "original"
@@ -520,7 +646,7 @@ mod tests {
             .unwrap()
             .after = Some("refs".into());
         let mut writes = 0;
-        let error = adopt_with_writer(&f.reviews, &snapshot, &f.project, &[], |path, bytes| {
+        let error = adopt_with_writer(&f.reviews, &snapshot, &f.project, &[], &base_patterns(), |path, bytes| {
             writes += 1;
             if writes == 2 {
                 return Err("模拟第二个文件写入失败".into());
@@ -548,7 +674,7 @@ mod tests {
             .unwrap()
             .after = Some("refs".into());
         let mut writes = 0;
-        let error = adopt_with_writer(&f.reviews, &snapshot, &f.project, &[], |path, bytes| {
+        let error = adopt_with_writer(&f.reviews, &snapshot, &f.project, &[], &base_patterns(), |path, bytes| {
             writes += 1;
             if writes == 2 {
                 fs::write(f.project.join("notes/inbox.md"), "changed during adoption").unwrap();
@@ -569,11 +695,11 @@ mod tests {
         let f = Fixture::new();
         let path = f.project.join("notes/inbox.md");
         fs::write(&path, vec![b'x'; FILE_CAP as usize + 1]).unwrap();
-        assert!(prepare(&f.id, &f.project, &f.isolation)
+        assert!(prepare(&f.id, &f.project, &f.isolation, &base_patterns())
             .unwrap_err()
             .contains("2 MB"));
         fs::write(&path, [0xff]).unwrap();
-        assert!(prepare(&f.id, &f.project, &f.isolation)
+        assert!(prepare(&f.id, &f.project, &f.isolation, &base_patterns())
             .unwrap_err()
             .contains("UTF-8"));
     }

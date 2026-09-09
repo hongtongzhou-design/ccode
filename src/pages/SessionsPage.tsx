@@ -159,7 +159,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   const setSessionsQuery = useAppStore((s) => s.setSessionsQuery);
   const sessionsScratchReq = useAppStore((s) => s.sessionsScratchReq);
   const setSessionsScratchReq = useAppStore((s) => s.setSessionsScratchReq);
-  // 任务卡：移到卡片菜单的候选列表（按项目根缓存）+ 卡片 chip 跳工作区页的一次性请求
+  // 话题：移到卡片菜单的候选列表（按项目根缓存）+ 卡片 chip 跳工作区页的一次性请求
   const taskCards = useAppStore((s) => s.taskCards);
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
   const assignSessionTask = useAppStore((s) => s.assignSessionTask);
@@ -607,7 +607,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     filter,
   ]);
 
-  // 项目筛选下按任务卡分组（对话归入卡片；无卡片的收「未归置」恒在最前，与原「无工作区会话
+  // 项目筛选下按话题分组（对话归入卡片；无卡片的收「未归置」恒在最前，与原「无工作区会话
   // 排最前」同口径）：组内保持时间降序，组按各自最近活跃排序；其余筛选保持纯时间序（跨项目分组无意义）。
   // header 只挂在每组首条上，渲染时据此插组名小标题。
   const displayList = useMemo(() => {
@@ -635,12 +635,12 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     setTreeOpen(keepOpen);
   }
 
-  // 项目筛选激活时预取该项目任务卡（「移到卡片…」菜单候选；非项目目录后端返回空表）
+  // 项目筛选激活时预取该项目话题（「移到卡片…」菜单候选；非项目目录后端返回空表）
   const projectFilterPath = projectScopePath(filter);
   useEffect(() => {
     if (!projectFilterPath) return;
     void loadTaskCards(projectFilterPath).catch((reason) => {
-      setError(`任务卡加载失败：${String(reason)}`);
+      setError(`话题加载失败：${String(reason)}`);
     });
   }, [projectFilterPath, loadTaskCards]);
 
@@ -2158,11 +2158,6 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         ⇄ 接自 {agentLabel(s.handoffFromAgent)}
                       </span>
                     )}
-                    {s.tokenUsage && (
-                      <span className="shrink-0 font-mono">
-                        {fmtTokens(s.tokenUsage)}
-                      </span>
-                    )}
                     {s.tags.slice(0, 2).map((tag) => (
                       <span
                         key={tag}
@@ -2299,12 +2294,13 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               )}
               <span
                 className="shrink-0 text-xs text-l3"
-                title={absTime(selected.updatedAt)}
+                title={
+                  selected.tokenUsage
+                    ? `${absTime(selected.updatedAt)} · ${fmtTokens(selected.tokenUsage)}`
+                    : absTime(selected.updatedAt)
+                }
               >
                 {agentLabel(selected.agent)} · {relTime(selected.updatedAt)}
-                {selected.tokenUsage
-                  ? ` · ${fmtTokens(selected.tokenUsage)}`
-                  : ""}
               </span>
               <span className="ml-auto flex shrink-0 items-center">
                 <button
@@ -2707,7 +2703,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                 {projectScopePath(filter) != null && (
                   <button
                     className={menuItem}
-                    title="把该对话归入本项目的一张任务卡"
+                    title="把该对话归入本项目的一张话题"
                     onClick={() => {
                       setMenu(null);
                       setTaskPickerFor(menu.session);
@@ -2817,7 +2813,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             </p>
             {(taskCards[scopePath] ?? []).length === 0 ? (
               <p className="px-3 py-1.5 text-sm text-l4">
-                该项目还没有任务卡，可在项目页新建。
+                该项目还没有话题，可在项目页新建。
               </p>
             ) : (
               (taskCards[scopePath] ?? []).map((c) => (

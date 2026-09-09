@@ -700,7 +700,7 @@ export default function StepFlow({
               显式取消后检测命中也照显示：进度感不随勾态消失（与 HumanTasksList 同文案） */}
           {node.kind === "human" && node.human!.hitCount != null && (
             <span
-              className={`shrink-0 text-micro ${node.done ? "text-done" : "text-l4"}`}
+              className="shrink-0 text-micro text-l4"
             >
               已见到 {node.human!.hitCount} 个文件
               {node.human!.expectedCount != null
@@ -719,7 +719,7 @@ export default function StepFlow({
         )}
         {node.kind === "input" && onSetLitSource && (
           // pl-9 与其余内容区（hint/agentContent）对齐到步骤名左缘，不顶到序号
-          <div className="ml-9 rounded-md bg-strip px-2 py-1.5">
+          <div className="ml-9">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               {LIT_SOURCES.map((o) => {
                 const on = (litSource || "search") === o.id;
@@ -1117,7 +1117,7 @@ export default function StepFlow({
           </ol>
         </>
       )}
-      {note && <p className="mt-1 pl-1 text-micro text-ok-text">{note}</p>}
+      {note && <p className="mt-1 pl-1 text-micro text-l3">{note}</p>}
       {registerOffer && (
         <RegisterOfferRow
           destRels={registerOffer.destRels}

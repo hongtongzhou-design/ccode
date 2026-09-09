@@ -1878,6 +1878,51 @@ pub(crate) fn acceptance_log_path(root: &Path) -> PathBuf {
     root.join(".ccode").join("acceptance-log.jsonl")
 }
 
+// ===== 项目长期知识（memory.md，审计 §8 Memory Proposal 的最小闭环） =====
+// 只进人确认过的内容：验收时人勾选「沉淀」才把意见写进来；Agent 自称的结论不进。
+// 上下文包注入这份文件 = 已确认知识；未确认的讨论留在会话里。
+
+pub(crate) fn memory_path(root: &Path) -> PathBuf {
+    root.join(".ccode").join("memory.md")
+}
+
+pub(crate) fn read_memory_at(root: &Path) -> String {
+    fs::read_to_string(memory_path(root)).unwrap_or_default()
+}
+
+/// 追加一条已确认知识（带时间与出处目标）；新建文件时带头部的简短说明。
+pub(crate) fn append_project_memory_at(
+    root: &Path,
+    goal_name: &str,
+    text: &str,
+) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+    let dir = root.join(".ccode");
+    fs::create_dir_all(&dir).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
+    let path = memory_path(root);
+    let mut body = read_memory_at(root);
+    if body.is_empty() {
+        body = "# 项目长期知识\n\n# 这里只放人确认过的结论与决定（验收时沉淀）。\n\n".to_string();
+    }
+    let entry = format!(
+        "- [{}]（目标「{}」）{}\n",
+        crate::sessions::now_iso(),
+        goal_name.trim(),
+        text
+    );
+    let next = format!("{}{}", body, if body.ends_with('\n') { "" } else { "\n" }) + &entry;
+    crate::profiles::atomic_write(&path, &next)
+}
+
+#[tauri::command]
+pub fn read_project_memory(path: String) -> Result<String, String> {
+    let root = PathBuf::from(crate::sessions::expand_tilde(&path));
+    Ok(read_memory_at(&root))
+}
+
 pub(crate) fn read_acceptance_log_at(root: &Path) -> Vec<AcceptanceLogEntry> {
     let Ok(text) = fs::read_to_string(acceptance_log_path(root)) else {
         return Vec::new();
@@ -4726,6 +4771,20 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         assert_eq!(status.accepted[0].name, "数据清洗");
         assert_eq!(status.accepted[1].name, "研究综述");
         assert_eq!(status.accepted[1].note, "已补");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn project_memory_appends_only_confirmed_entries() {
+        let dir = temp_dir("project-memory");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(read_memory_at(&root), "");
+        append_project_memory_at(&root, "综述", "结论A：X 显著优于 Y").unwrap();
+        append_project_memory_at(&root, "综述", "").unwrap(); // 空意见不沉淀
+        let text = read_memory_at(&root);
+        assert!(text.contains("项目长期知识"));
+        assert_eq!(text.matches("结论A").count(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

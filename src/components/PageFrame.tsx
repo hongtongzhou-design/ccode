@@ -1,5 +1,7 @@
 import type { MouseEvent, ReactNode } from "react";
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { ChevronDown } from "lucide-react";
 import { HoverTip, useHoverTip } from "./HoverTip";
 
 const WIDTHS = {
@@ -90,6 +92,124 @@ export const compactFieldClass =
 /** 表单输入框：模态与内联表单统一（canvas 底 + field 边） */
 export const fieldClass =
   "w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+
+/** 浮层/卡片上的输入：跟表面同底，避免 canvas 在 raised 上挖出一块黑。 */
+export const surfaceFieldClass =
+  "w-full rounded-md border border-field bg-strip px-2 py-1.5 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4";
+
+export function MenuSelect({
+  value,
+  onChange,
+  options,
+  placeholder,
+  disabled,
+  "aria-label": ariaLabel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string; disabled?: boolean }[];
+  placeholder?: string;
+  disabled?: boolean;
+  "aria-label"?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLUListElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(
+    null,
+  );
+  const current = options.find((item) => item.value === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
+    };
+    place();
+    const onDoc = (event: globalThis.MouseEvent) => {
+      const t = event.target as Node;
+      if (wrapRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={ariaLabel}
+        className={`${surfaceFieldClass} flex h-8 items-center justify-between gap-2 py-0 text-left ${
+          current ? "text-l1" : "text-l4"
+        }`}
+        onClick={() => setOpen((next) => !next)}
+      >
+        <span className="min-w-0 truncate">
+          {current?.label ?? placeholder ?? "请选择"}
+        </span>
+        <ChevronDown
+          size={14}
+          strokeWidth={1.8}
+          className="shrink-0 text-l4"
+          aria-hidden="true"
+        />
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <ul
+            ref={menuRef}
+            role="listbox"
+            style={{ top: pos.top, left: pos.left, width: pos.width }}
+            className="ccode-float-surface fixed z-50 max-h-64 overflow-auto py-1"
+          >
+            {options.map((item) => {
+              const selected = item.value === value;
+              return (
+                <li key={item.value}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    disabled={item.disabled}
+                    className={`flex h-8 w-full items-center px-2.5 text-left text-sm disabled:opacity-40 ${
+                      selected
+                        ? "bg-hover text-l1"
+                        : "text-l2 hover:bg-hover hover:text-l1"
+                    }`}
+                    onClick={() => {
+                      onChange(item.value);
+                      setOpen(false);
+                    }}
+                  >
+                    <span className="truncate">{item.label}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>,
+          document.body,
+        )}
+    </div>
+  );
+}
 
 /** 搜索输入框：inset 底色分层（无描边，聚焦时底色加深一档），与表单输入区分开 */
 export const searchFieldClass =
@@ -342,7 +462,7 @@ export function Checkbox({
         className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border text-micro ${align === "start" ? "mt-0.5" : ""} ${
           checked
             ? "border-cta-bd bg-cta text-cta-text"
-            : "border-field bg-canvas text-transparent"
+            : "border-field bg-transparent text-transparent"
         }`}
       >
         {checked ? "✓" : ""}

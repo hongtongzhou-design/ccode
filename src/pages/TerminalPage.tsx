@@ -119,7 +119,11 @@ import {
 } from "../terminal-tab-persistence";
 import { clampTabDragDx, tabDragTarget } from "../tab-drag";
 import { directoryUnavailableMessage } from "../terminal-cwd";
-import { welcomeCwdActionLabel } from "../terminal-welcome";
+import {
+  idleTabTitle,
+  isTerminalIdle,
+  welcomeCwdActionLabel,
+} from "../terminal-welcome";
 import type { RunOverviewInput } from "../run-overview";
 import type {
   ChatMessageDto,
@@ -1138,12 +1142,13 @@ const TerminalView = memo(function TerminalView({
     );
   }
 
+  const [activePtyId, setActivePtyId] = useState<string | null>(null);
   // 向标签条上报标题/运行状态；值没变就不惊动父组件
   const title =
     initialTitle?.trim() ||
+    idleTabTitle(cwd, isTerminalIdle({ ptyId: activePtyId })) ||
     (cwd ? basename(cwd) : "") ||
     "终端";
-  const [activePtyId, setActivePtyId] = useState<string | null>(null);
   // 真实 cwd 跟随：进程存活期间每 4s 问一次后端 PTY 进程的真实 cwd——shell 内 cd 后
   // 文件树/git 面板也能跟上（此前只认启动栏路径，切标签「不跟随」的根源之一）。
   // 未启动时的目录编辑：空态卡「将在 … 启动」点选文件夹；底栏胶囊可键入路径（启动前生效，与轮询不冲突）
@@ -3086,7 +3091,7 @@ const TerminalView = memo(function TerminalView({
             身份（agent / 配置 / 模型）只活在启动栏，不在卡上再说一遍。
             xterm 保持挂载在底层（移树会杀 PTY 语义）；浮层壳 pointer-events-none 不挡画布 */}
         {welcomeVisible && (
-          <div className="terminal-welcome-dots pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
             {/* 内容井 + 极浅勾边（v3.213：去掉玻璃拟态和大投影——浅色空画布上
                 blur 无物可透，shadow-lg 像登录卡）。勾边仍用 l1 12% 混合。
                 无顶部图标盒、无说明小字；卡片 w-80，主按钮 min-w-40 自适应。 */}
@@ -3147,7 +3152,7 @@ const TerminalView = memo(function TerminalView({
                   onClick={() => setPage("profiles")}
                   className="inline-flex h-9 min-w-40 cursor-pointer items-center justify-center rounded-md border border-cta-bd bg-cta px-5 text-sm text-cta-text hover:brightness-110"
                 >
-                  去配置页创建
+                  去连接页
                 </button>
               ) : (
                 <button
@@ -3169,12 +3174,9 @@ const TerminalView = memo(function TerminalView({
               <button
                 type="button"
                 onClick={() => void openShell()}
-                className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-field bg-inset px-3 py-1.5 text-xs text-l3 transition-colors hover:border-l4 hover:bg-hover hover:text-l1 active:brightness-95"
+                className="flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs text-l4 hover:bg-hover hover:text-l2"
               >
-                <span aria-hidden="true" className="font-mono">
-                  &gt;_
-                </span>
-                打开普通 Shell 终端
+                打开普通 Shell
               </button>
             </div>
           </div>

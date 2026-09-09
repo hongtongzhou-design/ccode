@@ -13,7 +13,7 @@ import {
 import { normalizeWorkMode } from "../work-mode";
 import type { DirEntryDto } from "./FileTree";
 import type { ProjectConfigDto, ProjectConfigReadDto, SkillDto } from "../types";
-import { Checkbox, fieldClass, FoldMark } from "./PageFrame";
+import { Checkbox, FoldMark, MenuSelect, surfaceFieldClass } from "./PageFrame";
 
 const RULE_PLACEHOLDER: Record<string, string> = {
   research: "引用格式：APA\n输出中文",
@@ -68,10 +68,8 @@ export default function ProjectRulesPanel({
       );
       nextProtected = read.config.protectedPaths ?? [];
       setProtectedPaths(nextProtected);
-      if (nextProtected.length > 0) setProtectOpen(true);
       const projectSkills = read.config.skills ?? [];
       setSkillNames(projectSkills);
-      if (projectSkills.length > 0) setSkillsOpen(true);
       setError(null);
     } catch (reason) {
       const message = `读取项目规则失败：${String(reason)}`;
@@ -236,7 +234,7 @@ export default function ProjectRulesPanel({
         <div className="mt-2 space-y-2">
           <textarea
             ref={rulesRef}
-            className={`${fieldClass} resize-none overflow-hidden leading-6`}
+            className={`${surfaceFieldClass} resize-none overflow-hidden leading-6`}
             value={rulesDraft}
             onChange={(event) => setRulesDraft(event.target.value)}
             onBlur={() => void save(rulesDraft, protectedPaths, skillNames)}
@@ -370,23 +368,22 @@ export default function ProjectRulesPanel({
                   }
                   if (addable.length === 0) return null;
                   return (
-                    <select
-                      className={`${fieldClass} mt-1.5 text-xs`}
-                      value=""
-                      onChange={(event) => {
-                        const name = event.target.value;
-                        if (name) toggleSkill(name, true);
-                      }}
-                      aria-label="从技能库添加"
-                    >
-                      <option value="">＋ 从技能库添加…</option>
-                      {addable.map((skill) => (
-                        <option key={skill.id} value={skill.name}>
-                          {skill.name}
-                          {skill.description ? `（${skill.description}）` : ""}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="mt-1.5">
+                      <MenuSelect
+                        aria-label="从技能库添加"
+                        value=""
+                        placeholder="＋ 从技能库添加…"
+                        onChange={(name) => {
+                          if (name) toggleSkill(name, true);
+                        }}
+                        options={addable.map((skill) => ({
+                          value: skill.name,
+                          label: skill.description
+                            ? `${skill.name}（${skill.description}）`
+                            : skill.name,
+                        }))}
+                      />
+                    </div>
                   );
                 })()}
               </>

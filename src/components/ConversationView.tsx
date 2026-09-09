@@ -2,8 +2,12 @@ import { useLayoutEffect, useRef, useState } from "react";
 import type { BlockDto, ChatMessageDto } from "../types";
 import { FoldMark } from "./PageFrame";
 import ChatMarkdown, { ChatImageCard } from "./ChatMarkdown";
-import { fmtTokens } from "./TerminalStatusBar";
 import { splitImagePaths } from "../chat-image";
+import {
+  groupConversationSegments,
+  segmentContainsIndex,
+  toolCallCount,
+} from "../conversation-tools";
 
 /** 文本块超过该长度先截断，点「展开全部」再看完整内容 */
 const TEXT_CAP = 4000;
@@ -328,7 +332,7 @@ export default function ConversationView({
     return runs;
   }
 
-  /** 工具调用折叠行：「▸ N 次工具调用」，展开后保留原有逐块渲染 */
+  /** 工具调用折叠行：「执行记录 · N 次工具调用」，展开后保留原有逐块渲染 */
   function renderToolRun(
     run: Extract<Run, { tool: true }>,
     isUser: boolean,
@@ -336,9 +340,7 @@ export default function ConversationView({
     const isOpen = expanded.has(run.key);
     // 计数只算 tool_use：tool_result 与调用并入同一条消息（如 codex 解析），
     // 直接数块数会把一次调用显示成两次
-    const callCount =
-      run.blocks.filter((b) => b.kind === "tool_use").length ||
-      run.blocks.length;
+    const callCount = toolCallCount(run.blocks);
     const names = [
       ...new Set(
         run.blocks
@@ -355,7 +357,7 @@ export default function ConversationView({
           className="flex h-7 w-full items-center gap-1.5 rounded-md bg-inset/65 px-2 text-xs text-l3 hover:bg-raised hover:text-l1"
         >
           <FoldMark open={isOpen} />
-          <span className="shrink-0">{callCount} 次工具调用</span>
+          <span className="shrink-0">执行记录 · {callCount} 次工具调用</span>
           {names.length > 0 && (
             <span className="min-w-0 truncate text-l4">
               {names.slice(0, 3).join("、")}
@@ -384,7 +386,26 @@ export default function ConversationView({
 
   return (
     <>
-      {messages.map((m, mi) => {
+      {groupConversationSegments(messages).map((seg) => {
+        if (seg.kind === "tool-run") {
+          const hit = segmentContainsIndex(seg, focusIndex);
+          const key = `tool:${seg.startIndex}:${seg.messages.length}`;
+          return (
+            <div
+              key={key}
+              ref={hit ? hitRef : undefined}
+              data-search-hit={hit ? "1" : undefined}
+              className={`mb-3 max-w-full ${hit ? "rounded-md bg-seg-sel px-2 py-1" : ""}`}
+            >
+              {renderToolRun(
+                { tool: true, blocks: seg.blocks, key },
+                false,
+              )}
+            </div>
+          );
+        }
+        const m = seg.message;
+        const mi = seg.index;
         const mk = msgKey(m, mi);
         const hit = mi === focusIndex;
         return m.role === "user" ? (
@@ -404,7 +425,6 @@ export default function ConversationView({
             </div>
           </div>
         ) : (
-          // AI 回复：直接排版，无气泡容器；有逐条 usage 的 agent 在消息末尾标 token
           <div
             key={mk}
             ref={hit ? hitRef : undefined}
@@ -412,14 +432,6 @@ export default function ConversationView({
             className={`mb-3 max-w-full ${hit ? "rounded-md bg-seg-sel px-2 py-1" : ""}`}
           >
             {renderRuns(m, mk, false, hit)}
-            {m.usage && (m.usage.input > 0 || m.usage.output > 0) && (
-              <div
-                className="mt-0.5 text-micro text-l4"
-                title="本条消息的 token 用量（输入↑ 输出↓）"
-              >
-                {fmtTokens(m.usage.input)}↑ {fmtTokens(m.usage.output)}↓
-              </div>
-            )}
           </div>
         );
       })}

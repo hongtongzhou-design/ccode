@@ -31,6 +31,19 @@ export function sessionIsInterrupted(text: string | null | undefined): boolean {
   return interruptedRe().test(text);
 }
 
+/** 展示用标题去掉 markdown 装饰，不写回源文件。 */
+export function stripTitleMarkdown(text: string): string {
+  let t = text.trim();
+  t = t.replace(/^#{1,6}\s+/, "");
+  t = t.replace(/^>\s+/, "");
+  t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  t = t.replace(/\*\*(.+?)\*\*/g, "$1");
+  t = t.replace(/__(.+?)__/g, "$1");
+  t = t.replace(/`([^`]+)`/g, "$1");
+  t = t.replace(/(^|[^\w*])\*(?!\s)([^*]+?)(?<!\s)\*(?=[^\w*]|$)/g, "$1$2");
+  return t.replace(/\s+/g, " ").trim();
+}
+
 function clampTitle(text: string): string {
   const chars = [...text];
   if (chars.length === 0) return "";
@@ -79,6 +92,8 @@ export function tidySessionText(raw: string | null | undefined): string | null {
   text = clause || text;
   const stripped = text.replace(LEADING_PROMPT_RE, "").trim();
   if ([...stripped].length >= 4) text = stripped;
+  text = stripTitleMarkdown(text);
+  if (!text || CLI_RESUME_RE.test(text) || isUnnamedRaw(text)) return null;
   text = clampTitle(text);
   return text || null;
 }

@@ -53,9 +53,8 @@ import {
 import { buildFolderTree } from "../folder-groups";
 import FolderGroupedList, { useFolderChrome } from "./FolderGroupedList";
 
-import ProjectSessionsSection, {
-  sessionsAsideOpenClass,
-} from "./ProjectSessionsSection";
+import ProjectSessionsSection from "./ProjectSessionsSection";
+import { useProjectSessionsOpen } from "../project-sessions-layout";
 import ScheduleSection from "./ScheduleSection";
 import type { OfficeDocDto, ProjectDto } from "../types";
 
@@ -151,7 +150,7 @@ export default function OfficeProjectView({
   const [recentMap, setRecentMap] = useState<Record<string, string>>(() =>
     loadRecent(repoPath),
   );
-  const [sessionsOpen, setSessionsOpen] = useState(true);
+  const [sessionsOpen, setSessionsOpen] = useProjectSessionsOpen();
   const folders = useFolderChrome(`office:${repoPath}`);
 
   function loadDocs() {
@@ -308,8 +307,12 @@ export default function OfficeProjectView({
   }
 
   return (
-    <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-0">
-      <div className={`min-w-0 flex-1 space-y-5 ${sessionsOpen ? "lg:pr-6" : ""}`}>
+    <div
+      className={`flex flex-row items-start ccode-project-work-well${
+        sessionsOpen ? " ccode-project-sessions-open" : ""
+      }`}
+    >
+      <div className="ccode-project-work-main min-w-0 flex-1 space-y-5">
       <section>
         <div className="flex min-w-0 items-start gap-2">
           <div className="min-w-0 flex-1">
@@ -475,7 +478,7 @@ export default function OfficeProjectView({
 
         {sessionsOpen && (
         <aside
-          className={`${sessionsAsideOpenClass} ccode-project-sessions-rail ${
+          className={`ccode-project-sessions-rail ${
             sessionsOpen ? "ccode-project-sessions-rail-open" : ""
           }`}
         >
