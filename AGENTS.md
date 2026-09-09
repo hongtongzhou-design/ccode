@@ -33,6 +33,7 @@ Mesa 是一个「AI 科研工作台」桌面应用（Tauri v2 + React/TS）—�
 - 应用展示名 **Mesa**（内部身份仍 `ccode`，见上）；九个 agent 全部支持（CodeBuddy Code、Cursor CLI、Grok Build 见 matrix §7/§8/§9；grok：MCP 只读不分发、技能强制 copy；「设为全局默认」2026-09-01 起支持，写 ~/.grok/config.toml）
 - 配置切换**双模式**：默认启动注入环境变量（零污染），另提供「设为全局默认」（写配置文件，先备份）
 - 终端为内嵌形态，且**与结构化会话视图联动**（同一会话双栏观看）
+- **会话标题**（2026-09-09）：展示格式 `MMDD|类型|主题`；日期用会话创建日、上海时区。类型闭集功能/设计/修复/优化/发布/探索/文档/研究。开头用第一条真正的用户问题写临时标题；Agent 退出后再用用户原话（首条/纠正/定题）校正，不送助手回复。写入 `custom_title` 且 `title_source=auto`，不写回 CLI 源文件。人手改过的标题（`title_source=user`）不覆盖；内容不足或无创建日保持原标题。内部无头会话不起名。配置复用会话摘要 profile
 - 项目列表**从各 agent 历史会话自动聚合并分类**，辅以手动添加
 - token/费用统计随 P3 顺带做，不提前
 - **三平台（macOS/Windows/Linux）同步**支持，功能不得以平台为由裁剪
@@ -152,6 +153,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   pipeline-start.ts          # 一键开步共享链路（renderTaskMd/gatherTaskMdExtras 单一出处，弹层预览与落盘共用）；
                              # 工作区→终端交接单一出处 buildWorkspaceTerminalRequest（reuseKey 找回同工作区标签 +
                              # 无 prompt 时 resume 最近会话）
+  goal-run.ts                # 普通目标/「验收后写入」共享启动链（审计 §4.10）：prepareGoalRun 先拼上下文
+                             # （packGoal/goalLine 可覆盖）再 task_prepare_run（contextText 冻结快照）；
+                             # goalRunTerminalFields 出终端请求公共字段；页面只补 model/预览等自有字段
   workspace-resume.ts        # 「去终端」resume 挑选纯逻辑（workspace 名 + 仓库路径匹配，排除归档/内部/live，
                              # tests/workspace-resume.test.ts）
   presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
@@ -386,6 +390,8 @@ src-tauri/src/
                              #   （api_backend/context_window/name；段键 = 目录模型 id 自动加引号）——api_backend
                              #   在 Mesa 侧的唯一通道（overlay 白名单不放行 [model.*]）
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
+                             # 稳定项目身份（档案卡顶层 `id` 跟随文件夹；register_at 同一 id 新路径 = 移动重连
+                             # 改路径不建新行；write_config_at 保证卡片带 id；list 回填旧行）、
                              # update_step_skills（步骤推荐技能读-改-原子写）、append_pipeline_steps（从模板追加：重名跳过、全跳过不落盘、
                              # 追加成功自动清 pipeline_opt_out）、set_pipeline_opt_out（「不使用研究流程」显式标记读-改-原子写）、
                              # 任务书草稿（read_task_draft/append_step_draft，
@@ -393,6 +399,8 @@ src-tauri/src/
                              # 任务卡 kind（idea/draft，旧卡按 step 推断）、fuse_card_into_draft（想法卡会话 ×
                              # 当前步骤草稿 → AI 融合稿，出站 redact_and_cap 不写盘）+ write_task_draft（确认后整份落盘）、
                              # update_lit_watch_filter（雷达筛选读-改-原子写，全空归一 None）、
+                             # 验收接受账本（.ccode/acceptance-log.jsonl append-only，按 run_id 去重幂等；
+                             # project-status.json 只是其「最近摘要」投影；目标删除不动账本与摘要）、
                              # 项目移除三档（移除注册 / purge_project_traces 清除 Mesa 痕迹保留文件夹 / delete_project_dir）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用；
                              # pty_report_terminal_colors = Windows 底色告知（win32-input-mode 记录逐条投递，
@@ -411,7 +419,8 @@ src-tauri/src/
                              #   kimi 新版 wd_<basename>_<sha256[:12]> + session_index.jsonl；grok URL 编码 cwd
   skills.rs                  # 技能库（§6.13）：SSOT 库 + symlink/copy 分发（cursor/grok 固定 copy）、四路导入、ZIP 导出、卸载备份、
                              # 漂移检测 resync、create_skill/update_skill_content；apps 表是创建时快照，
-                             #   list 时现算补齐注册表新 agent 的缺键（否则一键应用永远漏新 agent，不写盘）；内置技能种子（seed_builtin_skills：
+                             #   list 时现算补齐注册表新 agent 的缺键（否则一键应用永远漏新 agent，不写盘）；
+                             #   contentDigest = 库目录清单哈希（与漂移检测同口径），项目上下文/执行快照按它记技能版本；内置技能种子（seed_builtin_skills：
                              # include_str! 内嵌 src-tauri/resources/skills/ 18 个技能，启动幂等播种，不覆盖/不复活用户改动；
                              #   删除内置技能先落逐技能墓碑 .builtin-skill-tombstones（删除失败也不留「删了没记」），
                              #   种子版本升级补播跳过墓碑项——墓碑机制前的老删除靠 skill-backups 同名备份回填墓碑）、
@@ -540,7 +549,15 @@ src-tauri/src/
   handoff.rs                 # 接力（§11.3 机制四）：简报生成（脱敏+64KB）、提炼接力（build_session_digest AI 蒸馏全会话 +
                              # finalize_digest_brief 初稿写回）、handoff_links 接力链登记/固化
   runs.rs                    # 一次干活身份（app.db runs 表）：交互 pty_spawn 必有 id，无头 internal；
-                             # 关标签不删行；收件箱 action.run 可恢复；登录标签不建行
+                             # 关标签不删行；收件箱 action.run 可恢复；登录标签不建行；
+                             # Run 可以没有 Goal（2026-09-09，§4.7）：scratch/reader/办公文件闲聊
+                             # task_id 落 NULL，不再 ensure_task_at 强制登记；自动登记只留
+                             # pipeline_step/coding_lane/watch（run_needs_task）；
+                             # 普通目标开工写评审基线（写失败即开工失败）、收尾触发冻结、
+                             # 预览/采纳绑定冻结快照（失败清理只删本次新建目录 cleanup_failed_prepare）
+  task_review.rs             # 普通目标评审证据（规格 conventions/review-freeze.md）：开工基线哈希、
+                             # 收尾冻结 payload 副本（拒绝改写）、采纳三向判定（项目现读 vs 基线 vs 冻结内容，
+                             # 删除永不写回、>64MB 不自动采纳）；纯文件事实不碰数据库，编排在 runs.rs
   custom_runtime.rs          # 自定义 Runtime：用户登记命令，直接在已校验的隔离目录中运行；相对路径拒写；无密钥/会话/MCP；不支持恢复
   coding.rs                  # 编程项目 git 原语：worktree list / 从基准或已有本地·远程分支建树（~/ccode/worktrees）、
                              # origin 身份 + 相对上游 behind、fetch / pull --ff-only / push、合并进基准、
@@ -589,7 +606,7 @@ src-tauri/src/
   `NO_COLOR` 必须 `env_remove`；`TERM=xterm-256color`/`COLORTERM=truecolor`/`TERM_PROGRAM=Mesa` 必须显式设置。
 - **会话文本出站前必须在 Rust 层脱敏**：标题/摘要、结构化回放、AI 摘要、Markdown 导出均不得把已保存密钥或常见密钥前缀
   送到 React；只作用于 DTO/导出副本，不得回写会话源文件；前端遮盖不是安全边界。
-- **gitignored 科研产物写项目根**：文献 PDF、清洗后数据、渲染 PDF/docx 不进 git，必须落在项目根 `papers/`、产物目录或 `output/`，禁止只写在工作区。人工导入 `papers/` 与 PDF 强制项目根；合并成功后把工作区未跟踪的这三类目录拷到主仓（已有不覆盖）。TASK.md 必须给出项目根绝对路径。
+- **gitignored 科研产物最终落点是项目根，但分两类走法**（2026-09-09 口径 C）：文献 PDF 与人工导入属**原始资料**，直写项目根 `papers/`；清洗后数据、实验结果、渲染成品等 **Agent 派生产物**写工作区产物目录或 `output/`（不进 git），评审合并时由 `copy_untracked_deliverables` 带回主仓（同名冲突点名交人、保护路径跳过）。派生产物直写项目根 = 未验收产物。TASK.md 必须给出项目根绝对路径（读提货单、写 papers/）。
 - **Codex 全局写入不碰 `~/.codex/auth.json`**（v3.249 / v3.250）：「设为全局」与「注册到客户端」都只写 `config.toml` 的 provider 块，认证用 `experimental_bearer_token`（ChatGPT 自带 Codex 认这个字段）。禁止写 `http_headers`（MCP 字段，写在 provider 上客户端加载失败报 Model provider not found）。禁止退回 `requires_openai_auth=true` + 改 auth.json。
 - **各 CLI 会话/配置目录一律只读**；例外仅限用户显式操作（设为全局默认、hooks 精确注意力开关（七家，见 hooks.rs）、会话删除、工作树文件删除、**会话导入**——
   工作树文件删除走系统回收站（trash crate）可反悔；五类均有备份/白名单防护口径，见 `docs/conventions/safety.md`）。
@@ -624,6 +641,7 @@ src-tauri/src/
 | 步骤工作面板 | `docs/conventions/step-panel.md` | **新增步骤/模板前必读**：七条硬规则（顺序即语义、空节点不出现、同一事实只说一次、孤立按钮、主路径唯一、显式决策契约门控、角色标注）、问题该在什么时刻与层级出现（项目层/决策项/按需问/种子/人工事项五选一）、文案与术语、新增模板检查清单 |
 | 主题与设计系统 | `docs/conventions/design-system.md` | 主题令牌、字体栈、线条语言、控件密度、页面框架、对话页三栏、步进器规格、已否决设计 |
 | 网关与绑定（配置模型层） | `docs/conventions/profiles.md` | **改配置/注入/设为全局/模型能力/托盘前必读（已落地）**：网关×绑定拆层、binding id 复用、provider 派生名、relay 缓存键、求交器、体检与通道表不对称、迁移合并 |
+| 普通目标评审冻结 | `docs/conventions/review-freeze.md` | **改普通目标开工/收尾/评审/采纳前必读（2026-09-09 落地）**：开工基线哈希、收尾冻结 payload、采纳三向判定与删除/大文件/旧 Run 口径 |
 
 ## 路线图（见 docs/architecture.md §11 演进线）
 
@@ -657,6 +675,22 @@ src-tauri/src/
 
 **当前待办**：
 
+- **架构审计基线（2026-09-09）**：`docs/audits/architecture-audit-2026-09-09.md` 记录了
+  「执行/结果/验收/项目状态未分离」十大问题清单。**P0 全部落地**：§4.3 复用目录误删修复、
+  §4.2 评审冻结（开工基线 + 收尾冻结 + 采纳三向判定，`docs/conventions/review-freeze.md`）、
+  §4.5 接受记录长期化（`.ccode/acceptance-log.jsonl` 账本）、§4.1 写入政策统一为口径 C
+  （派生产物写工作区、评审合并带回主仓、冲突点名；文献 PDF/人工导入直写项目根；编程合并补
+  protected_paths 检查，见 pipeline.md「合并带回」）。P1 已推进：§4.4 验收入口与进程退出状态解绑
+  （冻结证据存在即可审可采纳，失败/停止 Run 有可审成果时目标提升待验收）；§4.7 前半
+  「Run 可以没有 Goal」（scratch/reader/办公闲聊不再强制登记 Task，task_id 可空）；
+  §4.8 普通目标侧有效上下文快照（`context.json` 冻结实际下发文本，评审可核对）；
+  §4.10 普通目标启动链收口进 `src/goal-run.ts`（页面只补自有终端字段）；
+  §4.9 前半（`SkillDto.contentDigest` + 档案卡 `skills` 名单 + 规则面板「项目技能」勾选，
+  版本随快照记录）；§4.6 首期稳定 ProjectId（档案卡顶层 `id` 跟随文件夹，移动后重新添加即认回，
+  路径降为当前位置；tasks/runs/会话等按路径的关联迁移留下一期）。
+  P1 剩余（Result Readiness 独立字段、Memory Proposal、TaskCard 命名分离、
+  目标删除即归档语义、§4.6 关联迁移、§4.9 后半定时通用采纳契约等）方案未拍板，动手前先出设计稿进
+  `docs/architecture.md` §10，不把审计建议当已决架构实施。
 - P0 收尾当前批次：批次 A（文献雷达应用层，v3.95）、批次 B（沉浸阅读区，v3.96）与批次 E（LaTeX 支持，v3.97）
   均已落地；后续只保留文档/回归走查与发布动作，不把历史批次重复列为功能未完成。
   批次顺序为用户拍板：E 先行，批次 C（实验数据分析）/D（表征分析）转待办；场景 4（agent 辅助做图）不做独立产品能力，改由按需挂载的 origin-plot 技能承接、
