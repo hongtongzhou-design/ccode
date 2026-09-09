@@ -138,6 +138,28 @@ test("composeLaunchPrompt keeps pack and user text apart", () => {
   assert.equal(composeLaunchPrompt("PACK", "hello"), "PACK\n\n----\n\nhello");
 });
 
+test("pack lists project skills with content version and contract", () => {
+  const pack = renderProjectContextPack({
+    name: "数据分析",
+    path: "/tmp/p",
+    workMode: "research",
+    topLevel: [],
+    skills: [
+      {
+        name: "data-clean",
+        description: "数据清洗规范",
+        digest: "a1b2c3d4e5f6",
+        inputs: ["data/"],
+        outputs: ["artifacts/"],
+      },
+      { name: "ghost-skill", missing: true },
+    ],
+  });
+  assert.match(pack, /项目技能（开工时记录内容版本）/);
+  assert.match(pack, /data-clean（版本 a1b2c3d4）：数据清洗规范（读取 data\/；产出 artifacts\/）/);
+  assert.match(pack, /ghost-skill（未安装，可在技能页新建或导入）/);
+});
+
 test("coding rules warn against writing the primary tree", () => {
   assert.match(defaultContextRules("coding").join("\n"), /主仓/);
   assert.match(projectHomeHint("office").join("\n"), /文档风格/);

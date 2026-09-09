@@ -8,7 +8,9 @@ import {
   type RunDto,
   type RunEventDto,
   type TaskDto,
+  type TaskContextDto,
   type TaskOutputChangeDto,
+  type TaskReviewDto,
 } from "../types";
 import {
   Checkbox,
@@ -32,7 +34,6 @@ import { confirmDialog } from "./ConfirmDialog";
 import {
   canSaveDeclaredGoal,
   canSubmitDeclaredTask,
-  continueGoalPrompt,
   declaredTaskKindsForMode,
   GOAL_BUCKET_LABEL,
   GOAL_BUCKET_ORDER,
@@ -58,8 +59,7 @@ import {
 import type { DirEntryDto } from "./FileTree";
 import FileTypeMark from "./FileTypeMark";
 import OfficePreviewModal from "./OfficePreviewModal";
-import { composeLaunchPrompt } from "../project-context";
-import { loadProjectContextPack } from "../project-context-load";
+import { goalRunTerminalFields, prepareGoalRun } from "../goal-run";
 import ProjectRulesPanel from "./ProjectRulesPanel";
 import {
   goalReviewCopy,
@@ -235,39 +235,23 @@ export default function ProjectUserTasksView({
     }
     setStartingId(task.id);
     try {
-      const run = await invoke<RunDto>("task_prepare_run", {
-        input: {
-          taskId: task.id,
-          agent: profile.agent,
-          profileId: profile.id,
-          reuseIsolation: opts?.reuseIsolation ?? false,
-          feedback: opts?.feedback ?? null,
-        },
-      });
-      const pack = await loadProjectContextPack({
-        name: project.name,
-        path: project.path,
+      const { run, prompt } = await prepareGoalRun({
+        projectName: project.name,
+        projectPath: project.path,
         workMode: project.workMode,
-        goal: task.description || task.name,
-        writeReview: task.reviewRequired,
+        task,
+        agent: profile.agent,
+        profileId: profile.id,
+        reuseIsolation: opts?.reuseIsolation,
         feedback: opts?.feedback,
       });
       setPendingTerminal({
-        cwd: run.isolationPath,
         extraEnv: {},
         title: task.name,
         agentId: profile.agent,
         profileId: profile.id,
         model: profile.models[0] ?? "",
-        autoStart: true,
-        permission: task.reviewRequired ? "write_tree" : "discuss",
-        initialPrompt: composeLaunchPrompt(
-          pack,
-          continueGoalPrompt(task.description?.trim() || task.name, opts?.feedback ?? ""),
-        ),
-        reuseKey: `task:${task.id}`,
-        runId: run.id,
-        taskId: task.id,
+        ...goalRunTerminalFields(task, run, prompt),
       });
       setPage("terminal");
     } catch (reason) {
@@ -280,10 +264,13 @@ export default function ProjectUserTasksView({
 
   async function deleteGoal(task: TaskDto) {
     const name = goalDisplayName(task);
-    const ok = await confirmDialog(`删除目标「${name}」？不会改项目里已验收的文件。`, {
-      danger: true,
-      confirmText: "删除",
-    });
+    const ok = await confirmDialog(
+      `删除目标「${name}」？不会改项目里已验收的文件；验收记录会保留在项目档案（.ccode）里，谁接受的、接受了哪一版仍可查。`,
+      {
+        danger: true,
+        confirmText: "删除",
+      },
+    );
     if (!ok) return;
     setDeletingId(task.id);
     try {
@@ -989,6 +976,22 @@ function ReviewOutputsModal({
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [feedback, setFeedback] = useState("");
   const [protectedPaths, setProtectedPaths] = useState<string[]>([]);
+  const [frozen, setFrozen] = useState(true);
+  const [payloadDir, setPayloadDir] = useState<string | null>(null);
+  const [contextSnapshot, setContextSnapshot] = useState<TaskContextDto | null>(null);
+
+  useEffect(() => {
+    if (!run) return;
+    let stale = false;
+    invoke<TaskContextDto | null>("task_run_context", { runId: run.id })
+      .then((value) => {
+        if (!stale) setContextSnapshot(value);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [run]);
 
   useEffect(() => {
     if (!previewPath) return;
@@ -1029,14 +1032,18 @@ function ReviewOutputsModal({
     }
     let stale = false;
     setLoading(true);
-    invoke<TaskOutputChangeDto[]>("task_output_changes", { runId: run.id })
-      .then((rows) => {
+    invoke<TaskReviewDto>("task_output_changes", { runId: run.id })
+      .then((review) => {
         if (stale) return;
-        setChanges(rows);
+        setFrozen(review.frozen);
+        setPayloadDir(review.payloadDir);
+        setChanges(review.changes);
         setSelected(
           new Set(
-            rows
-              .filter((row) => !pathIsProtected(row.path, protectedPaths))
+            review.changes
+              .filter(
+                (row) => row.kind !== "deleted" && !pathIsProtected(row.path, protectedPaths),
+              )
               .map((row) => row.path),
           ),
         );
@@ -1071,9 +1078,12 @@ function ReviewOutputsModal({
     }
   }
 
-  const selectable = changes.filter((change) => !pathIsProtected(change.path, protectedPaths));
+  const selectable = changes.filter(
+    (change) => change.kind !== "deleted" && !pathIsProtected(change.path, protectedPaths),
+  );
   const selectedCount = selected.size;
-  const previewAbs = previewPath && run ? joinRunPath(run.isolationPath, previewPath) : null;
+  const previewBase = payloadDir ?? run?.isolationPath ?? null;
+  const previewAbs = previewPath && previewBase ? joinRunPath(previewBase, previewPath) : null;
   const groups = groupReviewChanges(workMode, changes);
   const previewIndex = previewPath
     ? changes.findIndex((change) => change.path === previewPath)
@@ -1094,8 +1104,30 @@ function ReviewOutputsModal({
             <li key={line}>{line}</li>
           ))}
         </ul>
+        {!loading && run && run.status !== "completed" && (
+          <p className="ccode-well rounded-md px-2 py-1.5 text-micro text-l3">
+            这次运行未正常完成（{run.status === "stopped" ? "已停止" : "失败"}）：
+            下面是它留下的部分成果，已在收尾时冻结。请确认过程没有半途而废，再决定采纳还是写意见再出一版。
+          </p>
+        )}
+        {!loading && !frozen && (
+          <p className="ccode-well rounded-md px-2 py-1.5 text-micro text-l3">
+            这版结果没有冻结证据（旧版本生成或收尾时冻结失败）：下面按目录当前内容现算，
+            如果项目在这期间被你改过，采纳不会逐文件提醒，请先自行核对。
+          </p>
+        )}
+        {contextSnapshot && (
+          <details className="rounded-md border border-field px-2 py-1.5 text-micro text-l3">
+            <summary className="cursor-pointer select-none">
+              本次工作环境（开工时冻结，可核对这版成果基于什么材料）
+            </summary>
+            <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap text-l4">
+              {contextSnapshot.text}
+            </pre>
+          </details>
+        )}
         {loading ? (
-          <p className="text-l4">比较独立副本与项目…</p>
+          <p className="text-l4">读取这版的变更…</p>
         ) : changes.length === 0 ? (
           <p className="text-l3">{copy.empty}</p>
         ) : (
@@ -1131,7 +1163,10 @@ function ReviewOutputsModal({
                       <li key={change.path} className="flex items-center gap-2 rounded-md px-1 py-1 hover:bg-hover">
                         <Checkbox
                           checked={selected.has(change.path)}
-                          disabled={pathIsProtected(change.path, protectedPaths)}
+                          disabled={
+                            change.kind === "deleted" ||
+                            pathIsProtected(change.path, protectedPaths)
+                          }
                           onChange={(checked) => {
                             if (pathIsProtected(change.path, protectedPaths)) return;
                             const next = new Set(selected);
@@ -1141,18 +1176,29 @@ function ReviewOutputsModal({
                           }}
                         />
                         <FileTypeMark path={change.path} />
-                        <button
-                          type="button"
-                          className="min-w-0 flex-1 truncate text-left text-l2 hover:underline"
-                          onClick={() => setPreviewPath(change.path)}
-                          title={change.path}
-                        >
-                          {change.path}
-                        </button>
+                        {change.kind === "deleted" ? (
+                          <span
+                            className="min-w-0 flex-1 truncate text-l3 line-through"
+                            title={change.path}
+                          >
+                            {change.path}
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="min-w-0 flex-1 truncate text-left text-l2 hover:underline"
+                            onClick={() => setPreviewPath(change.path)}
+                            title={change.path}
+                          >
+                            {change.path}
+                          </button>
+                        )}
                         <span className="shrink-0 text-micro text-l4">
-                          {pathIsProtected(change.path, protectedPaths)
-                            ? "保持原样"
-                            : taskChangeKindLabel(change.kind)}
+                          {change.kind === "deleted"
+                            ? taskChangeKindLabel(change.kind)
+                            : pathIsProtected(change.path, protectedPaths)
+                              ? "保持原样"
+                              : taskChangeKindLabel(change.kind)}
                         </span>
                       </li>
                     ))}
@@ -1204,10 +1250,10 @@ function ReviewOutputsModal({
         </div>
       </div>
     </Modal>
-      {previewAbs && run && (
+      {previewAbs && previewBase && run && (
         <OfficePreviewModal
           path={previewAbs}
-          root={run.isolationPath}
+          root={previewBase}
           onClose={() => setPreviewPath(null)}
           hasPrevious={previewIndex > 0}
           hasNext={previewIndex >= 0 && previewIndex < changes.length - 1}

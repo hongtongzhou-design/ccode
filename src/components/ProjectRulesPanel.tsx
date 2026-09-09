@@ -10,7 +10,7 @@ import {
 } from "../project-tasks";
 import { normalizeWorkMode } from "../work-mode";
 import type { DirEntryDto } from "./FileTree";
-import type { ProjectConfigDto, ProjectConfigReadDto } from "../types";
+import type { ProjectConfigDto, ProjectConfigReadDto, SkillDto } from "../types";
 import { Checkbox, fieldClass, FoldMark } from "./PageFrame";
 
 const RULE_PLACEHOLDER: Record<string, string> = {
@@ -46,6 +46,9 @@ export default function ProjectRulesPanel({
   const [protectOpen, setProtectOpen] = useState(false);
   const [showAllFolders, setShowAllFolders] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
+  const [skillNames, setSkillNames] = useState<string[]>([]);
+  const [librarySkills, setLibrarySkills] = useState<SkillDto[]>([]);
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const rulesRef = useRef<HTMLTextAreaElement>(null);
 
   const load = useCallback(async () => {
@@ -65,6 +68,9 @@ export default function ProjectRulesPanel({
       nextProtected = read.config.protectedPaths ?? [];
       setProtectedPaths(nextProtected);
       if (nextProtected.length > 0) setProtectOpen(true);
+      const projectSkills = read.config.skills ?? [];
+      setSkillNames(projectSkills);
+      if (projectSkills.length > 0) setSkillsOpen(true);
       setError(null);
     } catch (reason) {
       const message = `读取项目规则失败：${String(reason)}`;
@@ -87,6 +93,18 @@ export default function ProjectRulesPanel({
   }, [onError, projectPath, showProtect, workMode]);
 
   useEffect(() => {
+    let stale = false;
+    invoke<SkillDto[]>("list_skills")
+      .then((skills) => {
+        if (!stale) setLibrarySkills(skills);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  useEffect(() => {
     void load();
   }, [load]);
 
@@ -98,7 +116,7 @@ export default function ProjectRulesPanel({
     el.style.height = `${Math.min(Math.max(el.scrollHeight, 72), 200)}px`;
   }, [open, rulesDraft]);
 
-  async function save(nextRules: string, nextProtected: string[]) {
+  async function save(nextRules: string, nextProtected: string[], nextSkills: string[]) {
     if (!config) return;
     const rules = nextRules
       .split("\n")
@@ -115,6 +133,7 @@ export default function ProjectRulesPanel({
           settings: rules,
           rulesOwned: true,
           protectedPaths: nextProtected,
+          skills: nextSkills,
         },
       });
       setConfig({
@@ -122,8 +141,10 @@ export default function ProjectRulesPanel({
         settings: rules,
         rulesOwned: true,
         protectedPaths: nextProtected,
+        skills: nextSkills,
       });
       setProtectedPaths(nextProtected);
+      setSkillNames(nextSkills);
       setError(null);
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);
@@ -138,7 +159,15 @@ export default function ProjectRulesPanel({
   function toggleFolder(path: string, checked: boolean) {
     const next = toggleProtectedFolder(protectedPaths, path, checked);
     setProtectedPaths(next);
-    void save(rulesDraft, next);
+    void save(rulesDraft, next, skillNames);
+  }
+
+  function toggleSkill(name: string, checked: boolean) {
+    const next = checked
+      ? [...skillNames, name]
+      : skillNames.filter((item) => item !== name);
+    setSkillNames(next);
+    void save(rulesDraft, protectedPaths, next);
   }
 
   const ruleCount = rulesDraft
@@ -167,6 +196,7 @@ export default function ProjectRulesPanel({
   const summary = [
     ruleCount ? `${ruleCount}` : "默认",
     showProtect && protectedPaths.length ? `⊘${protectedPaths.length}` : null,
+    skillNames.length ? `✦${skillNames.length}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -208,7 +238,7 @@ export default function ProjectRulesPanel({
             className={`${fieldClass} resize-none overflow-hidden leading-6`}
             value={rulesDraft}
             onChange={(event) => setRulesDraft(event.target.value)}
-            onBlur={() => void save(rulesDraft, protectedPaths)}
+            onBlur={() => void save(rulesDraft, protectedPaths, skillNames)}
             placeholder={RULE_PLACEHOLDER[mode]}
             aria-label="项目规则"
           />
@@ -261,6 +291,51 @@ export default function ProjectRulesPanel({
                 ))}
             </div>
           )}
+          <div>
+            <button
+              type="button"
+              className="flex items-center gap-1.5 text-left"
+              onClick={() => setSkillsOpen((current) => !current)}
+              aria-expanded={skillsOpen}
+            >
+              <FoldMark open={skillsOpen} />
+              <span className="text-xs text-l3">项目技能</span>
+              {skillNames.length > 0 && (
+                <span className="text-micro text-l4">{skillNames.length}</span>
+              )}
+            </button>
+            {skillsOpen &&
+              (librarySkills.length === 0 ? (
+                <p className="mt-1.5 text-micro text-l4">
+                  技能库里还没有技能，先到技能页新建或导入。
+                </p>
+              ) : (
+                <>
+                  <p className="mt-1 text-micro text-l4">
+                    勾选的技能随项目上下文下发给 Agent，开工快照会记录当时的内容版本。
+                  </p>
+                  <ul className="mt-1.5 space-y-0.5">
+                    {librarySkills.map((skill) => (
+                      <li key={skill.id}>
+                        <Checkbox
+                          className="min-w-0"
+                          checked={skillNames.includes(skill.name)}
+                          label={
+                            <span className="min-w-0 truncate text-xs text-l2">
+                              {skill.name}
+                              {skill.description && (
+                                <span className="text-l4">　{skill.description}</span>
+                              )}
+                            </span>
+                          }
+                          onChange={(next) => toggleSkill(skill.name, next)}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ))}
+          </div>
           <div className="flex items-center gap-2 text-micro">
             {saved && <span className="text-ok-text">✓ 已保存</span>}
             {error && <span className="text-err-text">{error}</span>}

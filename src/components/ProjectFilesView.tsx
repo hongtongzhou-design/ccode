@@ -39,7 +39,7 @@ import {
   type ProjectFileFilter,
 } from "../project-files";
 import { officeKindCounts } from "../project-status";
-import type { OfficeDocDto, RunDto, TaskDto, TaskOutputChangeDto } from "../types";
+import type { OfficeDocDto, RunDto, TaskDto, TaskReviewDto } from "../types";
 import {
   declaredTaskKindsForMode,
   markForProjectFile,
@@ -144,10 +144,11 @@ export default function ProjectFilesView({
             const run = latest.get(task.id);
             if (!run || run.status !== "completed") continue;
             try {
-              const changes = await invoke<TaskOutputChangeDto[]>("task_output_changes", {
+              const review = await invoke<TaskReviewDto>("task_output_changes", {
                 runId: run.id,
               });
-              for (const change of changes) {
+              for (const change of review.changes) {
+                if (change.kind === "deleted") continue;
                 marks.push({
                   relative: change.path,
                   goalName: task.name,

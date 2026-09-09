@@ -21,7 +21,8 @@ import { composeLaunchPrompt } from "../project-context";
 import { loadProjectContextPack } from "../project-context-load";
 import { goalReviewCopy } from "../goal-review";
 import { invoke } from "@tauri-apps/api/core";
-import type { RunDto, TaskDto } from "../types";
+import type { TaskDto } from "../types";
+import { goalRunTerminalFields, prepareGoalRun } from "../goal-run";
 
 export function beginAskAi(
   file: AskAiFile,
@@ -191,12 +192,6 @@ export default function AskAiModal() {
     if (projectChat && writeReview && file.workMode && file.workMode !== "coding") {
       setStarting(true);
       try {
-        const pack = await loadProjectContextPack({
-          name: file.name,
-          path: file.cwd,
-          workMode: file.workMode,
-          writeReview: true,
-        });
         const task = await invoke<TaskDto>("task_create", {
           input: {
             projectRoot: file.cwd,
@@ -210,20 +205,19 @@ export default function AskAiModal() {
             profileId,
           },
         });
-        const run = await invoke<RunDto>("task_prepare_run", {
-          input: { taskId: task.id, agent: agentId, profileId },
+        const { run, prompt } = await prepareGoalRun({
+          projectName: file.name,
+          projectPath: file.cwd,
+          workMode: file.workMode,
+          task,
+          agent: agentId,
+          profileId,
+          goalLine: "",
+          packGoal: null,
         });
         setPendingTerminal({
-          ...buildAskAiPending(
-            { ...file, prompt: composeLaunchPrompt(pack, "") },
-            choice,
-          ),
-          cwd: run.isolationPath,
-          permission: "write_tree",
-          reuseKey: `task:${task.id}`,
-          runId: run.id,
-          taskId: task.id,
-          autoStart: true,
+          ...buildAskAiPending({ ...file, prompt }, choice),
+          ...goalRunTerminalFields(task, run, prompt),
         });
         setPage("terminal");
         close();

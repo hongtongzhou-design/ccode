@@ -346,6 +346,7 @@ export function taskOutputLabel(
 export function taskChangeKindLabel(kind: string): string {
   if (kind === "added") return "新增";
   if (kind === "modified") return "修改";
+  if (kind === "deleted") return "已删除 · 不写回";
   return kind;
 }
 

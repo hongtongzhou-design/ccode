@@ -3,9 +3,10 @@ import type { DirEntryDto } from "./components/FileTree";
 import {
   renderProjectContextPack,
   type ContextPackEntry,
+  type ProjectSkillPack,
 } from "./project-context";
 import { acceptedGoalOutputs, isDeclaredTask } from "./project-tasks";
-import type { ProjectConfigReadDto, ProjectStatusDto, TaskDto } from "./types";
+import type { ProjectConfigReadDto, ProjectStatusDto, SkillDto, TaskDto } from "./types";
 
 /** 读档案卡和顶层目录，拼启动用的环境说明。失败时仍返回能用的短包。 */
 export async function loadProjectContextPack(input: {
@@ -20,6 +21,7 @@ export async function loadProjectContextPack(input: {
   let settings: string[] = [];
   let rulesOwned = false;
   let protectedPaths: string[] = [];
+  let skillNames: string[] = [];
   let topLevel: ContextPackEntry[] = [];
   try {
     const read = await invoke<ProjectConfigReadDto>("read_project_config", {
@@ -29,6 +31,7 @@ export async function loadProjectContextPack(input: {
     settings = read.config.settings ?? [];
     rulesOwned = read.config.rulesOwned === true;
     protectedPaths = read.config.protectedPaths ?? [];
+    skillNames = read.config.skills ?? [];
   } catch {
     /* 无档案卡时仍注入名称和目录 */
   }
@@ -77,6 +80,27 @@ export async function loadProjectContextPack(input: {
   } catch {
     /* 没有目标列表时省略已验收段 */
   }
+  // 项目技能：按名单顺序出库记录，带上内容版本与接口契约；库里没有的如实标「未安装」
+  let skills: ProjectSkillPack[] = [];
+  if (skillNames.length > 0) {
+    try {
+      const library = await invoke<SkillDto[]>("list_skills");
+      const byName = new Map(library.map((skill) => [skill.name, skill]));
+      skills = skillNames.map((name) => {
+        const skill = byName.get(name);
+        if (!skill) return { name, missing: true };
+        return {
+          name,
+          description: skill.description,
+          digest: skill.contentDigest ?? null,
+          inputs: skill.inputs ?? [],
+          outputs: skill.outputs ?? [],
+        };
+      });
+    } catch {
+      skills = skillNames.map((name) => ({ name }));
+    }
+  }
   return renderProjectContextPack({
     name: input.name,
     path: input.path,
@@ -91,5 +115,6 @@ export async function loadProjectContextPack(input: {
     openGoals,
     protectedPaths,
     feedback: input.feedback,
+    skills,
   });
 }

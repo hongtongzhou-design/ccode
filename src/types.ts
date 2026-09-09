@@ -825,6 +825,8 @@ export interface SkillDto {
   inputs?: string[];
   /** true = inputs/outputs 来自正文推断而非 frontmatter 声明（外部技能常见；提示按「推断」口径） */
   interfaceInferred?: boolean;
+  /** 库目录内容摘要（list 时现算）：执行快照/项目上下文按它记录技能版本 */
+  contentDigest?: string | null;
 }
 
 /** skill_md_path 返回：SKILL.md 绝对路径 + 技能库目录（◈ 优化开终端的 cwd） */
@@ -1020,6 +1022,8 @@ export interface ProfileUsageDto {
 
 /** 项目注册表条目（§11.4 P1b；app.db projects 表） */
 export interface ProjectDto {
+  /** 稳定身份（uuid，存 project.toml 顶层 id 行，跟随文件夹移动）；空串 = 旧项目尚未分配 */
+  id?: string;
   /** canonical 绝对路径，注册表主键 */
   path: string;
   name: string;
@@ -1129,6 +1133,8 @@ export interface ProjectConfigDto {
   submissionRound?: number;
   /** 文献雷达筛选：新命中展示与推送计数按期刊指标过滤；null/全空 = 不筛选 */
   litWatchFilter?: LitWatchFilterDto | null;
+  /** 项目级选用技能名单（技能库 name）：进上下文包并随执行快照记录版本；空 = 不注入技能段 */
+  skills?: string[];
   /** 工作方式：research / coding / office；缺省 research */
   workMode?: string;
 }
@@ -1473,8 +1479,23 @@ export interface RunEventDto {
 
 export interface TaskOutputChangeDto {
   path: string;
-  kind: "added" | "modified" | string;
+  kind: "added" | "modified" | "deleted" | string;
   bytes: number;
+}
+
+/** 目标评审：frozen=true 时变更来自收尾冻结副本，预览与采纳只读 payloadDir。 */
+export interface TaskReviewDto {
+  frozen: boolean;
+  payloadDir: string | null;
+  changes: TaskOutputChangeDto[];
+}
+
+/** 开工时冻结的有效上下文快照（Context Pack + 目标行全文）。 */
+export interface TaskContextDto {
+  runId: string;
+  createdAt: string;
+  sha256: string;
+  text: string;
 }
 
 export interface RuntimeCapabilitiesDto {

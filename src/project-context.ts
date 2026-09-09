@@ -11,6 +11,17 @@ export type AcceptedGoalPack = {
   note?: string | null;
 };
 
+/** 项目技能在上下文包里的条目：digest = 库目录内容摘要（版本记录，审计 §4.9）。 */
+export type ProjectSkillPack = {
+  name: string;
+  description?: string;
+  digest?: string | null;
+  inputs?: readonly string[];
+  outputs?: readonly string[];
+  /** true = 项目名单里有但技能库里没有（被删/未导入），如实标注不静默省略 */
+  missing?: boolean;
+};
+
 export type ProjectContextInput = {
   name: string;
   path: string;
@@ -26,6 +37,7 @@ export type ProjectContextInput = {
   protectedPaths?: readonly string[];
   decisions?: readonly string[];
   feedback?: string | null;
+  skills?: readonly ProjectSkillPack[];
 };
 
 export function projectHomeHint(workMode?: string | null): string[] {
@@ -193,6 +205,27 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
       "这些保持原样（验收写回时不改、不另存）：",
       ...protectedPaths.map((path) => `- ${path}`),
     );
+  }
+  const skills = input.skills ?? [];
+  if (skills.length) {
+    lines.push("", "项目技能（开工时记录内容版本）：");
+    for (const skill of skills) {
+      if (skill.missing) {
+        lines.push(`- ${skill.name}（未安装，可在技能页新建或导入）`);
+        continue;
+      }
+      const version = skill.digest ? `（版本 ${skill.digest.slice(0, 8)}）` : "";
+      const desc = skill.description?.trim();
+      const contract = [
+        skill.inputs?.length ? `读取 ${skill.inputs.join("、")}` : "",
+        skill.outputs?.length ? `产出 ${skill.outputs.join("、")}` : "",
+      ]
+        .filter(Boolean)
+        .join("；");
+      lines.push(
+        `- ${skill.name}${version}${desc ? `：${desc}` : ""}${contract ? `（${contract}）` : ""}`,
+      );
+    }
   }
   const goal = input.goal?.trim();
   if (goal) {
