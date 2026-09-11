@@ -1,4 +1,4 @@
-# Ccode 架构方案 v0.2
+# Mesa 架构方案
 
 > 一个「AI 科研工作台」：以 Project 为家，让不同 Agent 在长期环境里完成目标、结果经人验收。底层仍是九个 Agent CLI 的适配（启动器 + 配置 + 会话只读），表面是科研流水线，并覆盖编程/办公。**AI 负责干活，Mesa 负责环境和验收，人负责拍板。** 不是 CLI 聚合器，也不是任务编排器。
 > 本文档是项目的总体逻辑架构，配合 `docs/agent-integration-matrix.md`（九个 CLI 的适配细节）使用。
@@ -12,7 +12,7 @@
 
 让用户在一个桌面应用里：
 
-1. 为多个终端 AI agent（Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI）管理**多套 API 配置**（端点 + 密钥 + 模型），一键切换；
+1. 为多个终端 AI agent（Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build）管理**多套 API 配置**（端点 + 密钥 + 模型），一键切换；
 2. 在**内嵌终端**里一键拉起任意 agent + 任意配置 + 任意项目目录；
 3. **可视化浏览**各 agent 的历史会话（按项目自动聚合组织），并与内嵌终端联动，实时观看进行中的对话。
 

@@ -11,22 +11,41 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" /></a>
 </p>
 
-**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）：底层是九个终端 agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研流程（读文献 → 整数据 → 做图 → 写论文）。AI 负责干活，Mesa 负责管活，人负责拍板。
+**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）。底层是九个终端 Agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研、编程、办公流水线：读文献 → 整数据 → 做图 → 写论文。**AI 负责干活，Mesa 负责管环境和验收，人负责拍板。**
 
-为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 九个终端 agent 管理多套 API 配置（端点/密钥/模型）与官方账号登录，内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览；在此之上提供项目研究流程（模板 + 一键开步）、任务工作区评审、PDF/笔记阅读写作与用量成本统计。
+为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 管理多套 API 配置（端点 / 密钥 / 模型）与官方账号登录，内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览。
 
-产品对象按 **Project → Task → Run** 管理：Task 是人声明的工作单元，Run 是一次执行，终端标签只是 Run 的视图。Run 可使用本地 CLI、无头任务或用户登记的 Custom Runtime；需要写盘的任务默认在隔离工作树中运行，完成后由人查看改动并决定是否合并。
+产品对象按 **Project → Task → Run** 管理：Task 是人声明的工作单元，Run 是一次执行，终端标签只是 Run 的视图。需要写盘的任务默认在隔离工作树中运行，完成后由人查看改动并决定是否写回项目。
+
+展示名 **Mesa**；内部身份仍是 `ccode`（bundle ID `com.ccode.dev`、项目 `.ccode/`、本机 `~/ccode/`、Codex provider `ccode`）。数据和配置位置不随展示名改动。
+
+## 界面
+
+侧栏按 **工作 → 资源 → 管理** 分层，启动默认进入工作台：
+
+| 组 | 页面 | 做什么 |
+|---|---|---|
+| 工作 | **工作台** | 正在进行、待你处理、最近项目 / 对话；关标签后按运行身份找回 |
+| 工作 | **项目** | 科研 / 编程 / 办公三种工作方式：研究流程或目标、工作树、定时任务、文件、Agents 名册 |
+| 工作 | **运行** | 内嵌多标签终端（聊天 / 终端同一会话切换）、文件树、改动面板、沉浸阅读 |
+| 工作 | **对话** | 九家 CLI 本地会话的结构化回放、自动起名、归档 / 导出 / 接力 |
+| 资源 | **连接** | 网关 × 绑定；默认启动注入环境变量（零污染），可选「写入 CLI 全局默认」 |
+| 资源 | **技能** | Skills 统一库，分发到各 CLI；内置 18 个科研技能 |
+| 资源 | **MCP** | 统一清单，一键分发到各 CLI（Grok 只读） |
+| 管理 | **用量** | token 与费用（官方账号显示「订阅」），按项目 / 模型 / 任务归因 |
+| 管理 | **设置** | 十四套主题 + 自定义、字体 / 调色板、通知、更新、诊断 |
+
+快捷键：`⌘K` / `Ctrl+K` 命令面板，`⌘1`–`⌘9` / `Ctrl+1`–`Ctrl+9` 切页（顺序同上）。
 
 ## 功能
 
-- **配置中心（⇄）**：agent × profile 多配置管理（API 配置 + 官方账号双轨），多模型切换，密钥 0600 本地存储绝不回显；默认启动注入环境变量（零污染），可选「设为全局默认」（写前备份）；CLI 安装/更新一键完成
-- **工作区（⛁）**：任务级 git worktree 隔离（`ccode/<任务名>` 分支），多任务并行互不污染；`.ccode/settings.toml` 项目自动化（files-to-copy、setup/archive 脚本、端口段注入）；评审流：任务 diff、逐 hunk 验收、健康状态、本地合并、gh PR；项目注册后按研究流程分组（`.ccode/project.toml` 档案卡 + 模板库 + 一键开步 + 资源面板 + 提货单 artifacts.yaml）
-- **终端（⌨）**：内嵌 xterm.js 多标签终端（支持分屏对照与专注模式），agent 退出自动回落登录 shell、会话可一键恢复；Monaco 文件预览/编辑 + Markdown 阅读版式与沉浸阅读 + PDF/docx 内嵌预览（选段「◈ 问 AI」「整理为笔记」）+ git 改动面板 + ⌘F 输出搜索；◈ AI 生成提交信息、「◈ 接力到…」跨 Agent 交接
-- **会话（◔）**：解析九个 CLI 的本地会话文件做结构化回放（含外部终端里运行的会话）；按研究步骤分组、pin 快照保留、标签/归档/搜索、批量删除、◈ AI 摘要、Markdown 导出
-- **技能（✦）**：Skills 统一库 + 九 CLI 分发（symlink/copy），目录/ZIP/GitHub 四路导入，ZIP 导出；新建/编辑与「◈ 优化」让 Agent 迭代技能
-- **统计（◫）**：token 用量与费用统计（官方价口径，官方账号显示「订阅」，$/¥ 切换），agent 占比进度条、项目/模型分布、任务成本按工作区归因
-- **设置（⛭）**：七套深色 + 七套浅色共十四套主题、终端字体/调色板、AI 专用配置、长任务 OS 通知、应用内自动更新、诊断日志
-- **工作台体验**：「待你处理」首页收件箱聚合冲突/待确认/可合并/已完成待拍板事项；⌘K 命令面板 + ⌘1–⌘8 页切；研究流程大圆步进器直观表达步骤状态与点按推进；首启可一键创建示例课题（演示研究流程 + 示例 PDF + 引文）
+- **连接**：Agent × 网关 × 绑定；API 配置与官方账号双轨；密钥 0600 本地存储、绝不回显；CLI 安装 / 更新一键完成
+- **项目**：科研六套研究流程模板（综述 / 论文 / 数据 / 毕业论文 / 投稿返修 / LaTeX）+ 一键开步；无流程科研与办公用「新建目标」（隔离副本，人验收后写回）；编程用独立工作树，合进基准或开 PR
+- **运行**：xterm.js 多标签；Agent 退出回落 shell、会话可恢复；Monaco 预览 / 编辑；PDF / docx / 表格 / 图片内嵌预览；选段「◈ 问 AI」；⛶ 沉浸阅读（笔记｜PDF｜终端）
+- **对话**：解析九个 CLI 本地会话（含外部终端里跑的）；按项目 / 步骤整理；pin 快照、标签、归档、批量删除、◈ 摘要、Markdown 导出、会话包换机导入
+- **技能 / MCP**：技能四路导入（目录 / ZIP / GitHub / 收编）与 ZIP 导出；MCP 预设含 Consensus、Undermind、Blender
+- **科研配套**：文献雷达（定时巡检新文献）、精读清单、期刊指标徽章、引用检查、复现运行记录（与 Git 合并分开）
+- **工作台体验**：收件箱聚合冲突 / 待确认 / 可合并 / 更新 / 人工请求；快速开聊（不建项目直接聊）；长任务 OS 通知；应用内自动更新
 
 ## 安装
 
@@ -42,7 +61,7 @@
 
 其余 `.sig`、`latest.json`、`.app.tar.gz` 是应用内自动更新用的签名文件，**不用手动下载**。
 
-不确定自己的芯片？macOS：屏幕左上角苹果菜单  → 关于本机，看「芯片」一栏；Windows：设置 → 系统 → 关于，看「系统类型」（基本都是 x64）。
+不确定自己的芯片？macOS：屏幕左上角苹果菜单 → 关于本机，看「芯片」一栏；Windows：设置 → 系统 → 关于，看「系统类型」（基本都是 x64）。
 
 > **macOS 注意**：应用暂未做 Apple 签名公证，首次打开如提示「已损坏」，终端执行：
 > ```bash
@@ -56,7 +75,7 @@
 - [docs/user-guide.md](docs/user-guide.md) — 使用手册（完整操作流程）
 - [CHANGELOG.md](CHANGELOG.md) — 版本更新日志
 - [docs/architecture.md](docs/architecture.md) — 架构设计与决策记录
-- [docs/agent-integration-matrix.md](docs/agent-integration-matrix.md) — 九个 CLI 的 env/配置/会话格式调研
+- [docs/agent-integration-matrix.md](docs/agent-integration-matrix.md) — 九个 CLI 的 env / 配置 / 会话格式调研
 - [AGENTS.md](AGENTS.md) — 开发约定与踩坑记录
 
 ## 开发
@@ -65,17 +84,20 @@
 export PATH="$HOME/.cargo/bin:$PATH"   # Rust 不在默认 PATH 时
 
 npm install
-npm run tauri:dev      # 开发（前端 HMR + Rust 自动重启）
-npm run build            # 前端构建（tsc + vite）
+npm run tauri:dev      # 开发（独立窗口「Mesa Dev - 热更新」；前端 HMR + Rust 自动重启）
+npm run build          # 前端构建（tsc + vite）
+npm test               # 前端测试
 cd src-tauri && cargo test
-npm run tauri build      # 打包
+npm run tauri build    # 打包
 ```
+
+开发预览必须用 `npm run tauri:dev`（窗口标题 **Mesa Dev - 热更新**，bundle ID `com.ccode.dev.hmr`）。不要用 `/Applications/Mesa.app` 或旧打包前端做界面验收。
 
 三平台 CI：tag `v*` 或手动 dispatch 触发，跑全量测试后打三平台安装包并创建 Release 草稿（含自动更新签名包）。
 
 ## 反馈
 
-遇到问题或有想法，欢迎到 [Issues](../../issues) 提出；附上应用内「设置 → 诊断日志」导出的日志能加快定位。
+遇到问题或有想法，欢迎到 [Issues](../../issues) 提出；附上应用内「设置 → 诊断」导出的日志能加快定位。
 
 ## 开源协议
 
