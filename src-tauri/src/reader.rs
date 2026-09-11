@@ -1185,11 +1185,13 @@ mod tests {
         crate::projects::write_config_at(&root, &cfg).unwrap();
         let note = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
         assert!(Path::new(&note.path).starts_with(&root));
-        assert_eq!(
-            pdf_for_note_sync(&root.to_string_lossy(), &note.path)
-                .unwrap()
-                .as_deref(),
-            Some(pdf.to_string_lossy().as_ref())
+        let paired = pdf_for_note_sync(&root.to_string_lossy(), &note.path).unwrap();
+        assert!(
+            crate::paths::same_path(
+                paired.as_deref().unwrap_or(""),
+                &pdf.to_string_lossy()
+            ),
+            "{paired:?} vs {pdf:?}"
         );
         assert!(
             ensure_paper_note_sync(&root.to_string_lossy(), &sibling.to_string_lossy()).is_err()

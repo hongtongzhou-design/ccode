@@ -4915,7 +4915,8 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
             std::fs::read(copy.join(".ccode/project.toml")).unwrap(),
             card
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        drop(conn);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
