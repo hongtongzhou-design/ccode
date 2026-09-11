@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { File, Folder, Plus, Search, X } from "lucide-react";
 import {
   effectiveProjectRules,
   projectShowsProtectedPaths,
@@ -15,9 +16,18 @@ import {
   type ProtectEntry,
 } from "../project-tasks";
 import { normalizeWorkMode } from "../work-mode";
+import { samePath } from "../path-utils";
 import type { DirEntryDto } from "./FileTree";
 import type { ProjectConfigDto, ProjectConfigReadDto, SkillDto } from "../types";
-import { Checkbox, FoldMark, MenuSelect, surfaceFieldClass } from "./PageFrame";
+import {
+  Checkbox,
+  FoldMark,
+  ghostActionClass,
+  iconActionClass,
+  searchFieldClass,
+  secondaryActionClass,
+  surfaceFieldClass,
+} from "./PageFrame";
 
 const RULE_PLACEHOLDER: Record<string, string> = {
   research: "引用格式：APA\n输出中文",
@@ -53,6 +63,11 @@ export default function ProjectRulesPanel({
   const [skillNames, setSkillNames] = useState<string[]>([]);
   const [librarySkills, setLibrarySkills] = useState<SkillDto[]>([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillsLoading, setSkillsLoading] = useState(true);
+  const [skillsError, setSkillsError] = useState(false);
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false);
+  const [skillQuery, setSkillQuery] = useState("");
+  const addSkillRef = useRef<HTMLButtonElement>(null);
   const rulesRef = useRef<HTMLTextAreaElement>(null);
 
   const load = useCallback(async () => {
@@ -108,7 +123,12 @@ export default function ProjectRulesPanel({
       .then((skills) => {
         if (!stale) setLibrarySkills(skills);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!stale) setSkillsError(true);
+      })
+      .finally(() => {
+        if (!stale) setSkillsLoading(false);
+      });
     return () => {
       stale = true;
     };
@@ -206,10 +226,21 @@ export default function ProjectRulesPanel({
     : folders.filter(
         (entry) => !visibleFolders.some((item) => item.path === entry.path),
       );
-  const protectedFiles = files.filter((entry) =>
-    pathIsProtected(entry.path, protectedPaths),
+  // 文件只列已选路径；新增的子目录文件也能立即显示，不依赖重新读取目录。
+  const protectedFiles = protectedPaths
+    .filter((path) => !folders.some((entry) => samePath(entry.path, path)))
+    .map((path) => ({ path, isDir: false }));
+  const addableSkills = librarySkills.filter((skill) => !skillNames.includes(skill.name));
+  const query = skillQuery.trim().toLowerCase();
+  const matchingSkills = addableSkills.filter((skill) =>
+    `${skill.name} ${skill.description}`.toLowerCase().includes(query),
   );
-  // 文件级保护只显示「已勾的」，不平铺全部文件——文献项目根下几十个 PDF 铺出来没法看
+
+  function closeSkillPicker() {
+    setSkillPickerOpen(false);
+    setSkillQuery("");
+    addSkillRef.current?.focus();
+  }
   const summary = [
     ruleCount ? `${ruleCount}` : "默认",
     showProtect && protectedPaths.length ? `⊘${protectedPaths.length}` : null,
@@ -221,13 +252,19 @@ export default function ProjectRulesPanel({
   function renderProtectRow(entry: ProtectEntry) {
     const checked = pathIsProtected(entry.path, protectedPaths);
     return (
-      <li key={entry.path}>
+      <li key={entry.path} className="min-w-0">
         <Checkbox
-          className="min-w-0"
+          className={`min-h-9 min-w-0 rounded-md px-2 py-1.5 transition-colors focus-within:outline focus-within:outline-1 focus-within:outline-l3 ${checked ? "bg-hover" : "hover:bg-hover"}`}
           checked={checked}
+          title={entry.isDir ? `${entry.path}/` : entry.path}
           label={
-            <span className="min-w-0 truncate font-mono text-xs text-l2">
-              {entry.isDir ? `${entry.path}/` : entry.path}
+            <span className="flex min-w-0 items-center gap-2 text-xs text-l2">
+              {entry.isDir ? (
+                <Folder size={14} className="shrink-0 text-l3" aria-hidden="true" />
+              ) : (
+                <File size={14} className="shrink-0 text-l3" aria-hidden="true" />
+              )}
+              <span className="truncate">{entry.path}{entry.isDir ? "/" : ""}</span>
             </span>
           }
           onChange={(next) => toggleFolder(entry.path, next)}
@@ -260,46 +297,47 @@ export default function ProjectRulesPanel({
             aria-label="项目规则"
           />
           {showProtect && (
-            <div>
+            <div className="pt-2">
               <button
                 type="button"
-                className="flex items-center gap-1.5 text-left"
+                className="flex min-h-8 w-full items-center gap-1.5 text-left"
                 onClick={() => setProtectOpen((current) => !current)}
                 aria-expanded={protectOpen}
               >
                 <FoldMark open={protectOpen} />
-                <span className="text-xs text-l3">写回时跳过</span>
-                {protectedPaths.length > 0 && (
-                  <span className="text-micro text-l4">{protectedPaths.length}</span>
-                )}
+                <span className="flex-1 text-xs font-medium text-l2">写回时跳过</span>
+                <span className="text-micro text-l3">
+                  {protectedPaths.length ? `已选 ${protectedPaths.length} 项` : "未设置"}
+                </span>
               </button>
-              {protectOpen &&
-                (folders.length === 0 && files.length === 0 ? (
-                  <p className="mt-1.5 text-micro text-l4">项目里还没有可勾的项。</p>
-                ) : (
-                  <>
-                    {visibleFolders.length > 0 && (
-                    <ul className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5">
-                      {visibleFolders.map(renderProtectRow)}
-                    </ul>
-                    )}
-                    {extraFolders.length > 0 && (
-                      <button
-                        type="button"
-                        className="mt-1 text-micro text-l4 hover:text-l2"
-                        onClick={() => setShowAllFolders(true)}
-                      >
-                        其余 {extraFolders.length}…
-                      </button>
-                    )}
-                    {protectedFiles.length > 0 && (
-                      <ul className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5">
-                        {protectedFiles.map(renderProtectRow)}
-                      </ul>
-                    )}
+              {protectOpen && (
+                <div className="mt-1 space-y-2">
+                  <p className="text-xs text-l3">勾选项在验收写回时保持原样。</p>
+                  {folders.length === 0 && files.length === 0 && protectedFiles.length === 0 ? (
+                    <p className="rounded-md ccode-well px-3 py-3 text-xs text-l3">
+                      项目里还没有可勾选的文件或文件夹。
+                    </p>
+                  ) : (
+                    <>
+                      {visibleFolders.length > 0 && (
+                        <ul
+                          aria-label="写回时跳过的文件夹"
+                          className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,11rem),1fr))] gap-1 rounded-lg ccode-well p-1"
+                        >
+                          {visibleFolders.map(renderProtectRow)}
+                        </ul>
+                      )}
+                      {protectedFiles.length > 0 && (
+                        <ul aria-label="写回时跳过的文件" className="space-y-1 rounded-lg ccode-well p-1">
+                          {protectedFiles.map(renderProtectRow)}
+                        </ul>
+                      )}
+                    </>
+                  )}
+                  <div className="flex flex-wrap items-center gap-1">
                     <button
                       type="button"
-                      className="mt-1.5 text-micro text-l4 hover:text-l2"
+                      className={`${ghostActionClass} gap-1.5`}
                       onClick={() => {
                         void (async () => {
                           const picked = await openFileDialog({
@@ -323,82 +361,139 @@ export default function ProjectRulesPanel({
                         })();
                       }}
                     >
-                      ＋ 文件
+                      <Plus size={14} aria-hidden="true" />
+                      添加文件
                     </button>
-                  </>
-                ))}
+                    {extraFolders.length > 0 && (
+                      <button
+                        type="button"
+                        className={ghostActionClass}
+                        onClick={() => setShowAllFolders(true)}
+                      >
+                        显示其余 {extraFolders.length} 个文件夹
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {showSkillPool && (
-          <div>
-            <button
-              type="button"
-              className="flex items-center gap-1.5 text-left"
-              onClick={() => setSkillsOpen((current) => !current)}
-              aria-expanded={skillsOpen}
-            >
-              <FoldMark open={skillsOpen} />
-              <span className="text-xs text-l3">技能</span>
-              {skillNames.length > 0 && (
-                <span className="text-micro text-l4">{skillNames.length}</span>
-              )}
-            </button>
-            {skillsOpen && (
-              <>
-                {skillNames.length > 0 && (
-                  <ul className="mt-1.5 flex flex-wrap gap-1">
-                    {skillNames.map((name) => (
-                      <li
-                        key={name}
-                        className="inline-flex h-7 items-center gap-1 rounded-full bg-strip px-2.5 text-xs text-l2"
-                      >
-                        {name}
-                        <button
-                          type="button"
-                          className="text-l4 hover:text-err-text"
-                          aria-label={`移出 ${name}`}
-                          onClick={() => toggleSkill(name, false)}
+            <div className="pt-2">
+              <button
+                type="button"
+                className="flex min-h-8 w-full items-center gap-1.5 text-left"
+                onClick={() => setSkillsOpen((current) => !current)}
+                aria-expanded={skillsOpen}
+              >
+                <FoldMark open={skillsOpen} />
+                <span className="flex-1 text-xs font-medium text-l2">技能</span>
+                <span className="text-micro text-l3">
+                  {skillNames.length ? `已添加 ${skillNames.length} 个` : "未添加"}
+                </span>
+              </button>
+              {skillsOpen && (
+                <div className="mt-1 space-y-2">
+                  {skillNames.length > 0 && (
+                    <ul aria-label="已添加的技能" className="flex flex-wrap gap-1.5">
+                      {skillNames.map((name) => (
+                        <li
+                          key={name}
+                          className="inline-flex min-h-8 max-w-full items-center gap-1 rounded-md bg-inset pl-2.5 pr-0.5 text-xs text-l2"
                         >
-                          ×
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {(() => {
-                  const addable = librarySkills.filter(
-                    (skill) => !skillNames.includes(skill.name),
-                  );
-                  if (librarySkills.length === 0) {
-                    return (
-                      <p className="mt-1.5 text-micro text-l4">
-                        技能库里还没有技能，先到技能页新建或导入。
-                      </p>
-                    );
-                  }
-                  if (addable.length === 0) return null;
-                  return (
-                    <div className="mt-1.5">
-                      <MenuSelect
-                        aria-label="从技能库添加"
-                        value=""
-                        placeholder="＋ 从技能库添加…"
-                        onChange={(name) => {
-                          if (name) toggleSkill(name, true);
+                          <span className="min-w-0 truncate" title={name}>{name}</span>
+                          <button
+                            type="button"
+                            className={`${iconActionClass} hover:text-err-text`}
+                            aria-label={`移出 ${name}`}
+                            title="从项目移出，不删除技能"
+                            onClick={() => toggleSkill(name, false)}
+                          >
+                            <X size={13} aria-hidden="true" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {skillsLoading ? (
+                    <p role="status" className="text-xs text-l3">正在读取技能库…</p>
+                  ) : skillsError ? (
+                    <p role="alert" className="text-xs text-err-text">读取技能库失败，请重新打开项目设置。</p>
+                  ) : librarySkills.length === 0 ? (
+                    <p className="text-xs text-l3">技能库为空，先到技能页新建或导入。</p>
+                  ) : (
+                    <>
+                      <button
+                        ref={addSkillRef}
+                        type="button"
+                        className={`${secondaryActionClass} w-full gap-1.5`}
+                        disabled={addableSkills.length === 0}
+                        aria-expanded={skillPickerOpen && addableSkills.length > 0}
+                        onClick={() => {
+                          setSkillPickerOpen((current) => !current);
+                          setSkillQuery("");
                         }}
-                        options={addable.map((skill) => ({
-                          value: skill.name,
-                          label: skill.description
-                            ? `${skill.name}（${skill.description}）`
-                            : skill.name,
-                        }))}
-                      />
-                    </div>
-                  );
-                })()}
-              </>
-            )}
-          </div>
+                      >
+                        <Plus size={14} aria-hidden="true" />
+                        {addableSkills.length === 0 ? "技能库中的技能已全部添加" : "从技能库添加"}
+                      </button>
+                      {skillPickerOpen && addableSkills.length > 0 && (
+                        <div
+                          className="space-y-1 rounded-lg ccode-well p-1.5"
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              event.stopPropagation();
+                              closeSkillPicker();
+                            }
+                          }}
+                        >
+                          <div className="relative">
+                            <Search size={14} className="pointer-events-none absolute left-2.5 top-2.5 text-l3" aria-hidden="true" />
+                            <input
+                              autoFocus
+                              type="search"
+                              aria-label="搜索项目技能"
+                              placeholder="搜索名称或描述…"
+                              className={`${searchFieldClass} w-full pl-8`}
+                              value={skillQuery}
+                              onChange={(event) => setSkillQuery(event.target.value)}
+                            />
+                          </div>
+                          {matchingSkills.length > 0 ? (
+                            <ul aria-label="可添加的技能" className="max-h-60 space-y-0.5 overflow-y-auto overscroll-contain">
+                              {matchingSkills.map((skill) => (
+                                <li key={skill.id}>
+                                  <button
+                                    type="button"
+                                    className="flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left hover:bg-hover focus-visible:bg-hover"
+                                    aria-label={`添加技能 ${skill.name}`}
+                                    title={skill.description || skill.name}
+                                    onClick={() => {
+                                      toggleSkill(skill.name, true);
+                                      closeSkillPicker();
+                                    }}
+                                  >
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block truncate text-xs font-medium text-l1">{skill.name}</span>
+                                      {skill.description && (
+                                        <span className="mt-0.5 line-clamp-2 break-words text-xs leading-5 text-l3">{skill.description}</span>
+                                      )}
+                                    </span>
+                                    <Plus size={14} className="shrink-0 text-l3" aria-hidden="true" />
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p role="status" className="px-2.5 py-4 text-center text-xs text-l3">没有找到匹配的技能</p>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           <div className="flex items-center gap-2 text-micro">
             {saved && <span className="text-ok-text">✓ 已保存</span>}

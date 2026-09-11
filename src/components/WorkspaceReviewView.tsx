@@ -3,7 +3,7 @@ import ResearchReproductionPanel from "./ResearchReproductionPanel";
 import ResearchAcceptancePanel from "./ResearchAcceptancePanel";
 import { researchReportPatterns, reproductionEntrypoints } from "../research-report";
 import WatchRunReview from "./WatchRunReview";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -27,6 +27,7 @@ import {
   reviewedShaAfterCommit,
   gitAdmissionPayload,
   mergeAdmissionText,
+  deliveryFollowupText,
 } from "../acceptance-log";
 import { defaultCommitMessage } from "../git-commit-message";
 import { useAppStore } from "../store";
@@ -41,11 +42,14 @@ import type {
   RunArtifactDto,
   RunDto,
   WorkspaceDiffDto,
+  WorkspaceDeliverableReviewDto,
   WorkspaceDto,
   WorkspaceHealthDto,
   WorkspaceMergeResultDto,
   WorkspacePrResultDto,
 } from "../types";
+
+const OfficePreviewModal = lazy(() => import("./OfficePreviewModal"));
 
 interface GitStatusDto {
   isRepo: boolean;
@@ -835,7 +839,7 @@ function MainRepoCommitPanel({
   }
 
   return (
-    <div className="mt-1.5 rounded-md bg-inset p-2 text-l2">
+    <div className="mt-1.5 rounded-md ccode-well p-2 text-l2">
       <p className="mb-2 text-micro text-l4">
         提交 = 把改动保存到任务分支。合并后才会进入项目主线历史；文件本身不会丢。
       </p>
@@ -999,6 +1003,11 @@ function LiveWorkspaceReviewView({
   const [ledgerPending, setLedgerPending] = useState(false);
   const [mergeVersionId, setMergeVersionId] = useState<string | null>(null);
   const reviewedShaRef = useRef<string | null>(null);
+  const [deliveryReview, setDeliveryReview] = useState<WorkspaceDeliverableReviewDto | null>(null);
+  const deliveryReviewRef = useRef<WorkspaceDeliverableReviewDto | null>(null);
+  const [deliveryError, setDeliveryError] = useState<string | null>(null);
+  const [deliveryPreview, setDeliveryPreview] = useState<string | null>(null);
+  const [deliveryFollowup, setDeliveryFollowup] = useState("");
   const [nextStep, setNextStep] = useState<{
     step: ProjectStepDto;
     cfg: ProjectConfigDto;
@@ -1088,6 +1097,14 @@ function LiveWorkspaceReviewView({
                 id: nextDiff.workspaceId,
               }),
             ]);
+        if (!nextDiff.reviewOnly && (!quiet || !deliveryReviewRef.current)) {
+          try {
+            const review = await invoke<WorkspaceDeliverableReviewDto>("workspace_review_deliverables", { id: nextDiff.workspaceId });
+            deliveryReviewRef.current = review; setDeliveryReview(review); setDeliveryError(null);
+          } catch (reason) {
+            deliveryReviewRef.current = null; setDeliveryReview(null); setDeliveryError(String(reason));
+          }
+        }
         const signature = JSON.stringify({
           files: nextDiff.files,
           status: nextStatus.files,
@@ -1145,6 +1162,7 @@ function LiveWorkspaceReviewView({
     setLedgerPending(false);
     setMergeVersionId(null);
     reviewedShaRef.current = null;
+    deliveryReviewRef.current = null; setDeliveryReview(null); setDeliveryError(null); setDeliveryPreview(null); setDeliveryFollowup("");
     setNextStep(null);
     setCitations(null);
     setCiteExpanded(false);
@@ -1520,7 +1538,7 @@ function LiveWorkspaceReviewView({
         : "无待合并提交";
   const canPrimary =
     !busy &&
-    !hardBlocked &&
+    !hardBlocked && !deliveryError && !!deliveryReview &&
     // 提交信息可留空（v3.97）：finish 里留空走本地默认信息，按钮不再因空信息变灰
     (hasUncommitted || hasCommitted);
   const normalizedQuery = fileQuery.trim().toLocaleLowerCase();
@@ -1774,6 +1792,7 @@ function LiveWorkspaceReviewView({
 
   async function finishConflict(mergeAfter: boolean) {
     if (!diff) return;
+    if (mergeAfter && !deliveryReviewRef.current) { setError("非 Git 产物尚未完成评审，请先刷新并查看后再合并"); return; }
     if (unresolvedFiles.length > 0) {
       setError(`还有 ${unresolvedFiles.length} 个冲突文件未选择版本`);
       return;
@@ -1809,6 +1828,7 @@ function LiveWorkspaceReviewView({
       const merged = await invoke<WorkspaceMergeResultDto>("merge_workspace", {
         id: diff.workspaceId,
         archive: false,
+        expectDeliveryToken: deliveryReviewRef.current?.token ?? null,
         ...gitAdmissionPayload({
           retry: false,
           reviewedSha:
@@ -1818,6 +1838,7 @@ function LiveWorkspaceReviewView({
             null,
         }),
       });
+      setDeliveryFollowup(deliveryFollowupText(merged.salvage));
       if (merged.failedPhase) throw new Error(merged.message);
       if (merged.merged && merged.ledgerWritten === false) {
         setLedgerPending(true);
@@ -1926,6 +1947,7 @@ function LiveWorkspaceReviewView({
     if (!diff || !status || !health) return;
     const shouldCommit = status.files.length > 0;
     const shouldMerge = mode === "merge" || mode === "merge-archive";
+    if (shouldMerge && !deliveryReviewRef.current) { setError("非 Git 产物尚未完成评审，请先刷新并查看后再合并"); return; }
     const shouldArchive = mode === "archive";
     const archive = mode === "merge-archive";
     // 提交信息可留空（v3.97，面向不懂编程的用户）：留空走本地规则默认信息
@@ -1988,6 +2010,7 @@ function LiveWorkspaceReviewView({
           {
             id: diff.workspaceId,
             archive,
+            expectDeliveryToken: deliveryReviewRef.current?.token ?? null,
             ...gitAdmissionPayload({
               retry: false,
               reviewedSha:
@@ -1998,6 +2021,7 @@ function LiveWorkspaceReviewView({
             }),
           },
         );
+        setDeliveryFollowup(deliveryFollowupText(mergeResult.salvage));
         if (mergeResult.failedPhase) {
           setError(`${committed ? "提交已完成；" : ""}${mergeResult.message}`);
           await refresh(true);
@@ -2041,7 +2065,7 @@ function LiveWorkspaceReviewView({
   }
 
   return (
-    <div className="absolute inset-0 z-30 flex min-h-0 flex-col bg-canvas">
+    <div data-surface="canvas" className="absolute inset-0 z-30 flex min-h-0 flex-col bg-canvas">
       <header className="shrink-0 border-b border-hairline bg-strip">
         <div className="flex h-12 items-center gap-3 px-3">
           <button
@@ -2369,6 +2393,16 @@ function LiveWorkspaceReviewView({
           )}
       </header>
 
+      {!diff?.reviewOnly && deliveryError && <p role="alert" className="px-3 py-2 text-xs text-err-text">非 Git 产物未能冻结：{deliveryError}。请刷新评审后再合并。</p>}
+      {!diff?.reviewOnly && deliveryReview && deliveryReview.files.length > 0 && <section aria-label="非 Git 产物评审" className="max-h-48 shrink-0 overflow-auto border-b border-hairline px-3 py-2 text-xs">
+        <h3 className="font-medium">非 Git 产物 · {deliveryReview.files.length} 项</h3>
+        <p className="text-micro text-l3">合并只带回这版固定副本。看过后内容变化会要求重看；同名冲突不覆盖，未接收文件保留在工作区。</p>
+        <ul>{deliveryReview.files.map((file) => <li key={file.path} className="flex gap-2 py-0.5">
+          <button type="button" className="min-w-0 flex-1 truncate text-left text-l2 hover:underline disabled:text-l4" disabled={file.disposition !== "copy"} onClick={() => setDeliveryPreview(file.path)}>{file.path}</button>
+          <span className="shrink-0 text-micro text-l3">{file.disposition === "copy" ? `${(file.size / 1024).toFixed(1)} KB · ${file.sha256?.slice(0, 8)}` : file.disposition === "conflict" ? "同名存在，不覆盖" : file.disposition === "protected" ? "保护路径跳过" : file.disposition === "too_large" ? "超出冻结预算" : "随 Git 提交"}</span>
+        </li>)}</ul>
+      </section>}
+      {deliveryPreview && deliveryReview && <Suspense fallback={<p className="px-3 py-2 text-xs text-l3">加载固定副本预览…</p>}><OfficePreviewModal path={`${deliveryReview.payloadDir}/${deliveryPreview}`} root={deliveryReview.payloadDir} onClose={() => setDeliveryPreview(null)} /></Suspense>}
       {!diff?.reviewOnly && researchError && <p role="alert" className="px-3 py-2 text-xs text-err-text">{researchError}</p>}
       {!diff?.reviewOnly && researchContext?.root === worktreePath && <div className="max-h-[42vh] shrink-0 overflow-y-auto border-b border-hairline px-3">
         <ResearchEvidencePanel root={worktreePath} patterns={researchReportPatterns(researchContext.step, "acceptance")} kind="acceptance" />
@@ -2463,10 +2497,11 @@ function LiveWorkspaceReviewView({
 
         </div>
       )}
+      {deliveryFollowup && <p role="status" className="border-b border-hairline px-3 py-2 text-xs text-warn-text">{deliveryFollowup}</p>}
       {ledgerPending && diff && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-err-text">
           <span className="min-w-0 truncate">
-            ✗ {mergeAdmissionText({ ledgerWritten: false })}
+            ✗ Git 已合并，产物接收或验收记录尚未完成
           </span>
           <button
             type="button"
@@ -2477,6 +2512,7 @@ function LiveWorkspaceReviewView({
                 archive: false,
                 ...gitAdmissionPayload({ retry: true }),
               }).then((merged) => {
+                setDeliveryFollowup(deliveryFollowupText(merged.salvage));
                 if (merged.ledgerWritten) {
                   setLedgerPending(false);
                   setError(null);
@@ -2489,7 +2525,7 @@ function LiveWorkspaceReviewView({
               }).catch((reason) => setError(String(reason)));
             }}
           >
-            再记录验收
+            继续接收 / 补记验收
           </button>
         </div>
       )}

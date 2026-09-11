@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { firstFilledCatalogSlot, slotForAgent } from "../src/gateway-slot.ts";
+import { agentForSlot, firstFilledCatalogSlot, slotForAgent } from "../src/gateway-slot.ts";
 
 test("slotForAgent 与后端槽表一致", () => {
   assert.equal(slotForAgent("claude-code"), "anthropic");
@@ -29,4 +29,12 @@ test("firstFilledCatalogSlot：优先记住的槽，否则 Anthropic 先于 Open
     "openai",
   );
   assert.equal(firstFilledCatalogSlot({ cursor: "https://c" }), null);
+});
+
+test("agentForSlot 与后端探针 Agent 一致", () => {
+  assert.equal(agentForSlot("anthropic"), "claude-code");
+  assert.equal(agentForSlot("openai"), "opencode");
+  assert.equal(agentForSlot("responses"), "codex");
+  assert.equal(agentForSlot("gemini"), "gemini");
+  assert.equal(agentForSlot("cursor"), "cursor");
 });

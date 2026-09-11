@@ -651,7 +651,7 @@ export default function StepFlow({
           {/* 人工事项行：复选框本身就是状态 + 控件，再画一个 ✓ 是同一件事说两遍
               （用户实测：一行两个勾）。这里只占位保持与主干节点同列对齐 */}
           <span
-            className={`relative z-10 w-4 shrink-0 bg-inset text-center text-sm ${
+            className={`ccode-well relative z-10 w-4 shrink-0 text-center text-sm ${
               node.kind === "human" ? "" : ic.cls
             }`}
           >
@@ -1082,7 +1082,7 @@ export default function StepFlow({
   return (
     <div
       ref={containerRef}
-      className={bare ? "" : "rounded-md bg-inset px-2.5 py-2"}
+      className={bare ? "" : "ccode-well rounded-md px-2.5 py-2"}
     >
       {/* 主干节点用左侧竖线串起来（连接线落在序号列正下方，1.5px 极淡）：
           没有连线时三个节点像三条独立的行，读不出「这是一条流程」 */}

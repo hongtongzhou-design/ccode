@@ -34,13 +34,14 @@ mod pricing;
 mod process;
 mod profile_validation;
 mod profiles;
-mod projects;
 mod project_memory;
+mod projects;
 mod provider_id;
 mod pty;
 mod pty_input;
 mod reader;
 mod research_quality;
+mod research_tools;
 mod review_contract;
 mod runs;
 mod runtime;
@@ -194,15 +195,20 @@ pub fn run() {
             runs::task_create,
             runs::task_delete,
             runs::task_unarchive,
+            runs::goal_storage::task_storage_review,
+            runs::goal_storage::task_cleanup,
             runs::task_prepare_run,
+            runs::task_input_estimate,
             runs::task_output_changes,
             runs::task_run_context,
             runs::task_freeze_turn,
+            runs::task_freeze_large_outputs,
             projects::read_project_memory,
             project_memory::project_memory_read,
             project_memory::project_memory_update,
             projects::read_acceptance_log,
             runs::task_adopt_outputs,
+            runs::task_recover_outputs,
             custom_runtime::list_custom_runtimes,
             custom_runtime::save_custom_runtime,
             custom_runtime::delete_custom_runtime,
@@ -273,11 +279,14 @@ pub fn run() {
             mcp_blender::probe_blender_mcp_setup,
             fs_tree::list_dir,
             fs_tree::read_file_preview,
+            research_tools::research_tool_preflight,
+            research_quality::research_source,
             research_quality::research_run_reproduce,
             research_quality::research_get_run,
             research_quality::research_read_run_file,
             research_quality::research_save_acceptance,
             research_quality::research_get_acceptance,
+            research_quality::research_upstream_acceptances,
             fs_tree::save_file_preview,
             fs_tree::watch_dir,
             fs_tree::unwatch_dir,
@@ -321,6 +330,7 @@ pub fn run() {
             workspaces::register_artifact,
             workspaces::read_artifacts_manifest,
             workspaces::workspace_health,
+            workspaces::workspace_review_deliverables,
             workspaces::pending_artifact_checks,
             workspaces::list_human_task_states,
             workspaces::set_human_task_check,
@@ -408,6 +418,7 @@ pub fn run() {
             skills::apply_skill_update,
             skills::check_builtin_skill_updates,
             skills::apply_builtin_skill_update,
+            skills::preview_builtin_skill_update,
             skills::backfill_skill_categories,
             skills::discover_unmanaged,
             skills::import_discovered,

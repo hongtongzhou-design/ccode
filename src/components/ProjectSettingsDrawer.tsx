@@ -44,6 +44,7 @@ export default function ProjectSettingsDrawer({
       onClick={onClose}
     >
       <aside
+        data-surface="canvas"
         className="flex h-full w-[34rem] max-w-[92vw] flex-col bg-canvas"
         onClick={(e) => e.stopPropagation()}
       >
@@ -63,7 +64,7 @@ export default function ProjectSettingsDrawer({
         <div className="min-h-0 flex-1 space-y-5 overflow-auto px-5 pb-6">
           <section>
             <h3 className="mb-2 text-xs font-medium text-l3">规则与验收</h3>
-            <div className="rounded-lg bg-strip p-3">
+            <div className="rounded-lg ccode-well p-3">
               <ProjectRulesPanel
                 projectPath={projectPath}
                 workMode={workMode}

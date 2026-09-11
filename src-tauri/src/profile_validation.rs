@@ -3,7 +3,7 @@
 
 use crate::agents;
 use crate::profiles::{self, Profile, ProfileStore};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -414,10 +414,26 @@ fn tail_chars(text: &str, max: usize) -> String {
     }
 }
 
-fn run_capture(
+fn head_chars(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        text.to_string()
+    } else {
+        chars[..max].iter().collect()
+    }
+}
+
+fn exit_code_label(code: Option<i32>) -> String {
+    match code {
+        Some(code) => format!("CLI 退出码 {code}"),
+        None => "CLI 异常退出".into(),
+    }
+}
+
+fn capture_cli(
     cmd: &mut crate::process::BackgroundCommand,
     timeout: Duration,
-) -> Result<String, String> {
+) -> Result<crate::process::CapturedOutput, String> {
     let captured = crate::process::capture_command(cmd, timeout, 1024 * 1024)?;
     if captured.cancelled {
         return Err("CLI 预检已取消".into());
@@ -428,21 +444,152 @@ fn run_capture(
     if captured.truncated {
         return Err("CLI 预检输出超过 1 MB 安全上限".into());
     }
+    Ok(captured)
+}
+
+fn capture_text(captured: &crate::process::CapturedOutput) -> String {
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    let detail = if stderr.trim().is_empty() {
-        stdout
+    let stdout_t = stdout.trim();
+    let stderr_t = stderr.trim();
+    if stdout_t.starts_with('{') {
+        stdout_t.to_string()
+    } else if stderr_t.starts_with('{') {
+        stderr_t.to_string()
+    } else if stderr_t.is_empty() {
+        stdout_t.to_string()
     } else {
-        stderr
-    };
-    if captured.status.is_some_and(|s| s.success()) {
-        return Ok(tail_chars(detail.trim(), 1200));
+        stderr_t.to_string()
     }
-    Err(format!(
-        "CLI 退出码 {:?}: {}",
-        captured.status.and_then(|s| s.code()),
-        tail_chars(detail.trim(), 1200)
-    ))
+}
+
+fn first_nonempty_line(text: &str) -> &str {
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+}
+
+fn parse_json_value(text: &str) -> Option<serde_json::Value> {
+    let trimmed = text.trim();
+    let start = trimmed.find('{')?;
+    let slice = &trimmed[start..];
+    serde_json::from_str(slice).ok().or_else(|| {
+        let mut de = serde_json::Deserializer::from_str(slice);
+        serde_json::Value::deserialize(&mut de).ok()
+    })
+}
+
+fn is_codex_doctor_report(value: &serde_json::Value) -> bool {
+    value.get("checks").is_some()
+        || value.get("overallStatus").is_some()
+        || value.get("schemaVersion").is_some()
+}
+
+fn doctor_check_is_relevant(id: &str, category: &str) -> bool {
+    const RELEVANT: [&str; 2] = ["auth", "config"];
+    RELEVANT.iter().any(|name| {
+        category.eq_ignore_ascii_case(name)
+            || id.eq_ignore_ascii_case(name)
+            || id
+                .split_once('.')
+                .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case(name))
+    })
+}
+
+fn doctor_status_is_fail(status: &str) -> bool {
+    matches!(status, "fail" | "failed" | "error")
+}
+
+struct DoctorCheckRef<'a> {
+    id: &'a str,
+    category: &'a str,
+    status: &'a str,
+    summary: &'a str,
+}
+
+fn doctor_checks(report: &serde_json::Value) -> Vec<DoctorCheckRef<'_>> {
+    let Some(checks) = report.get("checks") else {
+        return Vec::new();
+    };
+    match checks {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| DoctorCheckRef {
+                id: value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(key.as_str()),
+                category: value.get("category").and_then(|v| v.as_str()).unwrap_or(""),
+                status: value.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+                summary: value.get("summary").and_then(|v| v.as_str()).unwrap_or(""),
+            })
+            .collect(),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|value| {
+                Some(DoctorCheckRef {
+                    id: value.get("id").and_then(|v| v.as_str())?,
+                    category: value.get("category").and_then(|v| v.as_str()).unwrap_or(""),
+                    status: value.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+                    summary: value.get("summary").and_then(|v| v.as_str()).unwrap_or(""),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn format_doctor_check(check: &DoctorCheckRef<'_>) -> String {
+    if check.summary.is_empty() {
+        check.id.to_string()
+    } else {
+        format!("{} — {}", check.id, check.summary)
+    }
+}
+
+/// Codex 0.154+ `doctor --json` 把本机体检整包打成 overallStatus=fail / exit 1。
+/// 注入自定义 provider 时，中转探测 404 会记成 reachability fail；会话库、桌面 CDN
+/// 等也与 Mesa 这条配置无关。CLI 层只认 config/auth，连通性归 API 层。
+fn interpret_codex_doctor(output: &str, exit_code: Option<i32>) -> Result<String, String> {
+    let parsed = parse_json_value(output).filter(is_codex_doctor_report);
+    let Some(report) = parsed else {
+        if exit_code == Some(0) {
+            let suffix = first_nonempty_line(output);
+            return Ok(if suffix.is_empty() {
+                "Codex doctor 通过".into()
+            } else {
+                format!("Codex doctor 通过：{}", head_chars(suffix, 200))
+            });
+        }
+        return Err(format!(
+            "{}: {}",
+            exit_code_label(exit_code),
+            head_chars(output.trim(), 400)
+        ));
+    };
+    let checks = doctor_checks(&report);
+    let relevant_fails: Vec<_> = checks
+        .iter()
+        .filter(|item| {
+            doctor_check_is_relevant(item.id, item.category) && doctor_status_is_fail(item.status)
+        })
+        .collect();
+    if !relevant_fails.is_empty() {
+        let detail = relevant_fails
+            .iter()
+            .map(|item| format_doctor_check(item))
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(format!("Codex doctor 未通过：{detail}"));
+    }
+    let other_fails = checks.iter().any(|item| {
+        !doctor_check_is_relevant(item.id, item.category) && doctor_status_is_fail(item.status)
+    });
+    if other_fails {
+        Ok("Codex doctor 通过：配置与认证正常；端点连通性以 API 层为准".into())
+    } else {
+        Ok("Codex doctor 通过".into())
+    }
 }
 
 fn codex_config_args(plan: &agents::LaunchPlan) -> Vec<String> {
@@ -527,18 +674,27 @@ fn cli_check(profile: &Profile, key: Option<&str>, injected: bool) -> Validation
         let cwd = std::env::temp_dir().join(format!("ccode-validate-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&cwd).map_err(|e| format!("创建预检目录失败: {e}"))?;
         cmd.current_dir(&cwd);
-        let output = run_capture(&mut cmd, CLI_TIMEOUT);
+        let captured = capture_cli(&mut cmd, CLI_TIMEOUT);
         let _ = fs::remove_dir_all(&cwd);
-        let output = output?;
-        let suffix = output
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("");
-        Ok(if suffix.is_empty() {
-            format!("{description} 通过")
-        } else {
-            format!("{description} 通过：{suffix}")
-        })
+        let captured = captured?;
+        let text = capture_text(&captured);
+        let exit_code = captured.status.and_then(|s| s.code());
+        if profile.agent == "codex" {
+            return interpret_codex_doctor(&text, exit_code);
+        }
+        if captured.status.is_some_and(|s| s.success()) {
+            let suffix = first_nonempty_line(&text);
+            return Ok(if suffix.is_empty() {
+                format!("{description} 通过")
+            } else {
+                format!("{description} 通过：{suffix}")
+            });
+        }
+        Err(format!(
+            "{}: {}",
+            exit_code_label(exit_code),
+            head_chars(text.trim(), 400)
+        ))
     })();
     match outcome {
         Ok(message) => check("passed", message, Some(started.elapsed().as_millis())),
@@ -850,32 +1006,119 @@ pub async fn probe_gateway(
     model: Option<String>,
 ) -> Result<GatewayProbeDto, String> {
     let profile = store.get(&profile_id)?;
-    probe_loaded_profile(&store, profile, model, false).await
+    probe_loaded_profile(&store, profile, model, false, None, true).await
+}
+
+/// 草稿探测：可带未保存的地址/密钥。只有地址与已存槽一致且没提交新密钥时才把结果写入 lastProbe。
+pub(crate) fn should_persist_slot_probe(
+    has_gateway: bool,
+    draft_url: Option<&str>,
+    saved_url: Option<&str>,
+    draft_key: Option<&str>,
+) -> bool {
+    if !has_gateway || draft_key.is_some() {
+        return false;
+    }
+    match (
+        draft_url.map(str::trim).filter(|s| !s.is_empty()),
+        saved_url.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
+        (None, Some(_)) => true,
+        (Some(draft), Some(saved)) => draft == saved,
+        _ => false,
+    }
 }
 
 #[tauri::command]
 pub async fn probe_gateway_slot(
     store: tauri::State<'_, ProfileStore>,
-    gateway_id: String,
+    gateway_id: Option<String>,
     slot: String,
     model: Option<String>,
     basic_only: Option<bool>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    no_auth: Option<bool>,
 ) -> Result<GatewayProbeDto, String> {
     let slot =
         crate::gateway_store::Slot::from_str(&slot).ok_or_else(|| format!("未知协议槽: {slot}"))?;
-    let gateways = store.list_gateways()?;
-    let gw = gateways
-        .iter()
-        .find(|g| g.id == gateway_id)
-        .ok_or("网关不存在")?
-        .clone();
+    if slot == crate::gateway_store::Slot::Cursor {
+        return Err("Cursor 为专有协议，不支持网关体检".into());
+    }
+    if slot == crate::gateway_store::Slot::Gemini {
+        return Err("Gemini 协议暂不支持网关体检".into());
+    }
+    let draft_url = base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let draft_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let gid = gateway_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let mut gw = if let Some(id) = gid.as_deref() {
+        store
+            .list_gateways()?
+            .into_iter()
+            .find(|g| g.id == id)
+            .ok_or("网关不存在")?
+    } else {
+        crate::profiles::Gateway {
+            id: String::new(),
+            name: "草稿".into(),
+            no_auth: no_auth.unwrap_or(draft_key.is_none()),
+            key_hint: None,
+            slots: crate::profiles::ProtocolSlots::default(),
+            header_env: Default::default(),
+            models: Vec::new(),
+            catalog_fetched_at: None,
+            catalog_from_slot: None,
+            last_probe: Vec::new(),
+            slot_probes: Vec::new(),
+            revision: String::new(),
+        }
+    };
+    if let Some(flag) = no_auth {
+        gw.no_auth = flag;
+    }
+    let saved_url = crate::gateway_store::slot_url(&gw.slots, slot).map(str::to_string);
+    if let Some(url) = &draft_url {
+        crate::gateway_store::set_slot_url(&mut gw.slots, slot, Some(url.clone()));
+    } else if crate::gateway_store::slot_url(&gw.slots, slot).is_none() {
+        return Err("这个槽还没填端点".into());
+    }
+    let persist = should_persist_slot_probe(
+        !gw.id.is_empty(),
+        draft_url.as_deref(),
+        saved_url.as_deref(),
+        draft_key.as_deref(),
+    );
     let model = Some(default_probe_model(&gw, slot, model));
     let binding = crate::profiles::Binding {
-        id: format!("probe-{}", gw.id),
+        id: format!(
+            "probe-{}",
+            if gw.id.is_empty() {
+                "draft"
+            } else {
+                gw.id.as_str()
+            }
+        ),
         agent: crate::gateway_store::agent_for_slot(slot).into(),
         name: format!("探测 · {}", gw.name),
         kind: crate::profiles::BindingKind::Api,
-        gateway_id: Some(gw.id.clone()),
+        gateway_id: if gw.id.is_empty() {
+            None
+        } else {
+            Some(gw.id.clone())
+        },
         protocol: None,
         api_backend: None,
         models: gw.models.iter().map(|m| m.id.clone()).collect(),
@@ -883,8 +1126,17 @@ pub async fn probe_gateway_slot(
         last_used_at: None,
     };
     let mut profile = crate::gateway_store::materialize(&binding, Some(&gw), model.as_deref());
-    profile.has_key = gw.key_hint.is_some();
-    probe_loaded_profile(&store, profile, model, basic_only.unwrap_or(false)).await
+    profile.has_key = draft_key.is_some() || gw.key_hint.is_some();
+    profile.no_auth = gw.no_auth && draft_key.is_none();
+    probe_loaded_profile(
+        &store,
+        profile,
+        model,
+        basic_only.unwrap_or(false),
+        draft_key,
+        persist,
+    )
+    .await
 }
 
 fn default_probe_model(
@@ -923,8 +1175,16 @@ async fn probe_loaded_profile(
     profile: crate::profiles::Profile,
     model: Option<String>,
     basic_only: bool,
+    key_override: Option<String>,
+    persist: bool,
 ) -> Result<GatewayProbeDto, String> {
-    let key = profiles::get_key_for_profile(&profile)?;
+    let key = if profile.no_auth {
+        None
+    } else if let Some(k) = key_override.filter(|s| !s.trim().is_empty()) {
+        Some(k)
+    } else {
+        profiles::get_key_for_profile(&profile)?
+    };
     if profile.agent == "cursor" {
         return Err("Cursor 为专有协议，不支持网关体检".into());
     }
@@ -934,13 +1194,16 @@ async fn probe_loaded_profile(
     }
     let model = model
         .or_else(|| profile.models.first().cloned())
-        .filter(|m| !m.trim().is_empty())
-        .ok_or("请先在配置里填写模型")?;
+        .filter(|m| !m.trim().is_empty());
     let base = profile
         .base_url
         .as_deref()
         .unwrap_or_else(|| default_base(&profile, kind))
         .to_string();
+    if model.is_none() {
+        return probe_catalog_connectivity(&profile, &base, key.as_deref(), persist, store).await;
+    }
+    let model = model.unwrap();
     let url = chat_url(&base, kind)?;
     let client = reqwest::Client::builder()
         .timeout(API_TIMEOUT)
@@ -1027,6 +1290,7 @@ async fn probe_loaded_profile(
             &checks,
             basic_latency,
             basic_only,
+            persist,
         );
         return Ok(GatewayProbeDto {
             ok: false,
@@ -1044,6 +1308,7 @@ async fn probe_loaded_profile(
             &checks,
             basic_latency,
             true,
+            persist,
         );
         return Ok(GatewayProbeDto {
             ok: true,
@@ -1177,8 +1442,61 @@ async fn probe_loaded_profile(
         &checks,
         basic_latency,
         false,
+        persist,
     );
     Ok(GatewayProbeDto { ok, model, checks })
+}
+
+/// 还没有模型名单时：用 GET /models 验证地址和密钥，不写目录。
+async fn probe_catalog_connectivity(
+    profile: &crate::profiles::Profile,
+    base: &str,
+    key: Option<&str>,
+    persist: bool,
+    store: &ProfileStore,
+) -> Result<GatewayProbeDto, String> {
+    let started = Instant::now();
+    let result = crate::models::fetch_models(
+        base.to_string(),
+        key.map(str::to_string),
+        None,
+        Some(profile.agent.clone()),
+        profile.protocol.clone(),
+        if persist {
+            profile.gateway_id.clone()
+        } else {
+            None
+        },
+        Some(true),
+    )
+    .await;
+    let latency = started.elapsed().as_millis();
+    let (ok, message) = match result {
+        Ok(res) if res.models.is_empty() => (false, "基础请求：目录为空".to_string()),
+        Ok(res) => (true, format!("基础请求：目录 {} 个模型", res.models.len())),
+        Err(e) => (false, format!("基础请求：{e}")),
+    };
+    let checks = vec![check(
+        if ok { "passed" } else { "failed" },
+        message,
+        Some(latency),
+    )];
+    persist_slot_probe(
+        store,
+        profile,
+        "",
+        base,
+        key,
+        &checks,
+        Some(latency as u64),
+        true,
+        persist,
+    );
+    Ok(GatewayProbeDto {
+        ok,
+        model: String::new(),
+        checks,
+    })
 }
 
 fn append_policy_probe_check(
@@ -1223,7 +1541,11 @@ fn persist_slot_probe(
     checks: &[ValidationCheckDto],
     latency_ms: Option<u64>,
     basic_only: bool,
+    persist: bool,
 ) {
+    if !persist {
+        return;
+    }
     let Some(gid) = profile.gateway_id.clone() else {
         return;
     };
@@ -1382,6 +1704,40 @@ mod tests {
     }
 
     #[test]
+    fn draft_probe_does_not_persist_until_saved() {
+        assert!(!should_persist_slot_probe(
+            false,
+            Some("https://a"),
+            None,
+            None
+        ));
+        assert!(!should_persist_slot_probe(
+            true,
+            Some("https://new"),
+            Some("https://old"),
+            None,
+        ));
+        assert!(!should_persist_slot_probe(
+            true,
+            Some("https://old"),
+            Some("https://old"),
+            Some("sk-new"),
+        ));
+        assert!(should_persist_slot_probe(
+            true,
+            Some("https://old"),
+            Some("https://old"),
+            None,
+        ));
+        assert!(should_persist_slot_probe(
+            true,
+            None,
+            Some("https://old"),
+            None
+        ));
+    }
+
+    #[test]
     fn request_policy_ranges_and_header_references_are_validated() {
         let mut p = profile("claude-code");
         p.request_policy.temperature = Some(2.1);
@@ -1485,5 +1841,91 @@ mod tests {
         assert_eq!(model_ids(&openai, ApiKind::OpenAi), vec!["m1"]);
         assert_eq!(model_ids(&openai, ApiKind::Anthropic), vec!["m1"]);
         assert_eq!(model_ids(&gemini, ApiKind::Gemini), vec!["gemini-2.5-pro"]);
+    }
+
+    fn doctor_report(auth: &str, config: &str, reachability: &str) -> String {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "overallStatus": "fail",
+            "checks": {
+                "auth.credentials": {
+                    "id": "auth.credentials",
+                    "category": "auth",
+                    "status": auth,
+                    "summary": "auth summary"
+                },
+                "config.load": {
+                    "id": "config.load",
+                    "category": "config",
+                    "status": config,
+                    "summary": "config loaded"
+                },
+                "network.provider_reachability": {
+                    "id": "network.provider_reachability",
+                    "category": "reachability",
+                    "status": reachability,
+                    "summary": "one or more required provider endpoints are unreachable over HTTP"
+                },
+                "terminal.title": {
+                    "id": "terminal.title",
+                    "category": "title",
+                    "status": "ok",
+                    "summary": "terminal title default"
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn codex_doctor_reachability_fail_does_not_fail_cli_layer() {
+        let message = interpret_codex_doctor(&doctor_report("ok", "ok", "fail"), Some(1)).unwrap();
+        assert!(message.contains("通过"));
+        assert!(message.contains("API 层"));
+        assert!(!message.contains("terminal.title"));
+        assert!(!message.contains("Some(1)"));
+    }
+
+    #[test]
+    fn codex_doctor_auth_fail_still_fails_cli_layer() {
+        let err = interpret_codex_doctor(&doctor_report("fail", "ok", "ok"), Some(1)).unwrap_err();
+        assert!(err.contains("auth.credentials"));
+        assert!(!err.contains("Some("));
+    }
+
+    #[test]
+    fn codex_doctor_config_fail_still_fails_cli_layer() {
+        let err = interpret_codex_doctor(&doctor_report("ok", "fail", "ok"), Some(1)).unwrap_err();
+        assert!(err.contains("config.load"));
+    }
+
+    #[test]
+    fn unparsed_cli_failure_uses_numeric_exit_code_and_head() {
+        let err = interpret_codex_doctor("not-json doctor output", Some(1)).unwrap_err();
+        assert!(err.contains("CLI 退出码 1"));
+        assert!(!err.contains("Some("));
+        assert!(err.contains("not-json"));
+    }
+
+    #[test]
+    #[ignore = "需本机 codex；注入假钥会让 doctor 因中转探测 exit 1"]
+    fn cli_check_codex_injected_live_doctor_ignores_reachability() {
+        if crate::agents::resolve_binary("codex").is_none() {
+            return;
+        }
+        let mut p = profile("codex");
+        p.base_url = Some("https://example.com/v1".into());
+        let result = cli_check(&p, Some("sk-test-dummy"), true);
+        eprintln!(
+            "cli_check status={} latency={:?} message={}",
+            result.status, result.latency_ms, result.message
+        );
+        assert_eq!(result.status, "passed", "{}", result.message);
+        assert!(result.message.contains("通过"), "{}", result.message);
+        assert!(
+            !result.message.contains("Some(1)") && !result.message.contains("terminal.title"),
+            "{}",
+            result.message
+        );
     }
 }

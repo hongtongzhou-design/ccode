@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crate::projects::{
     append_acceptance_log_at, project_id_at, read_acceptance_log_at, AcceptanceLogEntry,
-    ContentFingerprint,
 };
 
 pub const KIND_GOAL_ADOPT: &str = "goal_adopt";
@@ -269,25 +268,6 @@ pub fn result_readiness(input: &ReadinessInput) -> ResultReadiness {
         }
         _ => ResultReadiness::None,
     }
-}
-
-pub fn fingerprints_from_paths(root: &Path, paths: &[String]) -> Vec<ContentFingerprint> {
-    let mut out = Vec::new();
-    for rel in paths {
-        let path = root.join(rel);
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        out.push(ContentFingerprint {
-            path: rel.clone(),
-            size: meta.len(),
-            sha256: None,
-        });
-    }
-    out
 }
 
 #[cfg(test)]

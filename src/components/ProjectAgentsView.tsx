@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown } from "lucide-react";
+import { ArrowUpRight, Check, ChevronDown, Star } from "lucide-react";
 import { useAppStore } from "../store";
 import { AGENTS, type ProjectDto, type TaskDto } from "../types";
-import {
-  ghostActionClass,
-  hoverRevealClass,
-  secondaryActionClass,
-} from "./PageFrame";
+import { ghostActionClass } from "./PageFrame";
 import { agentBrand } from "../agent-colors";
 import {
   buildProjectAgentRoster,
@@ -130,18 +126,21 @@ export default function ProjectAgentsView({
   }
 
   return (
-    <section>
-      <div className="mb-4 flex items-baseline gap-3">
-        <h2 className="text-sm font-medium text-l1">Agents</h2>
-        <p className="min-w-0 flex-1 truncate text-xs text-l4">
-          {projectAgentsHint(project.workMode)}
-        </p>
+    <section aria-label="项目 Agents">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-medium text-l1">项目 Agents</h2>
+          <p className="mt-1 text-xs text-l3">
+            {projectAgentsHint(project.workMode)}
+          </p>
+        </div>
         <button
           type="button"
-          className={secondaryActionClass}
+          className={`${ghostActionClass} shrink-0 gap-1`}
           onClick={() => setPage("profiles")}
         >
-          连接
+          管理连接
+          <ArrowUpRight size={14} aria-hidden="true" />
         </button>
       </div>
       {roster.rows.length === 0 ? (
@@ -156,57 +155,43 @@ export default function ProjectAgentsView({
           </button>
         </p>
       ) : (
-        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <ul aria-label="项目 Agent 名册" className="grid grid-cols-1 items-start gap-2 md:grid-cols-2">
           {roster.rows.map((row) => (
             <li
               key={row.agentId}
-              className={`group relative rounded-lg px-3 py-3 ${
-                row.isProjectDefault ? "bg-hover" : "hover:bg-hover"
+              className={`min-w-0 rounded-lg p-3 transition-colors ${
+                row.isProjectDefault ? "bg-seg-sel" : "ccode-well"
               }`}
             >
-              {row.isProjectDefault && (
-                <span
-                  aria-hidden="true"
-                  className="absolute bottom-3 left-0 top-3 w-0.5 rounded-full"
-                  style={{ background: agentBrand(row.agentId) }}
-                />
-              )}
               <div className="flex items-center gap-2">
                 <span
                   aria-hidden="true"
-                  className="size-2.5 shrink-0 rounded-full"
+                  className="size-2 shrink-0 rounded-full"
                   style={{ background: agentBrand(row.agentId) }}
                 />
                 <h3 className="min-w-0 flex-1 truncate text-sm font-medium text-l1">
                   {row.label}
                 </h3>
-                {row.isProjectDefault ? (
-                  <button
-                    type="button"
-                    className={`${ghostActionClass} text-micro`}
-                    disabled={saving}
-                    title="取消后，＋新对话不再默认用这家。不改 Mesa 启动栏，也不写 CLI 全局文件。"
-                    onClick={() => void saveAgent("")}
-                  >
-                    项目默认
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className={`${ghostActionClass} ${hoverRevealClass} text-micro`}
-                    disabled={saving}
-                    title="只影响这个项目的新对话预选，不改 Mesa 启动栏，也不写 CLI 全局文件"
-                    onClick={() => void saveAgent(row.agentId)}
-                  >
-                    设为项目默认
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className={`${ghostActionClass} shrink-0 gap-1 ${row.isProjectDefault ? "font-medium text-l1" : ""}`}
+                  disabled={saving}
+                  aria-pressed={row.isProjectDefault}
+                  aria-label={row.isProjectDefault ? `取消 ${row.label} 的项目默认` : `将 ${row.label} 设为项目默认`}
+                  title={row.isProjectDefault
+                    ? "取消本项目默认，不改 Mesa 启动栏或 CLI 全局配置"
+                    : "只影响本项目的默认选择，不改 Mesa 启动栏或 CLI 全局配置"}
+                  onClick={() => void saveAgent(row.isProjectDefault ? "" : row.agentId)}
+                >
+                  <Star size={13} fill={row.isProjectDefault ? "currentColor" : "none"} aria-hidden="true" />
+                  {row.isProjectDefault ? "项目默认" : "设为默认"}
+                </button>
               </div>
-              <div className="mt-1 pl-[18px]">
+              <div className="mt-1 min-w-0 pl-2">
                 {row.profiles.length === 0 ? (
                   <button
                     type="button"
-                    className="text-xs text-l4 hover:text-l2"
+                    className={ghostActionClass}
                     onClick={() => setPage("profiles")}
                   >
                     还没有连接
@@ -244,12 +229,13 @@ export default function ProjectAgentsView({
           ))}
         </ul>
       )}
-      {roster.rows.length > 0 &&
+      {project.workMode !== "coding" &&
+        roster.rows.length > 0 &&
         roster.rows.every((row) => row.works.length === 0) &&
         roster.unassigned.length === 0 && (
           <p className="mt-3 px-1 text-micro text-l4">
             {projectAgentsEmptyWorkHint(project.workMode)}
-            {onOpenGoals && project.workMode !== "coding" && (
+            {onOpenGoals && (
               <button
                 type="button"
                 className="ml-1 text-l3 underline-offset-2 hover:text-l1 hover:underline"
@@ -300,6 +286,8 @@ function ProfileMenu({
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const current = row.profiles.find((profile) => profile.id === row.defaultProfileId) ?? row.profiles[0];
   const line = currentProfileLine(row);
   const currentId = row.defaultProfileId || row.profiles[0]?.id || "";
 
@@ -309,7 +297,10 @@ function ProfileMenu({
       if (!wrapRef.current?.contains(event.target as Node)) setOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
     };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -322,21 +313,27 @@ function ProfileMenu({
   return (
     <div ref={wrapRef} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         aria-expanded={open}
         aria-haspopup="listbox"
-        title="换这个项目用的配置。只影响本项目，不改 Mesa 启动栏，也不写 CLI 全局文件。"
-        className="inline-flex h-7 max-w-full items-center gap-1 text-xs text-l3 hover:text-l1 disabled:opacity-50"
+        aria-label={`更换 ${row.label} 的项目连接`}
+        title={`${line ?? "还没有连接"}；只修改本项目的连接选择`}
+        className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-hover disabled:opacity-50"
         onClick={() => setOpen((value) => !value)}
       >
-        <span className="truncate">{line}</span>
-        <ChevronDown size={12} className="shrink-0 opacity-60" aria-hidden="true" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs font-medium text-l2">{current?.name}</span>
+          <span className="mt-0.5 block truncate text-xs text-l3">{current?.model}</span>
+        </span>
+        <ChevronDown size={14} className="shrink-0 text-l3" aria-hidden="true" />
       </button>
       {open && (
         <ul
           role="listbox"
-          className="absolute left-0 z-20 mt-1 min-w-44 max-w-72 rounded-md border border-field py-1 ccode-float-surface"
+          aria-label={`${row.label} 的项目连接`}
+          className="ccode-float-surface absolute inset-x-0 z-50 mt-1 max-h-64 overflow-y-auto overscroll-contain rounded-md border border-field py-1"
         >
           {row.profiles.map((profile) => {
             const selected = profile.id === currentId;
@@ -346,15 +343,21 @@ function ProfileMenu({
                   type="button"
                   role="option"
                   aria-selected={selected}
-                  className={`flex h-7 w-full items-center px-2.5 text-left text-xs ${
-                    selected ? "bg-hover text-l1" : "text-l3 hover:bg-hover hover:text-l1"
+                  disabled={disabled}
+                  title={profile.modelLine}
+                  className={`flex w-full items-center gap-2 px-2.5 py-2 text-left disabled:opacity-50 ${
+                    selected ? "bg-hover text-l1" : "text-l2 hover:bg-hover hover:text-l1"
                   }`}
                   onClick={() => {
                     onPick(profile.id);
                     setOpen(false);
                   }}
                 >
-                  <span className="truncate">{profile.modelLine}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-medium">{profile.name}</span>
+                    <span className="mt-0.5 block truncate text-xs text-l3">{profile.model}</span>
+                  </span>
+                  {selected && <Check size={14} className="shrink-0" aria-hidden="true" />}
                 </button>
               </li>
             );

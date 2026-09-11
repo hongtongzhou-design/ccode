@@ -82,6 +82,7 @@ export interface GatewayModel {
   source: string;
   status?: "available" | "stale" | string;
   lastSeenAt?: string | null;
+  catalogSlot?: string | null;
   temperature: number | null;
   topP: number | null;
   maxOutputTokens: number | null;
@@ -211,6 +212,12 @@ export interface FetchModelsResultDto {
   models: string[];
   fromCache: boolean;
   fetchedAt: string;
+  capabilityMetadataCount: number;
+}
+
+/** fetch_gateway_catalog：写入网关目录，并带回本次 /models 里解析到的能力条数 */
+export interface FetchGatewayCatalogDto {
+  gateway: Gateway;
   capabilityMetadataCount: number;
 }
 
@@ -566,6 +573,15 @@ export interface WsSettingsDto {
   run: RunScriptDto[];
 }
 
+export type ResearchWorkspaceRef = Pick<WorkspaceDto, "id" | "repoPath" | "worktreePath" | "status">;
+export interface ResearchSourceDto {
+  root: string;
+  projectId: string | null;
+  resultVersion: string;
+  revision: string;
+  warnings: string[];
+}
+
 export interface ResearchRunDto {
   id: string;
   workspaceId: string;
@@ -583,6 +599,11 @@ export interface ResearchRunDto {
   resultFile: string | null;
   startedAt: string;
   finishedAt: string | null;
+  projectId?: string | null;
+  resultVersion?: string | null;
+  sourceRevision?: string | null;
+  sourceChanged?: boolean;
+  resultRevision?: string | null;
 }
 
 export interface ResearchAcceptedFile {
@@ -599,6 +620,11 @@ export interface ResearchAcceptanceDto {
   openBlockers: string[];
   runId: string | null;
   createdAt: string;
+  projectId?: string | null;
+  resultVersion?: string | null;
+  sourceRevision?: string | null;
+  sourceRoot?: string | null;
+  sourceRunId?: string | null;
 }
 
 export interface GitFileDto {
@@ -783,6 +809,14 @@ export interface GitCommitResultDto {
 }
 
 /** 本地合并/归档的分阶段结果；归档失败时 merged 仍为 true。 */
+export interface WorkspaceDeliverableReviewDto {
+  token: string;
+  workspaceId: string;
+  projectRoot: string;
+  payloadDir: string;
+  files: { path: string; size: number; sha256: string | null; disposition: "copy" | "protected" | "conflict" | "too_large" | "tracked" }[];
+}
+
 export interface WorkspaceMergeResultDto {
   merged: boolean;
   archived: boolean;
@@ -792,6 +826,7 @@ export interface WorkspaceMergeResultDto {
   versionId?: string | null;
   reviewedSha?: string | null;
   ledgerWritten?: boolean;
+  salvage?: { copied: string[]; conflicts: string[]; skippedProtected: string[]; failed: string[] };
 }
 
 /** 推送分支/创建 PR 的分阶段结果。 */
@@ -1486,6 +1521,25 @@ export interface TaskDto {
   skills?: string[];
   /** 项目稳定 id（双写中；旧数据可能为空） */
   projectId?: string | null;
+  pendingApplyRunId?: string | null;
+  workspaceCleared?: boolean;
+  reviewCleared?: boolean;
+  storageCleanupPending?: boolean;
+}
+
+export interface TaskStorageUsageDto {
+  bytes: number;
+  files: number;
+  directories: number;
+}
+export interface TaskStorageReviewDto {
+  taskId: string;
+  workspace: TaskStorageUsageDto;
+  review: TaskStorageUsageDto;
+  revision: string;
+  blockedReason: string | null;
+  reviewBlockedReason: string | null;
+  pending: { id: string; scope: "workspace" | "review" } | null;
 }
 
 /** 长期验收账本 `.ccode/acceptance-log.jsonl` 的一行（只读展示） */
@@ -1516,6 +1570,7 @@ export interface TaskOutputChangeDto {
   path: string;
   kind: "added" | "modified" | "deleted" | string;
   bytes: number;
+  tooLarge?: boolean;
 }
 
 /** 目标评审：frozen=true 时变更来自收尾冻结副本，预览与采纳只读 payloadDir。 */
@@ -1525,6 +1580,9 @@ export interface TaskReviewDto {
   /** 冻结版本号（回合再冻结递增）；采纳时回传绑定「看过的那版」 */
   seq?: number | null;
   changes: TaskOutputChangeDto[];
+  freezeRequired?: boolean;
+  readiness?: "none" | "reviewable" | "blocked" | "applied" | "ledger_pending";
+  pendingApply?: { id: string; versionId: string; paths: string[]; phase: string; note: string; memorize: boolean } | null;
 }
 
 /** 开工时冻结的有效上下文快照（Context Pack + 目标行全文）。 */

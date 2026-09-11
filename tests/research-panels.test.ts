@@ -35,6 +35,10 @@ test("科研界面：摘要来源/缺失/截断、决定编辑撤回、复现确
       if(args.path.endsWith('reproduce.py'))return {text:'# MESA_REPRODUCE: {"interpreter":"python","subcommand":"reproduce","outputPlacement":"independent","resultFile":"verification.json"}\nadd_parser(\'reproduce\')',revision:scriptRevision,truncated:false};
       return {text:report,truncated,revision:truncated?null:'rev-report'};
     }
+    if(command==='research_source') {
+      if(archived) throw new Error('工作区已归档且没有可核对的接受记录');
+      return {root:'/tree',projectId:'project',resultVersion:'commit-1',revision:'source-'+scriptRevision,warnings:[]};
+    }
     if(command==='workspace_settings')return {runMode:'nonconcurrent',run:configured};
     if(command==='list_workspaces')return [{id:'w1',name:'exp-run',repoPath:'/project',worktreePath:'/tree',status:archived?'archived':'active'}];
     if(command==='workspace_env_for'){if(rejectEnv)throw new Error('env failure');return [['PORT','18000']];}
@@ -42,6 +46,8 @@ test("科研界面：摘要来源/缺失/截断、决定编辑撤回、复现确
     if(command==='research_run_reproduce'){
       assert.equal(args.subcommand,'reproduce');
       assert.equal(args.entry,'experiments/reproduce.py');
+      assert.equal(args.expectedSourceRevision,'source-'+scriptRevision);
+      assert.equal(args.projectRoot,'/project');
       return {id:'r-test',workspaceId:'w1',worktreePath:'/tree',command:['python3','experiments/reproduce.py','reproduce','--input','/tree','--output','/out'],entry:'experiments/reproduce.py',entryRevision:scriptRevision,input:'/tree',outputDir:'/out',status:'succeeded',exitCode:0,stdout:'',stderr:'',outputs:['verification.json'],resultFile:'verification.json',startedAt:'t0',finishedAt:'t1'};
     }
     if(command==='research_read_run_file'){
@@ -118,7 +124,8 @@ test("科研界面：摘要来源/缺失/截断、决定编辑撤回、复现确
     delete state.runningScripts.w1;
     archived=true;
     await act(async()=>root.render(h('div',null,h(Reproduction,{...props,key:'archived',workspace:{...props.workspace,status:'archived'}}),h(ConfirmDialogHost))));
-    assert.ok(button('运行这次复现').disabled);
+    assert.match(host.textContent!,/无可用复现入口|来源无法核对/);
+    assert.match(host.textContent!,/尚无可用复现入口/);
 
   }finally{await act(async()=>root.unmount());dom.window.close();for(const[key,d]of restore){if(d)Object.defineProperty(globalThis,key,d);else Reflect.deleteProperty(globalThis,key);}}
 });

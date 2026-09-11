@@ -1,3 +1,5 @@
+import { researchToolContractMatches } from "./research-tools";
+import { appendUpstreamAcceptance, type UpstreamAcceptance } from "./research-acceptance";
 import { invoke } from "@tauri-apps/api/core";
 import { isGitMissingError } from "./dep-check";
 import { decisionGate, orderedAnswers, parseDecisions } from "./step-decisions";
@@ -26,6 +28,7 @@ export async function gatherTaskMdExtras(
   artifacts: ArtifactEntryDto[];
   skillMeta: Record<string, string> | undefined;
   decisions: { q: string; answer: string }[];
+  upstream: UpstreamAcceptance[];
 }> {
   // 提货单：项目根已有上一步产物清单时带进 TASK.md（读取失败不阻断）
   let artifacts: ArtifactEntryDto[] = [];
@@ -63,7 +66,8 @@ export async function gatherTaskMdExtras(
   } catch {
     /* 草稿不可读时跳过「已定方向」段 */
   }
-  return { artifacts, skillMeta, decisions };
+  const upstream = await invoke<UpstreamAcceptance[]>("research_upstream_acceptances", { projectRoot: projectPath, stepName: step.name });
+  return { artifacts, skillMeta, decisions, upstream };
 }
 
 /** 只读预览用的一步到位拼装（步骤级「预览 TASK.md」入口）：与开工落盘同一出处
@@ -73,11 +77,11 @@ export async function buildTaskMdPreview(
   step: ProjectStepDto,
   cfg: ProjectConfigDto,
 ): Promise<string> {
-  const { artifacts, skillMeta, decisions } = await gatherTaskMdExtras(
+  const { artifacts, skillMeta, decisions, upstream } = await gatherTaskMdExtras(
     projectPath,
     step,
   );
-  return renderTaskMd(step, cfg, projectPath, artifacts, skillMeta, decisions);
+  return appendUpstreamAcceptance(renderTaskMd(step, cfg, projectPath, artifacts, skillMeta, decisions), upstream);
 }
 
 /** 一键开步共享链路（§11.3 机制三）：ensure git → bootstrap 提交 → 建工作区 → 简报落成 TASK.md →
@@ -117,6 +121,20 @@ export async function startPipelineStep({
   }
   if (gate.needsAck && !decisionPauseAcknowledged) {
     throw new Error(`本步骤只允许准备或无依赖工作，请先确认：${gate.missing.join("、") || "仅允许准备"}`);
+  }
+  if (taskMdOverride?.trim() && !researchToolContractMatches(step, taskMdOverride)) {
+    throw new Error("任务书工具合同与当前步骤不一致，请重新核对后开始；未覆盖已有草稿");
+  }
+  if (launch && step.skills.length > 0) {
+    const checks = await invoke<{ name: string; detail: string; blocking: boolean }[]>("research_tool_preflight", {
+      projectRoot: projectPath, stepName: step.name, agent: launch.agentId,
+    });
+    const blocked = checks.filter((c) => c.blocking);
+    if (blocked.length) throw new Error(blocked.map((c) => `${c.name}：${c.detail}`).join("；"));
+  }
+  const upstream = await invoke<UpstreamAcceptance[]>("research_upstream_acceptances", { projectRoot: projectPath, stepName: step.name });
+  if (taskMdOverride?.trim() && appendUpstreamAcceptance(taskMdOverride, upstream).trim() !== taskMdOverride.trim()) {
+    throw new Error("上游科研验收记录或证据已变化，请重新打开开工确认并核对；未创建工作区或启动 Agent");
   }
   try {
     await invoke<EnsureGitDto>("ensure_git_repo", { path: projectPath });
@@ -163,6 +181,7 @@ export async function startPipelineStep({
       decisions,
     );
   }
+  content = appendUpstreamAcceptance(content, upstream);
   try {
     await invoke("write_workspace_task_md", {
       worktreePath: ws.worktreePath,

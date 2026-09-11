@@ -373,7 +373,7 @@ export default function ArtifactChecklist({
   }, [projectPath, workspaceName, root, refreshTick]);
 
   return (
-    <div className="mt-2 rounded-md bg-strip p-2">
+    <div className="mt-2 rounded-md ccode-well p-2">
       <div className="mb-1 flex items-center gap-2">
         <span className="text-xs text-l2">
           「{stepName ?? workspaceName}」产物核验
@@ -406,7 +406,7 @@ export default function ArtifactChecklist({
       ) : (
         <>
         {acceptanceCriteria.length > 0 && (
-          <div className="mb-2 rounded-sm border border-white/5 bg-inset px-2 py-1.5">
+          <div className="mb-2 rounded-sm border border-white/5 ccode-well px-2 py-1.5">
             <div className="mb-1 text-micro text-l4">内容级验收证据</div>
             <ul className="space-y-0.5">
               {acceptanceCriteria.map((criterion) => (

@@ -1,0 +1,150 @@
+import type { ProjectStepDto } from "./types";
+
+export interface ResearchTools {
+  literature: "files" | "zotero" | "endnote";
+  libraryExport: "none" | "zotero" | "endnote";
+  plotting: "python" | "origin";
+  illustration: "none" | "blender";
+  manuscript: "markdown" | "latex" | "word";
+}
+export const DEFAULT_RESEARCH_TOOLS: ResearchTools = {
+  literature: "files", libraryExport: "none", plotting: "python", illustration: "none", manuscript: "markdown",
+};
+export const RESEARCH_TOOL_FIELDS = [
+  { key: "literature", label: "文献主来源", options: [["files", "项目文件 / 检索"], ["zotero", "Zotero"], ["endnote", "EndNote 导出文件"]] },
+  { key: "libraryExport", label: "文献库交付", options: [["none", "不写外部库"], ["zotero", "Zotero（逐批确认）"], ["endnote", "EndNote XML / RIS"]] },
+  { key: "plotting", label: "数值图", options: [["python", "Python"], ["origin", "Origin（Windows）"]] },
+  { key: "illustration", label: "结构 / 装置示意", options: [["none", "不需要"], ["blender", "Blender"]] },
+  { key: "manuscript", label: "稿件载体", options: [["markdown", "Markdown / Quarto"], ["latex", "LaTeX（原生源码）"], ["word", "已有 Word（人工插件验收）"]] },
+] as const;
+const PREFIX = "科研工具/";
+export function researchToolsFromSettings(settings: readonly string[] = []): ResearchTools {
+  const result = { ...DEFAULT_RESEARCH_TOOLS };
+  for (const field of RESEARCH_TOOL_FIELDS) {
+    const value = settings.find((s) => s.startsWith(`${PREFIX}${field.key}：`))?.split("：").slice(1).join("：");
+    if (field.options.some(([key]) => key === value)) Object.assign(result, { [field.key]: value });
+  }
+  return result;
+}
+export function settingsWithResearchTools(settings: readonly string[], tools: ResearchTools): string[] {
+  return [...settings.filter((s) => !RESEARCH_TOOL_FIELDS.some((f) => s.startsWith(`${PREFIX}${f.key}：`))),
+    ...RESEARCH_TOOL_FIELDS.filter((f) => tools[f.key] !== DEFAULT_RESEARCH_TOOLS[f.key]).map((f) => `${PREFIX}${f.key}：${tools[f.key]}`)];
+}
+const START = "<!-- mesa-research-tools ";
+const END = "<!-- /mesa-research-tools -->";
+interface Added {
+  skills: string[]; required: string[]; artifacts: string[]; human: string[];
+  replaced?: Partial<Record<"inputs" | "anyOfInputs" | "expectedArtifacts" | "run" | "skills" | "requiredSkills", { before: unknown; after: unknown }>>;
+}
+
+/** Only remove additions recorded by this function; manual skills and other brief sections survive. */
+export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, artifactDir = "artifacts"): ProjectStepDto {
+  const step = { ...source, skills: [...source.skills], requiredSkills: [...(source.requiredSkills ?? source.skills)], expectedArtifacts: [...source.expectedArtifacts], humanTasks: [...(source.humanTasks ?? [])] };
+  const start = step.brief.indexOf(START);
+  const end = step.brief.indexOf(END, start);
+  if ((start >= 0) !== (end >= 0)) throw new Error("工具合同标记不完整，未覆盖原内容");
+  if (start >= 0 && end >= start) {
+    try {
+      const header = step.brief.indexOf(" -->", start);
+      const old: Added = JSON.parse(step.brief.slice(start + START.length, header));
+      for (const [key, value] of Object.entries(old.replaced ?? {})) {
+        if (JSON.stringify(step[key as keyof typeof step] ?? null) !== JSON.stringify(value.after ?? null)) {
+          throw new Error("原生稿件交付已被手工修改，请先保留副本再切换载体");
+        }
+        Object.assign(step, { [key]: value.before });
+      }
+      step.skills = step.skills.filter((s) => !old.skills.includes(s));
+      step.requiredSkills = step.requiredSkills.filter((s) => !old.required.includes(s));
+      step.expectedArtifacts = step.expectedArtifacts.filter((s) => !old.artifacts.includes(s));
+      step.humanTasks = step.humanTasks.filter((h) => !old.human.includes(h.title));
+      step.brief = step.brief.slice(0, start).trimEnd() + step.brief.slice(end + END.length);
+    } catch { throw new Error("工具合同记录损坏，请先在步骤简报中修复；未覆盖原内容"); }
+  }
+  const added: Added = { skills: [], required: [], artifacts: [], human: [] };
+  const notes: string[] = [];
+  const mount = (skill: string, artifacts: string[], note: string, human?: string) => {
+    if (!step.skills.includes(skill)) { step.skills.push(skill); added.skills.push(skill); }
+    if (!step.requiredSkills.includes(skill)) { step.requiredSkills.push(skill); added.required.push(skill); }
+    for (const path of artifacts) if (!step.expectedArtifacts.includes(path)) { step.expectedArtifacts.push(path); added.artifacts.push(path); }
+    if (human && !step.humanTasks.some((h) => h.title === human)) {
+      step.humanTasks.push({ title: human, guidance: note, target: "", timing: "after", completion: "manual" });
+      added.human.push(human);
+    }
+    notes.push(note);
+  };
+  const reading = step.skills.some((s) => s === "lit-search" || s === "lit-notes");
+  const bibliography = step.expectedArtifacts.some((p) => /citation|final-check/.test(p)) || step.workspaceName === "submission-materials";
+  const figures = step.skills.some((s) => s === "figure-forge" || s === "data-eda");
+  const illustration = step.workspaceName === "methodology" || step.workspaceName === "exp-design" || step.skills.includes("review-framework");
+  if ((tools.literature === "zotero" && reading) || (tools.libraryExport === "zotero" && bibliography)) {
+    mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：优先读取已登记题录/PDF，API 先探测版本及读写权限。交付选择不是批量写库授权：展示条目/collection/新增与变更，获得本批明确确认后才写。已有主 bib 键不改，不复制/改名库内附件；离线可用文件继续，写库未完成如实报告。");
+  }
+  if ((tools.literature === "endnote" && reading) || (tools.libraryExport === "endnote" && bibliography)) {
+    mount("endnote-bridge", ["papers/endnote-report.json"], "EndNote：来源 XML/RIS 先归一成候选并列差异，确认后才合并 references.bib，已有键不改。要求出库时交付 papers/endnote-import.xml 与 papers/endnote-report.json；Word 原件/域不被 Markdown 往返覆盖。", tools.libraryExport === "endnote" && bibliography ? "人工核对 EndNote 导入与 Word 引用插件" : undefined);
+    if (tools.libraryExport === "endnote" && bibliography && !step.expectedArtifacts.includes("papers/endnote-import.xml")) {
+      step.expectedArtifacts.push("papers/endnote-import.xml"); added.artifacts.push("papers/endnote-import.xml");
+    }
+  }
+  const outputRoot = artifactDir.replace(/\\/g, "/").replace(/\/+$/, "") || "artifacts";
+  if ((tools.plotting === "origin" || tools.illustration === "blender") && (outputRoot.startsWith("/") || outputRoot.includes(":") || outputRoot.split("/").some((part) => !part || part === "." || part === ".."))) {
+    throw new Error("科研工具工程文件必须写入工作区内的相对产物目录");
+  }
+  if (tools.plotting === "origin" && figures) {
+    mount("origin-plot", ["analysis/plot_origin.py", "figures/origin-manifest.json", "figures/origin-plot.png", `${outputRoot}/origin/project.opju`], `Origin：只在 Windows + 有许可证的 Origin 执行，缺能力停止该工具工作，不偷换 matplotlib。stats-check 定统计口径，figure-forge 定图型规格，Origin 只驱动。脚本与数值结果可复算，figures/origin-plot.png 及 ${outputRoot}/origin/project.opju 工程逐项登记哈希/版本/命令。`, "重开 Origin 工程并核对数值、坐标与图形");
+  }
+  if (tools.illustration === "blender" && illustration) {
+    mount("blender-research", ["analysis/build_scene.py", "figures/blender-manifest.json", "figures/blender-schematic.png", `${outputRoot}/blender/scene.blend`], `Blender：仅用于本步明确的结构/装置/机制示意；不把示意冒充实验观测。先确认真实尺寸、单位、来源/许可与不按比例部分。MCP 无 OS 沙箱，使用新建受控工程；交付脚本、${outputRoot}/blender/scene.blend、figures/blender-schematic.png 和 manifest，后台重建失败非零退出。`, "核对 Blender 结构、比例、来源和示意标注");
+  }
+  if (tools.manuscript !== "markdown" && /论文|初稿|定稿|格式|投稿|回复/.test(step.name)) {
+    notes.push(tools.manuscript === "latex"
+      ? "稿件以 LaTeX 原生源码为最终载体：已有稿先保留来源与版本，本步 md 是内容/审查交付；定稿须通过 LaTeX 模板编译并交付源码包与图源。不得把 Markdown 的完成状态当成 TeX 版面验收。"
+      : "稿件以已有 Word 原件为最终载体：本步 Markdown/Quarto 输出只作建议稿或审查材料，不覆盖 source.docx，不生成伪 EndNote/Zotero 引文域。由人将变更应用至原件、刷新引用插件并核对最终 PDF 后才提交。");
+  }
+  // 原生稿件分支有自己的正式交付；不把适配说明的 Quarto 输出当投稿稿。
+  const revision = /^rebuttal-r(\d+)$/.exec(step.workspaceName ?? "");
+  if (tools.manuscript !== "markdown" && (step.workspaceName === "journal-format" || revision)) {
+    const replace = (key: keyof NonNullable<Added["replaced"]>, value: unknown) => {
+      (added.replaced ??= {})[key] = { before: step[key] ?? null, after: value };
+      Object.assign(step, { [key]: value });
+    };
+    const round = revision ? Number(revision[1]) : null;
+    const native = tools.manuscript === "latex";
+    const input = round && round > 1
+      ? native ? `submission/latex-r${round - 1}/main.tex` : `manuscript/revised-r${round - 1}.docx`
+      : native ? "manuscript/main.tex" : "manuscript/source.docx";
+    const nativeOutput = native ? `submission/latex${round ? `-r${round}` : ""}/main.tex`
+      : round ? `manuscript/revised-r${round}.docx` : "submission/formatted.docx";
+    const pdf = round ? `output/revised-r${round}.pdf` : "output/formatted.pdf";
+    replace("anyOfInputs", [[input]]);
+    replace("expectedArtifacts", [...new Set([...step.expectedArtifacts.filter((p) => !(p.startsWith("output/") && /\.(pdf|docx)$/.test(p))), nativeOutput, pdf])]);
+    replace("run", []);
+    replace("skills", step.skills.filter((skill) => skill !== "quarto-render"));
+    replace("requiredSkills", step.requiredSkills.filter((skill) => skill !== "quarto-render"));
+    notes.push(`原生稿件正式交付：输入 ${input}；交付 ${nativeOutput} 与 ${pdf}。原简报的 Markdown 只保留修改/适配说明，不用 Quarto 将说明冒充正式稿；${native ? "将依赖的章节/bib/图按相对路径一起置于该轮源码包，使用期刊要求的 TeX 引擎编译并保存日志" : "在原 Word 稿的副本上人工应用建议并保留插件域，再由 Word 导出 PDF；未完成人工步骤就保持待审"}。不能用换后缀或重新生成普通 docx 替代。`);
+    if (!step.humanTasks.some((h) => h.title === "核对原生稿件与正式 PDF")) {
+      step.humanTasks.push({ title: "核对原生稿件与正式 PDF", guidance: "确认实际稿件、来源版本、图表和引用插件/TeX 引用，说明文档不是正式稿。", target: "", timing: "after", completion: "manual" });
+      added.human.push("核对原生稿件与正式 PDF");
+    }
+  }
+  if (tools.manuscript !== "markdown" && step.workspaceName === "submission-materials") {
+    const native = tools.manuscript === "latex" ? "submission/latex/main.tex" : "submission/formatted.docx";
+    const inputs = [...new Set([...(step.inputs ?? []), native, "output/formatted.pdf"])];
+    (added.replaced ??= {}).inputs = { before: step.inputs ?? null, after: inputs };
+    Object.assign(step, { inputs });
+    notes.push(`投稿材料必须审阅 ${native} 和 output/formatted.pdf；submission/formatted.md 仅为适配说明，不是审稿正文。科学论断/图表/引用核对以原生稿件及实际 PDF 为准。`);
+  }
+  if (notes.length) step.brief = `${step.brief.trimEnd()}\n\n${START}${JSON.stringify(added)} -->\n本项目选定工具（优先于默认软件示例）：\n${notes.map((n) => `- ${n}`).join("\n")}\n${END}\n`;
+  return step;
+}
+
+/** 旧 TASK 草稿优先于模板，但不能悄悄带着旧工具执行。只告警/阻止，不覆盖人写内容。 */
+export function researchToolContractMatches(step: Pick<ProjectStepDto, "brief">, task: string): boolean {
+  const block = (text: string) => {
+    const begin = text.indexOf(START);
+    if (begin < 0) return "";
+    const end = text.indexOf(END, begin);
+    return end < 0 ? null : text.slice(begin, end + END.length);
+  };
+  const expected = block(step.brief);
+  return expected !== null && expected === block(task);
+}

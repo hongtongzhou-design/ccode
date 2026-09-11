@@ -75,7 +75,7 @@ const DESIGN_GATE =
 
 const EXECUTION_GATE =
   "G3 数据与实现：最小试验先核对样本单位、数据流、指标已知答案或独立实现、基线和泄漏，不只测速；results/implementation-check.md 记录命令、预期/实测、容差及修复。未通过不扩规模，裁剪回 G2，不按易完成/结果好坏挑组合。\n" +
-  "results/run-manifest.json 每个计划 id 一条，含 dataHash、codeVersion、environment（锁定依赖/硬件）、command（配置/随机种子）、status、outputs（路径/哈希或失败日志）、运行时间与重试；未运行/取消记 not-run 和批准依据，不伪造命令/结果。results/matrix.json 与计划全部 id 对账；新增先改计划。每次输出独立目录，不覆盖旧运行；非 Git 材料记版本、备份/恢复与可迁移路径。交付 experiments/reproduce.py：项目专用入口，明确 --input/--output；从冻结输出重建主要结果，核对 manifest 哈希和已接受参考值/容差，失败非零退出；先实际执行，再在 implementation-check.md 记录命令。入口不自动重跑昂贵/需授权的实验，环境与重跑限制说明。\n";
+  "results/run-manifest.json 每个计划 id 一条，含 dataHash、codeVersion、environment（锁定依赖/硬件）、command（配置/随机种子）、status、outputs（路径/哈希或失败日志）、运行时间与重试；未运行/取消记 not-run 和批准依据，不伪造命令/结果。results/matrix.json 与计划全部 id 对账；新增先改计划。每次输出独立目录，不覆盖旧运行；非 Git 材料记版本、备份/恢复与可迁移路径。交付 experiments/reproduce.py：项目专用入口，明确 --input/--output；前 40 行声明 # MESA_REPRODUCE: {\"interpreter\":\"python\",\"outputPlacement\":\"independent\",\"resultFile\":\"verification.json\"}；输出 verification.json 含 ok 布尔值、checks 数组（逐项 expected/actual/tolerance/passed）及 inputVersion，未验证不得写 ok=true；从冻结输出重建主要结果，核对 manifest 哈希和已接受参考值/容差，失败非零退出；先实际执行，再在 implementation-check.md 记录命令。入口不自动重跑昂贵/需授权的实验，环境与重跑限制说明。\n";
 
 const EVIDENCE_GATE =
   "G4 证据与结论：核对计划/运行/结果覆盖，从冻结输出重建主表图；关键指标至少用手算样例/独立实现复算，统计报告记命令、输入/代码/环境版本、预期/实测、容差与未覆盖范围。同脚本重跑只证计算复现。按设计检查合理替代分析、异常处理影响与适用边界；发现于同一数据的关系不得仅补 p 值就升级确证，不足则保留探索性。\n" +
@@ -127,17 +127,17 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律保留为 pending 候选并标注「待确认」，不冒充已决纳入，不允许自行裁掉；\n" +
       "5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI），并同步写入 papers/included.json（每篇一条，至少含稳定唯一字符串 id、title、decision（included/pending）、reason；与 md 记录一一对应）；\n" +
       "6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR + TI/DO/UR 尽力而为，缺字段留空不编造），供用户一键导入 Zotero 建成待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n" +
-      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/zotero-sync.md 均存在且非空（未启用或回落时报告原因；无付费文献则 to-fetch 两个文件注明为空），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。\n" +
+      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/zotero-sync.md 均存在（RIS 允许有效空文件，其他文件非空；未启用或回落时报告原因；无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
     acceptanceCriteria: [
       "machine:file:papers/screening.md",
       "machine:file:papers/included.md",
       "machine:file:papers/to-fetch.md",
-      "machine:file:papers/to-fetch.ris",
+      "machine:optional-empty:papers/to-fetch.ris",
       "machine:file:papers/zotero-sync.md",
       "machine:contains:papers/screening.md::检索日期",
-      "machine:records:papers/included.json::id,title,decision,reason",
+      "machine:records-allow-empty:papers/included.json::id,title,decision,reason",
     ],
     skills: ["lit-search", "zotero-sync"],
     requiredSkills: ["lit-search"],
@@ -154,8 +154,8 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "输入：上一步产物 papers/included.md 与 papers/to-fetch.md（已随 main 合并在本工作区内）。全程按 lit-notes 技能执行。\n" +
       "1. 先整理人工补投：项目根 papers/（见上方「项目根」，含未进本工作区的文件，按绝对路径读）中命名不符「作者年份-短标题.pdf」的 PDF，对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n" +
       "2. 精读范围先给依据：**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇（列篇目）其余按摘要记」写进 .ccode/help-wanted.md 问用户一句**（附兜底：未回复可整理已有资料；不默认排除关键全文或降低核心证据要求），写完仅推进无依赖、可逆的准备；\n" +
-      "3. 全文来源优先级（写死）：项目根 papers/ 已有 PDF（含人工补投）→ 开放获取补下到项目根 papers/（arXiv/PMC/作者主页 preprint）→ 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」，不得装作读过全文；\n" +
-      "4. 每篇产出 notes/<序号-短标题>.md，有实际 PDF 时开头记来源锚点行「> 来源 PDF：<项目内相对路径>.pdf」，无 PDF 改记 DOI/URL，不造虚假路径（沉浸阅读区靠它认回笔记不另建重复），固定结构按 lit-notes 技能八段：一句话总结（≤50字）/ 研究问题 / 方法（附可复现细节）/ 主要结果（区分观察结果的支持范围与作者推测，注页码+表/图编号）/ 局限（作者自述与本笔记识别分开列）/ 可引用点（原文关键句+页码或段落位置）/ 与本课题的关系 / 疑问与待跟进（待跟进引用同时追加 papers/to-fetch.md）；\n" +
+      "3. 全文来源优先级（写死）：「项目资源」已登记 PDF 绝对路径（只读，不改名）→ 项目根 papers/ 已有 PDF（含人工补投）→ 开放获取补下到项目根 papers/（arXiv/PMC/作者主页 preprint）→ 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」，不得装作读过全文；\n" +
+      "4. 每篇产出 notes/<序号-短标题>.md，有实际 PDF 时开头记来源锚点行「> 来源 PDF：<项目内相对路径或已登记只读资源绝对路径>.pdf」，无 PDF 改记 DOI/URL，不造虚假路径（沉浸阅读区靠它认回笔记不另建重复），固定结构按 lit-notes 技能八段：一句话总结（≤50字）/ 研究问题 / 方法（附可复现细节）/ 主要结果（区分观察结果的支持范围与作者推测，注页码+表/图编号）/ 局限（作者自述与本笔记识别分开列）/ 可引用点（原文关键句+页码或段落位置）/ 与本课题的关系 / 疑问与待跟进（待跟进引用同时追加 papers/to-fetch.md）；\n" +
       "5. 每篇先按 DOI/版本/键匹配 references.bib，缺失才追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」，不得编造）；\n" +
       "6. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在项目根 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n" +
       "完成标准：included.md 每篇都有对应笔记与 bib 条目，notes/index.json 与 included.json 全部 id 对齐，记录 notePath/bibKey/fulltextStatus/reviewStatus（含 pending 不冒充精读完成）；notes/ 与 references.bib 均已提交。\n" +
@@ -295,7 +295,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "围绕课题主题（见上方「课题主题」段；未填写时只提出候选主题记入 papers/screening.md，待人确认后正式筛选；只可先试检摸底）执行：\n" +
       "1. 检索与筛选按 lit-search 技能：**先粗检一轮报数再定标准**（OpenAlex 命中约 N 篇与建议标准写入 .ccode/help-wanted.md，未回复仅做无依赖、可逆准备）；产出 papers/screening.md（标准 + 各库检索式、检索日期与命中数 + 每篇判定理由；拿不准相关性的一律保留为 pending 候选并标注「待确认」，不冒充已决纳入）与 papers/included.md；用户导入的检索结果先解析去重——看项目根 papers/imports/、工作区 papers/imports/、以及「项目资源」「提货单」里的绝对路径；\n" +
       "2. 全文获取：开放获取直接下载到**项目根 papers/**（文件名：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得绕过，汇总写入 papers/to-fetch.md 并转 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖。\n" +
-      "完成标准：六件套均已提交（无付费文献则 to-fetch 两个文件注明为空；未启用或回落时 zotero-sync.md 写明原因），筛选记录含检索日期与覆盖缺口、可复现。\n" +
+      "完成标准：六件套均已提交（无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件；未启用或回落时 zotero-sync.md 写明原因），筛选记录含检索日期与覆盖缺口、可复现。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     optionalInputs: ["notes/", "references.bib", "papers/included.md"],
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
@@ -303,10 +303,10 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "machine:file:papers/screening.md",
       "machine:file:papers/included.md",
       "machine:file:papers/to-fetch.md",
-      "machine:file:papers/to-fetch.ris",
+      "machine:optional-empty:papers/to-fetch.ris",
       "machine:file:papers/zotero-sync.md",
       "machine:contains:papers/screening.md::检索日期",
-      "machine:records:papers/included.json::id,title,decision,reason",
+      "machine:records-allow-empty:papers/included.json::id,title,decision,reason",
     ],
     skills: ["lit-search", "zotero-sync"],
     requiredSkills: ["lit-search"],
@@ -474,7 +474,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     decisions: [{ q: "写作依据的已评阅证据与结论范围（仅探索/待补时明确草稿边界）", options: [] }],
     brief:
       "输入：survey/、notes/、design.md、analysis/、figures/、references.bib（已随 main 合并在本工作区内）。\n" +
-      "1. 按 IMRaD 结构用规范学术英文撰写初稿，产出 manuscript/draft.md：Introduction（研究问题+gap+贡献，现状综述引用 survey/ 与 notes/）、Methods（对应 design.md）、Results（对应 analysis/，引用 figures/ 图表）、Discussion（findings 的意义与局限）；目标篇幅：已初定投稿目标时按其惯常篇幅，未定目标时按问题与证据复杂度拟篇幅，不为凑字数扩写；\n" +
+      "1. 按 IMRaD 结构按项目语种（未设时英文）撰写初稿，产出 manuscript/draft.md：Introduction（研究问题+gap+贡献，现状综述引用 survey/ 与 notes/）、Methods（对应 design.md）、Results（对应 analysis/，引用 figures/ 图表）、Discussion（findings 的意义与局限）；目标篇幅：已初定投稿目标时按其惯常篇幅，未定目标时按问题与证据复杂度拟篇幅，不为凑字数扩写；\n" +
       "2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献；\n" +
       "3. 数字与结论必须与 analysis/results-table.md 一致，不得新造实验结果；缺少的数据在文中标 [待补实验]；\n" +
       "4. 图表引用已有 figures/ 文件（「Figure 1: …」），图片文件不复制进 manuscript/；缺图用占位并在文中标明待补；\n" +
@@ -620,13 +620,14 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
       "3. 清洗脚本放入 cleaning/（可重复执行；输入只读原始数据，不原地修改）；\n" +
       "4. 处理后的数据写入本工作区产物目录（见上方「产物目录」，相对路径），不进 git，评审合并后自动进项目根同名目录；同时产出 cleaning/cleaned-data-manifest.md，记录源文件、字节数/hash、输出文件的项目根相对路径、行列数与生成命令；\n" +
       "5. 清洗报告 cleaning/cleaning-report.md：每条规则影响的行数、丢弃数据的清单与原因、清洗前后规模对比，[待确认] 规则单列一节。\n" +
-      "完成标准：rules.md 执行规则明确，关键待确认项未批准则阻塞；同步写 cleaning/fields.json，每个源字段保留 data/fields.json 的 id，记录 name/rule/status，删除或排除也留一条；新增派生字段另列在报告不混入源字段对账；脚本可重复跑通，manifest 与报告数字和产物目录结果一致，原始数据字节级未被改动。\n" +
+      "完成标准：rules.md 执行规则明确，关键待确认项未批准则阻塞；同步写 cleaning/fields.json，每个源字段保留 data/fields.json 的 id，记录 name/rule/status，删除或排除也留一条；新增派生字段另列在报告不混入源字段对账；脚本可重复跑通，manifest 与报告数字和产物目录结果一致，原始数据字节级未被改动；清洗入口交付 cleaning/clean.py，支持 --input/--output，manifest 中记录完整运行命令。\n" +
       QUALITY_STATUS,
     expectedArtifacts: [
       "cleaning/rules.md",
       "cleaning/cleaning-report.md",
       "cleaning/cleaned-data-manifest.md",
       "cleaning/fields.json",
+      "cleaning/clean.py",
     ],
     acceptanceCriteria: [
       "machine:file:cleaning/rules.md",
@@ -658,7 +659,7 @@ const DATA_PROCESSING_STEPS: ProjectStepDto[] = [
     decisions: [{ q: "批准用于分析的清洗规则与数据版本（影响主分析的待确认规则必须先解决）", options: [] }],
     brief:
       "输入：cleaning/cleaned-data-manifest.md 与 cleaning/rules.md（已随 main 合并在本工作区内）、项目根产物目录中清洗后的数据（按 manifest 的项目根相对路径读取）。全程按 data-eda 技能执行：分布/相关/异常全覆盖不挑选、图表可复现、发现可回溯。\n" +
-      "1. 分析与出图脚本放入 analysis/，交付 analysis/reproduce.py（明确 --input/--output，只读冻结数据，核对输入版本、重建主要表图/数字并比较参考值和容差；失败非零退出）；实际运行命令和结果写 stats-check-eda.md，缺环境则标未验证；\n" +
+      "1. 分析与出图脚本放入 analysis/，交付 analysis/reproduce.py（明确 --input/--output；前 40 行声明 # MESA_REPRODUCE: {\"interpreter\":\"python\",\"outputPlacement\":\"independent\",\"resultFile\":\"verification.json\"}；结果 verification.json 含 ok/checks/inputVersion，未验证不得写 ok=true；只读冻结数据，核对输入版本、重建主要表图/数字并比较参考值和容差；失败非零退出）；实际运行命令和结果写 stats-check-eda.md，缺环境则标未验证；\n" +
       "2. 分布分析：按变量类型选择图/摘要，ID 不强画分布；高维数据可分组并列未逐项覆盖范围，不按结果好看与否挑选；图表写入 figures/（英文标注，文件名与报告引用一一对应）；\n" +
       "3. 相关分析：按变量类型和问题选择相关/关联分析，排除 ID、无序类别等不适用字段并说明；报告选择口径、比较范围和多重性，不以固定 |r| 阈值筛选发现；\n" +
       "4. 异常分析：按 rules.md 的口径复查残留异常，新发现的异常标 [待确认] 并给出样例行号；\n" +
@@ -703,17 +704,18 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "2. 解析人工导入题录（项目根 papers/imports/、工作区 papers/imports/、项目资源与提货单绝对路径），去重进候选池；\n" +
       "3. 检索候选并逐条判定，产出 papers/screening.md、papers/included.md 和 papers/included.json（每项稳定唯一字符串 id/title/decision/reason，与 md 一一对应）；拿不准一律保留为 pending 候选并标「待确认」，不冒充已决纳入；检索日期与覆盖缺口写入 screening.md；\n" +
       "4. 开放获取全文下载到**项目根 papers/**；付费墙写入 papers/to-fetch.md 与 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖。\n" +
-      "完成标准：检索交付件存在（无付费文献则 to-fetch 两个文件注明为空；未启用或回落时 zotero-sync.md 写明原因），每条记录无空缺字段，筛选可复现。\n" + QUESTION_GATE + QUALITY_STATUS,
+      "零结果也交付 included.json=[] 与说明，禁止造条目；没有可精读证据时后续只允许准备，不宣称完成研究。\n" +
+      "完成标准：检索交付件存在（无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件；未启用或回落时 zotero-sync.md 写明原因），每条记录无空缺字段，筛选可复现。\n" + QUESTION_GATE + QUALITY_STATUS,
     optionalInputs: ["notes/", "references.bib", "papers/included.md"],
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
     acceptanceCriteria: [
       "machine:file:papers/screening.md",
       "machine:file:papers/included.md",
       "machine:file:papers/to-fetch.md",
-      "machine:file:papers/to-fetch.ris",
+      "machine:optional-empty:papers/to-fetch.ris",
       "machine:file:papers/zotero-sync.md",
       "machine:contains:papers/screening.md::检索日期",
-      "machine:records:papers/included.json::id,title,decision,reason",
+      "machine:records-allow-empty:papers/included.json::id,title,decision,reason",
     ],
     skills: ["lit-search", "zotero-sync"],
     requiredSkills: ["lit-search"],
@@ -991,7 +993,7 @@ const SUBMISSION_INITIAL_STEPS: ProjectStepDto[] = [
     role: "both",
     workspaceName: "journal-format",
     brief:
-      "输入：manuscript/paper-final.md 或 manuscript/review-final.md 或 manuscript/thesis-final.md、references.bib（接自上游模板时随仓库合并自带；独立启动本项目时，先把上游成稿与 references.bib 放入对应目录，或在资源面板绑定上游项目目录；这些稿件都不存在时在报告中说明并停止，不自行改用其他草稿）。\n" +
+      "输入：manuscript/paper-final.md 或 manuscript/review-final.md 或 manuscript/thesis-final.md、references.bib（接自上游模板时随仓库合并自带；独立启动本项目时，先把上游成稿与 references.bib 放入对应目录，或在资源面板绑定上游项目目录；项目工具选择 LaTeX 时用 manuscript/main.tex，选择 Word 时用 manuscript/source.docx：保留原件与插件域，不用 Markdown 往返覆盖；formatted.md 仅作适配说明，正式交付沿用原生格式并在清单写路径。已选原生稿件不得假装普通 docx 含引用域。这些稿件都不存在时在报告中说明并停止，不自行改用其他草稿）。\n" +
       "1. 确定目标期刊：项目根已有 submission/target-journal.md 时从其约定；没有则按课题主题给出 2-3 个候选期刊及理由，写入 submission/target-journal.md，等用户确认再做期刊专属适配；未确认只整理通用材料；\n" +
       "2. 获取目标期刊官方作者指南（WebFetch 期刊官网 Guide for Authors；获取失败时只做通用草稿并记录无法核验官方要求，不声称期刊格式通过）；\n" +
       "3. 按指南逐项适配：章节结构、引用与文献列表格式、图表规范、字数与摘要长度；产出 submission/formatted.md，只改格式与表达，不改学术观点与数据；\n" +
@@ -1122,6 +1124,7 @@ function submissionRevisionSteps(round: number): ProjectStepDto[] {
         `4. 产出 rebuttal/revisions-r${r}.md：每条意见 → 修改点 → revised-r${r}.md 位置，逐条可核对；\n` +
         `5. 按 bib-check 技能核对 revised-r${r}.md 与 references.bib，报告写入 rebuttal/citation-check-r${r}.md；\n` +
         `6. 产出 submission/resubmission-checklist-r${r}.md：上传文件、回复信/修订稿版本、逐项确认项与未决事项；提交前由人核对，不能把「已生成」当作「已提交」。\n` +
+        `用本步骤 run 脚本渲染修订清稿 PDF/docx；改动按 revisions-r${r}.md 核验，期刊要求标改稿时另行按官方格式制作并登记，未制作不写已交付。\n` +
         `完成标准：round-${r} 的回复信、修改对照表、citation-check 报告、修订稿、再投稿清单均存在且一一对应；[待确认]/[待补实验] 在清单末尾汇总。涉及补研究须先回到设计→执行→分析→复算，使用本轮独立产物并更新所有受影响数字与主张；只有计划时维持阻塞，不写已完成。\n` + RELEASE_GATE + QUALITY_STATUS,
       inputs: [`reviews/round-${r}.md`, "references.bib"],
       anyOfInputs: [previousInputs],
@@ -1131,10 +1134,15 @@ function submissionRevisionSteps(round: number): ProjectStepDto[] {
         `rebuttal/revisions-r${r}.md`,
         `rebuttal/citation-check-r${r}.md`,
         `manuscript/revised-r${r}.md`,
+        `output/revised-r${r}.pdf`,
+        `output/revised-r${r}.docx`,
         `submission/resubmission-checklist-r${r}.md`,
       ],
-      skills: ["rebuttal-crafter", "bib-check"],
-      run: [],
+      skills: ["rebuttal-crafter", "bib-check", "quarto-render"],
+      run: [
+        { name: `render-revised-r${r}`, command: `quarto render manuscript/revised-r${r}.md --to pdf --output-dir output`, default: true },
+        { name: `export-revised-r${r}`, command: `quarto render manuscript/revised-r${r}.md --to docx --output-dir output`, default: true },
+      ],
       humanTasks: [
         {
           title: `保存第${r}轮审稿意见全文`,
@@ -1187,10 +1195,10 @@ export function pipelineStepsForTemplate(
  *  编译脚本 render-pdf 四步共用：优先 tectonic（轻量、自动下载宏包），缺则 latexmk，
  *  都没有则非零退出并打印安装引导——应用内不做安装器，检测引导就放在脚本里 */
 const LATEX_RENDER_PDF_CMD =
-  'mkdir -p output && cd manuscript && if command -v tectonic >/dev/null 2>&1; then tectonic --outdir ../output main.tex; ' +
-  'elif command -v latexmk >/dev/null 2>&1; then latexmk -pdf -interaction=nonstopmode -outdir=../output -auxdir=../output main.tex; ' +
-  'else echo "未检测到 LaTeX 编译环境：macOS 用 brew install tectonic；Windows 用 winget install Tectonic.Tectonic；' +
-  '或安装 MacTeX / TeX Live / MiKTeX 获得 latexmk"; exit 1; fi';
+  'mkdir -p output && (cd manuscript && if command -v tectonic >/dev/null 2>&1; then tectonic --keep-logs --outdir ../output main.tex; ' +
+  'elif command -v latexmk >/dev/null 2>&1; then engine=-pdf; if grep -Eq "ctex|xeCJK|fontspec" main.tex; then engine=-xelatex; fi; ' +
+  'latexmk "$engine" -interaction=nonstopmode -outdir=../output -auxdir=../output main.tex; ' +
+  'else echo "未检测到 LaTeX 编译环境：安装 tectonic 或 TeX Live/MiKTeX 获得 latexmk"; exit 1; fi) > output/compile.log 2>&1; status=$?; cat output/compile.log; (exit "$status")';
 
 const LATEX_PAPER_STEPS: ProjectStepDto[] = [
   {
@@ -1250,7 +1258,7 @@ const LATEX_PAPER_STEPS: ProjectStepDto[] = [
       "2. 引用键必须存在于 references.bib——严禁编造文献、严禁新造键；确需引用而库里没有的文献，先在 references.bib 补条目（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」）再引用；\n" +
       "3. 已有 figures/ 用 \\includegraphics 引用；没有的图用 figure 环境占位「（待绘制）」，不虚构数据；\n" +
       "4. 没有文献支撑的论断不得下；必须保留的判断在该行行尾加 % TODO 待核实 注释；\n" +
-      "5. 每写完一章跑一次本步骤 run 脚本 render-pdf 确认可编译，报错立即读 manuscript/main.log 定位修掉，不攒到最后；按 bib-check 技能输出 manuscript/citation-check.md。\n" +
+      "5. 每写完一章跑一次本步骤 run 脚本 render-pdf 确认可编译，报错立即读 output/compile.log 与 output/main.log 定位修掉，不攒到最后；按 bib-check 技能输出 manuscript/citation-check.md。\n" +
       "完成标准：chapters/ 各章内容成文，全文编译通过，citation-check.md 各节齐全且 \\cite 键全部可在 references.bib 解析。\n" +
       QUALITY_STATUS,
     expectedArtifacts: ["manuscript/chapters/*.tex", "output/main.pdf", "manuscript/citation-check.md"],
@@ -1269,7 +1277,7 @@ const LATEX_PAPER_STEPS: ProjectStepDto[] = [
     brief:
       "输入：manuscript/ 全文（已随 main 合并在本工作区内）。\n" +
       "1. 用本步骤 run 脚本 render-pdf 编译：脚本优先 tectonic（缺则 latexmk），两个都没有会打印安装提示并以非零退出；本机缺环境时把提示原样写进 .ccode/help-wanted.md 转给用户，不要自己下载安装编译器；\n" +
-      "2. 编译报错先读 manuscript/main.log 定位（缺宏包/未闭合环境/引用未解析），对症改源码，禁止绕路——不删报错的命令、不换文档类、不把整段注释掉；\n" +
+      "2. 编译报错先读 output/compile.log 与 output/main.log 定位（缺宏包/未闭合环境/引用未解析），对症改源码，禁止绕路——不删报错的命令、不换文档类、不把整段注释掉；\n" +
       "3. 缺宏包：tectonic 会自动下载；latexmk 依赖本机 TeXLive 完整安装，遇到缺失包错误优先换用 TeXLive 自带的等价宏包，换不了的在 compile-notes.md 说明；\n" +
       "4. 警告分级处理：Citation/Reference undefined（PDF 里的 ??）必须清零；明显超版的 Overfull \\hbox 逐处调整；其余警告记录进 manuscript/compile-notes.md，不逐个纠缠；\n" +
       "5. 产出 output/main.pdf 与 manuscript/compile-notes.md（编译口径、清零项、遗留警告清单）。\n" +

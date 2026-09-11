@@ -20,6 +20,13 @@ outputs: [analysis/, figures/]
 - 主路检测按顺序尝试 `py -3`、`python`、Origin 自带 Python 执行 `import originpro`；都找不到时才转备路。缺包时只报告安装指引，不未经确认修改 Python 环境
 - 检测不过时在报告中写明缺什么、怎么补，然后停止；**不得静默改用 matplotlib 充数**（用户指定 Origin 通常因为有 Origin 工程/格式要求，偷换工具等于没做）
 
+## 随包驱动脚手架
+
+`scripts/plot_origin.py --probe` 只检查平台与 originpro 模块，不验证许可证、不启动 Origin。
+复制到项目 analysis/ 后按 figure-forge 规格和已批准列定义修改；显式 `--execute --input data.csv --output <新目录>` 才执行。
+脚本交付图、工程、数值输入、版本/哈希清单；默认散点仅脚手架，不保证符合期刊规格。失败非零退出，finally 关闭本次实例。
+把 manifest 登记为 figures/origin-manifest.json；大工程留在 TASK.md 指定产物目录。必须 Windows 实机重开/复算/看图后才能宣称已验收。
+
 ## 操作规范
 
 ### 1. 主路：外部 Python + originpro（COM 自动化）
@@ -58,7 +65,7 @@ outputs: [analysis/, figures/]
 - 原始数据**只读**：从项目数据文件/产物目录导入 worksheet，不改源文件一个字节
 - 脚本放 `analysis/`：一图一函数、`main()` 入口、路径集中为模块顶部常量，从 `main` 重跑产出相同图片（沿用 data-eda 约定）
 - 图表写入 `figures/`，文件名与报告/TASK.md 引用一一对应；位图 ≥ 300 dpi，矢量（EMF/PDF）按 figure-forge 规格
-- 用户要 Origin 工程留档时另存 `.opju` 到 `figures/src/` 并在报告注明；默认不要求
+- 在科研模板选择 Origin 后工程是必需交付，按 TASK.md 写到工作区产物目录 `origin/project.opju`；独立调用未要求工程时才可选，不把大工程默认放入 Git
 - 产物完成后按项目惯例登记提货单 artifacts.yaml（路径 + 生成命令）
 
 ### 4. 失败口径
@@ -70,7 +77,7 @@ outputs: [analysis/, figures/]
 ## 产出格式
 
 - `analysis/<出图脚本>`：可复现，`main()` 入口，顶部常量集中路径与风格参数
-- `figures/`：全部图表产物，命名与引用一一对应；可选 `figures/src/*.opju` 工程留档
+- `figures/`：全部图表产物，命名与引用一一对应；模板要求的产物目录 `origin/project.opju` 工程留档
 - 报告内逐图一行：产物文件名 + 驱动方式（originpro / LabTalk）+ 状态；「待人工确认」的视觉项如实标注（agent 读图不可靠，目检归人）
 
 ## 完成标准

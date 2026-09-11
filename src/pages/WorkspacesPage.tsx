@@ -2311,7 +2311,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         </NoticeBar>
       )}
       {created && (
-        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md bg-strip px-3 py-2.5 text-xs text-l2">
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md ccode-well px-3 py-2.5 text-xs text-l2">
           <span>
             <span className="mr-1 text-ok-text">✓</span>
             工作区「{created.name}」已创建 · 分支 {created.branch}
@@ -2533,7 +2533,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               </div>
             ) : (
             /* 工作区列表改卡片（去线条化，v3.85）：原 divide-y 细行叠成一串横线，
-               是「界面很线条化」的主要来源之一。改为 strip 底色的独立卡 + 卡间留白，
+               是「界面很线条化」的主要来源之一。改为统一内容井底色的独立卡 + 卡间留白，
                靠底色差成块、不靠分隔线；对象少时保留连续画布不铺满 */
             <ul className="mt-2 flex flex-col gap-2">
               {wsList.map((workspace) => {
@@ -2561,7 +2561,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   <li
                     key={workspace.id}
                     data-ws-row={workspace.id}
-                    className={`group rounded-lg bg-strip p-3 ${flashWsId === workspace.id ? "ring-2 ring-cta" : ""}`}
+                    className={`ccode-well group rounded-lg p-3 ${flashWsId === workspace.id ? "ring-2 ring-cta" : ""}`}
                   >
                     <div className="flex min-w-0 items-center gap-3">
                       <div className="min-w-0 flex-1">

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { THEMES } from "../src/themes.ts";
+import { DEFAULT_CUSTOM_THEME, deriveThemeTokens } from "../src/custom-theme.ts";
 
 /**
  * 主题令牌的结构性约束（design-system.md「主题令牌」「线条语言」）。
@@ -212,4 +214,88 @@ test("macOS 浅色中间档：l3 过 AA 正文线、l4 过 AA 大字线", () => 
     assert.ok(c3 >= 4.5, `${id}: mac l3/canvas 对比度仅 ${c3.toFixed(2)}:1`);
     assert.ok(c4 >= 3.0, `${id}: mac l4/canvas 对比度仅 ${c4.toFixed(2)}:1`);
   }
+});
+
+
+function wellColor(palette: Record<string, string>, surface: "canvas" | "workspace"): string {
+  const rule = /\.ccode-well \{([^}]+)\}/.exec(css)?.[1] ?? "";
+  const mix = /color-mix\(in srgb, var\(--ccode-surface-base, var\(--color-canvas\)\) (\d+)%, var\(--color-raised\)\)/.exec(rule);
+  assert.ok(mix, "全局内容卡必须从当前工作面派生，不固定用项目 rail2");
+  const weight = Number(mix[1]) / 100;
+  const base = palette[surface === "workspace" ? "rail2" : "canvas"];
+  return "#" + [1, 3, 5].map((offset) => {
+    const canvas = parseInt(base.slice(offset, offset + 2), 16);
+    const raised = parseInt(palette.raised.slice(offset, offset + 2), 16);
+    return Math.round(canvas * weight + raised * (1 - weight)).toString(16).padStart(2, "0");
+  }).join("");
+}
+
+test("全局内容卡共用不透明混色，项目与普通页面声明各自画布", () => {
+  assert.match(css, /@layer components \{[\s\S]*?\.ccode-well \{\s*background-color: color-mix\(in srgb, var\(--ccode-surface-base, var\(--color-canvas\)\) 65%, var\(--color-raised\)\);\s*\}/);
+  assert.equal([...css.matchAll(/\.ccode-well\s*\{/g)].length, 1);
+  assert.match(css, /\[data-surface="canvas"\] \{\s*--ccode-surface-base: var\(--color-canvas\);/);
+  assert.match(css, /\[data-surface="workspace"\] \{\s*--ccode-surface-base: var\(--color-rail2\);/);
+  const pageFrame = readFileSync(new URL("../src/components/PageFrame.tsx", import.meta.url), "utf8");
+  assert.match(pageFrame, /data-surface=\{surface\}/);
+  assert.match(pageFrame, /surface === "workspace" \? "bg-rail2" : "bg-canvas"/);
+  assert.match(pageFrame, /projectWellClass = "ccode-well rounded-lg p-3"/);
+  const floatRule = /\n\.ccode-float-surface \{([^}]+)\}/.exec(css)?.[1] ?? "";
+  assert.match(floatRule, /--ccode-surface-base: var\(--color-canvas\)/);
+  assert.match(floatRule, /background-color: var\(--color-raised\)/);
+});
+
+test("十四套主题、两种工作面的内容卡提亮一致，正文对比度不低于 4.5", () => {
+  for (const { id } of THEMES) {
+    const palette = { ...tokens(null), ...(id === "midnight" ? {} : tokens(id)) };
+    for (const surface of ["canvas", "workspace"] as const) {
+      const well = wellColor(palette, surface);
+      const base = palette[surface === "workspace" ? "rail2" : "canvas"];
+      assert.ok(lum(well) - lum(base) >= 4, `${id}/${surface}: 卡片与画布未拉开层次`);
+      assert.ok(lum(well) < lum(palette.raised), `${id}/${surface}: 卡片不应比浮层更亮`);
+      assert.notEqual(well, "#ffffff", `${id}/${surface}: 卡片不应漂成纯白`);
+      assert.ok(contrast(palette.l2, well) >= 4.5, `${id}/${surface}: 正文在卡片上不可读`);
+    }
+  }
+});
+
+test("自定义画布变化时全局卡片同步派生，近白画布不擅自调暗", () => {
+  const variants = [
+    DEFAULT_CUSTOM_THEME,
+    { rail: "#8b654c", canvas: "#eddcca", accent: "#c58642" },
+    { rail: "#13221e", canvas: "#213c32", accent: "#83cdaa" },
+    { rail: "#ead7f0", canvas: "#eee1f2", accent: "#9751a1" },
+  ];
+  for (const surface of ["canvas", "workspace"] as const) {
+    const colors = variants.map((seeds) => {
+      const palette = deriveThemeTokens(seeds).tokens;
+      const well = wellColor(palette, surface);
+      const base = palette[surface === "workspace" ? "rail2" : "canvas"];
+      assert.ok(lum(well) > lum(base));
+      assert.ok(lum(well) < lum(palette.raised));
+      assert.ok(contrast(palette.l2, well) >= 4.5);
+      return well;
+    });
+    assert.equal(new Set(colors).size, variants.length);
+    const white = deriveThemeTokens({ rail: "#f0f0f0", canvas: "#fcfcfc", accent: "#0169cc" });
+    assert.equal(white.tokens.canvas, "#fcfcfc");
+    assert.ok(white.warnings.some((message) => message.includes("太浅")));
+    assert.ok(contrast(white.tokens.l2, wellColor(white.tokens, surface)) >= 4.5);
+  }
+});
+
+test("科研步骤与流程遮罩接入共享底色，工作树和目标继续复用同一内容井", () => {
+  const source = (file: string) => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+  const cards = source("components/TaskCardsSection.tsx");
+  assert.match(cards, /className="ccode-well mt-2 rounded-lg px-4 py-3\.5 shadow-sm"/);
+  const flow = source("components/StepFlow.tsx");
+  assert.match(flow, /ccode-well relative z-10 w-4 shrink-0/);
+  assert.match(flow, /bare \? "" : "ccode-well rounded-md px-2\.5 py-2"/);
+  const group = source("components/ProjectGroup.tsx");
+  assert.match(group, /className="ccode-well relative shrink-0 px-\[3px\]"/);
+  assert.match(group, /className="ccode-well mb-3 rounded-md px-3 py-2\.5"/);
+  assert.match(source("pages/WorkspacesPage.tsx"), /ccode-well group rounded-lg p-3/);
+  for (const file of ["CodingProjectView", "ProjectUserTasksView", "LitWatchCard", "NotesListSection", "ResourceListSection", "ScheduleSection"]) {
+    assert.match(source(`components/${file}.tsx`), /projectWellClass/, file);
+  }
+  assert.match(source("components/ProjectAgentsView.tsx"), /row.isProjectDefault \? "bg-seg-sel" : "ccode-well"/);
 });

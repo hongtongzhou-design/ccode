@@ -36,7 +36,7 @@ export async function loadProjectContextPack(input: {
     const read = await invoke<ProjectConfigReadDto>("read_project_config", {
       path: input.path,
     });
-    if (isGoal && read.warnings.length) throw new Error(`项目档案卡需要处理：${read.warnings.join("；")}`);
+    if (isGoal && (read.warnings ?? []).length) throw new Error(`项目档案卡需要处理：${read.warnings.join("；")}`);
     topic = read.config.topic ?? null;
     settings = read.config.settings ?? [];
     rulesOwned = read.config.rulesOwned === true;

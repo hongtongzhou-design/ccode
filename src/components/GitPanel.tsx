@@ -1056,7 +1056,7 @@ function GitPanel({
             </button>
           </div>
           {output && (
-            <div className="mt-2 rounded-sm bg-inset p-2 text-xs">
+            <div className="mt-2 rounded-sm ccode-well p-2 text-xs">
               <pre
                 className={`max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono ${
                   output.phase === "push" ? "text-warn-text" : "text-err-text"

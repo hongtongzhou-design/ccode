@@ -359,7 +359,7 @@ function ImportModal({
           <p className="mt-2 text-xs text-l3">导入中…</p>
         )}
         {result && (
-          <div className="mt-3 rounded-sm border border-field bg-inset p-3 text-xs">
+          <div className="mt-3 rounded-sm border border-field ccode-well p-3 text-xs">
             <p className="text-l2">{summary(result)}</p>
             {result.added.length > 0 && (
               <p className="mt-1 break-words text-ok-text">
@@ -1145,6 +1145,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   // 内置技能新版提示：加载时 best-effort 检测；更新失败行内报错（按技能名记录）
   const [builtinUpdates, setBuiltinUpdates] = useState<string[]>([]);
+  const [builtinPreview, setBuiltinPreview] = useState<{ name: string; revision: string; files: { path: string; current: string; proposed: string }[] } | null>(null);
   const [builtinApplying, setBuiltinApplying] = useState<string | null>(null);
   const [builtinErrors, setBuiltinErrors] = useState<Record<string, string>>(
     {},
@@ -1233,12 +1234,12 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
   }, [visible]);
 
   /** 一键更新内置技能为官方最新版（覆盖前自动备份）；成功移出提示条并刷新列表 */
-  async function onApplyBuiltinUpdate(name: string) {
+  async function onApplyBuiltinUpdate(name: string, expectedRevision: string) {
     if (builtinApplying) return;
     setBuiltinApplying(name);
     setBuiltinErrors((prev) => ({ ...prev, [name]: "" }));
     try {
-      await invoke("apply_builtin_skill_update", { name });
+      await invoke("apply_builtin_skill_update", { name, expectedRevision });
       setBuiltinUpdates((prev) => prev.filter((n) => n !== name));
       setNotice(`内置技能「${name}」已更新到最新版（原文件已备份）`);
       setError(null);
@@ -1617,8 +1618,13 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
               </>
             }
           />
+          {builtinPreview && <section className="mb-3 rounded-md ccode-well p-3 text-xs" aria-label="内置技能更新预览">
+            <h3 className="font-medium text-l1">{builtinPreview.name}：本机与新版对照（不会自动覆盖）</h3>
+            {builtinPreview.files.map((file) => <details key={file.path} className="mt-2"><summary>{file.path}{file.current === file.proposed ? " · 未变" : " · 有差异"}</summary><div className="grid grid-cols-2 gap-2"><pre className="max-h-64 overflow-auto whitespace-pre-wrap bg-canvas p-2">本机：{file.current || "（尚无）"}</pre><pre className="max-h-64 overflow-auto whitespace-pre-wrap bg-canvas p-2">新版：{file.proposed}</pre></div></details>)}
+            <div className="mt-2 flex gap-3"><button type="button" onClick={() => setBuiltinPreview(null)}>保留本机版本</button><button type="button" disabled={builtinApplying !== null} onClick={async () => { if (await confirmDialog("将备份本机文件再更新所列技能文件。自改内容不会自动合并，确认采用新版？", { confirmText: "备份并更新" })) { await onApplyBuiltinUpdate(builtinPreview.name, builtinPreview.revision); setBuiltinPreview(null); } }}>备份并采用新版</button></div>
+          </section>}
           {builtinUpdates.length > 0 && (
-            <div className="mb-3 rounded-md bg-inset px-3 py-2 text-xs text-l3">
+            <div className="mb-3 rounded-md ccode-well px-3 py-2 text-xs text-l3">
               <p>
                 内置技能有新版：{builtinUpdates.join("、")}（共{" "}
                 {builtinUpdates.length}{" "}
@@ -1632,10 +1638,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                     <button
                       type="button"
                       disabled={builtinApplying !== null}
-                      onClick={() => void onApplyBuiltinUpdate(name)}
+                      onClick={() => { void invoke<{ revision: string; files: { path: string; current: string; proposed: string }[] }>("preview_builtin_skill_update", { name }).then((preview) => setBuiltinPreview({ name, ...preview })).catch((e) => setBuiltinErrors((prev) => ({ ...prev, [name]: String(e) }))); }}
                       className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110 disabled:opacity-50"
                     >
-                      {builtinApplying === name ? "更新中…" : "更新"}
+                      {builtinApplying === name ? "更新中…" : "查看差异"}
                     </button>
                     {builtinErrors[name] ? (
                       <span className="text-err-text">
@@ -1717,7 +1723,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                   return (
                     <section
                       key={category}
-                      className="mb-3 overflow-hidden rounded-md border border-field bg-strip"
+                      className="mb-3 overflow-hidden rounded-md border border-field ccode-well"
                     >
                       <button
                         type="button"

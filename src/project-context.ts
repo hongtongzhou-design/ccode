@@ -90,6 +90,7 @@ export function projectHomeHint(
     return [
       "按项目里已有的文档风格写。",
       "产出放到目标指定的路径；验收后才进项目。",
+      "如交付 PPT/PPTX 等幻灯，同时输出同名 PDF 供版式核对；如工具不支持，明确说明，不得冒称已完成预览验证。",
     ];
   }
   if (mode === "coding") {

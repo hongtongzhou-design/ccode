@@ -1,5 +1,6 @@
 import { sanitizeDocumentHtml } from "../document-html";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import { marked } from "marked";
 import { hydrateMdImages } from "../md-image-hydrate";
@@ -23,6 +24,7 @@ export default function OfficePreviewModal({
   onNext,
   hasPrevious = false,
   hasNext = false,
+  companionPdf,
 }: {
   path: string;
   root: string;
@@ -33,18 +35,21 @@ export default function OfficePreviewModal({
   onNext?: () => void;
   hasPrevious?: boolean;
   hasNext?: boolean;
+  companionPdf?: string | null;
 }) {
   const name = path.split(/[\\/]/).pop() ?? path;
   const mode = officePreviewMode(path);
   const [text, setText] = useState<string | null>(null);
   const [html, setHtml] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
   const mdRef = useRef<HTMLDivElement>(null);
 
   const isText = mode === "text";
   const isMarkdown = isText && /\.(md|markdown|mdx|qmd)$/i.test(name);
 
   useEffect(() => {
+    setText(null); setHtml(""); setError(null); setTruncated(false);
     if (!isText) return;
     let cancelled = false;
     invoke<{ text: string; truncated: boolean }>("read_file_preview", {
@@ -52,7 +57,7 @@ export default function OfficePreviewModal({
       root,
     })
       .then((r) => {
-        if (!cancelled) setText(r.text);
+        if (!cancelled) { setText(r.text); setTruncated(r.truncated); }
       })
       .catch((e) => {
         if (!cancelled) setError(String(e));
@@ -135,7 +140,10 @@ export default function OfficePreviewModal({
         </pre>
       );
   } else {
-    body = <p className="text-sm text-l3">这种文件请用系统应用打开。</p>;
+    body = companionPdf ? <div className="flex h-full min-h-0 flex-col">
+      <p className="mb-2 text-xs text-warn-text">显示同次结果中的配套 PDF。它是独立文件，不代表 Mesa 已验证 PPT 与 PDF 内容一致；请结合原文件核对。</p>
+      <PdfContinuousView path={companionPdf} cwdHint={root} maxFitMultiplier={1.5} />
+    </div> : <p className="text-sm text-l3">这种文件需用系统应用打开。汇报幻灯建议让 Agent 同时交付同名 PDF，方便核对版式。</p>;
   }
 
   return (
@@ -201,6 +209,7 @@ export default function OfficePreviewModal({
               : "min-h-0 flex-1 overflow-auto"
           }
         >
+          {truncated && <p className="mb-2 text-xs text-warn-text">只显示文件前半部分，不能据此确认完整内容。</p>}
           {body}
         </div>
         <div
@@ -208,6 +217,10 @@ export default function OfficePreviewModal({
             mode === "xlsx" ? "border-t border-hairline px-4 py-2.5" : "mt-3"
           }`}
         >
+          {mode === "external" && <>
+            <button type="button" className={rowActionClass} onClick={() => void openPath(path).catch((e) => setError(String(e)))}>用系统应用打开原文件</button>
+            <button type="button" className={rowActionClass} onClick={() => void revealItemInDir(path).catch((e) => setError(String(e)))}>显示文件位置</button>
+          </>}
           {extraAction && (
             <button
               type="button"

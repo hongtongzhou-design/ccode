@@ -39,7 +39,7 @@ const EXPLAIN_ITEMS_CAP: usize = 500;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchEntryDto {
-    /// 内容哈希 id（标题+批次日期），`w-<hex>`；仅作前端列表 key，不持久化
+    /// 标题 + 原注释批次日期的稳定哈希，`w-<hex>`；兼容前端已有忽略记录
     pub id: String,
     pub title: String,
     /// 来源行第一段（arxiv / 期刊 / 会议名）
@@ -55,7 +55,7 @@ pub struct WatchEntryDto {
     pub zh_summary: String,
     /// 来源行里的链接/DOI 段；没有为空串
     pub url: String,
-    /// 条目所属巡检批次日期（最近的 `<!-- watch-run: ... -->` 标记）；无标记为 None
+    /// 最近的巡检批次日期（标准注释或旧版巡检标题）；缺失/无效为 None
     pub date: Option<String>,
     /// 条目在 inbox.md 中的行范围（1 起，闭区间），供前端定位/高亮
     pub raw_line_range: [u32; 2],
@@ -125,7 +125,7 @@ pub struct DownloadedPaperDto {
 
 // ===== 公共小件 =====
 
-/// 内容哈希 id（DefaultHasher 固定种子，同一次构建内稳定；id 只服务于前端列表 diff）
+/// 内容哈希 id（DefaultHasher 固定种子）；条目忽略记录依赖其稳定性。
 fn hash_id(prefix: &str, parts: &[&str]) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -176,7 +176,7 @@ fn write_text_inside(root: &Path, rel: &str, text: &str) -> Result<(), String> {
 
 // ===== notes/inbox.md 解析 =====
 
-/// 批次标记行：`<!-- watch-run: YYYY-MM-DD -->`（宽松校验：10 位、只含数字与连字符）
+/// 保留旧批次标记的宽松口径，仅用于稳定 ID；展示日期另作日历校验。
 fn parse_batch_marker(line: &str) -> Option<String> {
     let inner = line
         .trim()
@@ -185,6 +185,40 @@ fn parse_batch_marker(line: &str) -> Option<String> {
     let d = inner.trim();
     if d.len() == 10 && d.chars().all(|c| c.is_ascii_digit() || c == '-') {
         Some(d.to_string())
+    } else {
+        None
+    }
+}
+
+fn validated_batch_date(day: &str) -> Option<String> {
+    if day.len() != 10
+        || day.as_bytes().iter().enumerate().any(|(i, b)| {
+            if i == 4 || i == 7 {
+                *b != b'-'
+            } else {
+                !b.is_ascii_digit()
+            }
+        })
+    {
+        return None;
+    }
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    Some(day.to_string())
+}
+
+/// 只认旧版明确的巡检标题，不把论文发表日期或普通日期标题当成发现日期。
+fn parse_batch_heading(line: &str) -> Option<&str> {
+    let heading = line
+        .trim()
+        .strip_prefix("### ")
+        .or_else(|| line.trim().strip_prefix("## "))?;
+    let (day, rest) = heading.split_once(char::is_whitespace)?;
+    if day.len() != 10 || !day.chars().all(|c| c.is_ascii_digit() || c == '-') {
+        return None;
+    }
+    let suffix = rest.trim_start().strip_prefix("巡检")?;
+    if suffix.is_empty() || suffix.starts_with(['（', '(', ' ', '\t']) {
+        Some(day)
     } else {
         None
     }
@@ -242,6 +276,7 @@ struct EntryBuilder {
     start_line: u32,
     last_line: u32,
     date: Option<String>,
+    id_date: Option<String>,
     source: String,
     authors: String,
     abstract_first: String,
@@ -253,12 +288,13 @@ struct EntryBuilder {
 }
 
 impl EntryBuilder {
-    fn new(title: String, start_line: u32, date: Option<String>) -> Self {
+    fn new(title: String, start_line: u32, date: Option<String>, id_date: Option<String>) -> Self {
         Self {
             title,
             start_line,
             last_line: start_line,
             date,
+            id_date,
             source: String::new(),
             authors: String::new(),
             abstract_first: String::new(),
@@ -273,7 +309,7 @@ impl EntryBuilder {
     fn build(self) -> WatchEntryDto {
         let date = self.date;
         WatchEntryDto {
-            id: hash_id("w", &[&self.title, date.as_deref().unwrap_or("")]),
+            id: hash_id("w", &[&self.title, self.id_date.as_deref().unwrap_or("")]),
             title: self.title,
             source: self.source,
             authors: self.authors,
@@ -311,15 +347,31 @@ impl EntryBuilder {
 }
 
 /// 解析 notes/inbox.md 全文为条目表（文件顺序，旧→新）。容错：坏行跳过；
-/// 任何 `## ` 块都算条目（不猜技能之外的块长什么样），缺字段给缺省。
+/// 巡检标题/注释划分批次；只有含文献字段的 `## ` 块算条目，缺字段给缺省。
 fn parse_inbox_entries_with_cap(text: &str, cap: bool) -> Vec<WatchEntryDto> {
     let mut out: Vec<WatchEntryDto> = Vec::new();
     let mut cur: Option<EntryBuilder> = None;
     let mut cur_batch: Option<String> = None;
+    // 旧条目用「标题 + 注释日期」生成忽略 ID；补识别标题日期不能让忽略失效。
+    let mut id_batch: Option<String> = None;
     for (idx, line) in text.lines().enumerate() {
         let ln = (idx + 1) as u32;
-        if let Some(d) = parse_batch_marker(line) {
-            cur_batch = Some(d);
+        let batch_day = line
+            .trim()
+            .strip_prefix("<!-- watch-run:")
+            .and_then(|s| s.strip_suffix("-->"))
+            .map(str::trim)
+            .or_else(|| parse_batch_heading(line));
+        if let Some(day) = batch_day {
+            if let Some(b) = cur.take() {
+                if b.is_literature_entry() {
+                    out.push(b.build());
+                }
+            }
+            cur_batch = validated_batch_date(day);
+            if let Some(d) = parse_batch_marker(line) {
+                id_batch = Some(d);
+            }
             continue;
         }
         if let Some(title) = line.strip_prefix("## ") {
@@ -332,6 +384,7 @@ fn parse_inbox_entries_with_cap(text: &str, cap: bool) -> Vec<WatchEntryDto> {
                 title.trim().to_string(),
                 ln,
                 cur_batch.clone(),
+                id_batch.clone(),
             ));
             continue;
         }
@@ -1234,6 +1287,58 @@ mod tests {
         assert_eq!(entries[0].date, None);
         assert_eq!(entries[0].abstract_first, "x");
         assert_eq!(entries[0].relevance, "推荐");
+    }
+
+    #[test]
+    fn legacy_batch_headings_supply_dates_without_changing_entry_ids() {
+        let text = "### 2026-08-22 巡检（自动雷达）\n\n## Paper A\n- 来源：Journal — 2026-08-19 — https://example.com/a\n\n### 2026-08-25 巡检（自动雷达）\n- 来源：本次未达\n\n### 2026-08-24 巡检（自动雷达）\n\n## Paper B\n- 相关性：推荐\n";
+        let entries = parse_inbox_entries(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].date.as_deref(), Some("2026-08-22"));
+        assert_eq!(entries[1].date.as_deref(), Some("2026-08-24"));
+        assert_eq!(entries[0].source, "Journal");
+        assert_eq!(entries[0].raw_line_range, [3, 4]);
+        for entry in &entries {
+            assert_eq!(entry.id, hash_id("w", &[&entry.title, ""]));
+        }
+    }
+
+    #[test]
+    fn mixed_batch_formats_use_nearest_date_but_keep_marker_based_ids() {
+        let text = "<!-- watch-run: 2026-08-10 -->\n### 2026-08-11 巡检 (自动雷达)\n## Paper A\n- 相关性：推荐\n<!-- watch-run: 2026-08-18 -->\n## Paper B\n- 相关性：相关\n## 2026-08-19 巡检\n- 来源：本次未达\n## Paper C\n- 相关性：推荐\n";
+        let entries = parse_inbox_entries(text);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].date.as_deref(), Some("2026-08-11"));
+        assert_eq!(entries[1].date.as_deref(), Some("2026-08-18"));
+        assert_eq!(entries[2].date.as_deref(), Some("2026-08-19"));
+        assert_eq!(entries[0].id, hash_id("w", &["Paper A", "2026-08-10"]));
+        assert_eq!(entries[1].id, hash_id("w", &["Paper B", "2026-08-18"]));
+        assert_eq!(entries[2].id, hash_id("w", &["Paper C", "2026-08-18"]));
+        assert!(entries[1].source.is_empty());
+    }
+
+    #[test]
+    fn invalid_batch_dates_stay_unknown_instead_of_inheriting_or_using_publication_date() {
+        for boundary in [
+            "### 2026-02-29 巡检（自动雷达）",
+            "### 2026-13-01 巡检",
+            "<!-- watch-run: 2026-02-30 -->",
+        ] {
+            let text = format!("<!-- watch-run: 2026-02-20 -->\n## Valid\n- 相关性：推荐\n{boundary}\n## Unknown\n- 来源：Journal — 2026-02-21 — https://example.com/a\n");
+            let entries = parse_inbox_entries(&text);
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].date.as_deref(), Some("2026-02-20"));
+            assert_eq!(entries[1].date, None, "{boundary}");
+        }
+        assert_eq!(
+            validated_batch_date("2024-02-29").as_deref(),
+            Some("2024-02-29")
+        );
+        assert_eq!(validated_batch_date("2026-2-01"), None);
+        assert_eq!(validated_batch_date("2026年02月01日"), None);
+        assert_eq!(parse_batch_heading("### 2026-08-22 普通笔记"), None);
+        assert_eq!(parse_batch_heading("### 2026-08-22 巡检方法研究"), None);
+        assert_eq!(parse_batch_heading("- 2026-08-22 巡检"), None);
     }
 
     #[test]

@@ -1959,14 +1959,23 @@ pub(crate) fn read_memory_at(root: &Path) -> String {
     crate::project_memory::read_raw(root).unwrap()
 }
 
-pub(crate) fn append_project_memory_at(root: &Path, goal_name: &str, text: &str, run_id: Option<&str>) -> Result<(), String> {
+pub(crate) fn append_project_memory_at(
+    root: &Path,
+    goal_name: &str,
+    text: &str,
+    run_id: Option<&str>,
+) -> Result<(), String> {
     crate::project_memory::append_confirmed(root, goal_name, text, run_id)
 }
 
 #[tauri::command]
-pub fn read_project_memory(path: String) -> Result<String, String> {
-    let root = PathBuf::from(crate::sessions::expand_tilde(&path));
-    crate::project_memory::context_at(&root)
+pub async fn read_project_memory(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = PathBuf::from(crate::sessions::expand_tilde(&path));
+        crate::project_memory::context_at(&root)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2041,6 +2050,12 @@ pub(crate) fn append_acceptance_log_at(
     entry: &AcceptanceLogEntry,
 ) -> Result<(), String> {
     use std::io::Write;
+    // 上次进程可能在 JSONL 一行写到一半时退出；保留原字节但必须隔开尾行，不能把新事实接进坏 JSON。
+    let previous = match fs::read(acceptance_log_path(root)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("读取原接受记录失败，未追加：{e}")),
+    };
     let existed = read_acceptance_log_at(root);
     if fact_already_recorded(&existed, entry) {
         return Ok(());
@@ -2049,9 +2064,17 @@ pub(crate) fn append_acceptance_log_at(
     fs::create_dir_all(&dir).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
     let mut line = serde_json::to_string(entry).map_err(|e| e.to_string())?;
     line.push('\n');
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    if !previous.is_empty() && !previous.ends_with(b"\n") {
+        line.insert(0, '\n');
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(acceptance_log_path(root))
         .map_err(|e| format!("打开接受记录失败: {e}"))?;
     file.write_all(line.as_bytes())
@@ -2065,6 +2088,27 @@ pub(crate) fn append_acceptance_log_at(
 pub fn read_project_status(path: String) -> Result<ProjectStatusDto, String> {
     let root = PathBuf::from(crate::sessions::expand_tilde(&path));
     Ok(read_project_status_at(&root))
+}
+
+static PROJECT_CONFIG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) struct ProjectConfigGuard {
+    _process: std::sync::MutexGuard<'static, ()>,
+    _file: fs::File,
+}
+
+pub(crate) fn project_config_lock(root: &Path) -> Result<ProjectConfigGuard, String> {
+    let process = PROJECT_CONFIG_MUTEX.lock().map_err(|_| "项目配置锁失效")?;
+    let canonical = crate::paths::canonicalize_plain(root).map_err(|e| e.to_string())?;
+    let key = format!(
+        "project-{:x}",
+        md5::compute(crate::paths::path_key(&canonical.to_string_lossy()))
+    );
+    let file = crate::storage::config_lock(&key)?;
+    Ok(ProjectConfigGuard {
+        _process: process,
+        _file: file,
+    })
 }
 
 pub(crate) fn write_config_at(project: &Path, config: &ProjectConfigDto) -> Result<(), String> {
@@ -2933,6 +2977,7 @@ pub async fn read_project_config(path: String) -> ProjectConfigReadDto {
 pub async fn write_project_config(path: String, config: ProjectConfigDto) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let project = PathBuf::from(crate::sessions::expand_tilde(&path));
+        let _guard = project_config_lock(&project)?;
         write_config_at(&project, &config)
     })
     .await
@@ -4061,6 +4106,7 @@ pub(crate) fn apply_pipeline_template_at(
             return Err(format!("投稿分支取值无效：{mode}"));
         }
     }
+    let _guard = project_config_lock(root)?;
     let mut cfg = read_config_at(root).config;
     let original_cfg = cfg.clone();
     let mut result = AppendStepsResultDto {
@@ -4118,7 +4164,15 @@ pub(crate) fn apply_pipeline_template_at(
                 result.skipped.push("（未命名步骤）".to_string());
                 continue;
             }
-            if cfg.steps.iter().any(|s| s.name == name) {
+            if let Some(previous) = cfg.steps.iter().find(|s| s.name == name) {
+                let missing: Vec<_> = step
+                    .expected_artifacts
+                    .iter()
+                    .filter(|path| !previous.expected_artifacts.contains(path))
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(format!("同名步骤「{name}」交付不同，未应用模板。请改名追加或确认复用后调整输入：{}", missing.into_iter().cloned().collect::<Vec<_>>().join("、")));
+                }
                 result.skipped.push(name);
                 continue;
             }
@@ -4153,6 +4207,16 @@ pub(crate) fn apply_pipeline_template_at(
     }
 
     cfg.settings.retain(|line| !setting_is_placeholder(line));
+    if original_cfg.steps.is_empty() {
+        // 首次选择工具可覆盖旧 opt-out 留下的偏好；已有流程必须经编辑器统一改步骤。
+        for candidate in project_settings
+            .iter()
+            .filter(|s| s.starts_with("科研工具/"))
+        {
+            cfg.settings
+                .retain(|line| setting_parts(line).0 != setting_parts(candidate).0);
+        }
+    }
     merge_project_settings(&mut cfg.settings, &project_settings);
     let has_topic = topic
         .as_deref()
@@ -5008,6 +5072,29 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         .unwrap();
         assert_eq!(read_acceptance_log_at(&root).len(), 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn acceptance_log_recovers_after_a_partial_final_line_without_destroying_evidence() {
+        let dir = temp_dir("acceptance-torn-tail");
+        fs::create_dir_all(dir.join(".ccode")).unwrap();
+        let torn = b"{\"goalId\":\"unfinished";
+        fs::write(acceptance_log_path(&dir), torn).unwrap();
+        let entry = AcceptanceLogEntry {
+            goal_id: "goal".into(),
+            run_id: "run".into(),
+            version_id: "run:1".into(),
+            paths: vec!["paper.md".into()],
+            ..Default::default()
+        };
+        append_acceptance_log_at(&dir, &entry).unwrap();
+        assert_eq!(read_acceptance_log_at(&dir), vec![entry.clone()]);
+        assert!(fs::read(acceptance_log_path(&dir))
+            .unwrap()
+            .starts_with(torn));
+        append_acceptance_log_at(&dir, &entry).unwrap();
+        assert_eq!(read_acceptance_log_at(&dir).len(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     // ===== 步骤资源绑定（resources 字段与 validate_step） =====
@@ -5948,7 +6035,8 @@ resources = ["ghost.pdf"]
         let text = "[[steps]]\nname = \"读文献\"\nworkspace_name = \"lit-notes\"\n\n\
                     [[steps]]\nname = \"占位\"\nworkspace_name = \"write\"\n";
         write(&config_path(&root), text);
-        let mut batch = sample_steps(); // 「读文献」(lit-notes) + 「写论文」(无 workspace_name)
+        let mut batch = sample_steps();
+        batch[0].expected_artifacts.clear(); // 「读文献」(lit-notes) + 「写论文」(无 workspace_name)
         batch.push(StepDto {
             name: "换个名字".into(),
             workspace_name: "write".into(), // 与既有步骤 workspace_name 撞车
@@ -5977,6 +6065,28 @@ resources = ["ghost.pdf"]
         assert_eq!(cfg.steps[2].name, "写论文");
         assert_eq!(cfg.steps[3].workspace_name, "write-2");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_conflicting_contract_fails_without_changing_project() {
+        let dir = temp_dir("append-contract");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "[[steps]]\nname = \"论文初稿\"\nexpected_artifacts = [\"manuscript/draft.md\"]\n",
+        );
+        let before = fs::read(config_path(&root)).unwrap();
+        let result = append_pipeline_steps_at(
+            &root,
+            vec![StepDto {
+                name: "论文初稿".into(),
+                expected_artifacts: vec!["manuscript/thesis-draft.md".into()],
+                ..StepDto::default()
+            }],
+        );
+        assert!(result.unwrap_err().contains("交付不同"));
+        assert_eq!(fs::read(config_path(&root)).unwrap(), before);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6076,6 +6186,7 @@ resources = ["ghost.pdf"]
     fn replace_template_normalizes_names_and_workspace_conflicts() {
         let dir = temp_dir("replace-normalize");
         let root = dir.join("proj");
+        fs::create_dir_all(&root).unwrap();
         let res = apply_pipeline_template_at(
             &root,
             vec![
@@ -6116,13 +6227,12 @@ resources = ["ghost.pdf"]
         );
 
         // 模板步骤全部因名称重复跳过，但返修分支仍必须在同一次读-改-原子写中生效。
-        let res = append_pipeline_steps_at_with_submission(
-            &root,
-            sample_steps(),
-            Some("revision"),
-            Some(0),
-        )
-        .unwrap();
+        let mut steps = sample_steps();
+        for step in &mut steps {
+            step.expected_artifacts.clear();
+        }
+        let res = append_pipeline_steps_at_with_submission(&root, steps, Some("revision"), Some(0))
+            .unwrap();
         assert_eq!(res.appended, 0);
         assert_eq!(res.skipped, vec!["读文献", "写论文"]);
 

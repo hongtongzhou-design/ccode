@@ -519,7 +519,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         />
       ) : (
         <>
-          <div className="mb-6 rounded-lg bg-strip p-4">
+          <div className="mb-6 rounded-lg ccode-well p-4">
             <div className="flex flex-wrap items-start gap-x-8 gap-y-3">
               <div>
                 <div className="text-xs font-medium tracking-wider text-l4">
@@ -638,7 +638,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
           </div>
 
           {distItems.length > 0 && (
-          <div className="mb-6 rounded-lg bg-strip p-3">
+          <div className="mb-6 rounded-lg ccode-well p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <SegTabs items={distItems} value={dist} onChange={setView} />
               {dist === "gateway" && focusGateway && (

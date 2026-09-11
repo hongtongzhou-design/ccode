@@ -487,15 +487,19 @@ fn parse_price_map(text: &str) -> Vec<(String, (f64, f64))> {
 }
 
 /// fetch_models 顺带调用：把网关 /models 响应里的元数据合并进实测缓存。
-/// 键为 `{gatewayId}|{model}`；无网关 id 不写（禁止再写无前缀键互踩）。
+/// 返回值 = 响应里能解析出的能力条数（即使还没有 gateway id、不能落盘，也据实计数，
+/// 避免新建网关拉取时 UI 一律显示「未提供能力元数据」）。
+/// 键为 `{gatewayId}|{model}`；无网关 id 只计数不写（禁止再写无前缀键互踩）。
 pub(crate) fn record_relay_models(v: &serde_json::Value, gateway_id: Option<&str>) -> usize {
+    let count = parse_openrouter_models(v).len();
     let Some(gid) = gateway_id.filter(|s| !s.is_empty()) else {
-        return 0;
+        return count;
     };
     let Some(path) = relay_cache_path() else {
-        return 0;
+        return count;
     };
-    record_relay_models_to(&path, v, gid)
+    let _ = record_relay_models_to(&path, v, gid);
+    count
 }
 
 /// record_relay_models 的可注入内核（测试用）
@@ -981,6 +985,38 @@ mod tests {
         assert_eq!(vx.context, Some(262144));
         // 纯 id 无元数据的条目丢弃
         assert!(!map.contains_key("bare-id-only"));
+    }
+
+    #[test]
+    fn anthropic_and_openai_id_lists_are_not_capability_tables() {
+        // 中转常见两种 /models：Anthropic 展示字段 / OpenAI 对象字段，都没有
+        // context_length / architecture / supported_parameters。
+        let anthropic = serde_json::json!({"data": [{
+            "id": "m1",
+            "created_at": "2026-01-01T00:00:00Z",
+            "display_name": "M1",
+            "type": "model"
+        }]});
+        let openai = serde_json::json!({"data": [{
+            "id": "m1",
+            "object": "model",
+            "created": 1,
+            "owned_by": "vendor",
+            "supported_endpoint_types": ["chat"]
+        }]});
+        assert!(parse_openrouter_models(&anthropic).is_empty());
+        assert!(parse_openrouter_models(&openai).is_empty());
+        assert_eq!(record_relay_models(&anthropic, None), 0);
+        assert_eq!(record_relay_models(&openai, None), 0);
+        let rich = serde_json::json!({"data": [{
+            "id": "relay/custom",
+            "context_length": 32000
+        }]});
+        assert_eq!(
+            record_relay_models(&rich, None),
+            1,
+            "无网关 id 仍按响应计数"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { vendorOf, groupModelsByVendor } from "../src/model-vendors.ts";
+import { vendorOf, groupModelsByVendor, visibleVendorGroups } from "../src/model-vendors.ts";
 
 test("vendorOf：斜杠风格取前段", () => {
   assert.equal(vendorOf("openai/gpt-5"), "openai");
@@ -46,4 +46,19 @@ test("groupModelsByVendor：筛选大小写不敏感、空组不产出", () => {
   assert.deepStrictEqual(groups, [
     { vendor: "gemini", models: ["gemini-3.5-flash"] },
   ]);
+});
+
+test("visibleVendorGroups：全部保留分组，指定厂商只留该组", () => {
+  const ids = ["gpt-5.6-sol", "gpt-5.4", "deepseek-v4-flash", "claude-opus-4"];
+  assert.deepEqual(
+    visibleVendorGroups(ids, "all").map((g) => g.vendor),
+    ["claude", "deepseek", "gpt"],
+  );
+  assert.deepEqual(visibleVendorGroups(ids, "gpt").map((g) => g.models), [
+    ["gpt-5.4", "gpt-5.6-sol"],
+  ]);
+  assert.deepEqual(visibleVendorGroups(ids, "gpt", "5.4").map((g) => g.models), [
+    ["gpt-5.4"],
+  ]);
+  assert.equal(visibleVendorGroups(ids, "missing").length, 0);
 });

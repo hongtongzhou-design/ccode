@@ -1,3 +1,5 @@
+import { researchToolContractMatches } from "../src/research-tools.ts";
+import { appendUpstreamAcceptance } from "../src/research-acceptance.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -60,7 +62,7 @@ test("三套文献链都有稳定 ID、全文状态与笔记覆盖，而非仅�
     const search = template(id).steps.find((s) => s.skills.includes("lit-search"))!;
     const notes = template(id).steps.find((s) => s.skills.includes("lit-notes"))!;
     assert.ok(search.expectedArtifacts.includes("papers/included.json"), id);
-    assert.ok(search.acceptanceCriteria?.includes("machine:records:papers/included.json::id,title,decision,reason"), id);
+    assert.ok(search.acceptanceCriteria?.includes("machine:records-allow-empty:papers/included.json::id,title,decision,reason"), id);
     assert.ok(notes.inputs?.includes("papers/included.json"), id);
     assert.ok(notes.expectedArtifacts.includes("notes/index.json"), id);
     assert.ok(notes.acceptanceCriteria?.includes("machine:same-ids:papers/included.json::notes/index.json"), id);
@@ -196,6 +198,8 @@ test("实际开工链：未答决定或任务书写入失败时不会调用终�
   let failWrite = false;
   const start = vm.runInNewContext(`${js}\nstartPipelineStep`, {
     parseDecisions,
+    appendUpstreamAcceptance,
+    researchToolContractMatches,
     decisionGate,
     renderTaskMd,
     DEFAULT_KICKOFF_PROMPT: "读 TASK.md，按简报开始执行",
@@ -203,6 +207,8 @@ test("实际开工链：未答决定或任务书写入失败时不会调用终�
     gatherTaskMdExtras: async () => ({ artifacts: [], skillMeta: undefined, decisions: [] }),
     invoke: async (command: string, args: Record<string, any>) => {
       calls.push(command);
+      if (command === "research_upstream_acceptances") return [];
+      if (command === "research_tool_preflight") return [];
       if (command === "create_workspace") return { name: s.workspaceName, worktreePath: "/isolated/project" };
       if (command === "write_workspace_task_md") {
         if (failWrite) throw new Error("disk full");
@@ -217,7 +223,7 @@ test("实际开工链：未答决定或任务书写入失败时不会调用终�
   const approved = upsertDecisions(md("research-paper", "exp-run"), s.decisions!.map((d) => ({ q: d.q, answer: formatDecisionAnswer("approve", "design v3，批准范围和许可见人工评阅") })));
   failWrite = true;
   await assert.rejects(start({ ...opts, taskMdOverride: approved }), /未启动 Agent.*disk full/);
-  assert.deepEqual(calls, ["ensure_git_repo", "commit_project_bootstrap", "create_workspace", "write_workspace_task_md"]);
+  assert.deepEqual(calls, ["research_upstream_acceptances", "ensure_git_repo", "commit_project_bootstrap", "create_workspace", "write_workspace_task_md"]);
   assert.equal(writes.length, 0);
   calls.length = 0;
   failWrite = false;

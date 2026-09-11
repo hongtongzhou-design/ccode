@@ -60,7 +60,7 @@ import {
   metricsTooltip,
   pdfUrlFor,
   staleLitHint,
-  weeklyBuckets,
+  weeklyTrend,
   normalizeTitle,
   parseWatchExplain,
   watchExplainPrompt,
@@ -124,7 +124,8 @@ function sourceUrl(url: string): string {
 }
 
 /** 近 8 周命中迷你趋势（手绘 SVG 柱，不引图表库）；悬停出 HoverTip（禁原生 title） */
-function TrendChart({ buckets }: { buckets: ReturnType<typeof weeklyBuckets> }) {
+function TrendChart({ trend }: { trend: ReturnType<typeof weeklyTrend> }) {
+  const { buckets, showChart, note } = trend;
   const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(
     null,
   );
@@ -145,44 +146,48 @@ function TrendChart({ buckets }: { buckets: ReturnType<typeof weeklyBuckets> }) 
   const H = 40;
   const W = buckets.length * (BAR_W + GAP) - GAP;
   return (
-    <div className="mt-1">
-      <svg
-        width={W}
-        height={H}
-        className="block"
-        role="img"
-        aria-label="近 8 周每周新命中数"
-      >
-        {buckets.map((b, i) => {
-          const h =
-            b.count === 0 ? 2 : Math.max(4, Math.round((b.count / max) * (H - 6)));
-          return (
-            <rect
-              key={b.label}
-              x={i * (BAR_W + GAP)}
-              y={H - h}
-              width={BAR_W}
-              height={h}
-              rx={2}
-              fill={
-                b.count > 0 ? "var(--color-cta)" : "var(--color-hairline)"
-              }
-              onMouseEnter={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                setTip({
-                  x: Math.min(
-                    Math.max(r.left + r.width / 2, 150),
-                    window.innerWidth - 150,
-                  ),
-                  y: r.top - 8,
-                  text: `${b.count} 篇 · ${b.label}`,
-                });
-              }}
-              onMouseLeave={() => setTip(null)}
-            />
-          );
-        })}
-      </svg>
+    <div className="mt-1 px-2">
+      <p className="mb-1 text-micro text-l3">近 8 周新命中</p>
+      {showChart && (
+        <svg
+          width={W}
+          height={H}
+          className="block"
+          role="img"
+          aria-label="近 8 周每周新命中数"
+        >
+          {buckets.map((b, i) => {
+            const h =
+              b.count === 0 ? 2 : Math.max(4, Math.round((b.count / max) * (H - 6)));
+            return (
+              <rect
+                key={b.label}
+                x={i * (BAR_W + GAP)}
+                y={H - h}
+                width={BAR_W}
+                height={h}
+                rx={2}
+                fill={
+                  b.count > 0 ? "var(--color-cta)" : "var(--color-hairline)"
+                }
+                onMouseEnter={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setTip({
+                    x: Math.min(
+                      Math.max(r.left + r.width / 2, 150),
+                      window.innerWidth - 150,
+                    ),
+                    y: r.top - 8,
+                    text: `${b.count} 篇 · ${b.label}`,
+                  });
+                }}
+                onMouseLeave={() => setTip(null)}
+              />
+            );
+          })}
+        </svg>
+      )}
+      {note && <p className="mt-1 text-micro text-l4">{note}</p>}
       <HoverTip tip={tip} text={tip?.text ?? ""} up />
     </div>
   );
@@ -415,7 +420,7 @@ function WatchEntryRow({
         </div>
       )}
       {explain && (
-        <div className="mt-1 rounded-md bg-inset p-2 text-xs leading-5 text-l2">
+        <div className="mt-1 rounded-md ccode-well p-2 text-xs leading-5 text-l2">
           {explain.status === "loading" && (
             <div
               className="flex items-center gap-2 py-1 text-l3"
@@ -1209,7 +1214,7 @@ export default function LitWatchCard({
   const includedTitles = new Set(
     (included ?? []).map((item) => normalizeTitle(item.title)),
   );
-  const buckets = weeklyBuckets(entries ?? []);
+  const trend = weeklyTrend(entries ?? []);
   // 「新命中」两种分组视图统一成同构组列表，下方渲染不分支；关键词组头要显眼（prominent）
   const entryGroups: {
     key: string;
@@ -1386,7 +1391,7 @@ export default function LitWatchCard({
               <LoadingRows compact />
             ) : (
               <>
-                <TrendChart buckets={buckets} />
+                <TrendChart trend={trend} />
                 {latestRadarRun && (
                   <p className="mt-1 px-2 text-micro text-l4">
                     最近一次成功巡检新增 {latestRadarRun.newEntries ?? "未知"} 条 · 未忽略 {undismissed.length} 条

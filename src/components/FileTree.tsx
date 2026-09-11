@@ -711,7 +711,7 @@ function FileTree({
         </div>
       )}
       {error && (
-        <div className="mx-2 my-1 rounded-md border border-field bg-inset px-2 py-1.5 text-xs">
+        <div className="mx-2 my-1 rounded-md border border-field ccode-well px-2 py-1.5 text-xs">
           <p className="text-warn-text">{error}</p>
           {errorPath === root && onRecoverDirectory && (
             <button

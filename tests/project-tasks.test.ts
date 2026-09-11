@@ -12,6 +12,7 @@ import {
   goalRevisionLabel,
   goalTimeline,
   goalTimelineLabel,
+  goalTimelinePath,
   groupGoalsByBucket,
   markForProjectFile,
   isDeclaredTask,
@@ -289,6 +290,7 @@ test("goalTimeline is generate → notes → revision → accepted", () => {
     ],
   });
   assert.equal(goalTimelineLabel(items), "生成 → 意见：引用太少 → 第 2 版 → 已接受");
+  assert.equal(goalTimelinePath(items), "生成 → 意见 → 第 2 版 → 已接受");
 });
 
 test("groupGoalsByBucket splits open / running / review / done", () => {

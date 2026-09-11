@@ -87,7 +87,7 @@ export default function TemplatePicker({
   ) {
     const stepPreview = t.steps.map((s) => s.name).join(" → ");
     return (
-      <li key={key} className="rounded-sm bg-inset p-2">
+      <li key={key} className="rounded-sm ccode-well p-2">
         <div className="flex items-center gap-2">
           <span className="shrink-0 text-xs font-medium text-l1">{t.name}</span>
           <span className="shrink-0 rounded-sm bg-strip px-1.5 py-0.5 text-xs text-l3">

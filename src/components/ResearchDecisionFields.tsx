@@ -46,7 +46,7 @@ export default function ResearchDecisionFields({ decisions, text, disabled, evid
     sent.current = setDecisionAnswer(sent.current, question, value);
     onChange(sent.current);
   }
-  return <fieldset disabled={disabled} className="mb-3 space-y-2 rounded-md bg-inset p-3 text-xs">
+  return <fieldset disabled={disabled} className="mb-3 space-y-2 rounded-md ccode-well p-3 text-xs">
     <legend className="px-1 font-medium text-l1">你的决定</legend>
     <p className="text-micro text-l4">先选能不能写，再写一句范围。证据还不够或先别做，不能开工。</p>
     {decisions.map((decision) => {

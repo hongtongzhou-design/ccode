@@ -1005,7 +1005,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
       ) : (
         // 整表收进单张卡片容器（field 细边 + strip 底）+ 轻量表头：数据再少也有闭合边界，
         // 行间 hairline 分割；表头与数据行共用 MCP_GRID 保证列严格对齐
-        <div className="mt-1 overflow-hidden rounded-md border border-field bg-strip">
+        <div className="mt-1 overflow-hidden rounded-md border border-field ccode-well">
           <div
             className={`grid ${MCP_GRID} items-center gap-3 border-b border-hairline px-3 py-2 text-micro tracking-wider text-l4`}
           >
@@ -1179,7 +1179,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                   // 展开面板：浅底 + 细边 + 圆角的深层区，给嵌套内容（完整配置/变量/分发网格）
                   // 一个明确的空间落点，不再直接摊在行下方
                   <div className="px-3 pb-3">
-                    <div className="rounded-md border border-hairline bg-canvas p-2.5">
+                    <div className="rounded-md border border-hairline ccode-well p-2.5">
                       <div className="break-all font-mono text-xs leading-5 text-l3">
                         {s.kind === "stdio"
                           ? `${s.command} ${s.args.join(" ")}`.trim()
@@ -1235,7 +1235,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                           return (
                             <div
                               key={agent.id}
-                              className="flex items-center justify-between gap-2 rounded-sm bg-inset px-2 py-1.5"
+                              className="flex items-center justify-between gap-2 rounded-sm ccode-well px-2 py-1.5"
                             >
                               <span className="flex min-w-0 items-center gap-1 text-xs text-l3">
                                 {/* 分发状态徽标（v3.88 三态点扩为五态）：开关表达清单分发意图
@@ -1608,7 +1608,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
               {fixTarget.candidates.map((c) => (
                 <li
                   key={c.command}
-                  className="rounded-sm bg-inset px-2 py-1.5"
+                  className="rounded-sm ccode-well px-2 py-1.5"
                 >
                   <div className="break-all font-mono text-xs text-l2">
                     {c.command}
@@ -1687,7 +1687,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 {discovered.map((d) => (
                   <li
                     key={`${d.agent}:${d.name}`}
-                    className="flex items-center gap-2 rounded-sm bg-inset px-2 py-1.5"
+                    className="flex items-center gap-2 rounded-sm ccode-well px-2 py-1.5"
                   >
                     <span className="shrink-0 rounded-sm bg-strip px-1.5 py-0.5 text-micro text-l4">
                       {AGENTS.find((a) => a.id === d.agent)?.label ?? d.agent}
@@ -1754,7 +1754,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
               }}
             />
             {pastePreview && (
-              <div className="mt-2 rounded-sm bg-inset p-2">
+              <div className="mt-2 rounded-sm ccode-well p-2">
                 <p className="mb-1 text-xs text-l3">
                   将导入 {pastePreview.servers.length} 个（stdio
                   命令会被各 agent 直接执行，请确认来源可信）：

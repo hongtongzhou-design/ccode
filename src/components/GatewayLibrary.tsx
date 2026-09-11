@@ -1,16 +1,31 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { mergeGatewayCatalog } from "../gateway-catalog";
-import { Checkbox, fieldClass, FoldMark, primaryActionClass, secondaryActionClass } from "./PageFrame";
+import { Checkbox, fieldClass, FoldMark, primaryActionClass, searchFieldClass, secondaryActionClass } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import { policyFieldHint, policyFieldMode } from "../combo-field";
-import { firstFilledCatalogSlot } from "../gateway-slot";
-import { bindingImpactLine } from "../binding-impact";
+import { type GatewaySlotName } from "../gateway-slot";
+import { groupModelsByVendor, visibleVendorGroups } from "../model-vendors";
+import {
+  applyFetchedCatalog,
+  catalogFetchNotice,
+  catalogFetchSlot,
+  catalogSlotWalkOrder,
+  effectiveSlotUrl,
+  fetchModelsInvokeArgs,
+  primaryProbeSlot,
+  parseHeaderEnv,
+  probeDtoToSummary,
+  slotsFollowMaster,
+} from "../gateway-draft";
+import { gatewayPickerRows } from "../gateway-option";
 import type {
   BindingInput,
   ComboSurfaceDto,
+  FetchGatewayCatalogDto,
+  FetchModelsResultDto,
   Gateway,
   GatewayInput,
   GatewayModel,
@@ -47,6 +62,118 @@ function probeSummaryText(sum: SlotProbeSummary | undefined): string {
   return "✗ 失败";
 }
 
+function ModelClassFilter({
+  ids,
+  vendor,
+  onVendor,
+  filter,
+  onFilter,
+}: {
+  ids: string[];
+  vendor: string;
+  onVendor: (vendor: string) => void;
+  filter: string;
+  onFilter: (value: string) => void;
+}) {
+  const groups = groupModelsByVendor(ids);
+  return (
+    <div className="space-y-1">
+      <input
+        className={`${searchFieldClass} w-full`}
+        placeholder="筛选模型名…"
+        value={filter}
+        onChange={(e) => onFilter(e.target.value)}
+      />
+      {groups.length > 1 && (
+        <div
+          className="flex max-h-16 flex-wrap gap-1 overflow-auto"
+          role="radiogroup"
+          aria-label="模型分类"
+        >
+          <button
+            type="button"
+            role="radio"
+            aria-checked={vendor === "all"}
+            className={`flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs ${
+              vendor === "all" ? "bg-seg-sel text-l1" : "text-l3 hover:bg-hover hover:text-l1"
+            }`}
+            onClick={() => onVendor("all")}
+          >
+            全部
+            <span className="text-micro text-l4">{ids.length}</span>
+          </button>
+          {groups.map((group) => {
+            const selected = vendor === group.vendor;
+            return (
+              <button
+                key={group.vendor}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                className={`flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs ${
+                  selected ? "bg-seg-sel text-l1" : "text-l3 hover:bg-hover hover:text-l1"
+                }`}
+                onClick={() => onVendor(group.vendor)}
+              >
+                {group.vendor}
+                <span className="text-micro text-l4">{group.models.length}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VendorModelSections({
+  ids,
+  vendor,
+  filter,
+  openVendors,
+  onToggle,
+  renderItem,
+}: {
+  ids: string[];
+  vendor: string;
+  filter: string;
+  openVendors: ReadonlySet<string>;
+  onToggle: (vendor: string) => void;
+  renderItem: (id: string) => ReactNode;
+}) {
+  const groups = visibleVendorGroups(ids, vendor, filter);
+  if (groups.length === 0) {
+    return <p className="px-1 py-1 text-xs text-l4">没有匹配的模型</p>;
+  }
+  const searching = filter.trim() !== "";
+  const foldVendors = vendor === "all" && groups.length > 1 && !searching;
+  return (
+    <div>
+      {groups.map((group) => {
+        const open = !foldVendors || openVendors.has(group.vendor);
+        return (
+          <div key={group.vendor}>
+            {foldVendors && (
+              <button
+                type="button"
+                className="flex min-h-7 w-full items-center gap-1.5 text-left text-xs font-medium text-l2 hover:text-l1"
+                onClick={() => onToggle(group.vendor)}
+              >
+                <FoldMark open={open} />
+                <span className="min-w-0 flex-1 truncate">{group.vendor}</span>
+                <span className="text-micro text-l4">{group.models.length}</span>
+              </button>
+            )}
+            {open && group.models.map((id) => (
+              <Fragment key={id}>{renderItem(id)}</Fragment>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function catalogAge(iso: string | null | undefined): string | null {
   if (!iso) return null;
   const t = Date.parse(iso);
@@ -68,8 +195,6 @@ export default function GatewayLibrary({
 }) {
   const gateways = useAppStore((s) => s.gateways);
   const profiles = useAppStore((s) => s.profiles);
-  const defaultProfiles = useAppStore((s) => s.settings?.defaultProfiles);
-  const activeGlobalProfiles = useAppStore((s) => s.settings?.activeGlobalProfiles);
   const loadGateways = useAppStore((s) => s.loadGateways);
   const saveGateway = useAppStore((s) => s.saveGateway);
   const removeGateway = useAppStore((s) => s.removeGateway);
@@ -91,12 +216,24 @@ export default function GatewayLibrary({
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [fetchingCatalog, setFetchingCatalog] = useState(false);
+  const [listFetchingId, setListFetchingId] = useState<string | null>(null);
   const [probingSlot, setProbingSlot] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
   const [bindAgent, setBindAgent] = useState("");
   const [bindProtocol, setBindProtocol] = useState("");
   const [bindModels, setBindModels] = useState<string[]>([]);
   const [monthUsage, setMonthUsage] = useState<GatewayUsageRow[]>([]);
+  const [draftProbes, setDraftProbes] = useState<Record<string, SlotProbeSummary>>({});
+  const [showSlots, setShowSlots] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showBind, setShowBind] = useState(false);
+  const [showModels, setShowModels] = useState(false);
+  const [policyFilter, setPolicyFilter] = useState("");
+  const [policyVendor, setPolicyVendor] = useState("all");
+  const [policyOpenVendors, setPolicyOpenVendors] = useState<ReadonlySet<string>>(new Set());
+  const [bindFilter, setBindFilter] = useState("");
+  const [bindVendor, setBindVendor] = useState("all");
+  const [bindOpenVendors, setBindOpenVendors] = useState<ReadonlySet<string>>(new Set());
   const modelSurfaceGen = useRef(0);
 
   useEffect(() => {
@@ -123,8 +260,19 @@ export default function GatewayLibrary({
   function openEdit(g: Gateway | "new") {
     modelSurfaceGen.current += 1;
     setError(null);
+    setNotice(null);
     setExpanded(null);
     setComboByModel({});
+    setDraftProbes({});
+    setShowAdvanced(false);
+    setShowBind(false);
+    setShowModels(false);
+    setPolicyFilter("");
+    setPolicyVendor("all");
+    setPolicyOpenVendors(new Set());
+    setBindFilter("");
+    setBindVendor("all");
+    setBindOpenVendors(new Set());
     if (g === "new") {
       setEditing("new");
       setName("");
@@ -134,6 +282,7 @@ export default function GatewayLibrary({
       setApiKey("");
       setHeaderText("");
       setModels([]);
+      setShowSlots(false);
       return;
     }
     setEditing(g);
@@ -149,7 +298,10 @@ export default function GatewayLibrary({
     setSlots(next);
     // 主输入初值：所有已填槽同址时取该址（跟随关系天然成立），混址时留空不强猜
     const filled = Object.values(next).filter((v) => v.trim());
-    setMasterUrl(filled.length > 0 && filled.every((v) => v.trim() === filled[0].trim()) ? filled[0] : "");
+    const master =
+      filled.length > 0 && filled.every((v) => v.trim() === filled[0].trim()) ? filled[0] : "";
+    setMasterUrl(master);
+    setShowSlots(!slotsFollowMaster(next, master));
     setApiKey("");
     setHeaderText(
       Object.entries(g.headerEnv)
@@ -228,6 +380,7 @@ export default function GatewayLibrary({
   }
 
   function slotSum(key: keyof ProtocolSlots): SlotProbeSummary | undefined {
+    if (draftProbes[key]) return draftProbes[key];
     if (editing === null || editing === "new") return undefined;
     return (editing.slotProbes ?? []).find((s) => s.slot === key);
   }
@@ -235,12 +388,7 @@ export default function GatewayLibrary({
   async function save() {
     setSaving(true);
     setError(null);
-    const headerEnv: Record<string, string> = {};
-    for (const line of headerText.split("\n")) {
-      const i = line.indexOf("=");
-      if (i <= 0) continue;
-      headerEnv[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-    }
+    const headerEnv = parseHeaderEnv(headerText);
     const input: GatewayInput = {
       name: name.trim() || "未命名网关",
       noAuth,
@@ -316,64 +464,106 @@ export default function GatewayLibrary({
     }
   }
 
+  async function refreshListedCatalog(g: Gateway) {
+    setListFetchingId(g.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await invoke<FetchGatewayCatalogDto>("fetch_gateway_catalog", {
+        gatewayId: g.id,
+        preferSlot: g.catalogFromSlot,
+      });
+      await loadGateways();
+      const n = result.gateway.models.filter((m) => m.status !== "stale").length;
+      setNotice(
+        `${catalogFetchNotice(n, result.capabilityMetadataCount, result.gateway.catalogFromSlot)}绑定里已勾选的名单不会自动改，编辑连接时再勾选新模型。`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setListFetchingId(null);
+    }
+  }
+
   async function fetchCatalog() {
-    if (editing === null || editing === "new") return;
-    const dirtySlots = SLOT_LABELS.some(
-      (s) => (slots[s.key] ?? "").trim() !== (editing.slots[s.key] ?? "").trim(),
-    );
-    if (dirtySlots || apiKey.trim()) {
-      setError("请先保存端点和密钥再获取目录；测的是已保存的网关");
+    const prefer = editing !== null && editing !== "new" ? editing.catalogFromSlot : null;
+    const start = catalogFetchSlot(slots, masterUrl, prefer);
+    if (!start) {
+      setError("先填 Base URL 或某个协议槽");
       return;
     }
     setFetchingCatalog(true);
     setError(null);
+    const gatewayId = editing !== null && editing !== "new" ? editing.id : null;
+    let lastError = "没有可拉取的协议槽";
     try {
-      const saved = await invoke<Gateway>("fetch_gateway_catalog", {
-        gatewayId: editing.id,
-        preferSlot: firstFilledCatalogSlot(slots, editing.catalogFromSlot),
-      });
-      const list = await invoke<Gateway[]>("list_gateways");
-      const fresh = list.find((g) => g.id === saved.id) ?? saved;
-      setModels(mergeGatewayCatalog(models, fresh.models.map((m) => ({ ...m }))));
-      setEditing({ ...editing, ...fresh, revision: fresh.revision });
-      setNotice(
-        `已获取模型目录${saved.catalogFromSlot ? `（${saved.catalogFromSlot} 槽）` : ""}；未保存的逐模型策略已保留`,
-      );
-      await loadGateways();
-    } catch (e) {
-      setError(String(e));
+      for (const slot of catalogSlotWalkOrder(prefer)) {
+        const baseUrl = effectiveSlotUrl(slots, slot, masterUrl);
+        if (!baseUrl) continue;
+        try {
+          const result = await invoke<FetchModelsResultDto>(
+            "fetch_models",
+            fetchModelsInvokeArgs({
+              baseUrl,
+              apiKey,
+              noAuth,
+              slot,
+              gatewayId,
+            }),
+          );
+          if (result.models.length === 0) {
+            lastError = `${slot} 槽返回空目录`;
+            continue;
+          }
+          setModels(applyFetchedCatalog(models, result, slot, mergeGatewayCatalog));
+          setNotice(
+            `${catalogFetchNotice(result.models.length, result.capabilityMetadataCount, slot)}确认无误后点保存。`,
+          );
+          return;
+        } catch (e) {
+          lastError = String(e);
+        }
+      }
+      setError(lastError);
     } finally {
       setFetchingCatalog(false);
     }
   }
 
-  async function probeOne(slot: keyof ProtocolSlots, basicOnly: boolean) {
-    if (editing === null || editing === "new") return;
+  async function probeOne(slot: GatewaySlotName, basicOnly: boolean) {
     if (slot === "cursor" || slot === "gemini") {
       setError(slot === "cursor" ? "Cursor 为专有协议，不支持网关体检" : "Gemini 协议暂不支持网关体检");
       return;
     }
-    if (!slots[slot]?.trim()) {
-      setError("这个槽还没填端点");
-      return;
-    }
-    if ((slots[slot] ?? "").trim() !== (editing.slots[slot] ?? "").trim()) {
-      setError("请先保存端点再测试，测的是已保存的地址");
+    const baseUrl = effectiveSlotUrl(slots, slot, masterUrl);
+    if (!baseUrl) {
+      setError("先填 Base URL 或这个槽的地址");
       return;
     }
     setProbingSlot(slot);
     setError(null);
     try {
-      await invoke<GatewayProbeDto>("probe_gateway_slot", {
-        gatewayId: editing.id,
+      const dto = await invoke<GatewayProbeDto>("probe_gateway_slot", {
+        gatewayId: editing !== null && editing !== "new" ? editing.id : null,
         slot,
-        model: null,
+        model: models.find((m) => m.status !== "stale")?.id ?? null,
         basicOnly,
+        baseUrl,
+        apiKey: noAuth ? null : apiKey.trim() || null,
+        noAuth,
       });
-      const list = await invoke<Gateway[]>("list_gateways");
-      const fresh = list.find((g) => g.id === editing.id);
-      if (fresh) setEditing(fresh);
-      await loadGateways();
+      setDraftProbes((cur) => ({ ...cur, [slot]: probeDtoToSummary(slot, dto) }));
+      if (dto.ok) {
+        setNotice("测试通过，可以保存");
+        const list = await invoke<Gateway[]>("list_gateways");
+        const id = editing !== null && editing !== "new" ? editing.id : null;
+        const fresh = id ? list.find((g) => g.id === id) : null;
+        if (fresh) setEditing(fresh);
+        await loadGateways();
+      } else {
+        const failed = dto.checks.find((c) => c.status === "failed");
+        setError(failed?.message ?? "测试失败");
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -382,42 +572,52 @@ export default function GatewayLibrary({
   }
 
   async function probeAll() {
-    if (editing === null || editing === "new") return;
-    const dirty = SLOT_LABELS.some(
-      (s) => (slots[s.key] ?? "").trim() !== (editing.slots[s.key] ?? "").trim(),
+    const filled = SLOT_LABELS.map((s) => s.key).filter(
+      (k) =>
+        k !== "cursor" &&
+        k !== "gemini" &&
+        Boolean(effectiveSlotUrl(slots, k, masterUrl)),
     );
-    if (dirty) {
-      setError("请先保存端点再测速，测的是已保存的地址");
+    if (filled.length === 0) {
+      setError("先填 Base URL 或某个协议槽");
       return;
     }
-    const gatewayId = editing.id;
     setProbingAll(true);
     setError(null);
+    let anyOk = false;
     try {
-      const filled = SLOT_LABELS.map((s) => s.key).filter(
-        (k) => slots[k]?.trim() && k !== "cursor" && k !== "gemini",
-      );
       // 同一 URL 也不能跨协议槽复用完整体检结果：OpenAI/Responses/Anthropic
       // 的请求体、鉴权头和默认模型可能不同。只保留「每个支持体检的槽各测一次」，
       // 避免把一个协议成功错误镜像成另一个协议成功。
       for (const slot of filled) {
         try {
-          await invoke<GatewayProbeDto>("probe_gateway_slot", {
-            gatewayId,
+          const dto = await invoke<GatewayProbeDto>("probe_gateway_slot", {
+            gatewayId: editing !== null && editing !== "new" ? editing.id : null,
             slot,
-            model: null,
+            model: models.find((m) => m.status !== "stale")?.id ?? null,
             basicOnly: true,
+            baseUrl: effectiveSlotUrl(slots, slot, masterUrl),
+            apiKey: noAuth ? null : apiKey.trim() || null,
+            noAuth,
           });
+          setDraftProbes((cur) => ({ ...cur, [slot]: probeDtoToSummary(slot, dto) }));
+          if (dto.ok) anyOk = true;
+          else if (!anyOk) {
+            const failed = dto.checks.find((c) => c.status === "failed");
+            setError(failed?.message ?? "测试失败");
+          }
         } catch (e) {
           setError(String(e));
         }
       }
-      const list = await invoke<Gateway[]>("list_gateways");
-      const fresh = list.find((g) => g.id === gatewayId);
-      if (fresh) {
-        setEditing(fresh);
+      if (anyOk) setNotice("测试通过，可以保存");
+      const id = editing !== null && editing !== "new" ? editing.id : null;
+      if (id) {
+        const list = await invoke<Gateway[]>("list_gateways");
+        const fresh = list.find((g) => g.id === id);
+        if (fresh) setEditing(fresh);
+        await loadGateways();
       }
-      await loadGateways();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -461,6 +661,13 @@ export default function GatewayLibrary({
   }, [editing, profiles]);
 
   const catalogModels = models.filter((m) => m.status !== "stale");
+  const primarySlot = primaryProbeSlot(
+    slots,
+    masterUrl,
+    editing !== null && editing !== "new" ? editing.catalogFromSlot : null,
+  );
+  const primaryProbe = primarySlot ? slotSum(primarySlot) : undefined;
+  const slotsTogether = slotsFollowMaster(slots, masterUrl);
 
   function usageLine(g: Gateway): string | null {
     const row = monthUsage.find((r) => r.bucket === "gateway" && r.gatewayId === g.id);
@@ -477,6 +684,7 @@ export default function GatewayLibrary({
         aria-modal="true"
         aria-labelledby="gateway-library-title"
         tabIndex={-1}
+        data-surface="canvas"
         className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-lg border border-hairline bg-canvas p-4 shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
@@ -508,92 +716,49 @@ export default function GatewayLibrary({
               onChange={setNoAuth}
               label="无密钥（本地端点）"
             />
-            {editing !== "new" && (
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className={secondaryActionClass}
-                  disabled={fetchingCatalog}
-                  onClick={() => void fetchCatalog()}
-                >
-                  {fetchingCatalog ? "获取中…" : "获取模型"}
-                </button>
-                <button
-                  type="button"
-                  className={secondaryActionClass}
-                  disabled={probingAll}
-                  onClick={() => void probeAll()}
-                >
-                  {probingAll ? "测速中…" : "测速支持槽位"}
-                </button>
-                {catalogAge(editing.catalogFetchedAt) && (
-                  <span className="self-center text-micro text-l4">
-                    {catalogAge(editing.catalogFetchedAt)}
-                    {editing.catalogFromSlot ? ` · ${editing.catalogFromSlot}` : ""}
-                  </span>
-                )}
-              </div>
-            )}
             <label className="block text-sm text-l2">
               <span className="flex items-center justify-between gap-2">
                 <span>Base URL</span>
-                <span className="text-micro text-l4">主输入：空槽与跟随中的槽一起改</span>
+                <span className="font-mono text-micro text-l4">
+                  {probeSummaryText(primaryProbe)}
+                </span>
               </span>
               <input
                 className={`${fieldClass} mt-1 w-full font-mono text-xs`}
                 value={masterUrl}
-                placeholder="https://…（五个协议槽同址时只填这里）"
+                placeholder="https://…（同址时只填这里）"
+                title="空槽与仍等于主输入的槽一起改；某个槽手填即脱离"
                 onChange={(e) => onMasterChange(e.target.value)}
               />
             </label>
-            {SLOT_LABELS.map(({ key, label }) => {
-              const follows =
-                !slots[key]?.trim() && !!masterUrl.trim();
-              return (
-              <div key={key} className="space-y-1">
-                <label className="block text-sm text-l2">
-                  <span className="flex items-center justify-between gap-2">
-                    <span>
-                      {label}
-                      {follows && (
-                        <span className="ml-1.5 text-micro text-l4">跟随 Base URL</span>
-                      )}
-                    </span>
-                    {editing !== "new" && (
-                      <span className="font-mono text-micro text-l4">{probeSummaryText(slotSum(key))}</span>
-                    )}
-                  </span>
-                  <input
-                    className={`${fieldClass} mt-1 w-full font-mono text-xs`}
-                    value={slots[key] ?? ""}
-                    placeholder={follows ? masterUrl : "https://…"}
-                    title={follows ? "留空 = 跟随 Base URL；填入即脱离跟随" : undefined}
-                    onChange={(e) => setSlots((s) => ({ ...s, [key]: e.target.value }))}
-                  />
-                </label>
-                {editing !== "new" && slots[key]?.trim() && key !== "cursor" && key !== "gemini" && (
-                  <button
-                    type="button"
-                    className={secondaryActionClass}
-                    disabled={
-                      !!probingSlot ||
-                      (slots[key] ?? "").trim() !== (editing.slots[key] ?? "").trim()
-                    }
-                    title={
-                      (slots[key] ?? "").trim() !== (editing.slots[key] ?? "").trim()
-                        ? "请先保存端点再测试"
-                        : undefined
-                    }
-                    onClick={() => void probeOne(key, false)}
-                  >
-                    {probingSlot === key ? "测试中…" : "测试"}
-                  </button>
-                )}
-              </div>
-              );
-            })}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className={secondaryActionClass}
+                disabled={!!probingSlot || probingAll || !primarySlot}
+                title={primarySlot ? "用当前填写的地址和密钥测试，不必先保存" : "先填 Base URL"}
+                onClick={() => primarySlot && void probeOne(primarySlot, false)}
+              >
+                {probingSlot && probingSlot === primarySlot ? "测试中…" : "测试"}
+              </button>
+              <button
+                type="button"
+                className={secondaryActionClass}
+                disabled={fetchingCatalog}
+                title="用当前填写的地址和密钥拉目录，确认后再保存"
+                onClick={() => void fetchCatalog()}
+              >
+                {fetchingCatalog ? "获取中…" : "获取模型"}
+              </button>
+              {editing !== "new" && catalogAge(editing.catalogFetchedAt) && (
+                <span className="self-center text-micro text-l4">
+                  {catalogAge(editing.catalogFetchedAt)}
+                  {editing.catalogFromSlot ? ` · ${editing.catalogFromSlot}` : ""}
+                </span>
+              )}
+            </div>
             <label className="block text-sm text-l2">
-              密钥（留空不改）
+              {editing === "new" || !editing.keyHint ? "密钥" : "密钥（留空不改）"}
               <input
                 className={`${fieldClass} mt-1 w-full`}
                 type="password"
@@ -610,92 +775,216 @@ export default function GatewayLibrary({
                 清除本地密钥
               </button>
             )}
-            <label className="block text-sm text-l2">
-              Header（名=环境变量名，每行一条）
-              <textarea
-                className={`${fieldClass} mt-1 h-20 w-full font-mono text-xs`}
-                value={headerText}
-                onChange={(e) => setHeaderText(e.target.value)}
-              />
-            </label>
-            {editing !== "new" && (
-              <div className="rounded-md border border-hairline p-2 text-sm">
-                <p className="mb-1 text-xs font-medium text-l2">添加 Agent 配置</p>
-                <p className="mb-2 text-micro text-l4">
-                  选 Agent、协议和模型。这只在 Mesa 里生成一条配置，不写外部 CLI 文件。
-                </p>
-                <ul className="mb-2 text-micro text-l3">
-                  {boundAgents.length === 0 && <li>还没有 Agent 配置</li>}
-                  {boundAgents.map((p) => (
-                    <li key={p.id}>
-                      {bindingImpactLine({
-                        accountType: p.accountType,
-                        gatewayName: editing.name,
-                        agent: p.agent,
-                        protocol: p.protocol,
-                        defaultModel: p.models[0] ?? null,
-                        mesaLaunchDefault: defaultProfiles?.[p.agent] === p.id,
-                        cliGlobalWritten: activeGlobalProfiles?.[p.agent] === p.id,
-                      })}
-                    </li>
-                  ))}
-                </ul>
-                <div className="space-y-2">
-                  <select
-                    className={fieldClass}
-                    value={bindAgent}
-                    onChange={(e) => {
-                      const agent = e.target.value;
-                      setBindAgent(agent);
-                      setBindProtocol(AGENT_PROTOCOLS[agent]?.default ?? "");
-                      setBindModels(catalogModels.map((m) => m.id).slice(0, 1));
-                    }}
+            <div>
+              <button
+                type="button"
+                className="flex min-h-7 w-full items-center gap-2 text-left text-sm text-l2"
+                onClick={() => setShowSlots((v) => !v)}
+              >
+                <FoldMark open={showSlots} />
+                <span className="flex-1">协议槽</span>
+                <span className="text-micro text-l4">
+                  {slotsTogether ? "跟随 Base URL" : "有独立地址"}
+                </span>
+              </button>
+              {showSlots && (
+                <div className="space-y-2 pt-1">
+                  {SLOT_LABELS.map(({ key, label }) => {
+                    const follows = !slots[key]?.trim() && !!masterUrl.trim();
+                    return (
+                      <div key={key} className="space-y-1">
+                        <label className="block text-sm text-l2">
+                          <span className="flex items-center justify-between gap-2">
+                            <span>
+                              {label}
+                              {follows && (
+                                <span className="ml-1.5 text-micro text-l4">跟随 Base URL</span>
+                              )}
+                            </span>
+                            <span className="font-mono text-micro text-l4">{probeSummaryText(slotSum(key))}</span>
+                          </span>
+                          <input
+                            className={`${fieldClass} mt-1 w-full font-mono text-xs`}
+                            value={slots[key] ?? ""}
+                            placeholder={follows ? masterUrl : "https://…"}
+                            title={follows ? "留空 = 跟随 Base URL；填入即脱离跟随" : undefined}
+                            onChange={(e) => setSlots((s) => ({ ...s, [key]: e.target.value }))}
+                          />
+                        </label>
+                        {key !== "cursor" && key !== "gemini" && (
+                          <button
+                            type="button"
+                            className={secondaryActionClass}
+                            disabled={!!probingSlot || !effectiveSlotUrl(slots, key, masterUrl)}
+                            onClick={() => void probeOne(key, false)}
+                          >
+                            {probingSlot === key ? "测试中…" : "测试"}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    className={secondaryActionClass}
+                    disabled={probingAll}
+                    onClick={() => void probeAll()}
                   >
-                    <option value="">选择 Agent…</option>
-                    {AGENTS.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.label}
-                        {boundAgents.some((p) => p.agent === a.id) ? "（已有绑定，将再加一条）" : ""}
-                      </option>
-                    ))}
-                  </select>
-                  {bindAgent && AGENT_PROTOCOLS[bindAgent] && (
-                    <select className={fieldClass} value={bindProtocol} onChange={(e) => setBindProtocol(e.target.value)}>
-                      {AGENT_PROTOCOLS[bindAgent].options.map((p) => (
-                        <option key={p} value={p}>{p}</option>
-                      ))}
-                    </select>
-                  )}
-                  {bindAgent && (
-                    <ul className="max-h-32 space-y-1 overflow-auto text-micro">
-                      {catalogModels.map((m) => {
-                        const on = bindModels.includes(m.id);
-                        return (
-                          <li key={m.id}>
-                            <label className="flex items-center gap-1">
-                              <Checkbox checked={on} onChange={(checked) => {
-                                setBindModels((cur) => checked
-                                  ? (cur.includes(m.id) ? cur : [...cur, m.id])
-                                  : cur.filter((id) => id !== m.id));
-                              }} />
-                              <span>{m.id}{on && bindModels[0] === m.id ? "（默认）" : ""}</span>
-                            </label>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                  <button type="button" className={secondaryActionClass} disabled={!bindAgent} onClick={() => void bindToAgent()}>
-                    添加 Agent 配置
+                    {probingAll ? "测速中…" : "测速支持槽位"}
                   </button>
                 </div>
+              )}
+            </div>
+            <div>
+              <button
+                type="button"
+                className="flex min-h-7 w-full items-center gap-2 text-left text-sm text-l2"
+                onClick={() => setShowAdvanced((v) => !v)}
+              >
+                <FoldMark open={showAdvanced} />
+                <span className="flex-1">Header</span>
+              </button>
+              {showAdvanced && (
+                <label className="block pt-1 text-sm text-l2">
+                  名=环境变量名，每行一条
+                  <textarea
+                    className={`${fieldClass} mt-1 h-20 w-full font-mono text-xs`}
+                    value={headerText}
+                    onChange={(e) => setHeaderText(e.target.value)}
+                  />
+                </label>
+              )}
+            </div>
+            {editing !== "new" && (
+              <div>
+                <button
+                  type="button"
+                  className="flex min-h-7 w-full items-center gap-2 text-left text-sm text-l2"
+                  onClick={() => setShowBind((v) => !v)}
+                >
+                  <FoldMark open={showBind} />
+                  <span className="flex-1">Agent 配置</span>
+                  <span className="text-micro text-l4">
+                    {boundAgents.length ? `${boundAgents.length} 条` : "未绑定"}
+                  </span>
+                </button>
+                {showBind && (
+                  <div className="space-y-2 pt-1 text-sm">
+                    <ul className="text-micro text-l3">
+                      {boundAgents.length === 0 && <li>还没有 Agent 配置</li>}
+                      {boundAgents.map((p) => (
+                        <li key={p.id} className="truncate" title={p.name}>
+                          {p.name}
+                        </li>
+                      ))}
+                    </ul>
+                    <select
+                      className={fieldClass}
+                      value={bindAgent}
+                      onChange={(e) => {
+                        const agent = e.target.value;
+                        setBindAgent(agent);
+                        setBindProtocol(AGENT_PROTOCOLS[agent]?.default ?? "");
+                        setBindModels(catalogModels.map((m) => m.id).slice(0, 1));
+                      }}
+                    >
+                      <option value="">选择 Agent…</option>
+                      {AGENTS.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.label}
+                          {boundAgents.some((p) => p.agent === a.id) ? "（已有绑定，将再加一条）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {bindAgent && AGENT_PROTOCOLS[bindAgent] && (
+                      <select className={fieldClass} value={bindProtocol} onChange={(e) => setBindProtocol(e.target.value)}>
+                        {AGENT_PROTOCOLS[bindAgent].options.map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    )}
+                    {bindAgent && (
+                      <div className="max-h-52 space-y-1 overflow-auto">
+                        <ModelClassFilter
+                          ids={catalogModels.map((m) => m.id)}
+                          vendor={bindVendor}
+                          onVendor={setBindVendor}
+                          filter={bindFilter}
+                          onFilter={setBindFilter}
+                        />
+                        <VendorModelSections
+                          ids={catalogModels.map((m) => m.id)}
+                          vendor={bindVendor}
+                          filter={bindFilter}
+                          openVendors={bindOpenVendors}
+                          onToggle={(name) => {
+                            setBindOpenVendors((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(name)) next.delete(name);
+                              else next.add(name);
+                              return next;
+                            });
+                          }}
+                          renderItem={(id) => {
+                            const on = bindModels.includes(id);
+                            return (
+                              <label key={id} className="flex items-center gap-1 py-0.5 text-micro">
+                                <Checkbox checked={on} onChange={(checked) => {
+                                  setBindModels((cur) => checked
+                                    ? (cur.includes(id) ? cur : [...cur, id])
+                                    : cur.filter((item) => item !== id));
+                                }} />
+                                <span>{id}{on && bindModels[0] === id ? "（默认）" : ""}</span>
+                              </label>
+                            );
+                          }}
+                        />
+                      </div>
+                    )}
+                    <button type="button" className={secondaryActionClass} disabled={!bindAgent} onClick={() => void bindToAgent()}>
+                      添加 Agent 配置
+                    </button>
+                  </div>
+                )}
               </div>
             )}
             {models.length > 0 && (
               <div className="text-sm text-l2">
-                模型策略（点行展开）
-                <ul className="mt-1 divide-y divide-hairline">
-                  {models.map((m) => {
+                <button
+                  type="button"
+                  className="flex min-h-7 w-full items-center gap-2 text-left"
+                  onClick={() => setShowModels((v) => !v)}
+                >
+                  <FoldMark open={showModels} />
+                  <span className="flex-1">模型策略</span>
+                  <span className="text-micro text-l4">{models.length} 个</span>
+                </button>
+                {showModels && (
+                <div className="mt-1 space-y-1">
+                  <ModelClassFilter
+                    ids={models.map((row) => row.id)}
+                    vendor={policyVendor}
+                    onVendor={setPolicyVendor}
+                    filter={policyFilter}
+                    onFilter={setPolicyFilter}
+                  />
+                  <div className="max-h-56 overflow-auto">
+                  <VendorModelSections
+                    ids={models.map((row) => row.id)}
+                    vendor={policyVendor}
+                    filter={policyFilter}
+                    openVendors={policyOpenVendors}
+                    onToggle={(name) => {
+                      setPolicyOpenVendors((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(name)) next.delete(name);
+                        else next.add(name);
+                        return next;
+                      });
+                    }}
+                    renderItem={(id) => {
+                    const m = models.find((row) => row.id === id);
+                    if (!m) return null;
                     const combo = comboByModel[m.id];
                     const cap = caps[m.id];
                     const open = expanded === m.id;
@@ -728,7 +1017,7 @@ export default function GatewayLibrary({
                       stored: m.maxOutputTokens != null,
                     });
                     return (
-                      <li key={m.id} className="py-1">
+                      <div className="border-b border-hairline py-1 last:border-b-0">
                         <button
                           type="button"
                           className="flex w-full items-center gap-2 text-left font-mono text-xs"
@@ -859,10 +1148,13 @@ export default function GatewayLibrary({
                             )}
                           </div>
                         )}
-                      </li>
+                      </div>
                     );
-                  })}
-                </ul>
+                    }}
+                  />
+                  </div>
+                </div>
+                )}
               </div>
             )}
             <div className="flex gap-2 pt-2">
@@ -877,18 +1169,18 @@ export default function GatewayLibrary({
         ) : (
           <ul className="divide-y divide-hairline">
             {gateways.length === 0 && <li className="py-6 text-center text-sm text-l3">还没有网关</li>}
-            {gateways.map((g) => {
+            {gatewayPickerRows(gateways).map((row) => {
+              const g = gateways.find((item) => item.id === row.id);
+              if (!g) return null;
               const n = profiles.filter((p) => p.gatewayId === g.id).length;
-              const filled = SLOT_LABELS.filter(({ key }) => g.slots[key]).map((s) => s.label);
               const usage = usageLine(g);
               return (
                 <li key={g.id} className="flex items-center gap-3 py-2 text-sm">
                   <span className="min-w-0 flex-1">
-                    <span className="font-medium text-l1">{g.name}</span>
-                    <span className="ml-2 text-l3">
-                      {n} 条 Agent 配置
-                      {filled.length ? ` · ${filled.join("、")}` : " · 未填槽"}
-                      {g.keyHint ? ` · ${g.keyHint}` : ""}
+                    <span className="font-medium text-l1">{row.name}</span>
+                    <span className="ml-2 text-l3">{n} 条配置</span>
+                    <span className="mt-0.5 block truncate text-micro text-l4" title={row.detail}>
+                      {row.detail}
                     </span>
                     {usage && (
                       <button
@@ -900,6 +1192,15 @@ export default function GatewayLibrary({
                       </button>
                     )}
                   </span>
+                  <button
+                    type="button"
+                    className={secondaryActionClass}
+                    disabled={listFetchingId === g.id}
+                    title="重新拉取这个网关的模型目录并保存"
+                    onClick={() => void refreshListedCatalog(g)}
+                  >
+                    {listFetchingId === g.id ? "获取中…" : "获取模型"}
+                  </button>
                   <button type="button" className={secondaryActionClass} onClick={() => openEdit(g)}>
                     编辑
                   </button>

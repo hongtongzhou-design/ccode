@@ -37,3 +37,19 @@ export function firstFilledCatalogSlot(
   }
   return order.find(filled) ?? null;
 }
+
+/** 与 gateway_store::agent_for_slot 双端镜像：探针 /models 用的 Agent。 */
+export function agentForSlot(slot: GatewaySlotName): string {
+  if (slot === "anthropic") return "claude-code";
+  if (slot === "openai") return "opencode";
+  if (slot === "responses") return "codex";
+  if (slot === "gemini") return "gemini";
+  return "cursor";
+}
+
+/** 支持通用网关体检的槽（Cursor / Gemini 没有通用探针）。 */
+export const PROBEABLE_GATEWAY_SLOTS: GatewaySlotName[] = [
+  "anthropic",
+  "openai",
+  "responses",
+];

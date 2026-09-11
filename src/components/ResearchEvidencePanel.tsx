@@ -42,7 +42,7 @@ export default function ResearchEvidencePanel({ root, patterns, kind, refreshKey
       if (activeKey.current === key) setPreview((current) => current?.key === key && current.path === path ? { key, path, error: String(reason) } : current);
     }
   }
-  return <section aria-label={kind === "decision" ? "决策摘要" : "验收摘要与未决项"} className="my-3 rounded-md bg-inset p-3 text-xs">
+  return <section aria-label={kind === "decision" ? "决策摘要" : "验收摘要与未决项"} className="my-3 rounded-md ccode-well p-3 text-xs">
     <div className="mb-2 flex items-center justify-between gap-2">
       <h3 className="font-medium text-l1">{kind === "decision" ? "先看方案，再决定" : "验收摘要与未决项"}</h3>
       <button type="button" className="text-l3 hover:text-l1" onClick={() => setReload((n) => n + 1)}>刷新摘要</button>

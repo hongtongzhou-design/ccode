@@ -10,7 +10,9 @@ test("实际评审页接入本步骤摘要/未决项和复现；只读历史不�
     b.onResolve({filter:/^\.\.\/store$/},()=>({path:'store',namespace:'stub'}));
     b.onResolve({filter:/^\.\/ArtifactChecklist$/},()=>({path:'artifacts',namespace:'stub'}));
     b.onResolve({filter:/^\.\/WatchRunReview$/},()=>({path:'watch',namespace:'stub'}));
-    b.onLoad({filter:/.*/,namespace:'stub'},(args)=>({loader:'js',contents:args.path==='store'?'export const useAppStore=Object.assign(fn=>fn(globalThis.__reviewStore),{getState:()=>globalThis.__reviewStore});':args.path==='artifacts'?'export const loadArtifactRows=async()=>[];':'export default function Watch(){return null;}'}));
+    b.onResolve({filter:/^\.\/OfficePreviewModal$/},()=>({path:'preview',namespace:'stub'}));
+    b.onResolve({filter:/^\.\/ConfirmDialog$/},()=>({path:'confirm',namespace:'stub'}));
+    b.onLoad({filter:/.*/,namespace:'stub'},(args)=>({loader:'js',contents:args.path==='confirm'?'export const confirmDialog=async()=>true;':args.path==='store'?'export const useAppStore=Object.assign(fn=>fn(globalThis.__reviewStore),{getState:()=>globalThis.__reviewStore});':args.path==='artifacts'?'export const loadArtifactRows=async()=>[];':'export default function Watch(){return null;}'}));
   }}]});
   const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost',pretendToBeVisual:true});
   const restore:Array<[string,PropertyDescriptor|undefined]>=[];
@@ -18,13 +20,17 @@ test("实际评审页接入本步骤摘要/未决项和复现；只读历史不�
     restore.push([key,Object.getOwnPropertyDescriptor(globalThis,key)]);Object.defineProperty(globalThis,key,{value,configurable:true,writable:true});
   }
   let reviewOnly=false;
+  let canMerge=false;
+  let mergedArgs:any=null;
   const calls:string[]=[];
   const template=PIPELINE_TEMPLATES.find(t=>t.id==='research-paper')!,step=template.steps.find(s=>s.workspaceName==='exp-run')!;
   Object.assign(dom.window,{__TAURI_INTERNALS__:{invoke:async(command:string,args:any)=>{
     calls.push(command);
-    if(command==='workspace_diff')return {inWorkspace:true,workspaceId:'w',workspaceName:'exp-run',reviewOnly,baseBranch:'main',files:[],ahead:0,totalAdd:0,totalDel:0};
+    if(command==='workspace_diff')return {inWorkspace:true,workspaceId:'w',workspaceName:'exp-run',branch:'ccode/test',reviewOnly,baseBranch:'main',files:[],ahead:canMerge?1:0,totalAdd:0,totalDel:0};
     if(command==='git_status')return {isRepo:true,branch:'ccode/test',ahead:0,behind:0,files:[],totalAdd:0,totalDel:0};
-    if(command==='workspace_health')return {conflict:false,dirty:false,mainDirty:false,ahead:0,behind:0};
+    if(command==='workspace_health')return {conflict:false,uncommitted:false,mainDirty:false,mainOffBase:false,readyToMerge:canMerge,worktreeHead:'a'.repeat(40),ahead:canMerge?1:0,behind:0};
+    if(command==='merge_workspace'){mergedArgs=args;canMerge=false;return {merged:true,archived:false,ledgerWritten:true,versionId:'b'.repeat(40),message:'已接收',output:''};}
+    if(command==='workspace_review_deliverables')return {token:'frozen-files',workspaceId:'w',projectRoot:'/project',payloadDir:'/frozen/files',files:[{path:'papers/result.pdf',size:12,sha256:'a'.repeat(64),disposition:'copy'}]};
     if(command==='workspace_unmerged_files')return {merging:false,files:[],staleBase:false};
     if(command==='list_workspaces')return [{id:'w',name:'exp-run',status:'active',repoPath:'/project',worktreePath:'/tree',mergedAt:null}];
     if(command==='read_project_config')return {config:{steps:[step],resources:[]}};
@@ -46,9 +52,18 @@ test("实际评审页接入本步骤摘要/未决项和复现；只读历史不�
     await act(async()=>root.render(h(Review,{worktreePath:'/tree',onClose(){}})));
     assert.match(host.textContent!,/验收摘要与未决项/);assert.match(host.textContent!,/独立复算待完成/);assert.match(host.textContent!,/基础检查/);
     assert.match(host.textContent!,/复现运行/);assert.match(host.textContent!,/科研验收决定/);
+    assert.match(host.textContent!,/非 Git 产物/);
+    assert.match(host.textContent!,/papers\/result.pdf/);
     assert.ok(!calls.some(c=>['shell_spawn','pty_write','merge_workspace'].includes(c)), '打开评审不会执行代码或合并');
     reviewOnly=true;
     await act(async()=>root.render(h(Review,{key:'history',worktreePath:'/history',onClose(){}})));
     assert.doesNotMatch(host.textContent!,/复现运行/);
+    reviewOnly=false;canMerge=true;
+    await act(async()=>root.render(h(Review,{key:'merge',worktreePath:'/tree',onClose(){}})));
+    const merge=Array.from(host.querySelectorAll('button')).find(b=>b.textContent==='合并');
+    assert.ok(merge && !merge.disabled);
+    await act(async()=>merge.click());
+    assert.equal(mergedArgs.expectDeliveryToken,'frozen-files');
+    assert.equal(mergedArgs.expectReviewedSha,'a'.repeat(40));
   }finally{await act(async()=>root.unmount());dom.window.close();for(const[key,d]of restore){if(d)Object.defineProperty(globalThis,key,d);else Reflect.deleteProperty(globalThis,key);}}
 });

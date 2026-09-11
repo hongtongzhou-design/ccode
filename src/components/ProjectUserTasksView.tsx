@@ -6,6 +6,7 @@ import { runInboxAction, useAppStore } from "../store";
 import {
   AGENTS,
   type ProjectDto,
+  type ProjectStepDto,
   type RunDto,
   type RunEventDto,
   type TaskDto,
@@ -18,6 +19,7 @@ import {
   EmptyState,
   FoldMark,
   ghostActionClass,
+  iconActionClass,
   primaryActionClass,
   projectWellClass,
   rowActionClass,
@@ -28,15 +30,17 @@ import { Modal } from "./Modal";
 import { agentBrand } from "../agent-colors";
 
 import { confirmDialog } from "./ConfirmDialog";
+import ResearchReproductionPanel from "./ResearchReproductionPanel";
+import ResearchAcceptancePanel from "./ResearchAcceptancePanel";
 import ProjectSettingsDrawer from "./ProjectSettingsDrawer";
 import {
+  acceptedGoalOutputs,
   canSaveDeclaredGoal,
   canSubmitDeclaredTask,
   declaredTaskKindsForMode,
   GOAL_BUCKET_LABEL,
   GOAL_BUCKET_ORDER,
   goalTimeline,
-  goalTimelineLabel,
   groupGoalsByBucket,
   goalDisplayName,
   isTaskMaterialNoise,
@@ -58,22 +62,31 @@ import {
 import type { DirEntryDto } from "./FileTree";
 import FileTypeMark from "./FileTypeMark";
 import OfficePreviewModal from "./OfficePreviewModal";
+import GoalStorageModal from "./GoalStorageModal";
 import { goalRunTerminalFields, prepareGoalRun } from "../goal-run";
 
 import {
   goalReviewCopy,
   goalReviewFacts,
+  companionPdfPath,
+  resultReadinessLabel,
   groupReviewChanges,
 } from "../goal-review";
 import {
   goalCardMeta,
   goalsNeedAttention,
-  projectNowLine,
 } from "../project-status";
 import { absTime, relTime } from "../rel-time";
 
 function agentLabel(id: string): string {
   return AGENTS.find((agent) => agent.id === id)?.label ?? id;
+}
+
+function timelineRow(item: { kind: string; text: string }): { label: string; body: string } {
+  if (item.kind === "feedback") {
+    return { label: "意见", body: item.text.replace(/^意见：/, "") };
+  }
+  return { label: item.text, body: "" };
 }
 
 function continueRun(run: RunDto) {
@@ -106,13 +119,16 @@ export default function ProjectUserTasksView({
   const setPendingTerminal = useAppStore((state) => state.setPendingTerminal);
   const [tasks, setTasks] = useState<TaskDto[]>([]);
   const [archivedTasks, setArchivedTasks] = useState<TaskDto[]>([]);
-  const [archiveOpen, setArchiveOpen] = useState(true);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const chromeConsumed = useRef<number | null>(null);
   const [runs, setRuns] = useState<RunDto[]>([]);
   const [events, setEvents] = useState<RunEventDto[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [reviewTask, setReviewTask] = useState<TaskDto | null>(null);
+  const [storageTaskId, setStorageTaskId] = useState<string | null>(null);
   const taskReviewReq = useAppStore((state) => state.taskReviewReq);
   const setTaskReviewReq = useAppStore((state) => state.setTaskReviewReq);
   const [error, setError] = useState<string | null>(null);
@@ -148,6 +164,8 @@ export default function ProjectUserTasksView({
       setError(null);
     } catch (reason) {
       setError(`任务读取失败：${String(reason)}`);
+    } finally {
+      setLoaded(true);
     }
   }, [eligible, project.path, project.workMode]);
 
@@ -187,6 +205,9 @@ export default function ProjectUserTasksView({
   }, [project.path, project.workMode]);
 
   useEffect(() => {
+    setLoaded(false);
+    setArchiveOpen(false);
+    setDetailsTaskId(null);
     void load();
     if (!eligible) return;
     const timer = window.setInterval(() => void load(), 2500);
@@ -224,7 +245,11 @@ export default function ProjectUserTasksView({
   }, [runs]);
   const buckets = useMemo(() => groupGoalsByBucket(tasks), [tasks]);
   const reviewCopy = goalReviewCopy(project.workMode);
-  const nowLine = useMemo(() => projectNowLine(tasks), [tasks]);
+  const visibleBuckets = GOAL_BUCKET_ORDER.filter((bucket) => buckets[bucket].length > 0);
+  const primaryTaskId = GOAL_BUCKET_ORDER.flatMap((bucket) => buckets[bucket]).find(
+    (task) => ["pending", "failed", "stopped"].includes(task.status) ||
+      (["pending_review", "running"].includes(task.status) && latestRunByTask.has(task.id)),
+  )?.id;
   const urgentGoals = useMemo(() => goalsNeedAttention(tasks), [tasks]);
 
   useEffect(() => {
@@ -269,7 +294,9 @@ export default function ProjectUserTasksView({
     try {
       // 重试（失败/已停止）且有上一版：复用上次的隔离副本，并尽量恢复上次会话——
       // 「重试」的产品语义是接着干，不是从零复制一份重跑
-      const previousRun = latestRunByTask.get(task.id);
+      if (task.storageCleanupPending) throw new Error("请先继续未完成的副本清理");
+      if (task.workspaceCleared && !await confirmDialog("旧工作副本已清理。将从当前项目复制资料重新开始，不恢复旧会话；已写入成果和接受记录保留。继续？", { focusCancel: true, confirmText: "重新开始" })) return;
+      const previousRun = task.workspaceCleared ? undefined : latestRunByTask.get(task.id);
       const retrying =
         (task.status === "failed" || task.status === "stopped") && previousRun
           ? previousRun
@@ -281,7 +308,7 @@ export default function ProjectUserTasksView({
         task,
         agent: profile.agent,
         profileId: profile.id,
-        reuseIsolation: opts?.reuseIsolation ?? Boolean(retrying),
+        reuseIsolation: task.workspaceCleared ? false : opts?.reuseIsolation ?? Boolean(retrying),
         feedback: opts?.feedback,
       });
       setPendingTerminal({
@@ -307,8 +334,11 @@ export default function ProjectUserTasksView({
 
   async function deleteGoal(task: TaskDto) {
     const name = goalDisplayName(task);
+    const reviewNote = task.status === "pending_review"
+      ? "这份目标还在待验收。归档后主列表不再提醒验收，可从已归档恢复再验收。\n\n"
+      : "";
     const ok = await confirmDialog(
-      `归档目标「${name}」？它会从列表收起；产出文件、会话和验收记录全部保留，之后可在下方「已归档」里恢复。`,
+      `归档目标「${name}」？它会从列表收起；产出文件、会话和验收记录全部保留，之后可在下方「已归档」里恢复。\n\n${reviewNote}归档不等于清理。内部副本不会因归档而删除，仍占磁盘；要腾空间请另点「释放副本空间」。`,
       {
         danger: true,
         confirmText: "归档",
@@ -344,34 +374,46 @@ export default function ProjectUserTasksView({
   return (
     <>
     <div className="mb-4">
-      <section className="min-w-0">
-        <div className="mb-3 flex items-center gap-2">
-          <div className="min-w-0 flex-1">
+      <section className="min-w-0" aria-label="项目目标">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-baseline gap-2">
             <h2 className="text-sm font-medium text-l1">目标</h2>
-            {nowLine && (
-              <p className="mt-1 text-sm font-medium text-l1">{nowLine}</p>
+            {loaded && tasks.length > 0 && (
+              <span className="text-xs text-l3">{tasks.length} 个</span>
             )}
           </div>
-          {tasks.length > 0 && (
-            <button type="button" className={primaryActionClass} onClick={() => setCreateOpen(true)}>
+          {loaded && tasks.length > 0 && (
+            <button
+              type="button"
+              className={`${primaryTaskId ? secondaryActionClass : primaryActionClass} gap-1.5`}
+              onClick={() => setCreateOpen(true)}
+            >
               <Plus size={13} aria-hidden="true" />
               新建目标
             </button>
           )}
-          <button type="button" className={rowActionClass} onClick={() => void load()} title="刷新任务">
-            <RotateCw size={13} aria-hidden="true" />
+          <button
+            type="button"
+            className={iconActionClass}
+            onClick={() => void load()}
+            title="刷新目标"
+            aria-label="刷新目标"
+          >
+            <RotateCw size={14} aria-hidden="true" />
           </button>
         </div>
-        {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
-        {tasks.length === 0 ? (
-          <EmptyState
+        {error && <p role="alert" className="mb-2 text-xs text-err-text">{error}</p>}
+        {!loaded ? (
+          <p role="status" className={`${projectWellClass} text-xs text-l3`}>正在读取目标…</p>
+        ) : tasks.length === 0 ? (
+          !error && <EmptyState
             compact
-            title="为这个项目定义第一个目标"
-            detail="明确要交付什么，再选择材料和 Agent。"
+            title={archivedTasks.length ? "当前没有目标" : "这次想完成什么？"}
+            detail={archivedTasks.length ? "可以新建目标，或从已归档中恢复。" : "写清要交付的成果，再选择资料和 Agent。"}
             action={
               <button
                 type="button"
-                className={primaryActionClass}
+                className={`${primaryActionClass} gap-1.5`}
                 onClick={() => setCreateOpen(true)}
               >
                 <Plus size={13} aria-hidden="true" />
@@ -381,122 +423,172 @@ export default function ProjectUserTasksView({
           />
         ) : (
           <div className="space-y-4">
-            {GOAL_BUCKET_ORDER.map((bucket) => {
+            {visibleBuckets.map((bucket) => {
               const rows = buckets[bucket];
-              if (rows.length === 0) return null;
+              const label = bucket === "review" ? reviewCopy.bucketReview : GOAL_BUCKET_LABEL[bucket];
               return (
                 <div key={bucket}>
-                  <h3 className="mb-2 text-micro font-medium text-l4">
-                    {bucket === "review"
-                      ? reviewCopy.bucketReview
-                      : GOAL_BUCKET_LABEL[bucket]}
-                  </h3>
-                  <ul className="space-y-2">
+                  {visibleBuckets.length > 1 && (
+                    <h3 className="mb-2 flex items-center gap-2 text-xs font-medium text-l3">
+                      {label}
+                      <span className="text-micro font-normal text-l4">{rows.length}</span>
+                    </h3>
+                  )}
+                  <ul aria-label={label} className="space-y-2">
                     {rows.map((task) => {
                       const run = latestRunByTask.get(task.id);
                       const running = task.status === "running";
+                      const name = goalDisplayName(task);
                       const taskRuns = runs.filter(
                         (item) => item.taskId === task.id && !item.internal,
                       );
-                      const timeline = goalTimelineLabel(
-                        goalTimeline({
-                          status: task.status,
-                          runs: taskRuns,
-                          events: events.filter((event) =>
-                            taskRuns.some((item) => item.id === event.runId),
-                          ),
-                          acceptedLabel: reviewCopy.timelineAccepted,
-                        }),
-                      );
-                      const canStart =
-                        task.status === "pending" ||
-                        task.status === "failed" ||
-                        task.status === "stopped";
-                      const canRevise =
-                        !!run &&
-                        (task.status === "pending_review" || task.status === "completed");
+                      const timeline = goalTimeline({
+                        status: task.status,
+                        runs: taskRuns,
+                        events: events.filter((event) =>
+                          taskRuns.some((item) => item.id === event.runId),
+                        ),
+                        acceptedLabel: reviewCopy.timelineAccepted,
+                      });
+                      const meta = goalCardMeta({
+                        agentLabel: agentLabel(task.agent ?? run?.agent ?? project.defaultAgent ?? "") || "跟随项目默认",
+                        outputPaths: task.outputPaths,
+                        adoptedPaths: task.adoptedPaths,
+                        reviewRequired: task.reviewRequired,
+                        workMode: project.workMode,
+                      });
+                      const cleanupPending = !!task.storageCleanupPending;
+                      const recoveryPending = !!task.pendingApplyRunId || cleanupPending;
+                      const canStart = !recoveryPending && ["pending", "failed", "stopped"].includes(task.status);
+                      const showStatus = visibleBuckets.length === 1 || bucket === "stuck";
+                      const detailsOpen = detailsTaskId === task.id;
+                      const fullGoal = [...new Set([task.name, task.description].map((value) => value?.trim()).filter(Boolean))].join("\n\n");
+                      const outputPaths = [...new Set(acceptedGoalOutputs(task.outputPaths, task.adoptedPaths))];
+                      const hasAdoptedFiles = acceptedGoalOutputs([], task.adoptedPaths).length > 0;
+                      const extraRequirement = fullGoal !== name;
+                      const actionClass = `${task.id === primaryTaskId ? primaryActionClass : secondaryActionClass} gap-1.5`;
                       return (
-                        <li key={task.id} className={`group ${projectWellClass}`}>
-                          <div className="flex items-start gap-3">
-                            <span className="min-w-0 flex-1">
-                              <span className="flex flex-wrap items-center gap-2">
-                                <span className="text-sm font-medium text-l1">
-                                  {goalDisplayName(task)}
-                                </span>
-                                <span className="rounded-full bg-strip px-2 py-0.5 text-micro text-l3">
-                                  {taskStatusLabel(task.status)}
-                                </span>
-                              </span>
-                              {task.description &&
-                                task.description.trim() !== goalDisplayName(task) && (
-                                <span className="mt-1 block text-xs text-l3">{task.description}</span>
+                        <li key={task.id} aria-label={`目标：${name}`} className={projectWellClass}>
+                          <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
+                            <div className="min-w-0 flex-[1_1_18rem]">
+                              <h4
+                                className={`${detailsOpen ? "" : "line-clamp-2"} break-words text-sm font-medium leading-5 text-l1 [overflow-wrap:anywhere]`}
+                                aria-label={detailsOpen && !extraRequirement ? `目标完整要求：${name}` : undefined}
+                              >{name}</h4>
+                              <p className="mt-1.5 flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-xs text-l3">
+                                {showStatus && (
+                                  <>
+                                    <span className={`shrink-0 ${task.status === "failed" ? "text-err-text" : ""}`}>{taskStatusLabel(task.status)}</span>
+                                    <span aria-hidden="true">·</span>
+                                  </>
+                                )}
+                                <span className="min-w-0 break-words">{meta}</span>
+                              </p>
+                            </div>
+                            <div className="ml-auto flex shrink-0 flex-wrap items-center gap-1 text-xs">
+                              {cleanupPending && <button type="button" className={primaryActionClass} onClick={() => setStorageTaskId(task.id)}>继续清理副本</button>}
+                              {!cleanupPending && task.pendingApplyRunId && <button type="button" className={primaryActionClass} onClick={() => setReviewTask(task)}>处理未完成接受</button>}
+                              {!recoveryPending && running && run && (
+                                <button type="button" className={actionClass} onClick={() => continueRun(run)}>
+                                  继续
+                                </button>
                               )}
-                              {timeline && (
-                                <span className="mt-1 block text-micro text-l4">{timeline}</span>
+                              {canStart && (
+                                <button
+                                  type="button"
+                                  className={actionClass}
+                                  disabled={startingId === task.id}
+                                  onClick={() => void startTask(task)}
+                                >
+                                  <Play size={13} aria-hidden="true" />
+                                  {startingId === task.id ? "准备中…" : run ? "重试" : "开始"}
+                                </button>
                               )}
-                              <span className="mt-1 block text-micro text-l4">
-                                {goalCardMeta({
-                                  agentLabel:
-                                    agentLabel(
-                                      task.agent ?? run?.agent ?? project.defaultAgent ?? "",
-                                    ) || "跟随项目默认",
-                                  outputPaths: task.adoptedPaths?.length
-                                    ? task.adoptedPaths
-                                    : task.outputPaths,
-                                  reviewRequired: task.reviewRequired,
-                                  workMode: project.workMode,
-                                })}
-                              </span>
-                            </span>
-                            {running && run && (
-                              <button type="button" className={secondaryActionClass} onClick={() => continueRun(run)}>
-                                继续
-                              </button>
-                            )}
-                            {canStart && (
+                              {!recoveryPending && task.status === "completed" && run && (
+                                <button type="button" className={ghostActionClass} onClick={() => task.workspaceCleared ? void startTask(task) : setReviewTask(task)}>
+                                  {task.workspaceCleared ? "从项目重新开始" : "再来一版"}
+                                </button>
+                              )}
+                              {!recoveryPending && task.status === "pending_review" && run && (
+                                <button type="button" className={actionClass} onClick={() => setReviewTask(task)}>
+                                  {reviewCopy.cardAction}
+                                </button>
+                              )}
                               <button
                                 type="button"
-                                className={secondaryActionClass}
-                                disabled={startingId === task.id}
-                                onClick={() => void startTask(task)}
+                                className={`${ghostActionClass} gap-1`}
+                                aria-label={`目标详情：${name}`}
+                                aria-expanded={detailsOpen}
+                                aria-controls={`goal-details-${task.id}`}
+                                onClick={() => setDetailsTaskId(detailsOpen ? null : task.id)}
                               >
-                                <Play size={12} aria-hidden="true" />
-                                {startingId === task.id ? "准备中…" : run ? "重试" : "开始"}
+                                <FoldMark open={detailsOpen} />
+                                详情
                               </button>
-                            )}
-                            {canRevise && task.status === "completed" && (
-                              <button
-                                type="button"
-                                className={secondaryActionClass}
-                                onClick={() => setReviewTask(task)}
-                              >
-                                再来一版
-                              </button>
-                            )}
-                            {task.status === "pending_review" && run && (
-                              <button
-                                type="button"
-                                className={primaryActionClass}
-                                onClick={() => setReviewTask(task)}
-                              >
-                                {reviewCopy.cardAction}
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              className={ghostActionClass}
-                              disabled={deletingId === task.id || task.status === "running"}
-                              title={
-                                task.status === "running"
-                                  ? "先停掉正在跑的 Agent，再归档"
-                                  : "归档这个目标（记录都保留）"
-                              }
-                              onClick={() => void deleteGoal(task)}
-                            >
-                              <Archive size={12} aria-hidden="true" />
-                              {deletingId === task.id ? "归档中…" : "归档"}
-                            </button>
+                            </div>
                           </div>
+                          {(running || task.status === "pending_review") && !run && (
+                            <p className="mt-2 text-xs text-l3">运行记录暂不可用，请刷新后重试。</p>
+                          )}
+                          {detailsOpen && (
+                            <section id={`goal-details-${task.id}`} aria-label={`目标详情内容：${name}`} className="mt-3 space-y-4 border-t border-hairline pt-3">
+                              {extraRequirement && (
+                                <div>
+                                  <h5 className="text-micro font-medium text-l3">要求</h5>
+                                  <p aria-label={`目标完整要求：${name}`} className="mt-1.5 whitespace-pre-wrap break-words text-sm leading-6 text-l1 [overflow-wrap:anywhere]">{fullGoal}</p>
+                                </div>
+                              )}
+                              {task.reviewRequired && outputPaths.length > 0 && (
+                                <div>
+                                  <h5 className="text-micro font-medium text-l3">{hasAdoptedFiles ? "已写入项目" : "输出范围"} · {outputPaths.length}</h5>
+                                  <ul aria-label={hasAdoptedFiles ? "已写入项目的文件" : "声明的输出范围"} className="mt-1.5 space-y-1 font-mono text-xs text-l2">
+                                    {outputPaths.map((path) => <li key={path} className="break-all">{path}</li>)}
+                                  </ul>
+                                </div>
+                              )}
+                              {timeline.length > 1 && (
+                                <div>
+                                  <h5 className="text-micro font-medium text-l3">历程</h5>
+                                  <ol aria-label={`目标历程详情：${name}`} className="mt-1.5 space-y-3 border-l border-hairline pl-3">
+                                    {timeline.map((item, index) => {
+                                      const row = timelineRow(item);
+                                      return (
+                                        <li key={index}>
+                                          <p className="text-xs text-l3">{row.label}</p>
+                                          {row.body ? (
+                                            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-l2 [overflow-wrap:anywhere]">{row.body}</p>
+                                          ) : null}
+                                        </li>
+                                      );
+                                    })}
+                                  </ol>
+                                </div>
+                              )}
+                              {task.workspaceCleared && (
+                                <p className="text-xs text-l3">工作副本已清理，不能从旧副本续跑。{task.reviewCleared ? "历史版本也已清理；目标与接受记录保留。" : "历史冻结版本仍保留。"}</p>
+                              )}
+                              <div className="flex flex-wrap items-center justify-end gap-2 border-t border-hairline pt-3">
+                                <button type="button" className={secondaryActionClass} onClick={() => setStorageTaskId(task.id)}>释放副本空间</button>
+                                <button
+                                  type="button"
+                                  className={`${ghostActionClass} gap-1.5`}
+                                  aria-label={`归档目标：${name}`}
+                                  disabled={deletingId === task.id || running || recoveryPending}
+                                  title={task.pendingApplyRunId
+                                    ? "请先处理未完成的接受，再归档"
+                                    : cleanupPending
+                                      ? "请先继续未完成的副本清理，再归档"
+                                      : running
+                                        ? "先停掉正在跑的 Agent，再归档"
+                                        : deletingId === task.id ? "归档中…" : "归档目标（记录都保留，副本仍占磁盘）"}
+                                  onClick={() => void deleteGoal(task)}
+                                >
+                                  <Archive size={14} aria-hidden="true" />
+                                  归档目标
+                                </button>
+                              </div>
+                            </section>
+                          )}
                         </li>
                       );
                     })}
@@ -506,11 +598,11 @@ export default function ProjectUserTasksView({
             })}
           </div>
         )}
-        {archivedTasks.length > 0 && (
+        {loaded && archivedTasks.length > 0 && (
           <div className="mt-4">
             <button
               type="button"
-              className="mb-2 flex items-center gap-1 text-micro font-medium text-l4 hover:text-l2"
+              className="mb-2 flex min-h-7 items-center gap-1 text-xs font-medium text-l3 hover:text-l2"
               onClick={() => setArchiveOpen((open) => !open)}
               aria-expanded={archiveOpen}
             >
@@ -520,9 +612,9 @@ export default function ProjectUserTasksView({
             {archiveOpen && (
               <ul className="space-y-2">
                 {archivedTasks.map((task) => (
-                  <li key={task.id} className="flex items-start gap-3 px-1 py-2">
+                  <li key={task.id} className="flex flex-wrap items-center gap-3 rounded-md px-2 py-2 hover:bg-hover">
                     <span className="min-w-0 flex-1">
-                      <span className="text-sm text-l2">{goalDisplayName(task)}</span>
+                      <span className="break-words text-sm text-l2 [overflow-wrap:anywhere]">{goalDisplayName(task)}</span>
                       <span
                         className="mt-1 block text-micro text-l4"
                         title={absTime(task.archivedAt)}
@@ -530,10 +622,12 @@ export default function ProjectUserTasksView({
                         {relTime(task.archivedAt)} · 已归档 · {taskStatusLabel(task.status)}
                       </span>
                     </span>
+                    <button type="button" className={ghostActionClass} onClick={() => setStorageTaskId(task.id)}>{task.storageCleanupPending ? "继续清理副本" : "释放副本空间"}</button>
                     <button
                       type="button"
                       className={secondaryActionClass}
-                      disabled={restoringId === task.id}
+                      disabled={restoringId === task.id || task.storageCleanupPending}
+                      title={task.storageCleanupPending ? "请先继续未完成的副本清理，再恢复" : undefined}
                       onClick={() => void restoreGoal(task)}
                     >
                       {restoringId === task.id ? "恢复中…" : "恢复"}
@@ -568,11 +662,12 @@ export default function ProjectUserTasksView({
           onError={setError}
         />
       )}
+      {storageTaskId && <GoalStorageModal taskId={storageTaskId} onClose={() => setStorageTaskId(null)} onChanged={() => void load()} />}
       {reviewTask && (
         <ReviewOutputsModal
           workMode={project.workMode}
           task={tasks.find((task) => task.id === reviewTask.id) ?? reviewTask}
-          run={latestRunByTask.get(reviewTask.id) ?? null}
+          run={runs.find((run) => run.id === (tasks.find((task) => task.id === reviewTask.id)?.pendingApplyRunId ?? reviewTask.pendingApplyRunId)) ?? latestRunByTask.get(reviewTask.id) ?? null}
           runCount={
             runs.filter((item) => item.taskId === reviewTask.id && !item.internal).length
           }
@@ -1070,38 +1165,27 @@ function ReviewOutputsModal({
   onError: (message: string) => void;
 }) {
   const copy = goalReviewCopy(workMode);
+  const runId = run?.id;
+  const projectRoot = task.projectRoot;
   const [changes, setChanges] = useState<TaskOutputChangeDto[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [feedback, setFeedback] = useState("");
   const [memorize, setMemorize] = useState(false);
   const [protectedPaths, setProtectedPaths] = useState<string[]>([]);
   const [frozen, setFrozen] = useState(true);
+  const [freezeRequired, setFreezeRequired] = useState(false);
+  const [readiness, setReadiness] = useState<TaskReviewDto["readiness"]>();
+  const [pendingApply, setPendingApply] = useState<TaskReviewDto["pendingApply"]>(null);
   const [payloadDir, setPayloadDir] = useState<string | null>(null);
   const [reviewSeq, setReviewSeq] = useState<number | null>(null);
   const [contextSnapshot, setContextSnapshot] = useState<TaskContextDto | null>(null);
-  // 勾选只初始化一次：之后任何刷新（含 protectedPaths 晚到触发的重拉）都合并而不是重置，
-  // 用户取消的勾选不能被抹掉；初始化后才出现的新变更不自动勾上（人还没看过）
-  const selectionReadyRef = useRef(false);
-  useEffect(() => {
-    selectionReadyRef.current = false;
-  }, [run?.id]);
-
-  useEffect(() => {
-    if (!run) return;
-    let stale = false;
-    invoke<TaskContextDto | null>("task_run_context", { runId: run.id })
-      .then((value) => {
-        if (!stale) setContextSnapshot(value);
-      })
-      .catch(() => {});
-    return () => {
-      stale = true;
-    };
-  }, [run]);
-
+  const [researchRunId, setResearchRunId] = useState<string | null>(null);
+  const [showResearch, setShowResearch] = useState(false);
+  const researchStep: ProjectStepDto = { name: task.name, workspaceName: task.id, brief: task.description, expectedArtifacts: changes.filter((c) => /\.(md|txt|py)$/i.test(c.path)).map((c) => c.path), skills: [], run: [] };
   useEffect(() => {
     if (!previewPath) return;
     const onKey = (event: KeyboardEvent) => {
@@ -1114,58 +1198,50 @@ function ReviewOutputsModal({
     return () => document.removeEventListener("keydown", onKey, true);
   }, [previewPath]);
 
+  // 打开后固定本次所审版本；列表轮询会创建新的 Run 对象，但不应重载评审或替换勾选。
+  // 规则、上下文和清单一起就绪，避免分批渲染撑开居中的弹窗。
   useEffect(() => {
-    if (!task.projectRoot) {
-      setProtectedPaths([]);
-      return;
-    }
-    let stale = false;
-    invoke<{ config: { protectedPaths?: string[] } }>("read_project_config", {
-      path: task.projectRoot,
-    })
-      .then((read) => {
-        if (!stale) setProtectedPaths(read.config.protectedPaths ?? []);
-      })
-      .catch(() => {
-        if (!stale) setProtectedPaths([]);
-      });
-    return () => {
-      stale = true;
-    };
-  }, [task.projectRoot]);
-
-  useEffect(() => {
-    if (!run) {
+    if (!runId) {
       setLoading(false);
       return;
     }
     let stale = false;
     setLoading(true);
-    invoke<TaskReviewDto>("task_output_changes", { runId: run.id })
-      .then((review) => {
+    setLoadError(null);
+    setPreviewPath(null);
+    const readProtectedPaths = projectRoot
+      ? invoke<{ config: { protectedPaths?: string[] } }>("read_project_config", { path: projectRoot })
+        .then((read) => read.config.protectedPaths ?? [])
+        .catch(() => [] as string[])
+      : Promise.resolve<string[]>([]);
+    Promise.all([
+      invoke<TaskReviewDto>("task_output_changes", { runId }),
+      invoke<TaskContextDto | null>("task_run_context", { runId }).catch(() => null),
+      readProtectedPaths,
+    ])
+      .then(([review, context, protectedPaths]) => {
         if (stale) return;
         // 版本错位防线：后端旧版返回的是数组而不是 TaskReviewDto，
         // 直接把 review.changes 当数组用会在渲染期炸进错误边界
         const rows = Array.isArray(review?.changes) ? review.changes : [];
+        setContextSnapshot(context);
+        setProtectedPaths(protectedPaths);
         setFrozen(review?.frozen === true);
+        setFreezeRequired(review?.freezeRequired === true);
+        setReadiness(review.readiness);
+        setPendingApply(review.pendingApply ?? null);
         setPayloadDir(review?.payloadDir ?? null);
         setReviewSeq(review?.seq ?? null);
         setChanges(rows);
-        setSelected((prev) => {
-          const next = new Set(prev);
-          for (const row of rows) {
-            if (row.kind === "deleted" || pathIsProtected(row.path, protectedPaths)) {
-              next.delete(row.path);
-            } else if (!selectionReadyRef.current) {
-              next.add(row.path);
-            }
-          }
-          selectionReadyRef.current = true;
-          return next;
-        });
+        setSelected(new Set(rows
+          .filter((row) => row.kind !== "deleted" && !row.tooLarge && !pathIsProtected(row.path, protectedPaths))
+          .map((row) => row.path)));
       })
       .catch((reason) => {
-        if (!stale) onError(`读取变更失败：${String(reason)}`);
+        if (stale) return;
+        const message = `读取变更失败：${String(reason)}`;
+        setLoadError(message);
+        onError(message);
       })
       .finally(() => {
         if (!stale) setLoading(false);
@@ -1173,7 +1249,19 @@ function ReviewOutputsModal({
     return () => {
       stale = true;
     };
-  }, [onError, protectedPaths, run]);
+  }, [onError, projectRoot, runId]);
+
+  async function freezeLarge() {
+    if (!run || (reviewSeq == null && !freezeRequired) || busy || pendingApply) return;
+    const ok = await confirmDialog("将为这次运行启用扩展冻结：单文件最多 1 GB、每版合计最多 4 GB。会额外占用磁盘，之后仍按版本人工验收；不会直接写进项目。超过上限请先拆分或归档文件。继续？", { focusCancel: true, confirmText: "确认冻结大文件" });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const review = await invoke<TaskReviewDto>("task_freeze_large_outputs", { runId: run.id, expectSeq: reviewSeq ?? 0, confirmed: true });
+      setChanges(review.changes); setReviewSeq(review.seq ?? null); setPayloadDir(review.payloadDir); setFrozen(review.frozen); setFreezeRequired(review.freezeRequired === true); setReadiness(review.readiness); setSelected(new Set()); setPreviewPath(null);
+    } catch (error) { onError(`冻结大文件失败：${String(error)}`); }
+    finally { setBusy(false); }
+  }
 
   async function adopt() {
     if (!run) return;
@@ -1182,7 +1270,7 @@ function ReviewOutputsModal({
       await invoke("task_adopt_outputs", {
         runId: run.id,
         paths: selectedChangePaths(changes, selected).filter(
-          (path) => !pathIsProtected(path, protectedPaths),
+          (path) => !pathIsProtected(path, protectedPaths) && !changes.find((c) => c.path === path)?.tooLarge,
         ),
         note: feedback.trim() || null,
         expectSeq: reviewSeq,
@@ -1191,49 +1279,100 @@ function ReviewOutputsModal({
       onAdopted();
     } catch (reason) {
       onError(`采纳输出失败：${String(reason)}`);
+      try {
+        const review = await invoke<TaskReviewDto>("task_output_changes", { runId: run.id });
+        setPendingApply(review.pendingApply ?? null); setReadiness(review.readiness);
+        if (review.pendingApply) { setChanges(review.changes); setPayloadDir(review.payloadDir); }
+      } catch { /* 原错误仍显示；无法读取恢复单时不谎报成功。 */ }
     } finally {
       setBusy(false);
     }
   }
 
+  async function recover(action: "continue" | "rollback") {
+    if (!run || !pendingApply || busy) return;
+    if (action === "rollback" && !await confirmDialog("恢复本次接受之前的项目文件？只恢复仍等于本次写入内容的文件；后来被修改的文件不会强制覆盖。已记账的接受不可从此撤销。", { confirmText: "恢复原文件", focusCancel: true })) return;
+    setBusy(true);
+    try {
+      await invoke("task_recover_outputs", { runId: run.id, operationId: pendingApply.id, action });
+      onAdopted();
+    } catch (error) {
+      onError(`处理接受恢复失败：${String(error)}`);
+      try {
+        const review = await invoke<TaskReviewDto>("task_output_changes", { runId: run.id });
+        setPendingApply(review.pendingApply ?? null);
+      } catch { /* 保留原错误，不把恢复单读失败当成完成。 */ }
+    }
+    finally { setBusy(false); }
+  }
+
   const selectable = changes.filter(
-    (change) => change.kind !== "deleted" && !pathIsProtected(change.path, protectedPaths),
+    (change) => change.kind !== "deleted" && !change.tooLarge && !pathIsProtected(change.path, protectedPaths),
   );
   const selectedCount = selected.size;
   const previewBase = payloadDir ?? run?.isolationPath ?? null;
   const previewAbs = previewPath && previewBase ? joinRunPath(previewBase, previewPath) : null;
   const groups = groupReviewChanges(workMode, changes);
+  const previewChanges = changes.filter((change) => change.kind !== "deleted" && !change.tooLarge);
   const previewIndex = previewPath
-    ? changes.findIndex((change) => change.path === previewPath)
+    ? previewChanges.findIndex((change) => change.path === previewPath)
     : -1;
 
   return (
     <>
-    <Modal open title={`${copy.modalTitle} · ${task.name}`} onClose={onClose} size="md">
-      <div className="space-y-3 text-xs">
+    <Modal
+      open title={`${copy.modalTitle} · ${task.name}`} onClose={onClose} size="md"
+      overflow="hidden"
+      panelClassName="h-[min(48rem,calc(100dvh-24px))]"
+      contentClassName="flex flex-1 flex-col"
+    >
+      <div
+        role="region" aria-label="验收内容" aria-busy={loading}
+        className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain [scrollbar-gutter:stable] text-xs"
+      >
+        {loading ? (
+          <p role="status" className="text-l4">读取这版的变更…</p>
+        ) : loadError ? (
+          <p role="alert" className="text-err-text">{loadError}。请关闭后重新打开验收。</p>
+        ) : (
+        <>
         <ul className="space-y-0.5 text-l3">
           {goalReviewFacts({
             workMode,
             agentLabel: agentLabel(run?.agent ?? task.agent ?? ""),
             runCount,
+            resultSeq: reviewSeq,
             changes,
             feedback: previousFeedback,
           }).map((line) => (
             <li key={line}>{line}</li>
           ))}
         </ul>
-        {!loading && run && run.status !== "completed" && (
+        {pendingApply && <section aria-label="未完成的接受操作" className="rounded border border-field p-3 text-xs">
+          <h3 className="font-medium text-warn-text">有一次接受操作尚未完成</h3>
+          <p className="mt-1 break-all">原版本 {pendingApply.versionId} · {pendingApply.paths.length} 个文件 · {pendingApply.phase === "prepared" ? "准备或部分写入" : pendingApply.phase === "files_applied" ? "文件已写入，待记账" : pendingApply.phase === "rolling_back" ? "恢复原文件尚未完成" : "接受已记账，待补状态"}</p>
+          {pendingApply.note && <p className="mt-1">原意见：{pendingApply.note}</p>}
+          <p className="mt-1 text-l3">继续只处理原版本，不带入后来生成的成果；请先完成恢复，再返修。</p>
+          <div className="mt-2 flex gap-2"><button type="button" className={primaryActionClass} disabled={busy || pendingApply.phase === "rolling_back"} onClick={() => void recover("continue")}>继续未完成的接受</button><button type="button" className={secondaryActionClass} disabled={busy || pendingApply.phase === "recorded"} onClick={() => void recover("rollback")}>恢复原文件</button></div>
+        </section>}
+        {!loading && readiness && <p className="text-micro text-l3">{resultReadinessLabel(readiness)}</p>}
+        {!loading && run && (run.status === "failed" || run.status === "stopped") && (
           <p className="ccode-well rounded-md px-2 py-1.5 text-micro text-l3">
             这次运行未正常完成（{run.status === "stopped" ? "已停止" : "失败"}）：
             下面是它留下的部分成果，已在收尾时冻结。请确认过程没有半途而废，再决定采纳还是写意见再出一版。
           </p>
         )}
-        {!loading && !frozen && (
+        {!loading && freezeRequired && <p className="text-warn-text">本次冻结未成功，不能按实时目录采纳。请确认扩展预算后重新冻结，或让 Agent 缩小输出范围。</p>}
+        {!loading && !frozen && !freezeRequired && (
           <p className="ccode-well rounded-md px-2 py-1.5 text-micro text-l3">
             这版结果没有冻结证据（旧版本生成或收尾时冻结失败）：下面按目录当前内容现算，
             如果项目在这期间被你改过，采纳不会逐文件提醒，请先自行核对。
           </p>
         )}
+        {!!changes.some((change) => change.tooLarge) && <div className="rounded border border-field p-2 text-warn-text">
+          <p>超出预算的文件尚未冻结，不可预览或采纳。可明确确认扩展预算，或让 Agent 拆分文件；其它已冻结文件可单独验收。</p>
+          <button type="button" className={`${secondaryActionClass} mt-1`} disabled={busy || (reviewSeq == null && !freezeRequired)} onClick={() => void freezeLarge()}>确认范围并冻结大文件</button>
+        </div>}
         {contextSnapshot && (
           <details className="rounded-md border border-field px-2 py-1.5 text-micro text-l3">
             <summary className="cursor-pointer select-none">
@@ -1250,9 +1389,7 @@ function ReviewOutputsModal({
             </pre>
           </details>
         )}
-        {loading ? (
-          <p className="text-l4">读取这版的变更…</p>
-        ) : changes.length === 0 ? (
+        {changes.length === 0 ? (
           <p className="text-l3">{copy.empty}</p>
         ) : (
           <>
@@ -1264,6 +1401,7 @@ function ReviewOutputsModal({
               <button
                 type="button"
                 className={rowActionClass}
+                disabled={!!pendingApply}
                 onClick={() =>
                   setSelected(
                     selectedCount === selectable.length
@@ -1288,11 +1426,11 @@ function ReviewOutputsModal({
                         <Checkbox
                           checked={selected.has(change.path)}
                           disabled={
-                            change.kind === "deleted" ||
+                            !!pendingApply || change.kind === "deleted" || change.tooLarge === true ||
                             pathIsProtected(change.path, protectedPaths)
                           }
                           onChange={(checked) => {
-                            if (pathIsProtected(change.path, protectedPaths)) return;
+                            if (pendingApply || change.tooLarge || pathIsProtected(change.path, protectedPaths)) return;
                             const next = new Set(selected);
                             if (checked) next.add(change.path);
                             else next.delete(change.path);
@@ -1311,6 +1449,7 @@ function ReviewOutputsModal({
                           <button
                             type="button"
                             className="min-w-0 flex-1 truncate text-left text-l2 hover:underline"
+                            disabled={change.tooLarge === true}
                             onClick={() => setPreviewPath(change.path)}
                             title={change.path}
                           >
@@ -1320,6 +1459,7 @@ function ReviewOutputsModal({
                         <span className="shrink-0 text-micro text-l4">
                           {change.kind === "deleted"
                             ? taskChangeKindLabel(change.kind)
+                            : change.tooLarge ? "未冻结 · 超出单文件预算"
                             : pathIsProtected(change.path, protectedPaths)
                               ? "跳过"
                               : taskChangeKindLabel(change.kind)}
@@ -1332,6 +1472,11 @@ function ReviewOutputsModal({
             </div>
           </>
         )}
+        {workMode === "research" && run && task.projectRoot && <details className="rounded border border-field p-2" onToggle={(event) => setShowResearch(event.currentTarget.open)}>
+          <summary className="cursor-pointer">科研复现与结论验收（不等于文件采纳）</summary>
+          {showResearch && <><ResearchReproductionPanel workspace={{ id: task.id, repoPath: task.projectRoot, worktreePath: run.isolationPath, status: "active" }} step={researchStep} sourceRunId={run.id} onLaunched={onClose} onRun={(r) => setResearchRunId(r.id)} />
+          <ResearchAcceptancePanel workspace={{ id: task.id, repoPath: task.projectRoot, worktreePath: run.isolationPath, status: "active" }} step={researchStep} sourceRunId={run.id} runId={researchRunId} /></>}
+        </details>}
         <label className="block text-xs text-l2">
           <span className="font-medium">意见</span>
           <span className="ml-1.5 font-normal text-l4">不满意再出一版</span>
@@ -1363,7 +1508,7 @@ function ReviewOutputsModal({
           <button
             type="button"
             className={secondaryActionClass}
-            disabled={busy || loading || !run || !feedback.trim()}
+            disabled={busy || loading || !run || !feedback.trim() || !!pendingApply}
             onClick={() => void onContinue(feedback.trim())}
           >
             {copy.continueLabel}
@@ -1372,7 +1517,7 @@ function ReviewOutputsModal({
           <button
             type="button"
             className={primaryActionClass}
-            disabled={busy || loading || !run}
+            disabled={busy || loading || !run || freezeRequired || !!pendingApply}
             onClick={() => void adopt()}
           >
             {busy
@@ -1383,21 +1528,24 @@ function ReviewOutputsModal({
           </button>
           )}
         </div>
+        </>
+        )}
       </div>
     </Modal>
       {previewAbs && previewBase && run && (
         <OfficePreviewModal
           path={previewAbs}
           root={previewBase}
+          companionPdf={previewPath && companionPdfPath(previewPath, changes) ? joinRunPath(previewBase, companionPdfPath(previewPath, changes)!) : null}
           onClose={() => setPreviewPath(null)}
           hasPrevious={previewIndex > 0}
-          hasNext={previewIndex >= 0 && previewIndex < changes.length - 1}
+          hasNext={previewIndex >= 0 && previewIndex < previewChanges.length - 1}
           onPrevious={() => {
-            if (previewIndex > 0) setPreviewPath(changes[previewIndex - 1].path);
+            if (previewIndex > 0) setPreviewPath(previewChanges[previewIndex - 1].path);
           }}
           onNext={() => {
-            if (previewIndex >= 0 && previewIndex < changes.length - 1) {
-              setPreviewPath(changes[previewIndex + 1].path);
+            if (previewIndex >= 0 && previewIndex < previewChanges.length - 1) {
+              setPreviewPath(previewChanges[previewIndex + 1].path);
             }
           }}
         />

@@ -1,3 +1,7 @@
+import { researchToolContractMatches } from "../research-tools";
+import { appendUpstreamAcceptance, type UpstreamAcceptance } from "../research-acceptance";
+import UpstreamResearchAcceptance from "./UpstreamResearchAcceptance";
+import ResearchToolPreflight from "./ResearchToolPreflight";
 import ResearchEvidencePanel from "./ResearchEvidencePanel";
 import ResearchDecisionFields from "./ResearchDecisionFields";
 import { researchReportPatterns } from "../research-report";
@@ -135,6 +139,7 @@ export default function KickoffConfirmDialog({
     skillMeta: Record<string, string> | undefined;
     /** 已定方向（决策项答案，读自任务书草稿）：渲染进 TASK.md 的「已定方向」段 */
     decisions: { q: string; answer: string }[];
+    upstream: UpstreamAcceptance[];
   } | null>(null);
   // 主仓未提交改动数（null = 非 git 仓库/读取失败，不渲染提醒行）
   const [mainDirty, setMainDirty] = useState<number | null>(null);
@@ -176,9 +181,11 @@ export default function KickoffConfirmDialog({
     { text: "", dirty: false } satisfies TaskMdEditorState,
   );
   const [editorReady, setEditorReady] = useState(false);
+  const [toolsBlocked, setToolsBlocked] = useState(false);
   const [evidenceRevision, setEvidenceRevision] = useState<string | null>(null);
   useEffect(() => { setEvidenceRevision(null); }, [stepNow.workspaceName]);
   const gate = decisionGate(stepNow, editor.text, evidenceRevision);
+  const staleTools = editorReady && !researchToolContractMatches(stepNow, editor.text);
   const [decisionAck, setDecisionAck] = useState<string | null>(null);
   // 合同或未答问题变了，旧确认自动失效。
   const decisionSignature = JSON.stringify([stepNow.workspaceName, gate.missing, editor.text]);
@@ -274,7 +281,7 @@ export default function KickoffConfirmDialog({
     let stale = false;
     gatherTaskMdExtras(projectPath, step).then((value) => {
       if (!stale) setExtras(value);
-    });
+    }).catch((reason) => { if (!stale) { setSkillError(`无法读取上游验收：${String(reason)}，请关闭后重试`); setEditorReady(false); } });
     invoke<KickoffInputChip[]>("inspect_step_inputs", {
       projectRoot: projectPath,
       stepName: step.name,
@@ -356,9 +363,9 @@ export default function KickoffConfirmDialog({
     if (assembled === null || draftText === undefined) return;
     const raw = draftText?.trim() ?? "";
     const draft = raw && !isDecisionsOnly(raw) ? raw : null;
-    dispatchEditor({ type: "assemble", text: draft ?? assembled });
+    dispatchEditor({ type: "assemble", text: appendUpstreamAcceptance(draft ?? assembled, extras?.upstream ?? []) });
     setEditorReady(true);
-  }, [assembled, draftText]);
+  }, [assembled, draftText, extras]);
 
   /** 旧版简报「并入草稿」：逐份读全文（单份失败行内报错、其余继续），
    *  合并为一段经 append_step_draft 追加，完成后重读草稿刷新编辑区（人未编辑时 assemble 生效） */
@@ -560,7 +567,10 @@ export default function KickoffConfirmDialog({
           </div>
         )}
 
+        {staleTools && <p role="alert" className="my-2 text-xs text-warn-text">旧任务书的工具合同与当前选择不同。请展开 TASK.md 对照，或「恢复默认拼装」后重新确认；未覆盖你的草稿。</p>}
+        {launch && stepNow.skills.length > 0 && <ResearchToolPreflight key={`${stepNow.name}:${stepNow.skills.join(",")}:${launch.agentId}`} projectRoot={projectPath} stepName={stepNow.name} agent={launch.agentId} onBlocked={setToolsBlocked} />}
         {(stepNow.decisions?.length ?? 0) > 0 && <>
+          <UpstreamResearchAcceptance projectRoot={projectPath} stepName={stepNow.name} decisions={stepNow.decisions ?? []} text={editor.text} evidenceRevision={evidenceRevision} onChange={(text) => dispatchEditor({ type: "edit", text })} />
           <ResearchEvidencePanel key={`${projectPath}:${stepNow.workspaceName}`} root={projectPath} patterns={researchReportPatterns(stepNow, "decision")} kind="decision"
             onFingerprint={setEvidenceRevision} />
           <ResearchDecisionFields decisions={stepNow.decisions ?? []} text={editor.text} disabled={busy || !editorReady}
@@ -669,7 +679,7 @@ export default function KickoffConfirmDialog({
 
         {/* 主仓改动协同（只提醒不阻断）：想法期实验性改动留在主仓是合法的 */}
         {mainDirty !== null && mainDirty > 0 && (
-          <p className="mb-3 rounded-md bg-inset px-2.5 py-1.5 text-xs leading-5 text-l2">
+          <p className="mb-3 rounded-md ccode-well px-2.5 py-1.5 text-xs leading-5 text-l2">
             <span className="mr-1 text-warn-text">!</span>
             项目里有 {mainDirty} 处改动还没存入历史。Agent 只看得到上次存入的内容。
           </p>
@@ -677,7 +687,7 @@ export default function KickoffConfirmDialog({
 
         {/* 旧版简报兜底（只提醒不阻断）：新口径沉淀走任务书草稿，旧 brief-*.md 不再自动带入 */}
         {showLegacyHint && (
-          <div className="mb-3 shrink-0 rounded-sm bg-inset px-2.5 py-1.5 text-xs text-l3">
+          <div className="mb-3 shrink-0 rounded-sm ccode-well px-2.5 py-1.5 text-xs text-l3">
             <div className="flex items-center gap-2">
               <span className="min-w-0 flex-1">
                 检测到旧版简报 {legacyBriefs!.length}{" "}
@@ -701,7 +711,7 @@ export default function KickoffConfirmDialog({
 
         {/* 未登记资源提醒（只提醒不阻断，默认不勾选）：登记后进 TASK.md 的「项目资源」段 */}
         {resCandidates && resCandidates.length > 0 && (
-          <div className="mb-3 shrink-0 rounded-md bg-inset px-2.5 py-2">
+          <div className="mb-3 shrink-0 rounded-md ccode-well px-2.5 py-2">
             <div className="mb-1 text-xs text-l3">
               发现 {resCandidates.length} 个未登记文件
             </div>
@@ -823,7 +833,7 @@ export default function KickoffConfirmDialog({
               type="button"
               onClick={() =>
                 assembled !== null &&
-                dispatchEditor({ type: "reset", text: assembled })
+                dispatchEditor({ type: "reset", text: appendUpstreamAcceptance(assembled, extras?.upstream ?? []) })
               }
               title="放弃修改，回到模板的默认拼装"
               className="ml-auto shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-l4 hover:bg-hover hover:text-l2"
@@ -861,7 +871,7 @@ export default function KickoffConfirmDialog({
         {/* 上一步收尾软门（只确认不阻断）：未勾的非可选收尾事项逐条列出，
             第一次点「确认开始」只是表态知情，按钮变成「仍要开工」再点才真开 */}
         {prevClosing.length > 0 && prevStep && (
-          <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-l2">
+          <p className="mb-3 shrink-0 rounded-md ccode-well px-3 py-2 text-xs leading-5 text-l2">
             <span className="mr-1 text-warn-text">!</span>
             上一步「{prevStep.name}」还有 {prevClosing.length}{" "}
             件收尾事项没完成（{prevClosing.map((t) => t.title).join("、")}
@@ -872,7 +882,7 @@ export default function KickoffConfirmDialog({
           </p>
         )}
         {(gate.blocked || gate.needsAck) && (
-          <p className="mb-3 shrink-0 rounded-md bg-inset px-3 py-2 text-xs leading-5 text-warn-text">
+          <p className="mb-3 shrink-0 rounded-md ccode-well px-3 py-2 text-xs leading-5 text-warn-text">
             待拍板：{gate.missing.join("、")}。
             {gate.blocked
               ? `硬暂停：${gate.gaps.map((g) => `${g.q}（${g.reason === "legacy" ? "旧纯文本需重选状态" : g.reason === "stale" ? "依据已变，需重新确认" : g.reason === "wait" ? "待补证据" : g.reason === "reject" ? "不批准" : "未选择状态并填写说明"}）`).join("、")}。待补或不批准不能开工。`
@@ -895,7 +905,7 @@ export default function KickoffConfirmDialog({
           </button>
           <button
             type="button"
-            disabled={busy || !editorReady || !launch || gate.blocked}
+            disabled={busy || !editorReady || !launch || gate.blocked || staleTools || (stepNow.skills.length > 0 && toolsBlocked)}
             onClick={() => {
               if (needsDecisionAck) {
                 setDecisionAck(decisionSignature);

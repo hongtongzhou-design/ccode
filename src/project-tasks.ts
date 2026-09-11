@@ -164,8 +164,8 @@ export function taskStatusLabel(status: string): string {
 export type GoalBucket = "running" | "review" | "stuck" | "open" | "done";
 
 export const GOAL_BUCKET_ORDER: GoalBucket[] = [
-  "running",
   "review",
+  "running",
   "stuck",
   "open",
   "done",
@@ -174,7 +174,7 @@ export const GOAL_BUCKET_ORDER: GoalBucket[] = [
 export const GOAL_BUCKET_LABEL: Record<GoalBucket, string> = {
   running: "进行中",
   review: "待验收",
-  stuck: "没做完",
+  stuck: "需要处理",
   open: "尚未开始",
   done: "已完成",
 };
@@ -491,6 +491,11 @@ export function goalTimeline(input: {
 
 export function goalTimelineLabel(items: readonly GoalTimelineItem[]): string {
   return items.map((item) => item.text).join(" → ");
+}
+
+/** 历程路径不含意见正文，给任务卡摘要用。 */
+export function goalTimelinePath(items: readonly GoalTimelineItem[]): string {
+  return items.map((item) => (item.kind === "feedback" ? "意见" : item.text)).join(" → ");
 }
 
 export function pathIsProtected(

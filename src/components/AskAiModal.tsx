@@ -302,6 +302,7 @@ export default function AskAiModal() {
               ))}
             </datalist>
           </label>
+          {!file.path.trim() && <p className="mb-2 text-xs text-l3">{writeReview ? "在独立副本工作，文件经你验收后写回项目。" : "直接在项目目录工作，改动即时生效；不是只读讨论或隔离副本。"}</p>}
           {!file.path.trim() && file.workMode && file.workMode !== "coding" && (
             <Checkbox
               className="mb-3 text-xs text-l3"

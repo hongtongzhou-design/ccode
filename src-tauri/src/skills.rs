@@ -54,39 +54,7 @@ pub struct SkillDto {
     /// 各 agent 的分发形态（"symlink" | "copy"，list 时现算，仅启用的 agent 有键）
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub app_modes: HashMap<String, String>,
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SkillSnapshot {
-    pub name: String,
-    pub library_digest: String,
-    pub runtime_digest: Option<String>,
-    pub source_revision: Option<String>,
-    pub entry_text: String,
-}
-
-pub(crate) fn snapshot_named_skills(names: &[String], agent: &str) -> Result<Vec<SkillSnapshot>, String> {
-    if names.is_empty() { return Ok(Vec::new()); }
-    let store = SkillStore::default_paths()?;
-    let registry_text = fs::read_to_string(&store.json_path).map_err(|e| format!("读取技能库失败：{e}"))?;
-    let registry: Vec<SkillDto> = serde_json::from_str(&registry_text).map_err(|e| format!("技能库损坏：{e}"))?;
-    let runtime = agent_dirs().remove(agent);
-    let mut out = Vec::new();
-    for name in names {
-        crate::paths::validate_fs_name(name)?;
-        let skill = registry.iter().find(|s| &s.name == name).ok_or_else(|| format!("点名技能未安装：{name}"))?;
-        let library_digest = dir_manifest_hash(&store.skill_dir(name)).ok_or_else(|| format!("无法核对技能版本：{name}"))?;
-        let runtime_digest = runtime.as_ref().and_then(|dir| dir_manifest_hash(&dir.join(name)));
-        if runtime_digest.as_deref() != Some(library_digest.as_str()) {
-            return Err(format!("点名技能「{name}」尚未分发到所选 Agent 或副本已漂移，请先在技能页同步"));
-        }
-        let entry_text = fs::read_to_string(store.skill_dir(name).join("SKILL.md")).map_err(|e| format!("读取点名技能失败：{e}"))?;
-        if entry_text.len() > 256 * 1024 { return Err(format!("技能 {name} 的入口超过 256 KB，未启动")); }
-        out.push(SkillSnapshot { name: name.clone(), library_digest, runtime_digest, source_revision: skill.source_revision.clone(), entry_text });
-    }
-    Ok(out)
-}
-
-/// SKILL.md 是否提到 MCP（含「推荐 MCP」段）：list 时现算，不入库文件
+    /// SKILL.md 是否提到 MCP（含「推荐 MCP」段）：list 时现算，不入库文件
     #[serde(default)]
     pub mentions_mcp: bool,
     /// SKILL.md frontmatter 声明的产物路径（目录带尾斜杠、文件写全路径）：
@@ -228,7 +196,7 @@ fn new_skill(
 /// marker 是库目录下的 . 开头文件（发现逻辑跳过），记录已播种到的版本；
 /// 用户删掉某个内置技能后不会被复活——逐技能删除墓碑（BUILTIN_TOMBSTONE_FILE）
 /// 记下用户删过的内置技能名，版本升级补播时跳过墓碑项。
-const BUILTIN_SEED_VERSION: u32 = 4;
+const BUILTIN_SEED_VERSION: u32 = 5;
 const BUILTIN_SEED_MARKER: &str = ".builtin-seed-version";
 
 /// 内置技能删除墓碑（库目录下 . 开头文件，一行一个技能名）：删除内置技能先落墓碑，
@@ -275,6 +243,10 @@ static BUILTIN_SKILLS: &[(&str, &str)] = &[
         include_str!("../resources/skills/data-eda/SKILL.md"),
     ),
     (
+        "blender-research",
+        include_str!("../resources/skills/blender-research/SKILL.md"),
+    ),
+    (
         "origin-plot",
         include_str!("../resources/skills/origin-plot/SKILL.md"),
     ),
@@ -312,7 +284,40 @@ static BUILTIN_SKILLS: &[(&str, &str)] = &[
     ),
 ];
 
-/// 读内置技能删除墓碑（用户删过的内置技能名清单）；文件不存在按空表处理。
+/// 随技能一起播种/显式更新的驱动脚本，不能只更新 SKILL.md 留下失效入口。
+static BUILTIN_SUPPORT: &[(&str, &str, &str)] = &[
+    (
+        "endnote-bridge",
+        "scripts/bridge.py",
+        include_str!("../resources/skills/endnote-bridge/scripts/bridge.py"),
+    ),
+    (
+        "origin-plot",
+        "scripts/plot_origin.py",
+        include_str!("../resources/skills/origin-plot/scripts/plot_origin.py"),
+    ),
+    (
+        "blender-research",
+        "scripts/build_scene.py",
+        include_str!("../resources/skills/blender-research/scripts/build_scene.py"),
+    ),
+];
+
+fn builtin_files(name: &str) -> Vec<(&'static str, &'static str)> {
+    let mut files = Vec::new();
+    if let Some((_, seed)) = BUILTIN_SKILLS.iter().find(|(n, _)| *n == name) {
+        files.push(("SKILL.md", *seed));
+    }
+    files.extend(
+        BUILTIN_SUPPORT
+            .iter()
+            .filter(|(n, _, _)| *n == name)
+            .map(|(_, path, text)| (*path, *text)),
+    );
+    files
+}
+
+/// 读内置技能删除墓碑，文件不存在按空表处理。
 fn read_builtin_tombstones(store: &SkillStore) -> Vec<String> {
     fs::read_to_string(store.lib.join(BUILTIN_TOMBSTONE_FILE))
         .map(|t| {
@@ -374,7 +379,7 @@ fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
     let mut skills = store.read();
     let mut tombstones = read_builtin_tombstones(store);
     let mut added = Vec::new();
-    for (name, content) in BUILTIN_SKILLS {
+    for (name, _content) in BUILTIN_SKILLS {
         if skills.iter().any(|s| s.name == *name) || store.skill_dir(name).exists() {
             continue; // 已有同名（含用户自建/改过的）：不覆盖
         }
@@ -389,8 +394,9 @@ fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
         }
         let dir = store.skill_dir(name);
         fs::create_dir_all(&dir).map_err(|e| format!("创建内置技能目录失败: {e}"))?;
-        fs::write(dir.join("SKILL.md"), content)
-            .map_err(|e| format!("写入内置技能 {name} 失败: {e}"))?;
+        for (relative, text) in builtin_files(name) {
+            crate::profiles::atomic_write(&dir.join(relative), text)?;
+        }
         let description = parse_skill_md(&dir.join("SKILL.md")).description;
         skills.push(new_skill(name.to_string(), description, "builtin", None));
         added.push(name.to_string());
@@ -417,6 +423,20 @@ fn seed_builtin_skills_impl(store: &SkillStore) -> Result<Vec<String>, String> {
 
 // ===== 内置技能更新（种子增强后老用户库内旧副本的追平通道，播种器永不覆盖的配套出口） =====
 
+static BUILTIN_UPDATE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+struct BuiltinUpdateGuard {
+    _process: std::sync::MutexGuard<'static, ()>,
+    _file: fs::File,
+}
+fn builtin_update_lock() -> Result<BuiltinUpdateGuard, String> {
+    let process = BUILTIN_UPDATE_MUTEX.lock().map_err(|_| "技能更新锁失效")?;
+    let file = crate::storage::config_lock("builtin-skills")?;
+    Ok(BuiltinUpdateGuard {
+        _process: process,
+        _file: file,
+    })
+}
+
 /// 内置技能更新检测：库内 SKILL.md 与内嵌种子逐字节不一致 → 返回技能名。
 /// 只提示 skills.json 里 source == "builtin" 的项（同名用户自建技能不算）；
 /// 库目录缺失/文件读失败 = 跳过（缺失归播种器管）。用户在内置技能上的自改同样算差异，
@@ -434,7 +454,13 @@ fn check_builtin_skill_updates_impl(store: &SkillStore) -> Vec<String> {
         let Ok(current) = fs::read(store.skill_dir(name).join("SKILL.md")) else {
             continue;
         };
-        if !bytes_eq_ignore_crlf(&current, seed.as_bytes()) {
+        if !bytes_eq_ignore_crlf(&current, seed.as_bytes())
+            || builtin_files(name).iter().any(|(path, text)| {
+                fs::read(store.skill_dir(name).join(path))
+                    .map(|bytes| !bytes_eq_ignore_crlf(&bytes, text.as_bytes()))
+                    .unwrap_or(true)
+            })
+        {
             outdated.push(name.to_string());
         }
     }
@@ -452,7 +478,7 @@ fn today_yyyymmdd() -> String {
 /// 应用内置技能更新：现有 SKILL.md 先备份为同目录 SKILL.md.bak-<yyyymmdd>
 /// （同日重复更新追加 -2/-3 防覆盖），再原子写入种子内容，skills.json 描述按新文件重解析。
 fn apply_builtin_skill_update_impl(store: &SkillStore, name: &str) -> Result<(), String> {
-    let Some((_, seed)) = BUILTIN_SKILLS.iter().find(|(n, _)| *n == name) else {
+    let Some((_, _seed)) = BUILTIN_SKILLS.iter().find(|(n, _)| *n == name) else {
         return Err(format!("「{name}」不是内置技能，无法一键更新"));
     };
     let dir = store.skill_dir(name);
@@ -460,34 +486,143 @@ fn apply_builtin_skill_update_impl(store: &SkillStore, name: &str) -> Result<(),
     if !md.is_file() {
         return Err(format!("库内缺少 {}（重启应用播种后再试）", md.display()));
     }
-    let date = today_yyyymmdd();
-    let mut backup = dir.join(format!("SKILL.md.bak-{date}"));
-    let mut seq = 2;
-    while backup.exists() {
-        backup = dir.join(format!("SKILL.md.bak-{date}-{seq}"));
-        seq += 1;
-    }
-    fs::copy(&md, &backup).map_err(|e| format!("备份原文件失败: {e}"))?;
-    if let Err(e) = crate::profiles::atomic_write(&md, seed) {
-        // 写入失败盘面回到更新前，不留孤儿备份
-        let _ = fs::remove_file(&backup);
-        return Err(format!("写入新版 SKILL.md 失败: {e}"));
-    }
     let mut skills = store.read();
-    if let Some(pos) = skills.iter().position(|s| s.name == name) {
-        let description = parse_skill_md(&md).description;
-        skills[pos].description = description.unwrap_or_default();
-        store.write(&skills)?;
+    let pos = skills
+        .iter()
+        .position(|s| s.name == name && s.source == "builtin")
+        .ok_or("只允许更新已注册的内置技能")?;
+    let mut originals: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
+    for (relative, _) in builtin_files(name) {
+        let path = dir.join(relative);
+        if path
+            .ancestors()
+            .take_while(|p| *p != store.lib)
+            .any(|p| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+        {
+            return Err(format!("技能文件路径经过符号链接，未覆盖：{relative}"));
+        }
+        let bytes = if path.exists() {
+            Some(fs::read(&path).map_err(|e| format!("读取 {relative} 失败: {e}"))?)
+        } else {
+            None
+        };
+        originals.push((path, bytes));
     }
+    let date = today_yyyymmdd();
+    // 全部备份完成才开始写入；更新失败恢复本批文件，备份继续保留供人工恢复。
+    for (path, bytes) in &originals {
+        if let Some(bytes) = bytes {
+            let base = format!("{}.bak-{date}", path.file_name().unwrap().to_string_lossy());
+            let mut backup = path.with_file_name(&base);
+            let mut seq = 2;
+            while backup.exists() {
+                backup = path.with_file_name(format!("{base}-{seq}"));
+                seq += 1;
+            }
+            crate::storage::atomic_write(&backup, bytes, true)?;
+        }
+    }
+    let write_result = (|| -> Result<(), String> {
+        for (relative, text) in builtin_files(name) {
+            crate::profiles::atomic_write(&dir.join(relative), text)?;
+        }
+        skills[pos].description = parse_skill_md(&md).description.unwrap_or_default();
+        store.write(&skills)
+    })();
+    if let Err(error) = write_result {
+        let mut failures = Vec::new();
+        for (path, bytes) in &originals {
+            let result = match bytes {
+                Some(bytes) => crate::storage::atomic_write(path, bytes, false),
+                None if path.exists() => fs::remove_file(path).map_err(|e| e.to_string()),
+                None => Ok(()),
+            };
+            if let Err(e) = result {
+                failures.push(e);
+            }
+        }
+        return Err(format!(
+            "技能更新失败：{error}；恢复情况：{}",
+            if failures.is_empty() {
+                "原文件已恢复".into()
+            } else {
+                failures.join("；")
+            }
+        ));
+    }
+
     crate::logbuf::record(
         "info",
         "skills",
         &format!(
             "内置技能 {name} 已更新到最新版，原文件备份为 {}",
-            backup.file_name().unwrap_or_default().to_string_lossy()
+            format!("*.bak-{date}")
         ),
     );
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinSkillPreview {
+    path: String,
+    current: String,
+    proposed: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinUpdatePreview {
+    revision: String,
+    files: Vec<BuiltinSkillPreview>,
+}
+
+#[tauri::command]
+pub async fn preview_builtin_skill_update(name: String) -> Result<BuiltinUpdatePreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = builtin_update_lock()?;
+        let store = SkillStore::default_paths()?;
+        if !store
+            .read()
+            .iter()
+            .any(|s| s.name == name && s.source == "builtin")
+        {
+            return Err("不是已安装的内置技能".into());
+        }
+        let dir = store.skill_dir(&name);
+        let revision = dir_manifest_hash(&dir).ok_or("无法核对技能版本")?;
+        let files = builtin_files(&name)
+            .into_iter()
+            .map(|(path, proposed)| {
+                let p = dir.join(path);
+                if p.ancestors()
+                    .take_while(|p| *p != store.lib)
+                    .any(|p| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+                {
+                    return Err("更新路径经过符号链接，未读取".into());
+                }
+                if p.exists() && fs::metadata(&p).map_err(|e| e.to_string())?.len() > 256 * 1024 {
+                    return Err("本机文件过大，请在文件预览中检查".into());
+                }
+                let current = if p.exists() {
+                    fs::read_to_string(p).map_err(|e| e.to_string())?
+                } else {
+                    String::new()
+                };
+                Ok(BuiltinSkillPreview {
+                    path: path.into(),
+                    current,
+                    proposed: proposed.into(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if dir_manifest_hash(&dir).as_deref() != Some(&revision) {
+            return Err("读取期间技能发生变化，请重新预览".into());
+        }
+        Ok(BuiltinUpdatePreview { revision, files })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ===== SKILL.md 防御式解析（开放标准：frontmatter 取 name/description/outputs/inputs，扩展字段忽略） =====
@@ -1592,6 +1727,75 @@ fn app_modes(dirs: &HashMap<String, PathBuf>, skill: &SkillDto) -> HashMap<Strin
     out
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkillSnapshot {
+    pub name: String,
+    pub library_digest: String,
+    pub runtime_digest: Option<String>,
+    pub source_revision: Option<String>,
+    pub entry_text: String,
+}
+
+pub(crate) fn snapshot_named_skills(
+    names: &[String],
+    agent: &str,
+) -> Result<Vec<SkillSnapshot>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let store = SkillStore::default_paths()?;
+    snapshot_named_skills_at(&store, &agent_dirs(), names, agent)
+}
+
+fn snapshot_named_skills_at(
+    store: &SkillStore,
+    dirs: &HashMap<String, PathBuf>,
+    names: &[String],
+    agent: &str,
+) -> Result<Vec<SkillSnapshot>, String> {
+    let registry_text =
+        fs::read_to_string(&store.json_path).map_err(|e| format!("读取技能库失败：{e}"))?;
+    let registry: Vec<SkillDto> =
+        serde_json::from_str(&registry_text).map_err(|e| format!("技能库损坏：{e}"))?;
+    let runtime = dirs.get(agent);
+    let mut out = Vec::new();
+    for name in names {
+        crate::paths::validate_fs_name(name)?;
+        let skill = registry
+            .iter()
+            .find(|s| &s.name == name)
+            .ok_or_else(|| format!("点名技能未安装：{name}"))?;
+        let library_digest = dir_manifest_hash(&store.skill_dir(name))
+            .ok_or_else(|| format!("无法核对技能版本：{name}"))?;
+        let runtime_digest = runtime
+            .as_ref()
+            .and_then(|dir| dir_manifest_hash(&dir.join(name)));
+        if runtime_digest.as_deref() != Some(library_digest.as_str()) {
+            return Err(format!(
+                "点名技能「{name}」尚未分发到所选 Agent 或副本已漂移，请先在技能页同步"
+            ));
+        }
+        let entry_path = store.skill_dir(name).join("SKILL.md");
+        if fs::metadata(&entry_path).map_err(|e| e.to_string())?.len() > 256 * 1024 {
+            return Err(format!("技能 {name} 的入口超过 256 KB，未启动"));
+        }
+        let entry_text =
+            fs::read_to_string(&entry_path).map_err(|e| format!("读取点名技能失败：{e}"))?;
+        if entry_text.len() > 256 * 1024 {
+            return Err(format!("技能 {name} 的入口超过 256 KB，未启动"));
+        }
+        out.push(SkillSnapshot {
+            name: name.clone(),
+            library_digest,
+            runtime_digest,
+            source_revision: skill.source_revision.clone(),
+            entry_text,
+        });
+    }
+    Ok(out)
+}
+
 /// SKILL.md 是否提到 MCP（「推荐 MCP」段也靠这个子串命中；读不到视为未提及）
 fn mentions_mcp(md_path: &Path) -> bool {
     fs::read_to_string(md_path)
@@ -2010,9 +2214,22 @@ pub async fn check_builtin_skill_updates() -> Vec<String> {
 
 /// 一键更新内置技能为内嵌种子版（覆盖前原文件自动备份为同目录 SKILL.md.bak-<yyyymmdd>）
 #[tauri::command]
-pub async fn apply_builtin_skill_update(name: String) -> Result<(), String> {
-    let store = SkillStore::default_paths()?;
-    apply_builtin_skill_update_impl(&store, name.trim())
+pub async fn apply_builtin_skill_update(
+    name: String,
+    expected_revision: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = builtin_update_lock()?;
+        let store = SkillStore::default_paths()?;
+        if dir_manifest_hash(&store.skill_dir(name.trim())).as_deref()
+            != Some(expected_revision.as_str())
+        {
+            return Err("预览后技能发生变化，请重新查看差异再更新".into());
+        }
+        apply_builtin_skill_update_impl(&store, name.trim())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 边下边计数：content_length 预检 + 实际字节超限即中止（防 zipball 内存炸弹）
@@ -2486,6 +2703,35 @@ pub async fn skill_md_path(id: String) -> Result<SkillPathDto, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn named_skill_snapshot_requires_matching_runtime_copy() {
+        let fx = Fx::new();
+        fx.add_lib_skill("science", "科学检查");
+        assert!(
+            snapshot_named_skills_at(&fx.store, &fx.agents, &["science".into()], "codex").is_err()
+        );
+        let runtime = fx.agents.get("codex").unwrap().join("science");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::copy(
+            fx.store.skill_dir("science").join("SKILL.md"),
+            runtime.join("SKILL.md"),
+        )
+        .unwrap();
+        let snapshot =
+            snapshot_named_skills_at(&fx.store, &fx.agents, &["science".into()], "codex").unwrap();
+        assert_eq!(
+            snapshot[0].runtime_digest.as_deref(),
+            Some(snapshot[0].library_digest.as_str())
+        );
+        assert!(snapshot[0].entry_text.contains("科学检查"));
+        fs::write(runtime.join("SKILL.md"), "outdated").unwrap();
+        assert!(
+            snapshot_named_skills_at(&fx.store, &fx.agents, &["science".into()], "codex")
+                .unwrap_err()
+                .contains("漂移")
+        );
+    }
+
     struct Fx {
         dir: PathBuf,
         store: SkillStore,
@@ -2740,6 +2986,36 @@ mod tests {
         let backups = fx.dir.join("skill-backups");
         delete_impl(&fx.store, &fx.agents, &backups, &skill.id).unwrap();
         assert!(read_builtin_tombstones(&fx.store).is_empty());
+    }
+
+    #[test]
+    fn builtin_support_scripts_seed_and_update_together_without_touching_user_files() {
+        let fx = Fx::new();
+        seed_builtin_skills_impl(&fx.store).unwrap();
+        let name = "endnote-bridge";
+        let script = fx.store.skill_dir(name).join("scripts/bridge.py");
+        assert!(script.is_file());
+        fs::write(&script, "user changed script").unwrap();
+        let other = fx.store.skill_dir(name).join("my-note.txt");
+        fs::write(&other, "keep").unwrap();
+        assert!(check_builtin_skill_updates_impl(&fx.store).contains(&name.to_string()));
+        apply_builtin_skill_update_impl(&fx.store, name).unwrap();
+        assert_eq!(
+            fs::read_to_string(&script).unwrap(),
+            builtin_files(name)
+                .into_iter()
+                .find(|(path, _)| *path == "scripts/bridge.py")
+                .unwrap()
+                .1
+        );
+        assert_eq!(fs::read_to_string(other).unwrap(), "keep");
+        assert!(fs::read_dir(script.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .any(|e| e
+                .file_name()
+                .to_string_lossy()
+                .starts_with("bridge.py.bak-")));
     }
 
     #[test]

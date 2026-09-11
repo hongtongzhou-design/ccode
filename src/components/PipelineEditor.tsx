@@ -1,3 +1,7 @@
+import { pipelineUpgradeCandidates } from "../pipeline-upgrade";
+import ResearchToolFields from "./ResearchToolFields";
+import { researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../research-tools";
+import { conflictingTemplateSteps, renameConflictingSteps } from "../pipeline-append";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -206,17 +210,20 @@ export default function PipelineEditor({
   /** 从步骤 ✎ 进入时定位的步骤序号：滚动到该卡片并聚焦简报输入框 */
   focusStep?: number | null;
   /** 保存成功与关闭覆盖层由父组件负责 */
-  onSave: (steps: ProjectStepDto[]) => void;
+  onSave: (steps: ProjectStepDto[], settings?: string[]) => void;
   onClose: () => void;
   /** 从模板追加成功后回推重读的配置（父组件同步 cfg/warnings，保持脏检查基准一致） */
   onConfigReload: (read: ProjectConfigReadDto) => void;
 }) {
+  const [tools, setTools] = useState(() => researchToolsFromSettings(config.settings));
   const [drafts, setDrafts] = useState<StepDraft[]>(() =>
     config.steps.map(toDraft),
   );
   const [error, setError] = useState<string | null>(null);
   // 「从模板追加」：内联模板列表 + 追加结果行内提示
   const [appendOpen, setAppendOpen] = useState(false);
+  const [upgradeTemplate, setUpgradeTemplate] = useState("");
+  const [upgradeSelection, setUpgradeSelection] = useState<number[]>([]);
   const [appending, setAppending] = useState(false);
   const [appendResult, setAppendResult] = useState<AppendStepsResultDto | null>(
     null,
@@ -283,7 +290,7 @@ export default function PipelineEditor({
     () => JSON.stringify(config.steps.map((s, i) => toStep(toDraft(s), i))),
     [config.steps],
   );
-  const dirty = JSON.stringify(drafts.map(toStep)) !== initialJson;
+  const dirty = JSON.stringify(drafts.map(toStep)) !== initialJson || JSON.stringify(tools) !== JSON.stringify(researchToolsFromSettings(config.settings));
 
   function patch(index: number, patchPart: Partial<StepDraft>) {
     setDrafts((list) =>
@@ -363,7 +370,9 @@ export default function PipelineEditor({
       return;
     }
     setError(null);
-    onSave(drafts.map(toStep));
+    try {
+      onSave(drafts.map(toStep).map((s) => withResearchTools(s, tools, config.artifactDir)), settingsWithResearchTools(config.settings ?? [], tools));
+    } catch (reason) { setError(String(reason)); }
   }
 
   /** 从模板追加：步骤直接写入 project.toml，成功后重读配置刷新卡片。 */
@@ -391,7 +400,7 @@ export default function PipelineEditor({
     setAppendResult(null);
     setError(null);
     try {
-      const submissionSteps =
+      let submissionSteps =
         tpl.id === "submission-rebuttal"
           ? pipelineStepsForTemplate(
               tpl as (typeof PIPELINE_TEMPLATES)[number],
@@ -399,12 +408,20 @@ export default function PipelineEditor({
               round,
             )
           : tpl.steps;
+      const current = await invoke<ProjectConfigReadDto>("read_project_config", { path: projectPath });
+      const savedTools = researchToolsFromSettings(current.config.settings);
+      submissionSteps = submissionSteps.map((s) => withResearchTools(s, savedTools, current.config.artifactDir));
+      const conflicts = conflictingTemplateSteps(current.config.steps, submissionSteps);
+      if (conflicts.length) {
+        if (!(await confirmDialog(`同名步骤交付不同：${conflicts.join("、")}。不能直接跳过；是否保留旧步骤，将这些步骤按「${tpl.name}」改名追加？取消可回编辑器自行选择复用并调整输入。`, { confirmText: "改名追加" }))) return;
+        submissionSteps = renameConflictingSteps(current.config.steps, submissionSteps, tpl.name);
+      }
       const res = await invoke<AppendStepsResultDto>(
         "apply_pipeline_template",
         {
           projectRoot: projectPath,
           steps: submissionSteps,
-          projectSettings: settingsForTemplateApply(tpl),
+          projectSettings: settingsWithResearchTools(settingsForTemplateApply(tpl), savedTools),
           strategy: "append",
           topic: null,
           submissionMode: tpl.id === "submission-rebuttal" ? mode : null,
@@ -419,6 +436,7 @@ export default function PipelineEditor({
         path: projectPath,
       });
       setDrafts(read.config.steps.map(toDraft));
+      setTools(researchToolsFromSettings(read.config.settings));
       onConfigReload(read);
       setAppendResult(res);
       setAppendOpen(false);
@@ -512,7 +530,7 @@ export default function PipelineEditor({
       <div
         key={i}
         data-step-card={i}
-        className="rounded-md bg-strip p-3"
+        className="rounded-md ccode-well p-3"
       >
         <div className="mb-2 flex items-center gap-2">
           <span className="shrink-0 text-xs text-l4">#{i + 1}</span>
@@ -711,7 +729,7 @@ export default function PipelineEditor({
             人工事项（人必须参与的事项清单；标题空白行保存时丢弃）
           </span>
           {d.humanTasks.map((t, ti) => (
-            <div key={ti} className="mb-1 rounded-sm bg-inset p-1.5">
+            <div key={ti} className="mb-1 rounded-sm ccode-well p-1.5">
               <div className="mb-1 flex items-center gap-1">
                 <input
                   className={`${field} min-w-0 flex-1`}
@@ -1159,7 +1177,7 @@ export default function PipelineEditor({
   }
 
   return (
-    <div className="fixed inset-0 z-30 flex flex-col bg-canvas">
+    <div data-surface="canvas" className="fixed inset-0 z-30 flex flex-col bg-canvas">
       {/* 覆盖层头部统一（P3）：strip 底 + hairline 下缘，标题 + 副题 + 唯一主动作（保存） */}
       <div className="flex shrink-0 items-center gap-3 border-b border-hairline bg-strip px-8 py-3">
         <h2 className="shrink-0 text-base font-semibold text-l1">
@@ -1190,8 +1208,22 @@ export default function PipelineEditor({
 
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="mx-auto w-full max-w-3xl space-y-3 px-8 py-4">
+          <ResearchToolFields value={tools} onChange={setTools} disabled={saving || appending} />
+          <details className="rounded ccode-well p-3 text-xs"><summary className="cursor-pointer text-l2">检查已有步骤的内置模板更新</summary>
+            <p className="my-2 text-l3">只对名称与工作区都一致的步骤提出更新；先看差异、勾选，再载入编辑草稿。资源绑定保留，不修改已有 TASK.md 或研究产物。保存前仍可取消。</p>
+            <select className="rounded border border-field bg-canvas p-1" value={upgradeTemplate} onChange={(e) => { setUpgradeTemplate(e.target.value); setUpgradeSelection([]); }}><option value="">选择原模板</option>{PIPELINE_TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
+            {(() => { const template = PIPELINE_TEMPLATES.find((t) => t.id === upgradeTemplate); if (!template) return null; const changes = pipelineUpgradeCandidates(drafts.map(toStep), template); return <>
+              {changes.length === 0 && <p className="mt-2 text-l3">没有可匹配的差异；自定义/改名步骤请人工对照。</p>}
+              {changes.map((change) => <details key={change.index} className="mt-2"><summary><input type="checkbox" checked={upgradeSelection.includes(change.index)} onClick={(e) => e.stopPropagation()} onChange={(e) => setUpgradeSelection((old) => e.target.checked ? [...old, change.index] : old.filter((i) => i !== change.index))} /> {change.current.name} · {change.fields.join("、")}</summary><div className="grid grid-cols-2 gap-2"><pre className="max-h-64 overflow-auto whitespace-pre-wrap bg-canvas p-2">{JSON.stringify(change.current,null,2)}</pre><pre className="max-h-64 overflow-auto whitespace-pre-wrap bg-canvas p-2">{JSON.stringify(change.proposed,null,2)}</pre></div></details>)}
+              <button type="button" disabled={!upgradeSelection.length} className="mt-2 text-l2 disabled:opacity-40" onClick={async () => {
+                if (!(await confirmDialog("将用新版合同替换勾选步骤的简报、输入输出、技能和人工事项；自定义修改不会自动合并。只更新编辑草稿，确认？", { confirmText: "载入草稿" }))) return;
+                setDrafts((old) => old.map((draft, index) => { const change = changes.find((c) => c.index === index); return change && upgradeSelection.includes(index) ? toDraft(withResearchTools({ ...change.proposed, resources: draft.resources }, tools, config.artifactDir)) : draft; }));
+                setUpgradeSelection([]);
+              }}>将勾选更新载入草稿</button>
+            </>; })()}
+          </details>
           {warnings.length > 0 && (
-            <div className="rounded-sm bg-strip p-2 text-xs">
+            <div className="rounded-sm ccode-well p-2 text-xs">
               <p className="mb-1 text-warn-text">
                 ! project.toml 有 {warnings.length} 条提示
               </p>
@@ -1212,7 +1244,7 @@ export default function PipelineEditor({
           <div className="flex gap-2">
             <button
               type="button"
-              className="flex-1 rounded-md bg-strip p-3 text-sm text-l3 hover:bg-inset hover:text-l1"
+              className="flex-1 rounded-md ccode-well p-3 text-sm text-l3 hover:bg-hover hover:text-l1"
               onClick={() =>
                 setDrafts((list) => [
                   ...list,
@@ -1243,9 +1275,9 @@ export default function PipelineEditor({
             </button>
             <button
               type="button"
-              className="flex-1 rounded-md bg-strip p-3 text-sm text-l3 hover:bg-inset hover:text-l1 disabled:opacity-40"
+              className="flex-1 rounded-md ccode-well p-3 text-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-40"
               disabled={appending}
-              title="把模板的步骤追加到当前流程末尾；同名步骤跳过，工作区名冲突自动改名"
+              title="把模板的步骤追加到当前流程末尾；同名且交付相容才跳过；交付不同需确认改名追加"
               onClick={() => setAppendOpen((v) => !v)}
             >
               ＋ 从模板追加
@@ -1275,12 +1307,12 @@ export default function PipelineEditor({
             </p>
           )}
           {appendOpen && (
-            <div className="rounded-md bg-strip p-3">
+            <div className="rounded-md ccode-well p-3">
               <p className="mb-2 text-xs text-l3">
-                选择模板，把它的步骤追加到当前流程末尾（同名步骤跳过；工作区名冲突会自动加后缀）：
+                选择模板，把它的步骤追加到当前流程末尾（同名交付不同需确认改名；工作区名冲突会自动加后缀）：
               </p>
               {submissionAppend ? (
-                <div className="rounded-sm bg-inset p-3">
+                <div className="rounded-sm ccode-well p-3">
                   <p className="text-xs font-medium text-l1">投稿与返修分支</p>
                   <div className="mt-2 space-y-1.5 text-xs text-l2">
                     <label className="flex items-center gap-2">
@@ -1364,7 +1396,7 @@ export default function PipelineEditor({
                   <li key={t.id}>
                     <button
                       type="button"
-                      className="w-full rounded-sm bg-inset p-2 text-left hover:bg-hover disabled:opacity-40"
+                      className="w-full rounded-sm ccode-well p-2 text-left hover:bg-hover disabled:opacity-40"
                       disabled={appending}
                       onClick={() =>
                         t.id === "submission-rebuttal"
@@ -1395,7 +1427,7 @@ export default function PipelineEditor({
                   <li key={t.id}>
                     <button
                       type="button"
-                      className="w-full rounded-sm bg-inset p-2 text-left hover:bg-hover disabled:opacity-40"
+                      className="w-full rounded-sm ccode-well p-2 text-left hover:bg-hover disabled:opacity-40"
                       disabled={appending}
                       onClick={() => void appendTemplate(t)}
                     >

@@ -80,7 +80,8 @@
   **Codex 例外（v3.249 / v3.250）**：「设为全局」与注册只写 `config.toml`，禁止写 `auth.json`。密钥落
   `experimental_bearer_token`（ChatGPT 自带 Codex 认这个字段）。禁止把 MCP 的 `http_headers` 写进 provider 块。
 - **Profile“保存成功”不等于“可用”**：验证固定三层——本地字段/活配置解析、CLI doctor/启动预检、最小 API 请求；密钥仅在
-  Rust 层参与验证，结果统一脱敏。「设为全局」成功后必须自动执行本地与 CLI 配置复检。
+  Rust 层参与验证，结果统一脱敏。「设为全局」成功后必须自动执行本地与 CLI 配置复检。Codex `doctor --json` 只把
+  `config`/`auth` 失败算 CLI 预检失败；中转探测、桌面 CDN、会话库等本机项不株连，连通性看 API 层。
 - **官方账号 profile 只读检测 + env 净化**：CLI auth 文件只读探测「已连接」，断开引导用户用 CLI 自己的 logout；官方账号
   拉起不注入 API env，且必须 `env_remove` 同协议残留 API 密钥变量（防静默覆盖账号登录）；统计页官方账号显示「订阅」不计费。
   **API Key 模式不算官方账号**：凭证字段表只认 OAuth token 字段；`OfficialAccountSpec.api_key_fields`（codex =
@@ -216,7 +217,7 @@
   路径），上游改名/移动时明确报错并引导手动重新导入；手动重新导入仍走冲突确认。新建/编辑
   走 `create_skill`/`update_skill_content`：重名拒绝并引导改用「编辑内容」；编辑经临时目录走既有覆盖路径（覆盖前备份、
   辅助文件保留、source/repo 不改写）；◈ 优化开终端让 Agent 直改库文件，备份兜底仍靠保存/覆盖路径。**内置技能更新**
-  （`apply_builtin_skill_update`）= 覆盖前原文件自动备份为同目录 `SKILL.md.bak-<yyyymmdd>`（同日重名追加 -2/-3），种子内容原子写入。
+  （`apply_builtin_skill_update`）= 先预览 SKILL.md 与随包脚本并绑定目录摘要，再持进程/OS 锁确认摘要未变；全部原件备份后写入，失败恢复本批文件。保留同目录 `.bak-<yyyymmdd>`（重名追加后缀）供人工恢复，辅助文件不能静默漏更新。
 - **技能删除保护（与 MCP 同思路，语义不同）**：删除 = 删 SSOT 库条目 + 回收各 agent 已分发副本——没有 MCP 那种
   「保留 agent 侧」选项，因为分发出去的本就是 Mesa 管的链接/带标记副本（`remove_ours` 只动这两类，用户自放内容天然不碰）。
   删除确认走应用内弹层（`src/pages/SkillsPage.tsx` DeleteSkillModal，禁原生对话框）：所有技能列影响面
@@ -229,3 +230,5 @@
   宁可多提示也不错删警告）。
 - **技能接口声明（inputs/outputs）与产物冲突/链路检测**：技能 SKILL.md frontmatter 可声明 `outputs`（产物路径）与 `inputs`（读取路径）字段（YAML 列表，行内 `[a, b]` 与多行 `- a` 两种写法解析都容忍，缺字段 = 空数组；目录带尾斜杠、文件写全路径，只声明主要读写产物），`parse_skill_md` 解析进 `SkillDto.outputs/inputs`（list 时现算，不入库文件）。`compose_skill_md`/`update_content_impl` 支持写接口声明，普通编辑（interface=None）保留库中已声明的 inputs/outputs 不静默丢弃。外部技能未声明时由 `infer_interface_from_body` 从正文推断兜底（逐行找路径 token、按行内动词分类读入/产出、双侧动词不猜、每侧上限 8 条；推断只进 DTO 并打 `interface_inferred` 标，不回写 SKILL.md）。分发随目录走不受影响，CLI 端对未知 frontmatter 字段一律忽略。检测为纯逻辑（`src/skill-conflicts.ts`）：① `skillOutputConflicts`——同一步骤挂载技能的 outputs 两两比对，路径相同或互为目录前缀即报冲突；② `skillChainWarnings`——技能 inputs 对「上游步骤产物 + 本步骤声明输入 + 项目资源」（调用方汇总成 supply）逐条找供给，outputs 对本步骤 expectedArtifacts 对账（含 `*` 通配与目录/文件互含判定），缺供给/未进预期产物即报；推断接口照检但文案标「推断」。StepSkillsChips 警告行逐条提示——只提醒不拦截。
 - **技能分类批量回填**：`backfill_skill_categories` 只给「GitHub 来源 + 无分类」的技能补仓库名分类（自动分类 #15 之前的存量导入），已有分类一律不动、幂等；入口在技能页顶部 ⋯。
+
+- **科研工具读取边界（2026-09-11）**：Zotero SQLite 仅只读连接+在线备份到内存；取得一致快照失败不可退回裸复制。项目资源/文献来源写回与模板应用持项目配置进程锁+OS 锁；前端不得用导入前配置覆盖后端新增资源。阅读区对外部 PDF 只放行精确登记且 readonly 的 paper 资源，笔记仍只写项目 notes。Origin/Blender 执行不声称受工作树 OS 沙箱保护，默认新输出目录、显式执行、不碰个人已打开工程。

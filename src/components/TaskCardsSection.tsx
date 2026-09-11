@@ -659,7 +659,7 @@ export default function TaskCardsSection({
       </div>
       {error && <p className="mt-1 text-xs text-err-text">{error}</p>}
       {dirtyOpen && mainDirty !== null && mainDirty > 0 && (
-        <div className="mt-1.5 rounded-md bg-inset px-2.5 py-2">
+        <div className="ccode-well mt-1.5 rounded-md px-2.5 py-2">
           {dirtyLoading && (
             <p className="text-micro text-l4">正在列出改动…</p>
           )}
@@ -711,7 +711,7 @@ export default function TaskCardsSection({
           StepFlow 传 bare 去掉自带底色，由这张卡统一承载。 */}
       {focusStep && focusStepDto ? (
         /* shadow-sm：当前步骤卡是本屏唯一「现在该干嘛」答案，微弱投影把它从画布上抬起来（v3.92 走查） */
-        <div className="mt-2 rounded-lg bg-inset px-4 py-3.5 shadow-sm">
+        <div className="ccode-well mt-2 rounded-lg px-4 py-3.5 shadow-sm">
           <div className="mb-3 flex items-center gap-2">
           {onFocusIndex && (
             <button

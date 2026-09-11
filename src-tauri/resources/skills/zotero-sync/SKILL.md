@@ -17,7 +17,8 @@ outputs: [papers/zotero-sync.md]
 
 ## 前置检测（开工先做）
 
-- 探活：`curl -s http://127.0.0.1:23119/api/users/me`；连接失败 = 未运行，HTTP 403/401 = 已运行但未授权，两者都不得直接写库
+- 探活：`curl -i --max-time 3 http://127.0.0.1:23119/api/`；连接失败 = 未运行，HTTP 403 = 本机通信未开启（读取与写入授权分开），两者都不得直接写库
+- 官方本地用户路径用 `/api/users/0/items` 或真实数字 ID；不使用 users/me。读取可用不等于写入可用；Zotero 10+ 的本地写入需 `/api/local/authorize` 用户确认，本机较旧版本不得照搬该流程。
 - Better BibTeX：向 `/better-bibtex/json-rpc` 发送 `user.groups` 探测；方法名、参数和写入能力以实机版本及官方方法表为准，不凭记忆拼参数
 - 未取得写入授权时只读或导出；不得把“本地 API 可探活”误判为“可以写库”。写入前记录用户意图、授权状态和拟写入条数
 - **回落口径**：`lit_source = search` 下通道不可用或用户未授权时，只产出 `papers/to-fetch.ris` 等文件；这是正常分支，不是失败
@@ -29,7 +30,7 @@ outputs: [papers/zotero-sync.md]
 - 来源：`papers/included.md`、`papers/to-fetch.md`/`papers/to-fetch.ris`；每条先按 DOI（无 DOI 按标题）查重
 - 优先 BBT `item.import`；不可用时按实机 API 口径建 item。已在库的不重复建，逐条报告「已在库」
 - `papers/` 已有 PDF 才挂附件；付费墙条目可归入用户确认的「待获取全文」collection
-- 超过 20 条先在 `.ccode/help-wanted.md` 报数，未回复按全量执行，不停工
+- 逐批在 `.ccode/help-wanted.md` 列条目、collection、附件及拟写操作，取得该批明确确认后才写；未回复只导出文件，不执行写库
 
 ### 2. 出库（Zotero → 项目，仅精读/用户明确要求时）
 

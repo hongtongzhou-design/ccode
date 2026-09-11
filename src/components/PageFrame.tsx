@@ -23,11 +23,12 @@ export function PageFrame({
   children: ReactNode;
   className?: string;
   width?: keyof typeof WIDTHS;
-  /** workspace = 项目页工作面，与项目栏同底（rail2），对象用 inset 浮起。 */
+  /** workspace = 项目页工作面，与项目栏同底（rail2），对象统一用 ccode-well 浮起。 */
   surface?: "canvas" | "workspace";
 }) {
   return (
     <div
+      data-surface={surface}
       className={`ccode-page-frame min-h-full px-6 pb-6 pt-1 ${
         surface === "workspace" ? "bg-rail2" : "bg-canvas"
       }`}
@@ -73,7 +74,7 @@ export const primaryActionClass =
 export const secondaryActionClass =
   "ccode-action-secondary inline-flex h-8 items-center justify-center rounded-md border border-field bg-strip px-3 text-xs text-l2 transition-colors hover:bg-inset hover:text-l1 disabled:cursor-not-allowed disabled:opacity-50";
 
-/** 项目页文档/笔记/工作树等内容井：canvas/strip 混色，浅色不另垫白纸 */
+/** 内容卡统一底色：由所在 PageFrame 画布派生，保留现有项目页公共类名 */
 export const projectWellClass = "ccode-well rounded-lg p-3";
 
 /** 行内 28px 描边次按钮：列表行/工具栏次级操作统一口径（原各页 secBtn 逐字复制的收敛点） */
@@ -517,7 +518,7 @@ export function NoticeBar({
     tone === "ok" ? "text-ok-text" : tone === "warn" ? "text-warn-text" : "";
   return (
     <div
-      className={`flex items-start gap-2 rounded-md bg-strip px-3 py-2.5 text-xs leading-5 text-l2 ${className}`}
+      className={`flex items-start gap-2 rounded-md ccode-well px-3 py-2.5 text-xs leading-5 text-l2 ${className}`}
     >
       {icon && <span className={`shrink-0 ${iconCls}`}>{icon}</span>}
       <span className="min-w-0 flex-1">{children}</span>

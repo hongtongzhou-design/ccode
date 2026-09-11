@@ -951,7 +951,7 @@ export default function ScheduleSection({
         </div>
       )}
       {(isCard || open) && (
-        <div className={isCard ? "" : "mt-1 rounded-md bg-strip p-2"}>
+        <div className={isCard ? "" : "mt-1 rounded-md ccode-well p-2"}>
           {error && <p className="py-1 text-xs text-err-text">{error}</p>}
           {schedules !== null &&
             schedules.length === 0 &&

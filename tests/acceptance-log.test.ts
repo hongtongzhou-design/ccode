@@ -8,6 +8,7 @@ import {
   reviewedShaAfterCommit,
   gitAdmissionPayload,
   mergeAdmissionText,
+  deliveryFollowupText,
   shortVersionId,
   watchAdoptText,
   watchLedgerFailed,
@@ -96,4 +97,11 @@ test("acceptance entry key does not collapse empty run/goal ids", () => {
       decidedAt: "t2",
     }),
   );
+});
+
+test("successful merge still explains skipped non-Git deliverables", () => {
+  assert.equal(deliveryFollowupText(undefined), "");
+  assert.equal(deliveryFollowupText({}), "");
+  assert.match(deliveryFollowupText({ conflicts: ["papers/report.pdf"] }), /未覆盖.*papers\/report.pdf/);
+  assert.match(deliveryFollowupText({ failed: ["磁盘写入失败"] }), /仍需处理.*不能归档/);
 });

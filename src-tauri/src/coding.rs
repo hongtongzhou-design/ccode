@@ -455,23 +455,11 @@ fn parse_worktree_list(text: &str) -> Vec<WorktreeRow> {
     };
     for line in text.lines() {
         if line.is_empty() {
-            flush(
-                &mut path,
-                &mut branch,
-                &mut detached,
-                &mut head,
-                &mut rows,
-            );
+            flush(&mut path, &mut branch, &mut detached, &mut head, &mut rows);
             continue;
         }
         if let Some(rest) = line.strip_prefix("worktree ") {
-            flush(
-                &mut path,
-                &mut branch,
-                &mut detached,
-                &mut head,
-                &mut rows,
-            );
+            flush(&mut path, &mut branch, &mut detached, &mut head, &mut rows);
             path = Some(PathBuf::from(rest));
         } else if let Some(rest) = line.strip_prefix("branch ") {
             branch = strip_heads(rest);
@@ -481,13 +469,7 @@ fn parse_worktree_list(text: &str) -> Vec<WorktreeRow> {
             detached = true;
         }
     }
-    flush(
-        &mut path,
-        &mut branch,
-        &mut detached,
-        &mut head,
-        &mut rows,
-    );
+    flush(&mut path, &mut branch, &mut detached, &mut head, &mut rows);
     rows
 }
 

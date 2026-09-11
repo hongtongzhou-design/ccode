@@ -282,7 +282,7 @@ test("projectNowLine puts review and unfinished before accepted", () => {
   );
 });
 
-test("goalCardMeta hides whole-project input noise", () => {
+test("goalCardMeta uses counts instead of repeating paths and distinguishes accepted outputs from declared scope", () => {
   assert.equal(
     goalCardMeta({
       agentLabel: "Codex",
@@ -299,8 +299,24 @@ test("goalCardMeta hides whole-project input noise", () => {
       reviewRequired: true,
       workMode: "office",
     }),
-    "Codex · 周报.md",
+    "Codex · 输出范围 1 项",
   );
+  assert.equal(goalCardMeta({
+    agentLabel: "Codex", outputPaths: ["."],
+    adoptedPaths: ["output/summary.md", "output/weekly.md", "output/clean.csv"],
+    reviewRequired: true, workMode: "research",
+  }), "Codex · 已写入 3 项");
+  assert.equal(goalCardMeta({
+    agentLabel: "Codex", outputPaths: ["output", "output", " ", "."],
+    reviewRequired: true,
+  }), "Codex · 输出范围 1 项", "声明目录不当成已生成文件");
+  assert.equal(goalCardMeta({
+    agentLabel: "Codex", outputPaths: ["."], adoptedPaths: ["report.md", " report.md ", ".", ""],
+    reviewRequired: true,
+  }), "Codex · 已写入 1 项");
+  assert.equal(goalCardMeta({
+    agentLabel: "Codex", outputPaths: ["output"], reviewRequired: false,
+  }), "Codex · 只讨论");
 });
 
 test("formatAcceptedStatusLine keeps the verdict and note", () => {

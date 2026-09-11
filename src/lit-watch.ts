@@ -11,7 +11,7 @@ import type { LitWatchFilterDto, ScheduleDto } from "./types.ts";
 
 /** inbox.md 中的一条文献命中 */
 export interface WatchEntryDto {
-  /** 内容哈希 id（标题+批次日期），`w-<hex>`；仅作列表 key，不持久化 */
+  /** 标题 + 原注释批次日期的稳定哈希，`w-<hex>`；兼容已有忽略记录 */
   id: string;
   title: string;
   /** 来源行第一段（arxiv / 期刊 / 会议名） */
@@ -26,7 +26,7 @@ export interface WatchEntryDto {
   zhSummary: string;
   /** 链接/DOI 段；没有为空串 */
   url: string;
-  /** 巡检批次日期 YYYY-MM-DD；无批次标记为 null */
+  /** 巡检批次日期 YYYY-MM-DD（标准注释或旧版巡检标题）；缺失/无效为 null */
   date: string | null;
   rawLineRange: [number, number];
   /** 期刊指标（JCR2025 + 中科院分区表2025 合并，按期刊名规范化匹配）；未匹配/未装表为 null */
@@ -191,8 +191,15 @@ export interface DayGroup {
 function parseLocalDay(date: string): Date | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.trim());
   if (!m) return null;
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  return Number.isNaN(d.getTime()) ? null : d;
+  const year = Number(m[1]);
+  const month = Number(m[2]) - 1;
+  const day = Number(m[3]);
+  const d = new Date(0);
+  d.setFullYear(year, month, day);
+  d.setHours(0, 0, 0, 0);
+  return d.getFullYear() === year && d.getMonth() === month && d.getDate() === day
+    ? d
+    : null;
 }
 
 /** 本地日期串（分桶比较键） */
@@ -348,6 +355,37 @@ export function weeklyBuckets(
     label: `${start.getMonth() + 1}月${start.getDate()}日周`,
     count: counts.get(localDayKey(start)) ?? 0,
   }));
+}
+
+/** 缺日期与确实为零分开呈现；趋势仍统计全部命中，不受忽略/筛选影响。 */
+export function weeklyTrend(
+  entries: readonly WatchEntryDto[],
+  weeks = 8,
+  now: Date = new Date(),
+): {
+  buckets: WeekBucket[];
+  undatedCount: number;
+  showChart: boolean;
+  note: string | null;
+} {
+  const undatedCount = entries.filter(
+    (e) => !e.date || !parseLocalDay(e.date),
+  ).length;
+  const showChart = entries.length > undatedCount;
+  const note =
+    entries.length === 0
+      ? "暂无文献命中，巡检后显示趋势"
+      : !showChart
+        ? `${undatedCount} 条文献缺少有效巡检日期，暂无法统计趋势`
+        : undatedCount > 0
+          ? `另有 ${undatedCount} 条缺少有效巡检日期，未计入趋势`
+          : null;
+  return {
+    buckets: weeklyBuckets(entries, weeks, now),
+    undatedCount,
+    showChart,
+    note,
+  };
 }
 
 // ===== PDF 直链 =====

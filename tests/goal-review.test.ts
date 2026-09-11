@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   codingReviewHint,
+  companionPdfPath,
+  resultReadinessLabel,
   goalReviewCopy,
   goalReviewFacts,
   goalReviewMode,
@@ -69,4 +71,20 @@ test("review copy and facts stay scene-specific", () => {
   }).join("\n");
   assert.match(office, /文档 1/);
   assert.doesNotMatch(office, /文献/);
+});
+
+test("review generation is distinct from execution count and paired PDF is same result", () => {
+  const facts = goalReviewFacts({ runCount: 4, resultSeq: 2, changes: [] }).join("\n");
+  assert.match(facts, /冻结版本：2/);
+  assert.doesNotMatch(facts, /第 4 版/);
+  assert.equal(companionPdfPath("slides/deck.pptx", [{ path: "slides/deck.pdf", kind: "added" }]), "slides/deck.pdf");
+  assert.equal(companionPdfPath("slides/deck.pptx", [{ path: "old/deck.pdf", kind: "added" }]), null);
+  assert.equal(companionPdfPath("slides/deck.pptx", [{ path: "slides/deck.pdf", kind: "added", tooLarge: true }]), null);
+});
+
+test("result readiness describes acceptance rather than process completion", () => {
+  assert.match(resultReadinessLabel("reviewable"), /不代表目标已完成/);
+  assert.match(resultReadinessLabel("blocked"), /不可写回/);
+  assert.match(resultReadinessLabel("applied"), /接受记录/);
+  assert.match(resultReadinessLabel("ledger_pending"), /待补记/);
 });

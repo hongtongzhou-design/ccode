@@ -2421,7 +2421,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               <>
                 {summary && (
                   <div className="px-4">
-                    <div className="mx-auto mt-2 max-w-3xl rounded-sm bg-inset p-3 text-sm text-l2">
+                    <div className="mx-auto mt-2 max-w-3xl rounded-sm ccode-well p-3 text-sm text-l2">
                       <span className="mr-1">◈</span>
                       <span className="whitespace-pre-wrap">{summary}</span>
                     </div>

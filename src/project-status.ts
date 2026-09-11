@@ -6,7 +6,7 @@ import { pathWithin, samePath } from "./path-utils.ts";
 import { sessionExcludedFromProjectList } from "./session-filter.ts";
 import { deriveCodingKind, officeDocKind, type OfficeDocKind } from "./work-mode.ts";
 import { namedSessionTitle } from "./workbench-hero.ts";
-import { goalBucket, goalDisplayName } from "./project-tasks.ts";
+import { acceptedGoalOutputs, goalBucket, goalDisplayName } from "./project-tasks.ts";
 
 export function codingStatusLine(input: {
   worktrees: readonly {
@@ -480,6 +480,7 @@ export function formatAcceptedStatusLine(goal: AcceptedGoalStatus): string {
 export function goalCardMeta(input: {
   agentLabel?: string | null;
   outputPaths?: readonly string[];
+  adoptedPaths?: readonly string[];
   reviewRequired: boolean;
   workMode?: string | null;
 }): string {
@@ -490,10 +491,10 @@ export function goalCardMeta(input: {
     bits.push("只讨论");
     return bits.join(" · ");
   }
-  const outputs = (input.outputPaths ?? [])
-    .map((item) => item.trim())
-    .filter((item) => item && item !== ".");
-  if (outputs.length) bits.push(outputs.join("、"));
+  const adoptedCount = new Set(acceptedGoalOutputs([], input.adoptedPaths)).size;
+  const scopeCount = new Set(acceptedGoalOutputs(input.outputPaths, [])).size;
+  if (adoptedCount) bits.push(`已写入 ${adoptedCount} 项`);
+  else if (scopeCount) bits.push(`输出范围 ${scopeCount} 项`);
   else bits.push(input.workMode === "office" ? "验收后写入文档" : "验收后写入项目");
   return bits.join(" · ");
 }

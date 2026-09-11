@@ -97,3 +97,13 @@ export function acceptanceEntryKey(entry: {
 }): string {
   return `${entry.kind ?? ""}:${entry.runId}:${entry.goalId}:${entry.versionId ?? ""}:${entry.decidedAt}`;
 }
+
+/** Git 合并成功不表示被跳过的非 Git 文件也已接收。 */
+export function deliveryFollowupText(report: { conflicts?: string[]; skippedProtected?: string[]; failed?: string[] } | null | undefined): string {
+  if (!report) return "";
+  const parts: string[] = [];
+  if (report.conflicts?.length) parts.push(`同名文件未覆盖：${report.conflicts.join("、")}`);
+  if (report.skippedProtected?.length) parts.push(`保护路径未接收：${report.skippedProtected.join("、")}`);
+  if (report.failed?.length) parts.push(`仍需处理：${report.failed.join("；")}`);
+  return parts.length ? `${parts.join("；")}。工作区中仍有未接收内容时不能归档。` : "";
+}

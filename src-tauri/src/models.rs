@@ -122,7 +122,7 @@ fn model_list_cache_key(
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchModelsResult {
-    models: Vec<String>,
+    pub models: Vec<String>,
     from_cache: bool,
     fetched_at: String,
     /// 0 表示网关只返回模型 ID，能力会回退到其他能力层。
@@ -366,13 +366,20 @@ fn catalog_slot_walk_order(
     order
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchGatewayCatalogDto {
+    pub gateway: crate::profiles::Gateway,
+    pub capability_metadata_count: usize,
+}
+
 /// 优先调用方指定的协议槽（连接行刷新）或网关上次成功槽，再按 Anthropic → OpenAI → Responses → Gemini。
 #[tauri::command]
 pub async fn fetch_gateway_catalog(
     store: tauri::State<'_, crate::profiles::ProfileStore>,
     gateway_id: String,
     prefer_slot: Option<String>,
-) -> Result<crate::profiles::Gateway, String> {
+) -> Result<FetchGatewayCatalogDto, String> {
     let gw = store
         .list_gateways()?
         .into_iter()
@@ -397,7 +404,11 @@ pub async fn fetch_gateway_catalog(
         .await
         {
             Ok(res) if !res.models.is_empty() => {
-                return store.merge_fetched_models(&gateway_id, slot.as_str(), res.models);
+                let gateway = store.merge_fetched_models(&gateway_id, slot.as_str(), res.models)?;
+                return Ok(FetchGatewayCatalogDto {
+                    gateway,
+                    capability_metadata_count: res.capability_metadata_count,
+                });
             }
             Ok(_) => last_err = format!("{} 槽返回空目录", slot.as_str()),
             Err(e) => last_err = e,

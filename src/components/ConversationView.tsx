@@ -227,7 +227,7 @@ export default function ConversationView({
             </span>
           </button>
           {isOpen && (
-            <div className="mt-1 whitespace-pre-wrap rounded-sm bg-inset p-2 text-xs italic text-l3">
+            <div className="mt-1 whitespace-pre-wrap rounded-sm ccode-well p-2 text-xs italic text-l3">
               {b.text}
             </div>
           )}
@@ -240,7 +240,7 @@ export default function ConversationView({
       return (
         <div
           key={key}
-          className="my-1 inline-block max-w-full rounded-sm border border-hairline bg-inset px-2 py-1 font-mono text-xs text-l3"
+          className="my-1 inline-block max-w-full rounded-sm border border-hairline ccode-well px-2 py-1 font-mono text-xs text-l3"
         >
           <span className="mr-1 rounded-sm bg-seg-sel px-1 text-l2">{b.toolName ?? "tool"}</span>
           <span className="whitespace-pre-wrap break-all">
@@ -263,7 +263,7 @@ export default function ConversationView({
       return (
         <div
           key={key}
-          className="my-1 whitespace-pre-wrap break-all rounded-sm border border-hairline bg-inset p-2 font-mono text-xs text-l3"
+          className="my-1 whitespace-pre-wrap break-all rounded-sm border border-hairline ccode-well p-2 font-mono text-xs text-l3"
         >
           {isOpen || !long ? b.text : `${b.text.slice(0, 200)}…`}
           {long && (
@@ -358,7 +358,7 @@ export default function ConversationView({
           type="button"
           onClick={() => toggleExpand(run.key)}
           aria-expanded={isOpen}
-          className="flex h-7 w-full items-center gap-1.5 rounded-md bg-inset/65 px-2 text-xs text-l3 hover:bg-raised hover:text-l1"
+          className="flex h-7 w-full items-center gap-1.5 rounded-md ccode-well px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
         >
           <FoldMark open={isOpen} />
           <span className="shrink-0">

@@ -1,3 +1,4 @@
+import { researchToolsFromSettings, withResearchTools } from "../research-tools";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -180,7 +181,7 @@ function StepperCell({
   return (
     <li className="flex min-w-0 items-center justify-center">
       <span
-        className="relative shrink-0 bg-strip px-[3px]"
+        className="ccode-well relative shrink-0 px-[3px]"
         onMouseEnter={showTip}
         onMouseLeave={hideTip}
         onFocus={showTip}
@@ -666,7 +667,7 @@ export default function ProjectGroup({
       try {
         await invoke("apply_pipeline_template", {
           projectRoot: projectPath,
-          steps: item.steps,
+          steps: item.steps.map((s) => withResearchTools(s, researchToolsFromSettings(cfg.settings), cfg.artifactDir)),
           projectSettings: settingsForTemplateApply(item),
           strategy: "append",
           topic: templateTopic.trim() || null,
@@ -706,7 +707,7 @@ export default function ProjectGroup({
     try {
       await invoke("apply_pipeline_template", {
         projectRoot: projectPath,
-        steps: item.steps.map((s) => ({ ...s })),
+        steps: item.steps.map((s) => withResearchTools(s, researchToolsFromSettings(cfg.settings), cfg.artifactDir)),
         projectSettings: settingsForTemplateApply(item),
         strategy: "replace",
         topic: templateTopic.trim() || null,
@@ -794,10 +795,10 @@ export default function ProjectGroup({
   }
 
   /** 编辑器保存：整体写回 steps 后重读配置，刷新资源绑定等校验警告并关闭编辑器 */
-  async function savePipeline(steps: ProjectStepDto[]) {
+  async function savePipeline(steps: ProjectStepDto[], settings?: string[]) {
     if (!project || !cfg) return;
     setPipelineSaving(true);
-    const ok = await saveConfig({ ...cfg, steps });
+    const ok = await saveConfig({ ...cfg, steps, ...(settings ? { settings } : {}) });
     if (ok) {
       try {
         await reloadCfg(project.path);
@@ -992,6 +993,7 @@ export default function ProjectGroup({
 
   /** 导入选定分类：生成 references.bib + 登记 PDF 为资源；顺带把 lit_source 置为 zotero，
    *  TASK.md 据此把检索步骤降级为「盘点 + 查漏补缺」（renderTaskMd 的「文献来源」段） */
+  const [zoteroAttachmentBase, setZoteroAttachmentBase] = useState<string | null>(null);
   async function importZotero(collectionId: number | null) {
     if (!project) return;
     setZoteroBusy(true);
@@ -1002,16 +1004,16 @@ export default function ProjectGroup({
         itemCount: number;
         pdfCount: number;
         missingPdf: number;
+        config: ProjectConfigDto;
       }>("zotero_import", {
         projectRoot: project.path,
         dataDir: zoteroDir ?? null,
         collectionId,
+        linkedAttachmentBase: zoteroAttachmentBase,
       });
-      if (cfg && cfg.litSource !== "zotero") {
-        await saveConfig({ ...cfg, litSource: "zotero" });
-        // 与 setLitSource 同口径：「文献来源」段就地同步进已编辑的 TASK.md 内容文件
-        await syncLitSourceToTaskMds("zotero");
-      }
+      setCfg(out.config);
+      // 后端已把资源与来源一起保存；不得用导入前的 cfg 全量回写。
+      await syncLitSourceToTaskMds("zotero");
       setZoteroLib(null);
       setZoteroMsg(
         `已导入 ${out.itemCount} 条 → ${out.bibRel}` +
@@ -1471,7 +1473,7 @@ export default function ProjectGroup({
       )}
 
       {registered && freshGitGuide && (
-        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-sm bg-strip p-2 text-xs text-l2">
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-sm ccode-well p-2 text-xs text-l2">
           <span>还不是 git 仓库的话，初始化后才能建工作区。</span>
           {/* 注册时已自动扫过一遍资源，结果要在**详情页**说出来（v3.87 修）：
               原先只在「文献与数据」面板的折叠头里显示，而那个面板 v3.85 搬进了设置抽屉，
@@ -1544,7 +1546,7 @@ export default function ProjectGroup({
       )}
 
       {registered && cfg && cfg.steps.length === 0 && !cfg.pipelineOptOut && (
-        <div className="mb-2 rounded-md bg-strip p-3">
+        <div className="ccode-well mb-2 rounded-md p-3">
           <p className="mb-2 text-xs text-l3">
             还没有研究步骤。写论文请从模板库选一套；只读文献、写笔记，选「不使用研究流程」。
           </p>
@@ -1594,9 +1596,9 @@ export default function ProjectGroup({
           伪装成虚线块可发现性为零，入口删除、视觉块保留为普通虚线块）；末端菱形 = 流程终点，
           全部步骤完成后点亮（与完成圆同一 done 绿）。
           结构 = 名称带 + 步进器带两个同列网格；虚线链由 StepperChain 在带级一次铺满
-          （块位以圆心为锚分段等距计算，跨列无边界、各圆两侧断口一致），圆以 strip 底色遮罩压在链上 */}
+          （块位以圆心为锚分段等距计算，跨列无边界、各圆两侧断口一致），圆以同款内容井底色遮罩压在链上 */}
       {registered && cfg && cfg.steps.length > 0 && (
-        <div className="mb-3 rounded-md bg-strip px-3 py-2.5">
+        <div className="ccode-well mb-3 rounded-md px-3 py-2.5">
           {cfg.steps.some((step) => step.role === "you" || step.role === "both") && (
             <div
               className="mb-1 flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-micro text-l4"
@@ -1868,6 +1870,7 @@ export default function ProjectGroup({
           onClick={() => setSettingsOpen(false)}
         >
           <aside
+            data-surface="canvas"
             className="flex h-full w-[34rem] max-w-[92vw] flex-col bg-canvas"
             onClick={(e) => e.stopPropagation()}
           >
@@ -1888,7 +1891,7 @@ export default function ProjectGroup({
               {project && (
                 <section>
                   <h3 className="mb-2 text-xs font-medium text-l3">基本</h3>
-                  <div className="rounded-lg bg-strip p-3">
+                  <div className="rounded-lg ccode-well p-3">
                     <div className="mb-2 flex items-center gap-2">
                       <span className="w-20 shrink-0 text-xs text-l3">
                         项目名
@@ -1968,7 +1971,7 @@ export default function ProjectGroup({
               {registered && cfg && (
                 <section>
                   <h3 className="mb-2 text-xs font-medium text-l3">研究流程</h3>
-                  <div className="rounded-lg bg-strip p-3">
+                  <div className="rounded-lg ccode-well p-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="min-w-0 flex-1 text-xs text-l4">
                         当前 {cfg.steps.length} 个步骤
@@ -2022,7 +2025,7 @@ export default function ProjectGroup({
 
       {/* 模板库选择器：项目菜单与空研究流程「选择研究流程模板」共用的唯一实例 */}
       {registered && cfg && pickerOpen && (
-        <div className="mb-4 rounded-md bg-strip p-2">
+        <div className="ccode-well mb-4 rounded-md p-2">
           <TemplatePicker
             applying={applyingTemplate}
             onApply={(item) => void applyTemplate(item)}
@@ -2056,7 +2059,7 @@ export default function ProjectGroup({
             )}
           </div>
           {resOpen && (
-            <div className="mt-1 rounded-md bg-strip p-2">
+            <div className="ccode-well mt-1 rounded-md p-2">
               {/* 「文献来源」选择器已移到流程线「定方向」的输入准备块（v3.86）——
                   它是开工前必须拍板的事，藏在抽屉三层下面本身就是错的位置，
                   而且当时与决策项、人工事项一起把同一个问题问了四遍。
@@ -2213,7 +2216,7 @@ export default function ProjectGroup({
                 </NoticeBar>
               )}
               {zoteroMsg && (
-                <div className="mt-2 flex items-start gap-2 rounded-md bg-strip px-3 py-2.5 text-xs leading-5 text-l2">
+                <div className="mt-2 flex items-start gap-2 rounded-md ccode-well px-3 py-2.5 text-xs leading-5 text-l2">
                   <span className="min-w-0 flex-1">{zoteroMsg}</span>
                   {zoteroMsg.includes("没找到") && (
                     <button
@@ -2286,7 +2289,7 @@ export default function ProjectGroup({
           warnings={cfgWarnings}
           saving={pipelineSaving}
           focusStep={editorFocus}
-          onSave={(steps) => void savePipeline(steps)}
+          onSave={(steps, settings) => void savePipeline(steps, settings)}
           onClose={() => setEditorOpen(false)}
           onConfigReload={(read) => {
             setCfg(read.config);
@@ -2317,6 +2320,10 @@ export default function ProjectGroup({
             </h2>
             <p className="mt-1 shrink-0 text-xs text-l3">生成 references.bib；PDF 只登记位置，不复制。<span className="text-l4">你的 Zotero 库只读不改。</span>
             </p>
+            <button type="button" className="mt-2 text-left text-xs text-l3" onClick={async () => {
+              const picked = await open({ directory: true, multiple: false, title: "选择 Zotero 链接附件基目录（可选）" });
+              if (typeof picked === "string") setZoteroAttachmentBase(picked);
+            }}>链接附件基目录：{zoteroAttachmentBase ?? "未指定（使用相对链接附件时选择）"}</button>
             <div className="mt-3 min-h-0 flex-1 space-y-1 overflow-auto">
               {zoteroLib.collections.map((c) => (
                 <button
@@ -2324,7 +2331,7 @@ export default function ProjectGroup({
                   type="button"
                   disabled={zoteroBusy || c.count === 0}
                   onClick={() => void importZotero(c.id)}
-                  className="flex w-full items-center gap-2 rounded-md bg-inset px-2.5 py-2 text-left hover:bg-hover disabled:opacity-40"
+                  className="flex w-full items-center gap-2 rounded-md ccode-well px-2.5 py-2 text-left hover:bg-hover disabled:opacity-40"
                 >
                   <span className="min-w-0 flex-1 truncate text-sm text-l1">
                     {c.name}

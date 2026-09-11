@@ -1,3 +1,7 @@
+import ResearchToolFields from "./ResearchToolFields";
+import { DEFAULT_RESEARCH_TOOLS, RESEARCH_TOOL_FIELDS, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../research-tools";
+import { confirmDialog } from "./ConfirmDialog";
+import { conflictingTemplateSteps, renameConflictingSteps } from "../pipeline-append";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -55,12 +59,14 @@ export default function TemplatePickModal({
     useState<SubmissionMode>("initial");
   const [submissionRound, setSubmissionRound] = useState(1);
   const [topic, setTopic] = useState("");
+  const [tools, setTools] = useState({ ...DEFAULT_RESEARCH_TOOLS });
 
   useEffect(() => {
     let cancelled = false;
     invoke<ProjectConfigReadDto>("read_project_config", { path: projectPath })
       .then((read) => {
         if (cancelled) return;
+        setTools(researchToolsFromSettings(read.config.settings));
         const t = read.config.topic?.trim();
         if (t) setTopic(t);
       })
@@ -133,12 +139,22 @@ export default function TemplatePickModal({
       const mode = tpl.id === "submission-rebuttal" ? submissionMode : undefined;
       const round = Math.max(1, Math.floor(submissionRound));
       const submission = tpl.id === "submission-rebuttal";
-      const projectSettings = settingsForTemplateApply(tpl, filled);
+      const projectSettings = [...settingsWithResearchTools(settingsForTemplateApply(tpl, filled), tools), ...RESEARCH_TOOL_FIELDS.filter((f) => tools[f.key] === DEFAULT_RESEARCH_TOOLS[f.key]).map((f) => `科研工具/${f.key}：${tools[f.key]}`)];
+      const current = await invoke<ProjectConfigReadDto>("read_project_config", { path: projectPath });
+      if (current.config.steps.length && JSON.stringify(researchToolsFromSettings(current.config.settings)) !== JSON.stringify(tools)) {
+        throw new Error("已有流程的工具选择请在「编辑研究流程」统一修改，再追加模板；未改变现有步骤");
+      }
+      let steps = pipelineStepsForTemplate(tpl, mode ?? "initial", round).map((s) => withResearchTools(s, tools, current.config.artifactDir));
+      const conflicts = conflictingTemplateSteps(current.config.steps, steps);
+      if (conflicts.length) {
+        if (!(await confirmDialog(`这些同名步骤的交付不同：${conflicts.join("、")}。保留旧步骤，按「${tpl.name}」改名追加？`, { confirmText: "改名追加" }))) { setBusy(null); return; }
+        steps = renameConflictingSteps(current.config.steps, steps, tpl.name);
+      }
       const res = await invoke<AppendStepsResultDto>(
         "apply_pipeline_template",
         {
           projectRoot: projectPath,
-          steps: pipelineStepsForTemplate(tpl, mode ?? "initial", round),
+          steps,
           projectSettings,
           strategy: "append",
           topic: topic.trim() || null,
@@ -184,13 +200,14 @@ export default function TemplatePickModal({
       onClose={() => void closeLater()}
       size="lg"
     >
+        <ResearchToolFields value={tools} onChange={setTools} disabled={busy !== null} />
         {submissionTpl ? (
           <>
             <p className="mb-4 text-xs text-l3">
               首投与返修不是同一条流水线；返修会按轮次生成独立的意见、回复信、修订稿和再投稿清单。
             </p>
             <div className="space-y-2">
-              <label className="flex cursor-pointer items-start gap-2 rounded-sm bg-inset p-3">
+              <label className="flex cursor-pointer items-start gap-2 rounded-sm ccode-well p-3">
                 <input
                   type="radio"
                   name="submission-mode"
@@ -205,7 +222,7 @@ export default function TemplatePickModal({
                   </span>
                 </span>
               </label>
-              <label className="flex cursor-pointer items-start gap-2 rounded-sm bg-inset p-3">
+              <label className="flex cursor-pointer items-start gap-2 rounded-sm ccode-well p-3">
                 <input
                   type="radio"
                   name="submission-mode"
@@ -361,7 +378,7 @@ export default function TemplatePickModal({
                     type="button"
                     disabled={busy !== null}
                     onClick={() => pick(t.id)}
-                    className="w-full rounded-sm bg-inset p-2.5 text-left hover:bg-hover disabled:opacity-50"
+                    className="w-full rounded-sm ccode-well p-2.5 text-left hover:bg-hover disabled:opacity-50"
                   >
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-l1">{t.name}</span>

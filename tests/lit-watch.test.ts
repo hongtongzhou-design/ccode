@@ -25,6 +25,7 @@ import {
   staleLitHint,
   UNCATEGORIZED_KEYWORD,
   weeklyBuckets,
+  weeklyTrend,
   parseWatchExplain,
   watchExplainPrompt,
   litWatchBodyOpenKey,
@@ -187,6 +188,50 @@ test("weeklyBuckets：近 8 周计数，周一起点，无 date 不计", () => {
   assert.equal(buckets[7].label, "8月17日周");
   // 桶首必为周一
   assert.equal(buckets[7].start.getDay(), 1);
+});
+
+test("weeklyTrend：无命中与全部缺日期不画零柱，提示各自原因", () => {
+  const empty = weeklyTrend([], 8, NOW);
+  assert.equal(empty.showChart, false);
+  assert.equal(empty.note, "暂无文献命中，巡检后显示趋势");
+
+  const undated = weeklyTrend([entry({}), entry({ date: "未知" })], 8, NOW);
+  assert.equal(undated.showChart, false);
+  assert.equal(undated.undatedCount, 2);
+  assert.equal(undated.note, "2 条文献缺少有效巡检日期，暂无法统计趋势");
+});
+
+test("weeklyTrend：部分缺日期仅计已知条目，并说明遗漏数量", () => {
+  const trend = weeklyTrend([
+    entry({ date: "2026-08-17" }),
+    entry({ date: "2026-08-18" }),
+    entry({ date: null }),
+  ], 8, NOW);
+  assert.equal(trend.showChart, true);
+  assert.equal(trend.undatedCount, 1);
+  assert.equal(trend.note, "另有 1 条缺少有效巡检日期，未计入趋势");
+  assert.deepEqual(trend.buckets.map((b) => b.count), [0, 0, 0, 0, 0, 0, 0, 2]);
+});
+
+test("weeklyTrend：已知日期全在窗口外是真零，不冒充缺日期", () => {
+  const trend = weeklyTrend([
+    entry({ date: "2026-01-01" }),
+    entry({ date: "2026-08-24" }),
+  ], 8, NOW);
+  assert.equal(trend.showChart, true);
+  assert.equal(trend.undatedCount, 0);
+  assert.equal(trend.note, null);
+  assert.deepEqual(trend.buckets.map((b) => b.count), Array(8).fill(0));
+});
+
+test("weeklyBuckets：无效日历日期不能溢出到下一月参与统计", () => {
+  const invalid = ["2026-02-29", "2026-02-30", "2026-03-00", "2026-13-01"];
+  const now = new Date(2026, 2, 2, 12);
+  const trend = weeklyTrend(invalid.map((date) => entry({ date })), 8, now);
+  assert.equal(trend.showChart, false);
+  assert.equal(trend.undatedCount, invalid.length);
+  assert.deepEqual(trend.buckets.map((b) => b.count), Array(8).fill(0));
+  assert.equal(weeklyBuckets([entry({ date: "2024-02-29" })], 1, new Date(2024, 1, 29))[0].count, 1);
 });
 
 test("pdfUrlFor：arXiv abs 转 pdf 直链，其余 http 原样，非 http(s) 为 null", () => {

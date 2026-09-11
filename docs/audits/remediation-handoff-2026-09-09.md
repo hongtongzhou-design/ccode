@@ -26,6 +26,48 @@
 
 源码/自动化检查不等于 Mesa Dev 实机交互或九家 CLI × 三平台验收；仍需按下文实机清单确认。
 
+## 2026-09-11 后续闭环与未验收边界
+
+已实现：普通目标环境清单/返修上下文与成果绑定；点名技能分发版本核对；科研来源/结果指纹关联与自由目标入口；
+人工知识修订、作废、旧文停用、来源漂移与最新优先注入；输入预检、流式大文件冻结/备份/写回、显式扩展预算；
+新运行冻结失败禁止降级实时采纳；收尾复核最后部分成果、相同内容不造版本；评审 readiness；同批幻灯/PDF 配套预览。
+
+最小回归集：`task_review::tests`、`project_memory::tests`、`research_quality::tests`、
+`skills::tests::named_skill_snapshot_requires_matching_runtime_copy`、`runs::tests::input_preflight_rejects_over_budget_before_any_copy`；
+前端 `tests/project-memory-panel.test.ts`、`tests/research-acceptance-panel.test.ts`、`tests/research-panels.test.ts`、`tests/goal-review.test.ts`。
+
+保留边界：不是 OS 级只读沙箱；大输入仍需分范围，未做零复制只读挂载；定时自动采纳仍为 ≤2MB UTF-8 契约，
+不静默升级为任意二进制；科研/编程/定时仍使用各自环境凭证，不宣称已统一所有 Runtime 的有效上下文；
+无 Agent 自动记忆/向量库、无 PPT 原生渲染或自动内容一致性验证。三平台九 CLI 与真实端到端需实机另验。
+本轮已确认 17575 的 Tauri Dev 来自本仓库，但电脑控制工具不能定位 com.ccode.dev.hmr，因此未拿旧 Mesa 窗口代验。
+
+验证说明（共享工作树有并行开发，不以较早全绿替代最新结果）：本轮专属前端集 25 项通过，
+Rust 专属集 task_review 15 / project_memory 3 / research_quality 5 / runs 28 / 技能快照 1 项全部通过；
+`npm run build`、`cargo check --offline --lib`、`git diff --check` 通过，保留原有大 chunk/未使用代码提示。
+最新一次全量检查出现本轮未修改的模板追加/模板产物契约变化：前端 864 通过、2 失败；Rust 1081 通过、3 失败、1 忽略。
+失败位置为 pipeline-presets/research-quality 的模板产物断言，以及 projects 的步骤追加/替换测试；未为刷绿回退并行改动。
+这些计数只代表检查时刻，后续并行开发变化需重跑。
+
+## 2026-09-11 可靠性专项：当前实现与验收入口
+
+本批只补两个风险边界：科研非 Git 文件不审错版本；普通目标/科研文件接收中断不丢失原操作。
+新增回归覆盖 prepared 部分写入、账本失败、DB 失败、恢复方向中断、外部修改拒绝覆盖、JSONL 尾行截断、
+Git 合并成功但合并 SHA 尚未落盘时的恢复、产物内容变化但 Git HEAD 不变、归档前 ignored 产物保护。
+目标列表及评审从持久恢复单找回原操作；前端测试验证继续请求携带旧 Run/操作 ID，而不是最新 Run。
+科研评审 UI 测试验证非 Git 固定副本展示及 token 随 merge 命令传递。
+
+热更新通过本仓库 `npm run tauri:dev` 启动，17575；工具仍不识别 com.ccode.dev.hmr，用户负责最后窗口验收。
+本批不操作真实项目作故障注入；异常路径均使用临时目录和隔离测试数据库。
+
+本批最新完整验证：`npm test` 894 通过；`cargo test --offline --lib -- --test-threads=4` 1100 通过、1 原有忽略；
+`npm run build` / `cargo check --offline --lib` / `git diff --check` 通过。保留原有大 chunk 与无关编译警告。
+这组结果覆盖此前交接记录中的失败时刻，不把旧失败继续当作当前结论；仍不等同于三平台实机验收。
+
+人工验收使用临时虚构数据项目，添加目录后执行：只生成 output/ 三文件→只改报告标题返修→三文件仍齐全→接受→关闭 Agent，
+目标保持完成；检查 manuscript/ 保护文件未变。可选在项目中手改报告后再采纳旧副本，应拒绝覆盖。
+中断故障无需用户在图形界面制造，不需要删除真实文件、强杀运行或改数据库。
+
+
 ## 1. 改动地图
 
 | 提交 | 内容 |
@@ -99,8 +141,8 @@ npm run build                             # 生产构建
 
 **明确未做（有意保留）**：
 - §4.6：目标/Run 已按 ID 解析当前位置；历史路径与原生会话来源保留。跨机恢复、Git 指针修复与完整复制项目 UX 仍需单独验收。
-- Memory 没有「Agent 提议区」——Agent 的结论只能经人勾选沉淀，没有独立提议通道。
-- Result Readiness 没有独立字段（由快照存在性隐式表达）。
+- Memory 没有「Agent 提议区」；已有人工维护、来源漂移和作废，不自动把助手结论沉淀。
+- 普通目标评审已返回派生 readiness；未增加持久结果状态机，也未把进程状态当目标状态。
 - 技能纪律是提示词级约束，不是硬闸；实机仍滥用的话需要「目标级白名单硬约束」评估。
 - 科研流水线/编程链路不走 task_review 冻结（它们走 Git 评审链），统一契约是后续话题。
 - watch 契约展开只收 ≤2MB UTF-8 文本；二进制产出留在隔离目录不自动采纳。

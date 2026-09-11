@@ -58,7 +58,7 @@ export default function HistoryOverlay({
   );
 
   return (
-    <div className="fixed inset-0 z-30 flex flex-col bg-canvas">
+    <div data-surface="canvas" className="fixed inset-0 z-30 flex flex-col bg-canvas">
       {/* 覆盖层头部统一（P3）：strip 底 + hairline 下缘；只读视图无主动作，仅「关闭」 */}
       <div className="flex shrink-0 items-center gap-3 border-b border-hairline bg-strip px-8 py-3">
         <h2 className="shrink-0 text-base font-semibold text-l1">
@@ -79,7 +79,7 @@ export default function HistoryOverlay({
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="mx-auto w-full max-w-3xl px-8 py-4">
           {error ? (
-            <p className="rounded-sm bg-strip p-3 text-xs">
+            <p className="rounded-sm ccode-well p-3 text-xs">
               <span className="mr-1 text-err-text">✗</span>
               <span className="text-l2">{error}</span>
             </p>
@@ -96,7 +96,7 @@ export default function HistoryOverlay({
                 <h3 className="mb-1 text-xs font-medium text-l4">
                   {group.label}
                 </h3>
-                <ul className="divide-y divide-hairline rounded-md bg-strip">
+                <ul className="divide-y divide-hairline rounded-md ccode-well">
                   {group.entries.map((entry) => {
                     const item = translateHistoryEntry(entry, wsSteps);
                     return (

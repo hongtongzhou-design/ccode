@@ -3,7 +3,7 @@ import { normSep } from "./path-utils.ts";
 
 export type GoalReviewMode = "research" | "office";
 
-export type ReviewChange = { path: string; kind: string };
+export type ReviewChange = { path: string; kind: string; tooLarge?: boolean };
 
 export type ReviewGroup = {
   id: string;
@@ -165,14 +165,16 @@ export function goalReviewFacts(input: {
   workMode?: string | null;
   agentLabel?: string | null;
   runCount: number;
+  resultSeq?: number | null;
   changes: readonly ReviewChange[];
   feedback?: string | null;
 }): string[] {
   const lines: string[] = [];
   const agent = input.agentLabel?.trim();
   if (agent) lines.push(`Agent：${agent}`);
-  if (input.runCount > 1) lines.push(`第 ${input.runCount} 版`);
-  else if (input.runCount === 1) lines.push("第一次生成");
+  if (input.resultSeq != null) lines.push(`当前冻结版本：${input.resultSeq}`);
+  if (input.runCount > 1) lines.push(`执行 ${input.runCount} 次（执行次数不是成果版数）`);
+  else if (input.runCount === 1 && input.resultSeq == null) lines.push("第一次生成");
   const groups = groupReviewChanges(input.workMode, input.changes);
   if (groups.length === 0) {
     lines.push(goalReviewMode(input.workMode) === "office" ? "没有文档改动" : "没有产物改动");
@@ -191,4 +193,21 @@ export function codingReviewHint(): string {
 
 export function isCodingWorkMode(workMode?: string | null): boolean {
   return normalizeWorkMode(workMode) === "coding";
+}
+
+/** PPT 等无法原生预览的成品，只关联同次冻结集合里的同名 PDF，不猜其它目录或旧版本。 */
+export function companionPdfPath(path: string, candidates: readonly ReviewChange[]): string | null {
+  if (!/\.(pptx?|odp)$/i.test(path)) return null;
+  const wanted = normSep(path).replace(/\.[^.]+$/, ".pdf");
+  return candidates.find((item) => item.kind !== "deleted" && !item.tooLarge && normSep(item.path) === wanted)?.path ?? null;
+}
+
+export function resultReadinessLabel(readiness: string | undefined): string {
+  switch (readiness) {
+    case "reviewable": return "本版可验收（不代表目标已完成）";
+    case "blocked": return "本版暂不可写回，请处理冻结或保护范围";
+    case "applied": return "本版已有接受记录";
+    case "ledger_pending": return "文件已写入，接受记录待补记";
+    default: return "尚无可写回成果";
+  }
 }

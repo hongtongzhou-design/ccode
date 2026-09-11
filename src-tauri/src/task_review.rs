@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// 单文件超过 64 MB 不进冻结内容副本：进清单供人知悉，但不能自动采纳。
@@ -49,7 +49,7 @@ pub(crate) struct RunBaseline {
     pub files: Vec<BaselineEntry>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SnapshotChange {
     pub path: String,
@@ -74,6 +74,8 @@ pub(crate) struct ResultSnapshot {
     /// 新版副本按 UUID 独立保存；None 兼容旧版 payload/，旧副本不迁走。
     #[serde(default)]
     pub payload_id: Option<String>,
+    #[serde(default)]
+    pub context_id: Option<String>,
 }
 
 fn hash_file(path: &Path) -> Result<(String, u64), String> {
@@ -150,8 +152,22 @@ fn unchanged_by_baseline(
 
 /// 按输出范围收集隔离目录里的普通文件（相对 posix 路径，排序去重）。
 /// 范围含 "." = 整个目录；符号链接文件直接报错（fail-closed，冻结缺失比冻结错的内容好）。
-fn collect_scoped_files(root: &Path, output_paths: &[String]) -> Result<Vec<String>, String> {
+pub(crate) fn collect_scoped_files(
+    root: &Path,
+    output_paths: &[String],
+) -> Result<Vec<String>, String> {
     let mut files = Vec::new();
+    for raw in output_paths {
+        if raw != "."
+            && (Path::new(raw).is_absolute()
+                || raw
+                    .replace('\\', "/")
+                    .split('/')
+                    .any(|part| matches!(part, ".." | "." | "")))
+        {
+            return Err("文件范围必须是项目内相对路径".into());
+        }
+    }
     let mut stack: Vec<PathBuf> = if output_paths.iter().any(|path| path == ".") {
         vec![root.to_path_buf()]
     } else {
@@ -161,7 +177,22 @@ fn collect_scoped_files(root: &Path, output_paths: &[String]) -> Result<Vec<Stri
             .filter(|path| path.exists())
             .collect()
     };
+    let mut visited = 0usize;
     while let Some(dir_or_file) = stack.pop() {
+        visited += 1;
+        if visited > WALK_FILE_CAP * 2 {
+            return Err("文件目录遍历超过预算，未生成不完整快照".into());
+        }
+        if dir_or_file != root
+            && matches!(
+                dir_or_file.file_name().and_then(|n| n.to_str()),
+                Some(
+                    ".git" | ".ccode" | "node_modules" | "target" | "__pycache__" | ".pytest_cache"
+                )
+            )
+        {
+            continue;
+        }
         let metadata =
             fs::symlink_metadata(&dir_or_file).map_err(|e| format!("读取任务输出失败：{e}"))?;
         if metadata.file_type().is_symlink() {
@@ -281,8 +312,51 @@ pub(crate) fn load_baseline(dir: &Path) -> Result<Option<RunBaseline>, String> {
     }
 }
 
-/// 收尾冻结内核：隔离目录现状对基线现算 diff（stat 快路径，只有变化文件读内容并复制进
-/// payload_dir）。没有基线（机制上线前的旧 Run）返回 Ok(None)，不伪造证据。
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct FreezeBudget {
+    file: u64,
+    total: u64,
+}
+impl Default for FreezeBudget {
+    fn default() -> Self {
+        Self {
+            file: PAYLOAD_FILE_CAP,
+            total: PAYLOAD_TOTAL_CAP,
+        }
+    }
+}
+
+fn copy_frozen_file(source: &Path, dest: &Path, cap: u64) -> Result<(String, u64), String> {
+    let mut input = fs::File::open(source).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dest.parent().ok_or("无效冻结路径")?).map_err(|e| e.to_string())?;
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options.open(dest).map_err(|e| e.to_string())?;
+    let mut hash = sha2::Sha256::new();
+    let mut total = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = input.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        total = total.saturating_add(n as u64);
+        if total > cap {
+            return Err("文件在冻结期间增长并超过预算，旧版仍保留".into());
+        }
+        hash.update(&buf[..n]);
+        output.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+    }
+    output.sync_all().map_err(|e| e.to_string())?;
+    Ok((format!("{:x}", hash.finalize()), total))
+}
+
+#[cfg(test)]
 fn build_snapshot(
     dir: &Path,
     payload_dir: &Path,
@@ -291,6 +365,30 @@ fn build_snapshot(
     output_paths: &[String],
     frozen_at: &str,
     seq: u32,
+) -> Result<Option<ResultSnapshot>, String> {
+    build_snapshot_with_budget(
+        dir,
+        payload_dir,
+        run_id,
+        run_root,
+        output_paths,
+        frozen_at,
+        seq,
+        FreezeBudget::default(),
+    )
+}
+
+/// 收尾冻结内核：隔离目录现状对基线现算 diff（stat 快路径，只有变化文件读内容并复制进
+/// payload_dir）。没有基线（机制上线前的旧 Run）返回 Ok(None)，不伪造证据。
+fn build_snapshot_with_budget(
+    dir: &Path,
+    payload_dir: &Path,
+    run_id: &str,
+    run_root: &Path,
+    output_paths: &[String],
+    frozen_at: &str,
+    seq: u32,
+    budget: FreezeBudget,
 ) -> Result<Option<ResultSnapshot>, String> {
     let Some(baseline) = load_baseline(dir)? else {
         return Ok(None);
@@ -317,32 +415,23 @@ fn build_snapshot(
             }
         }
         let kind = if entry.is_some() { "modified" } else { "added" };
-        // 哈希与副本必须来自同一次读取，避免 Agent 写入时「哈希 A、复制 B」。
-        let mut bytes = Vec::new();
-        fs::File::open(&file_path)
-            .map_err(|e| format!("读取任务输出失败：{e}"))?
-            .take(PAYLOAD_FILE_CAP + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("读取任务输出失败：{e}"))?;
-        let too_large = bytes.len() as u64 > PAYLOAD_FILE_CAP;
-        let size = if too_large {
-            cur_size.max(bytes.len() as u64)
+        let too_large = cur_size > budget.file;
+        let (sha256, size) = if too_large {
+            (None, cur_size)
         } else {
-            bytes.len() as u64
-        };
-        let sha256 = if too_large {
-            None
-        } else {
-            Some(format!("{:x}", sha2::Sha256::digest(&bytes)))
-        };
-        if !too_large {
-            if payload_bytes + size > PAYLOAD_TOTAL_CAP {
-                return Err("冻结内容超过总预算，未写入任何快照".into());
+            if payload_bytes.saturating_add(cur_size) > budget.total {
+                return Err(
+                    "冻结内容超过总预算，未发布新快照；请缩小输出范围或确认扩展大文件预算".into(),
+                );
             }
-            let dest = payload.join(&relative);
-            crate::profiles::atomic_write_bytes(&dest, &bytes)?;
+            let (sha, size) = copy_frozen_file(
+                &file_path,
+                &payload.join(&relative),
+                budget.file.min(budget.total - payload_bytes),
+            )?;
             payload_bytes += size;
-        }
+            (Some(sha), size)
+        };
         changes.push(SnapshotChange {
             path: relative,
             kind: kind.into(),
@@ -370,6 +459,7 @@ fn build_snapshot(
         seq,
         changes,
         payload_id: None,
+        context_id: None,
     }))
 }
 
@@ -381,21 +471,48 @@ fn publish_snapshot(
     output_paths: &[String],
     frozen_at: &str,
     refresh: bool,
+    large: Option<u32>,
 ) -> Result<Option<ResultSnapshot>, String> {
     fs::create_dir_all(dir).map_err(|e| format!("创建评审证据目录失败：{e}"))?;
     let _lock = crate::storage::lock_at(&dir.join("freeze.lock"))?;
+    let _context_lock = crate::storage::lock_at(&dir.join("context.lock"))?;
     let previous = load_snapshot(dir)?;
+    let policy = dir.join("freeze-policy.json");
+    let budget = if let Some(expect) = large {
+        crate::review_contract::assert_seq(
+            expect,
+            previous.as_ref().map_or(0, |snapshot| snapshot.seq),
+        )?;
+        FreezeBudget {
+            file: 1024 * 1024 * 1024,
+            total: 4 * 1024 * 1024 * 1024,
+        }
+    } else {
+        match fs::read(&policy) {
+            Ok(bytes) => {
+                let budget: FreezeBudget =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                if budget.file > 1024 * 1024 * 1024 || budget.total > 4 * 1024 * 1024 * 1024 {
+                    return Err("冻结预算损坏".into());
+                }
+                budget
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FreezeBudget::default(),
+            Err(e) => return Err(format!("读取冻结预算失败：{e}")),
+        }
+    };
     if !refresh && previous.is_some() {
         return Err("本次运行已有冻结证据，拒绝改写".into());
     }
     let seq = previous
+        .as_ref()
         .map_or(0, |s| s.seq)
         .checked_add(1)
         .ok_or("冻结版本号已达上限")?;
     let payload_id = uuid::Uuid::new_v4().to_string();
     let version_dir = dir.join("versions").join(&payload_id);
     let result = (|| {
-        let Some(mut snapshot) = build_snapshot(
+        let Some(mut snapshot) = build_snapshot_with_budget(
             dir,
             &version_dir.join("payload"),
             run_id,
@@ -403,13 +520,37 @@ fn publish_snapshot(
             output_paths,
             frozen_at,
             seq,
+            budget,
         )?
         else {
             return Ok(None);
         };
+        if large.is_none() {
+            if let Some(prev) = &previous {
+                if prev.changes == snapshot.changes {
+                    let _ = fs::remove_dir_all(&version_dir);
+                    return Ok(Some(prev.clone()));
+                }
+            }
+        }
+        snapshot.context_id = match fs::read(dir.join("current-context.json")) {
+            Ok(bytes) => {
+                let id: String = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                uuid::Uuid::parse_str(&id).map_err(|_| "上下文索引标识无效")?;
+                Some(id)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.to_string()),
+        };
         snapshot.payload_id = Some(payload_id);
         let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
         crate::profiles::atomic_write_bytes(&version_dir.join("snapshot.json"), &bytes)?;
+        if large.is_some() {
+            crate::profiles::atomic_write_bytes(
+                &policy,
+                &serde_json::to_vec(&budget).map_err(|e| e.to_string())?,
+            )?;
+        }
         crate::profiles::atomic_write_bytes(&dir.join("snapshot.json"), &bytes)?;
         Ok(Some(snapshot))
     })();
@@ -419,6 +560,7 @@ fn publish_snapshot(
     result
 }
 
+#[cfg(test)]
 pub(crate) fn freeze(
     dir: &Path,
     run_id: &str,
@@ -426,7 +568,7 @@ pub(crate) fn freeze(
     output_paths: &[String],
     frozen_at: &str,
 ) -> Result<Option<ResultSnapshot>, String> {
-    publish_snapshot(dir, run_id, run_root, output_paths, frozen_at, false)
+    publish_snapshot(dir, run_id, run_root, output_paths, frozen_at, false, None)
 }
 
 pub(crate) fn freeze_or_refresh(
@@ -436,7 +578,28 @@ pub(crate) fn freeze_or_refresh(
     output_paths: &[String],
     frozen_at: &str,
 ) -> Result<Option<ResultSnapshot>, String> {
-    publish_snapshot(dir, run_id, run_root, output_paths, frozen_at, true)
+    publish_snapshot(dir, run_id, run_root, output_paths, frozen_at, true, None)
+}
+
+pub(crate) fn freeze_large(
+    dir: &Path,
+    run_id: &str,
+    run_root: &Path,
+    outputs: &[String],
+    expected_seq: u32,
+    now: &str,
+) -> Result<(), String> {
+    publish_snapshot(
+        dir,
+        run_id,
+        run_root,
+        outputs,
+        now,
+        true,
+        Some(expected_seq),
+    )?
+    .ok_or("没有开工基线，无法安全冻结大文件")?;
+    Ok(())
 }
 
 pub(crate) fn snapshot_payload_dir(
@@ -478,6 +641,8 @@ pub(crate) struct ContextEnvironment {
     pub input_paths: Vec<String>,
     pub output_paths: Vec<String>,
     pub files: Vec<BaselineEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_baseline_created_at: Option<String>,
     pub rules: Vec<(String, String)>,
     pub memory_sha256: String,
     pub skills: Vec<crate::skills::SkillSnapshot>,
@@ -485,30 +650,74 @@ pub(crate) struct ContextEnvironment {
 }
 
 pub(crate) fn collect_environment(
-    project: &Path, run_root: &Path, agent: &str, permission: &str,
-    input_paths: &[String], output_paths: &[String], skills: Vec<crate::skills::SkillSnapshot>, baseline: Option<RunBaseline>,
+    project: &Path,
+    run_root: &Path,
+    agent: &str,
+    permission: &str,
+    input_paths: &[String],
+    output_paths: &[String],
+    skills: Vec<crate::skills::SkillSnapshot>,
+    baseline: Option<RunBaseline>,
 ) -> Result<ContextEnvironment, String> {
+    let mut files = Vec::new();
+    for path in collect_scoped_files(run_root, &[".".into()])? {
+        let actual = run_root.join(&path);
+        let (size, mtime) = stat_sig(&actual, "读取本次资料")?.ok_or("本次资料已消失")?;
+        files.push(BaselineEntry {
+            path,
+            copy_size: Some(size),
+            copy_mtime_ns: mtime,
+            project_size: None,
+            project_mtime_ns: None,
+            copy_sha256: if size <= SMALL_HASH_CAP {
+                Some(hash_file(&actual)?.0)
+            } else {
+                None
+            },
+            project_sha256: None,
+        });
+    }
     let read = crate::projects::read_config_at(project);
-    if !read.warnings.is_empty() { return Err(format!("项目规则未能完整读取：{}", read.warnings.join("；"))); }
+    if !read.warnings.is_empty() {
+        return Err(format!(
+            "项目规则未能完整读取：{}",
+            read.warnings.join("；")
+        ));
+    }
     let mut rules = Vec::new();
-    for name in [".ccode/project.toml", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "TASK.md"] {
+    for name in [
+        ".ccode/project.toml",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        "TASK.md",
+    ] {
         let path = project.join(name);
         let mut bytes = Vec::new();
         match fs::File::open(&path) {
-            Ok(file) => { file.take(512 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?; }
+            Ok(file) => {
+                file.take(512 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| e.to_string())?;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(format!("读取规则 {name} 失败：{e}")),
         }
-        if bytes.len() > 512 * 1024 { return Err(format!("规则 {name} 超过 512 KB，无法冻结")); }
-        rules.push((name.into(), String::from_utf8(bytes).map_err(|_| format!("规则 {name} 不是 UTF-8"))?));
+        if bytes.len() > 512 * 1024 {
+            return Err(format!("规则 {name} 超过 512 KB，无法冻结"));
+        }
+        rules.push((
+            name.into(),
+            String::from_utf8(bytes).map_err(|_| format!("规则 {name} 不是 UTF-8"))?,
+        ));
     }
     let memory = crate::project_memory::context_at(project)?;
     Ok(ContextEnvironment {
         project_id: crate::projects::project_id_at(project), project_root: project.to_string_lossy().into_owned(),
         isolation_path: run_root.to_string_lossy().into_owned(), agent: agent.into(), permission: permission.into(),
-        input_paths: input_paths.into(), output_paths: output_paths.into(), files: baseline.map(|b| b.files).unwrap_or_default(), rules,
+        input_paths: input_paths.into(), output_paths: output_paths.into(), files, acceptance_baseline_created_at: baseline.map(|b| b.created_at), rules,
         memory_sha256: format!("{:x}", sha2::Sha256::digest(memory.as_bytes())), skills,
-        warnings: vec!["记录的是启动时提供的材料与技能，不证明 Agent 实际读取或执行；父目录规则、CLI 内置指令和外部工具状态未封存。大文件基线以 stat 记录，非内容封存。".into()],
+        warnings: vec!["记录本次下发文本、隔离目录实际文件及项目规则参考；项目根规则可能与 CLI 实際加载的隔离副本规则不同。已核对点名技能的 Agent 目录副本，但不证明 Agent 实际读取或执行。父目录规则、CLI 内置指令和外部工具状态未封存；大文件以 stat 记录。".into()],
     })
 }
 
@@ -532,10 +741,17 @@ pub(crate) fn write_context_snapshot(
     created_at: &str,
     environment: Option<ContextEnvironment>,
 ) -> Result<ContextSnapshot, String> {
-    let environment_sha256 = environment.as_ref().map(|e| serde_json::to_vec(e)
-        .map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes)))).transpose().map_err(|e| e.to_string())?;
+    if text.len() > 2 * 1024 * 1024 {
+        return Err("下发上下文超过 2 MB，未启动".into());
+    }
+    let environment_sha256 = environment
+        .as_ref()
+        .map(|e| serde_json::to_vec(e).map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes))))
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let snapshot = ContextSnapshot {
-        environment, environment_sha256,
+        environment,
+        environment_sha256,
         run_id: run_id.into(),
         created_at: created_at.into(),
         sha256: format!("{:x}", sha2::Sha256::digest(text.as_bytes())),
@@ -546,11 +762,55 @@ pub(crate) fn write_context_snapshot(
     if path.exists() {
         return Err("本次运行已有上下文快照，拒绝改写".into());
     }
-    crate::profiles::atomic_write_bytes(
-        &path,
-        &serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?,
-    )?;
+    let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("上下文与环境清单超过 16 MB，未启动".into());
+    }
+    crate::profiles::atomic_write_bytes(&path, &bytes)?;
     Ok(snapshot)
+}
+
+pub(crate) fn write_context_continuation(
+    dir: &Path,
+    run_id: &str,
+    text: &str,
+    environment: ContextEnvironment,
+    now: &str,
+) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let _lock = crate::storage::lock_at(&dir.join("context.lock"))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let dest = dir.join("contexts").join(&id);
+    write_context_snapshot(&dest, run_id, text, now, Some(environment))?;
+    crate::profiles::atomic_write(
+        &dir.join("current-context.json"),
+        &serde_json::to_string(&id).map_err(|e| e.to_string())?,
+    )
+}
+
+pub(crate) fn load_current_context(dir: &Path) -> Result<Option<ContextSnapshot>, String> {
+    if let Some(snapshot) = load_snapshot(dir)? {
+        return match snapshot.context_id {
+            Some(id) => {
+                uuid::Uuid::parse_str(&id).map_err(|_| "结果上下文标识损坏")?;
+                load_context_snapshot(&dir.join("contexts").join(id))
+            }
+            None => load_context_snapshot(dir),
+        };
+    }
+    match fs::read(dir.join("current-context.json")) {
+        Ok(bytes) => {
+            let id: String =
+                serde_json::from_slice(&bytes).map_err(|e| format!("上下文索引损坏：{e}"))?;
+            uuid::Uuid::parse_str(&id).map_err(|_| "上下文索引标识无效")?;
+            load_context_snapshot(&dir.join("contexts").join(id))?
+                .ok_or("本次上下文文件缺失")
+                .map(Some)
+                .map_err(str::to_owned)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => load_context_snapshot(dir),
+        Err(e) => Err(format!("读取上下文索引失败：{e}")),
+    }
 }
 
 pub(crate) fn load_context_snapshot(dir: &Path) -> Result<Option<ContextSnapshot>, String> {
@@ -561,7 +821,9 @@ pub(crate) fn load_context_snapshot(dir: &Path) -> Result<Option<ContextSnapshot
                 serde_json::from_slice(&bytes).map_err(|e| format!("上下文快照损坏：{e}"))?;
             if let Some(environment) = &snapshot.environment {
                 let bytes = serde_json::to_vec(environment).map_err(|e| e.to_string())?;
-                if snapshot.environment_sha256.as_deref() != Some(format!("{:x}", sha2::Sha256::digest(bytes)).as_str()) {
+                if snapshot.environment_sha256.as_deref()
+                    != Some(format!("{:x}", sha2::Sha256::digest(bytes)).as_str())
+                {
                     return Err("工作环境清单与哈希不一致".into());
                 }
             }
@@ -694,6 +956,153 @@ pub(crate) fn check_adoption(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_manifest_roundtrip_and_tamper_detection() {
+        let (base, run, project) = fixture();
+        fs::write(project.join("AGENTS.md"), "只允许修改论文目录").unwrap();
+        fs::write(run.join("paper.md"), "draft").unwrap();
+        let review = base.join("review");
+        let baseline = write_baseline(&review, "r", &run, &project, "now").unwrap();
+        let env = collect_environment(
+            &project,
+            &run,
+            "codex",
+            "write_tree",
+            &["paper.md".into()],
+            &["paper.md".into()],
+            Vec::new(),
+            Some(baseline),
+        )
+        .unwrap();
+        assert_eq!(env.files.len(), 1);
+        assert!(env
+            .rules
+            .iter()
+            .any(|(name, body)| name == "AGENTS.md" && body.contains("论文")));
+        write_context_snapshot(&review, "r", "有效文本", "now", Some(env)).unwrap();
+        assert_eq!(
+            load_context_snapshot(&review)
+                .unwrap()
+                .unwrap()
+                .environment
+                .unwrap()
+                .permission,
+            "write_tree"
+        );
+        let path = review.join("context.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        json["environment"]["permission"] = "unrestricted".into();
+        fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(load_context_snapshot(&review)
+            .unwrap_err()
+            .contains("清单与哈希"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn result_stays_bound_to_its_context_when_user_starts_another_turn() {
+        let (base, run, project) = fixture();
+        let review = base.join("review");
+        write_baseline(&review, "r", &run, &project, "start").unwrap();
+        write_context_snapshot(&review, "r", "first instruction", "t1", None).unwrap();
+        fs::write(run.join("report.md"), "first result").unwrap();
+        freeze(&review, "r", &run, &[".".into()], "t1").unwrap();
+        let env = collect_environment(
+            &project,
+            &run,
+            "codex",
+            "write_tree",
+            &[],
+            &[".".into()],
+            Vec::new(),
+            load_baseline(&review).unwrap(),
+        )
+        .unwrap();
+        write_context_continuation(&review, "r", "second instruction", env, "t2").unwrap();
+        assert_eq!(
+            load_current_context(&review).unwrap().unwrap().text,
+            "first instruction"
+        );
+        fs::write(run.join("report.md"), "second result").unwrap();
+        freeze_or_refresh(&review, "r", &run, &[".".into()], "t2").unwrap();
+        assert_eq!(
+            load_current_context(&review).unwrap().unwrap().text,
+            "second instruction"
+        );
+        assert_eq!(
+            load_context_snapshot(&review).unwrap().unwrap().text,
+            "first instruction"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn bounded_freeze_marks_large_files_and_streamed_extension_preserves_old_version() {
+        let (base, run, project) = fixture();
+        let review = base.join("review");
+        write_baseline(&review, "r", &run, &project, "now").unwrap();
+        fs::write(run.join("large.bin"), [1u8; 64]).unwrap();
+        let limited = build_snapshot_with_budget(
+            &review,
+            &base.join("limited"),
+            "r",
+            &run,
+            &[".".into()],
+            "t1",
+            1,
+            FreezeBudget {
+                file: 32,
+                total: 64,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(limited.changes[0].too_large);
+        assert!(!base.join("limited/large.bin").exists());
+        assert!(build_snapshot_with_budget(
+            &review,
+            &base.join("budget-fail"),
+            "r",
+            &run,
+            &[".".into()],
+            "t2",
+            2,
+            FreezeBudget {
+                file: 128,
+                total: 32
+            }
+        )
+        .is_err());
+        let frozen = freeze(&review, "r", &run, &[".".into()], "t1")
+            .unwrap()
+            .unwrap();
+        assert!(freeze_large(&review, "r", &run, &[".".into()], 0, "t2").is_err());
+        freeze_large(&review, "r", &run, &[".".into()], frozen.seq, "t2").unwrap();
+        assert_eq!(
+            fs::read(payload_file(&review, &frozen, "large.bin").unwrap()).unwrap(),
+            vec![1u8; 64]
+        );
+        assert!(review.join("freeze-policy.json").is_file());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn collection_skips_internal_state_and_rejects_escape() {
+        let (base, run, _) = fixture();
+        for name in [".git", ".ccode", "__pycache__"] {
+            fs::create_dir_all(run.join(name)).unwrap();
+            fs::write(run.join(name).join("noise"), "not input").unwrap();
+        }
+        fs::write(run.join("paper.md"), "input").unwrap();
+        assert_eq!(
+            collect_scoped_files(&run, &[".".into()]).unwrap(),
+            vec!["paper.md"]
+        );
+        assert!(collect_scoped_files(&run, &["../outside".into()]).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn refreshing_keeps_the_previously_reviewed_payload() {
@@ -882,13 +1291,13 @@ mod tests {
             "保存未改不应报变化: {:?}",
             snap2.changes
         );
-        assert_eq!(snap2.seq, 2);
+        assert_eq!(snap2.seq, 1);
         // 真改 → modified，seq 再进一位；payload 跟着换
         fs::write(run.join("notes/a.md"), "a2").unwrap();
         let snap3 = freeze_or_refresh(&review, "r1", &run, &[".".to_string()], "t3")
             .unwrap()
             .unwrap();
-        assert_eq!(snap3.seq, 3);
+        assert_eq!(snap3.seq, 2);
         assert_eq!(snap3.changes.len(), 1);
         assert_eq!(snap3.changes[0].kind, "modified");
         assert_eq!(

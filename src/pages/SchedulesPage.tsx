@@ -134,7 +134,7 @@ export default function SchedulesPage({ visible }: { visible: boolean }) {
     return (
       <li
         key={schedule.id}
-        className="rounded-lg border border-hairline bg-raised/40 p-3"
+        className="rounded-lg border border-hairline ccode-well p-3"
       >
         <div className="flex min-w-0 items-start gap-3">
           <span

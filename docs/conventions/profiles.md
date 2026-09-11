@@ -232,7 +232,7 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 
 官方账号收进组头芯片（已安装才显示）：未连接是「连接」ghost 钮（终端跑 CLI 登录），已连接是「官方已连接」。不占一整行。启动栏里官方也是一条绑定。
 
-网关库（同页工具条，不是新的一级导航）：密钥、五个协议槽、Header、获取模型、按模型展开策略、按槽体检。连接弹层保持窄；网关编辑可以更宽。保存是唯一主 CTA。
+网关库（同页工具条，不是新的一级导航）：密钥、五个协议槽、Header、获取模型、按模型展开策略、按槽体检。连接弹层保持窄；网关编辑可以更宽。默认只露名称、无密钥、Base URL、测试/获取模型、密钥和保存；协议槽 / Header / Agent 配置 / 模型策略收进折叠。填完即可测、可拉目录，测的是当前表单；草稿探测不写 lastProbe，也不落密钥。模型策略与添加 Agent 配置勾选模型按厂商分类筛选（`groupModelsByVendor` / `visibleVendorGroups`），不整表摊开。保存是唯一主 CTA。
 
 ## 11. 启动注入
 

@@ -50,3 +50,14 @@ export function groupModelsByVendor(
           : a.vendor.localeCompare(b.vendor),
     );
 }
+
+/** 分类筛选：`all` 保留全部分组；指定厂商只留该组。筛选词仍走 groupModelsByVendor。 */
+export function visibleVendorGroups(
+  models: readonly string[],
+  vendor = "all",
+  filter = "",
+): VendorGroup[] {
+  const groups = groupModelsByVendor(models, filter);
+  if (!vendor || vendor === "all") return groups;
+  return groups.filter((g) => g.vendor === vendor);
+}

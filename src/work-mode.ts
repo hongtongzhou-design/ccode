@@ -126,7 +126,7 @@ export function codingKindUrgent(kind: CodingKind): boolean {
   return kind === "sync" || kind === "ready" || kind === "dev";
 }
 
-/** 工作树/分支行上的 git 事实芯片：只亮非默认态，干净且已推送不占位。 */
+/** Git 事实用图标 + 短文案：只亮非默认态，基准差异与远程同步分开。 */
 export type CodingFactTone = "ok" | "warn" | "muted";
 
 export type CodingFactMark =
@@ -157,6 +157,20 @@ export function codingDivergenceBar(
     aheadShare: a / cap,
     behindShare: b / cap,
   };
+}
+
+export function codingDivergenceLabel(
+  ahead: number,
+  behind: number,
+  baseBranch: string,
+): string {
+  const base = baseBranch.trim() || "基准";
+  const a = Math.max(0, ahead);
+  const b = Math.max(0, behind);
+  if (a > 0 && b > 0) return `比 ${base} 多 ${a}、少 ${b} 个提交`;
+  if (a > 0) return `比 ${base} 多 ${a} 个提交`;
+  if (b > 0) return `比 ${base} 少 ${b} 个提交`;
+  return "";
 }
 
 export function codingDivergenceTip(
@@ -190,27 +204,25 @@ export function codingFactChips(facts: {
     const n = facts.dirtyCount ?? 0;
     chips.push({
       key: "dirty",
-      label: n > 0 ? String(n) : "",
+      label: n > 0 ? `${n} 个文件未提交` : "有未提交改动",
       mark: "dirty",
       tone: "warn",
-      tip: n > 0 ? `${n} 个未提交` : "有未提交的改动",
+      tip: n > 0 ? `${n} 个文件有未提交改动` : "有未提交的改动",
     });
   }
   const upstreamBehind = facts.upstreamBehind ?? 0;
   if (!facts.hasUpstream) {
     chips.push({
       key: "remote",
-      label: "",
+      label: "未关联远程分支",
       mark: "noUpstream",
       tone: "muted",
-      tip: gh
-        ? "还没推到 GitHub，第一次推送会设上游"
-        : "还没推到远程，第一次推送会设上游",
+      tip: "当前分支未设置上游，不代表远程没有同名分支；首次推送会尝试关联 origin",
     });
   } else if (facts.unpushed > 0) {
     chips.push({
       key: "remote",
-      label: String(facts.unpushed),
+      label: `${facts.unpushed} 个提交待推送`,
       mark: "unpushed",
       tone: "warn",
       tip: `未推送：比 ${remoteWord} 上该分支多 ${facts.unpushed} 个提交`,
@@ -219,7 +231,7 @@ export function codingFactChips(facts: {
   if (facts.hasUpstream && upstreamBehind > 0) {
     chips.push({
       key: "upstreamBehind",
-      label: String(upstreamBehind),
+      label: `${remoteWord}有 ${upstreamBehind} 个新提交`,
       mark: "upstreamBehind",
       tone: "warn",
       tip: gh

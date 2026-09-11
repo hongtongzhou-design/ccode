@@ -37,7 +37,7 @@ export type ProjectAgentRow = {
   label: string;
   isProjectDefault: boolean;
   defaultProfileId: string;
-  profiles: { id: string; name: string; modelLine: string }[];
+  profiles: { id: string; name: string; model: string; modelLine: string }[];
   works: ProjectAgentWork[];
 };
 
@@ -130,6 +130,7 @@ export function buildProjectAgentRoster(input: {
       .map((profile) => ({
         id: profile.id,
         name: profile.name,
+        model: profile.models[0] || "CLI 默认",
         modelLine: profileLine(profile),
       }));
     return {
@@ -145,14 +146,8 @@ export function buildProjectAgentRoster(input: {
   return { rows, unassigned };
 }
 
-export function projectAgentsHint(workMode: string | null | undefined): string {
-  if (workMode === "coding") {
-    return "这个项目能用谁。点配置名只改这个项目的默认，不改 Mesa 启动栏。工作树里选谁干。";
-  }
-  if (workMode === "office") {
-    return "这个项目能用谁。点配置名只改这个项目的默认，不改 Mesa 启动栏。目标里指定谁写。";
-  }
-  return "这个项目能用谁。点配置名只改这个项目的默认，不改 Mesa 启动栏。目标或开步时指定谁干。";
+export function projectAgentsHint(_workMode: string | null | undefined): string {
+  return "默认选择仅对本项目生效。";
 }
 
 /** 名册上不逐家重复空状态；整页没有目标时才说一次。 */

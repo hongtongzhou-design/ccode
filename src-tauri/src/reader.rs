@@ -4,7 +4,7 @@
 //! 生词本与译段（B3）：notes/glossary.md 表格的 list/append/remove（机管文件，表外内容保留），
 //! 译段追加进笔记「## 译段」小节（append_note_translation）。
 //! 门槛同 lit_watch（gated_root 口径：已注册项目或含 .ccode/project.toml，返回 canonical 根）；
-//! pdf_path canonicalize 后必须在项目根内；已存在的笔记**永不覆盖**（created:false 原样返回）；
+//! pdf_path canonicalize 后必须在项目根内或精确匹配已登记只读 PDF 资源；已存在的笔记**永不覆盖**（created:false 原样返回）；
 //! 新建/写回走 profiles::atomic_write（tmp+rename），symlink 会被整体替换而非穿透。
 
 use base64::Engine;
@@ -64,12 +64,32 @@ fn inside(child: &Path, root: &Path) -> bool {
     crate::paths::path_within_path(child, root)
 }
 
+fn readable_project_pdf(root: &Path, pdf: &Path) -> bool {
+    if !pdf.is_file()
+        || !pdf
+            .extension()
+            .is_some_and(|s| s.eq_ignore_ascii_case("pdf"))
+    {
+        return false;
+    }
+    if inside(pdf, root) {
+        return true;
+    }
+    crate::projects::read_config_at(root)
+        .config
+        .resources
+        .iter()
+        .filter(|r| r.kind == "paper" && r.readonly)
+        .filter_map(|r| crate::paths::canonicalize_plain(&root.join(&r.path)).ok())
+        .any(|path| crate::paths::same_path(&path.to_string_lossy(), &pdf.to_string_lossy()))
+}
+
 fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNoteDto, String> {
     let root = gated_root(project_root)?;
     let pdf = crate::paths::canonicalize_plain(Path::new(&crate::sessions::expand_tilde(pdf_path)))
         .map_err(|e| format!("PDF 不存在或不可读: {e}"))?;
-    if !inside(&pdf, &root) {
-        return Err("PDF 不在项目目录内，拒绝建立笔记".into());
+    if !readable_project_pdf(&root, &pdf) {
+        return Err("PDF 不在项目目录内或未登记为只读资源，拒绝建立笔记".into());
     }
     let file_name = pdf
         .file_name()
@@ -88,7 +108,7 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
         return Err("notes 指向项目目录之外，拒绝写入".into());
     }
     // slug 已去路径分隔符，join 不会逃逸 canon_notes
-    let target = canon_notes.join(format!("{}.md", slugify_note_stem(&stem)));
+    let mut target = canon_notes.join(format!("{}.md", slugify_note_stem(&stem)));
     // 来源行写相对项目根的路径（统一正斜杠，同 discover_resources 口径）
     let rel_pdf = pdf
         .strip_prefix(&root)
@@ -98,14 +118,17 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
                 .collect::<Vec<_>>()
                 .join("/")
         })
-        .unwrap_or_else(|_| file_name.clone());
+        .unwrap_or_else(|_| pdf.to_string_lossy().replace('\\', "/"));
     // 配对优先：notes/ 里已有「来源行」指向本 PDF 的笔记（精读步骤产物）就直接打开它，
     // 不另建 slug 笔记——同一篇只有一份笔记。此前误建的 slug 笔记若仍是空模板（从未写过内容），
     // 顺带清进回收站（可反悔）；有内容的保留，不与精读笔记强行合并
     if let Some(existing) = find_note_by_source(&canon_notes, &rel_pdf) {
         if existing != target && target.exists() {
             if let Ok(content) = fs::read_to_string(&target) {
-                if note_is_untouched(&content) {
+                if note_is_untouched(&content)
+                    && note_source_pdf(&content)
+                        .is_some_and(|source| crate::paths::same_path(&source, &rel_pdf))
+                {
                     let _ = trash::delete(&target);
                 }
             }
@@ -114,6 +137,14 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
             path: existing.to_string_lossy().into_owned(),
             created: false,
         });
+    }
+    if !inside(&pdf, &root) && target.exists() {
+        // 不把另一篇同名附件的笔记认作本篇；原笔记保留，按来源派生稳定后缀。
+        let suffix = format!(
+            "{:x}",
+            md5::compute(crate::paths::path_key(&pdf.to_string_lossy()))
+        );
+        target = canon_notes.join(format!("{}-{}.md", slugify_note_stem(&stem), &suffix[..8]));
     }
     if target.exists() {
         return Ok(PaperNoteDto {
@@ -207,7 +238,7 @@ fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
             if pdf.exists() {
                 let c = crate::paths::canonicalize_plain(&pdf)
                     .map_err(|e| format!("PDF 路径无效（{rel}）: {e}"))?;
-                if inside(&c, root) {
+                if readable_project_pdf(root, &c) {
                     return Ok(Some(c.to_string_lossy().replace('\\', "/")));
                 }
             }
@@ -223,7 +254,13 @@ fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
     for r in cfg.resources.iter().filter(|r| r.kind == "paper") {
         let pdf = root.join(&r.path);
         let pstem = pdf.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let norm = crate::lit_watch::normalize_title(pstem);
+        let title = crate::lit_watch::normalize_title(&r.name);
+        let file_norm = crate::lit_watch::normalize_title(pstem);
+        let norm = if !title.is_empty() && (want.contains(&title) || title.contains(&want)) {
+            title
+        } else {
+            file_norm
+        };
         if norm.is_empty() || !(want.contains(&norm) || norm.contains(&want)) {
             continue;
         }
@@ -232,7 +269,7 @@ fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
         }
         let c = crate::paths::canonicalize_plain(&pdf)
             .map_err(|e| format!("PDF 路径无效（{}）: {e}", r.path))?;
-        if !inside(&c, root) {
+        if !readable_project_pdf(root, &c) {
             continue;
         }
         if best.as_ref().is_none_or(|(len, _)| norm.len() > *len) {
@@ -1127,6 +1164,60 @@ mod tests {
                 .any(|l| l.note_name.eq_ignore_ascii_case("inbox.md")),
             "{links:?}"
         );
+    }
+
+    #[test]
+    fn external_registered_pdf_can_pair_but_sibling_cannot() {
+        let (root, _) = project_with_pdf("external-pdf", "internal.pdf");
+        let external = tmpdir("external-library");
+        let pdf = external.join("paper.pdf");
+        fs::write(&pdf, b"%PDF-fixture").unwrap();
+        let sibling = external.join("private.pdf");
+        fs::write(&sibling, b"%PDF-private").unwrap();
+        let mut cfg = crate::projects::read_config_at(&root).config;
+        cfg.resources.push(crate::projects::ResourceDto {
+            name: "External Paper".into(),
+            path: pdf.to_string_lossy().into(),
+            kind: "paper".into(),
+            readonly: true,
+            ..Default::default()
+        });
+        crate::projects::write_config_at(&root, &cfg).unwrap();
+        let note = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        assert!(Path::new(&note.path).starts_with(&root));
+        assert_eq!(
+            pdf_for_note_sync(&root.to_string_lossy(), &note.path)
+                .unwrap()
+                .as_deref(),
+            Some(pdf.to_string_lossy().as_ref())
+        );
+        assert!(
+            ensure_paper_note_sync(&root.to_string_lossy(), &sibling.to_string_lossy()).is_err()
+        );
+        assert_eq!(fs::read(&pdf).unwrap(), b"%PDF-fixture");
+        fs::create_dir_all(external.join("other")).unwrap();
+        let second = external.join("other/paper.pdf");
+        fs::write(&second, b"%PDF-second").unwrap();
+        cfg.resources.push(crate::projects::ResourceDto {
+            name: "Other Paper".into(),
+            path: second.to_string_lossy().into(),
+            kind: "paper".into(),
+            readonly: true,
+            ..Default::default()
+        });
+        crate::projects::write_config_at(&root, &cfg).unwrap();
+        let second_note =
+            ensure_paper_note_sync(&root.to_string_lossy(), &second.to_string_lossy()).unwrap();
+        assert_ne!(second_note.path, note.path);
+        assert_eq!(
+            ensure_paper_note_sync(&root.to_string_lossy(), &second.to_string_lossy())
+                .unwrap()
+                .path,
+            second_note.path
+        );
+        assert!(Path::new(&note.path).exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(external).unwrap();
     }
 
     #[test]

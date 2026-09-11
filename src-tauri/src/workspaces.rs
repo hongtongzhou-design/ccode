@@ -1,7 +1,9 @@
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Digest;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
@@ -66,11 +68,15 @@ pub struct SalvageReport {
     pub copied: Vec<String>,
     pub conflicts: Vec<String>,
     pub skipped_protected: Vec<String>,
+    pub failed: Vec<String>,
 }
 
 impl SalvageReport {
     fn note(&self) -> String {
-        if self.copied.is_empty() && self.skipped_protected.is_empty() && self.conflicts.is_empty()
+        if self.copied.is_empty()
+            && self.skipped_protected.is_empty()
+            && self.conflicts.is_empty()
+            && self.failed.is_empty()
         {
             return String::new();
         }
@@ -100,6 +106,12 @@ impl SalvageReport {
             };
             note.push_str(&format!(
                 "。{names}{suffix}在主文件夹已存在同名文件，未覆盖——请对比后手动决定保留哪份"
+            ));
+        }
+        if !self.failed.is_empty() {
+            note.push_str(&format!(
+                "；未接收：{}（工作区保留）",
+                self.failed.join("、")
             ));
         }
         note
@@ -820,6 +832,9 @@ fn archive_impl_with_guard(
     id: &str,
     ensure_no_active_tasks: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<(), String> {
+    if read_delivery_pending(id)?.is_some() || crate::review_contract::pending_needs_attention(id) {
+        return Err("工作区还有未完成的产物接收或验收记录，请先继续原操作再归档".into());
+    }
     let w = get_workspace(conn, id)?;
     let wt = PathBuf::from(&w.worktree_path);
     let settings = crate::ws_settings::merged_settings(Path::new(&w.repo_path));
@@ -857,6 +872,8 @@ fn archive_impl_with_guard(
                 return Err(format!("archive 脚本执行失败，worktree 未移除:\n{tail}"));
             }
         }
+        // Git 会允许删除只含 ignored 文件的工作树，归档前还须确认这些成果已有项目副本。
+        assert_deliverables_retained(&w, Path::new(&w.repo_path))?;
         // 钩子可能跑了很久，期间用户可能又在工作区启动了任务；移除前必须再确认无人占用
         ensure_no_active_tasks(&w.worktree_path)?;
         // files-to-copy 若与主仓库原件完全一致，可安全移除后用非 --force 归档；修改过的副本已被上面拦截。
@@ -1244,7 +1261,8 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
             && !gitdir_detached,
         worktree_head,
         gitdir_detached,
-        ledger_pending: crate::review_contract::pending_needs_attention(id),
+        ledger_pending: crate::review_contract::pending_needs_attention(id)
+            || !matches!(read_delivery_pending(id), Ok(None)),
     })
 }
 
@@ -1261,7 +1279,15 @@ fn merge_impl(
         &["rev-parse", &w.branch],
         Duration::from_secs(10),
     )?;
-    merge_impl_with_guard(conn, id, archive, &|_| Ok(()), Some(&tip))
+    let review = freeze_deliverables(&w, &live_repo_for(&w))?;
+    merge_impl_with_guard(
+        conn,
+        id,
+        archive,
+        &|_| Ok(()),
+        Some(&tip),
+        Some(&review.token),
+    )
 }
 
 fn live_repo_for(w: &WorkspaceDto) -> PathBuf {
@@ -1304,36 +1330,6 @@ fn gitdir_matches_repo(worktree: &Path, repo: &Path) -> Result<(), String> {
     Err("工作树与主仓脱节，请重新挂载".into())
 }
 
-fn commit_pipeline_ledger(
-    w: &WorkspaceDto,
-    repo: &Path,
-    version_id: &str,
-    reviewed_sha: Option<&str>,
-    paths: Vec<String>,
-    fingerprints: Vec<crate::projects::ContentFingerprint>,
-    note: &str,
-) -> Result<bool, String> {
-    let entry = crate::projects::AcceptanceLogEntry {
-        goal_id: String::new(),
-        goal_name: format!("{} / {}", w.name, w.branch),
-        run_id: String::new(),
-        paths,
-        note: note.to_string(),
-        frozen: false,
-        decided_at: crate::sessions::now_iso(),
-        kind: crate::review_contract::KIND_PIPELINE_MERGE.into(),
-        version_id: version_id.to_string(),
-        reviewed_sha: reviewed_sha.map(|s| s.to_string()),
-        project_id: w
-            .project_id
-            .clone()
-            .or_else(|| crate::projects::project_id_at(repo)),
-        scene_ref: Some(w.id.clone()),
-        content_fingerprints: fingerprints,
-    };
-    crate::review_contract::record_pending_fact(repo, &w.id, &entry).map(|()| true)
-}
-
 /// ensure_no_active_tasks 透传给归档阶段：merge 成功后、worktree remove 前复查运行中任务
 fn merge_impl_with_guard(
     conn: &Connection,
@@ -1341,10 +1337,141 @@ fn merge_impl_with_guard(
     archive: bool,
     ensure_no_active_tasks: &dyn Fn(&str) -> Result<(), String>,
     expect_reviewed_sha: Option<&str>,
+    expect_delivery_token: Option<&str>,
 ) -> Result<WorkspaceMergeResultDto, String> {
     let w = get_workspace(conn, id)?;
     let repo = live_repo_for(&w);
     let _apply_lock = crate::review_contract::apply_lock(&repo)?;
+    if let Some(mut pending) = read_delivery_pending(&w.id)? {
+        if pending.fact.scene_ref.as_deref() != Some(w.id.as_str())
+            || pending.fact.kind != crate::review_contract::KIND_PIPELINE_MERGE
+            || (pending.fact.project_id.is_some()
+                && pending.fact.project_id != crate::projects::project_id_at(&repo))
+        {
+            return Err("科研产物恢复单与当前项目不匹配".into());
+        }
+        if pending.fact.version_id.is_empty() {
+            let before = pending
+                .before_sha
+                .as_deref()
+                .ok_or("缺少原合并基线，不能猜测恢复")?;
+            let reviewed = pending
+                .fact
+                .reviewed_sha
+                .as_deref()
+                .ok_or("缺少原评审提交")?;
+            if run_git(
+                &repo,
+                &["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+                Duration::from_secs(10),
+            )
+            .is_ok()
+            {
+                return Err("原合并仍处于冲突处理中，请先处理 Git 状态；未接收任何新产物".into());
+            }
+            if let Some(sha) = original_merge_commit(&repo, &w.base_branch, before, reviewed)? {
+                pending.fact.version_id = sha;
+                save_delivery_pending(&w.id, &pending)?;
+            } else {
+                let base_tip = run_git(
+                    &repo,
+                    &["rev-parse", &w.base_branch],
+                    Duration::from_secs(10),
+                )?;
+                if base_tip == before {
+                    fs::remove_file(delivery_pending_path(&w.id)?).map_err(|e| e.to_string())?;
+                    return Err("原合并尚未发生，未接收产物。请刷新评审后重新合并".into());
+                }
+                return Err(
+                    "无法定位原合并提交，恢复单已保留；请检查历史，不会按最新 HEAD 猜测".into(),
+                );
+            }
+        }
+        if !git_is_ancestor(&repo, &pending.fact.version_id, &w.base_branch)? {
+            return Err("产物恢复版本不在基准历史中，未重新合并".into());
+        }
+        let mut review = load_delivery_review(&w.id, &pending.review_token)?;
+        for file in &mut review.files {
+            if pending.tracked_after_review.contains(&file.path) {
+                file.disposition = "tracked".into();
+            }
+        }
+        let recorded = crate::projects::read_acceptance_log_at(&repo)
+            .iter()
+            .any(|e| e.kind == pending.fact.kind && e.version_id == pending.fact.version_id);
+        let report = if pending.files_applied || recorded {
+            SalvageReport {
+                copied: review
+                    .files
+                    .iter()
+                    .filter(|f| f.disposition == "copy")
+                    .map(|f| f.path.clone())
+                    .collect(),
+                conflicts: review
+                    .files
+                    .iter()
+                    .filter(|f| f.disposition == "conflict")
+                    .map(|f| f.path.clone())
+                    .collect(),
+                skipped_protected: review
+                    .files
+                    .iter()
+                    .filter(|f| f.disposition == "protected")
+                    .map(|f| f.path.clone())
+                    .collect(),
+                failed: Vec::new(),
+            }
+        } else {
+            let protected = crate::projects::protected_paths_at(&repo)?;
+            apply_delivery_review(&review, &repo, &protected)
+        };
+        if report.failed.is_empty() && !pending.files_applied {
+            pending.files_applied = true;
+            save_delivery_pending(&w.id, &pending)?;
+        }
+        let ledger = pending.files_applied
+            && crate::review_contract::record_pending_fact(&repo, &w.id, &pending.fact).is_ok();
+        let mut result = WorkspaceMergeResultDto {
+            merged: true,
+            archived: false,
+            failed_phase: None,
+            message: if ledger {
+                "已完成原版本产物接收与验收记录".into()
+            } else {
+                format!(
+                    "Git 已合并，原版本产物仍待接收或记账：{}；工作区保留，请继续原操作",
+                    report.failed.join("；")
+                )
+            },
+            output: report.note(),
+            version_id: Some(pending.fact.version_id),
+            reviewed_sha: pending.fact.reviewed_sha,
+            ledger_written: ledger,
+            salvage: Some(report.clone()),
+        };
+        if ledger {
+            if let Err(e) = conn.execute(
+                "UPDATE workspaces SET merged_at=COALESCE(merged_at,?1) WHERE id=?2",
+                params![pending.fact.decided_at, id],
+            ) {
+                result.failed_phase = Some("state".into());
+                result.message = format!("文件已接收，但状态未完成：{e}，请继续原操作");
+                return Ok(result);
+            }
+            fs::remove_file(delivery_pending_path(&w.id)?)
+                .map_err(|e| format!("产物已接收，恢复标记未清理：{e}"))?;
+            if archive && report.conflicts.is_empty() {
+                match archive_impl_with_guard(conn, id, ensure_no_active_tasks) {
+                    Ok(()) => result.archived = true,
+                    Err(e) => {
+                        result.failed_phase = Some("archive".into());
+                        result.message = format!("文件已接收，但归档失败：{e}");
+                    }
+                }
+            }
+        }
+        return Ok(result);
+    }
     let already_merged = git_is_ancestor(&repo, &w.branch, &w.base_branch)?;
     let tip = run_git(&repo, &["rev-parse", &w.branch], Duration::from_secs(10))?;
     if crate::review_contract::read_pending(&w.id)?.is_some() || already_merged {
@@ -1444,7 +1571,21 @@ fn merge_impl_with_guard(
             "主仓库有未提交改动（{names}{suffix}），请先提交或 stash 再合并（或改用 PR 流程）"
         ));
     }
+    let uncommitted = run_git(
+        Path::new(&w.worktree_path),
+        &["diff", "--name-only", "HEAD", "--"],
+        Duration::from_secs(30),
+    )?;
+    if !uncommitted.is_empty() {
+        return Err("工作区仍有未提交的受 Git 管理改动，请先提交并重新评审；尚未合并".into());
+    }
     crate::review_contract::assert_reviewed_sha(expect_reviewed_sha.unwrap_or(""), &tip)?;
+    let review = check_delivery_review(
+        &w,
+        &repo,
+        expect_delivery_token.ok_or("请先打开并核对非 Git 产物评审，再合并")?,
+    )?;
+
     // 保护路径：验收合并必须让被保护路径保持主仓原样。git 无法只按路径部分合并，
     // 任务分支改动了被保护路径时拒绝合并并说明，由人先去工作区撤掉这些改动
     // （或调整保护设置）；配置读不出时 fail-closed，不按「没有保护」合并
@@ -1479,6 +1620,63 @@ fn merge_impl_with_guard(
             ));
         }
     }
+    let mut paths = touched;
+    paths.extend(
+        review
+            .files
+            .iter()
+            .filter(|f| f.disposition == "copy")
+            .map(|f| f.path.clone()),
+    );
+    paths.sort();
+    paths.dedup();
+    let fact = crate::projects::AcceptanceLogEntry {
+        goal_id: String::new(),
+        goal_name: format!("{} / {}", w.name, w.branch),
+        run_id: String::new(),
+        paths,
+        note: format!(
+            "已合并进 {}；非 Git 产物版本 {}",
+            w.base_branch, review.token
+        ),
+        frozen: true,
+        decided_at: crate::sessions::now_iso(),
+        kind: crate::review_contract::KIND_PIPELINE_MERGE.into(),
+        version_id: String::new(),
+        reviewed_sha: Some(tip.clone()),
+        project_id: w
+            .project_id
+            .clone()
+            .or_else(|| crate::projects::project_id_at(&repo)),
+        scene_ref: Some(w.id.clone()),
+        content_fingerprints: review
+            .files
+            .iter()
+            .filter(|f| f.disposition == "copy")
+            .map(|f| crate::projects::ContentFingerprint {
+                path: f.path.clone(),
+                size: f.size,
+                sha256: f.sha256.clone(),
+            })
+            .collect(),
+    };
+    let mut pending = PipelineFilePending {
+        review_token: review.token.clone(),
+        fact,
+        before_sha: Some(run_git(
+            &repo,
+            &["rev-parse", "HEAD"],
+            Duration::from_secs(10),
+        )?),
+        files_applied: false,
+        tracked_after_review: review
+            .files
+            .iter()
+            .filter(|f| f.disposition == "tracked")
+            .map(|f| f.path.clone())
+            .collect(),
+    };
+    save_delivery_pending(&w.id, &pending)?;
     // 应用内自动 merge commit 必须绕过用户全局 commit.gpgsign：无头环境调 gpg 会卡住或失败
     let mut log = match run_git(
         &repo,
@@ -1507,44 +1705,43 @@ fn merge_impl_with_guard(
             } else {
                 "未进入合并状态，主仓库未留下 merge 过程"
             };
+            if run_git(
+                &repo,
+                &["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+                Duration::from_secs(10),
+            )
+            .is_err()
+                && run_git(&repo, &["rev-parse", "HEAD"], Duration::from_secs(10))
+                    .ok()
+                    .as_deref()
+                    == pending.before_sha.as_deref()
+            {
+                fs::remove_file(delivery_pending_path(&w.id)?)
+                    .map_err(|err| format!("合并失败且恢复标记未清理：{err}"))?;
+            }
             return Err(format!(
                 "最终合并失败；{abort_note}。请回到隔离工作区重新处理冲突:\n{e}\n冲突文件:\n{files}"
             ));
         }
     };
-    let salvage = copy_untracked_deliverables(Path::new(&w.worktree_path), &repo, &protected);
+    let version_id = run_git(&repo, &["rev-parse", "HEAD"], Duration::from_secs(10))?;
+    pending.fact.version_id = version_id.clone();
+    save_delivery_pending(&w.id, &pending)?;
+    let salvage = apply_delivery_review(&review, &repo, &protected);
     let salvage_note = salvage.note();
     if !salvage_note.is_empty() {
-        if !log.is_empty() {
-            log.push('\n');
-        }
+        log.push('\n');
         log.push_str(&salvage_note);
     }
     let auto_manifest = register_expected_artifacts_at(&repo, &w.name);
     if !auto_manifest.is_empty() {
-        if !log.is_empty() {
-            log.push('\n');
-        }
+        log.push('\n');
         log.push_str(&auto_manifest);
     }
-    let version_id = run_git(&repo, &["rev-parse", "HEAD"], Duration::from_secs(10))?;
-    let mut paths = touched;
-    paths.extend(salvage.copied.iter().cloned());
-    paths.sort();
-    paths.dedup();
-    let fingerprints = crate::review_contract::fingerprints_from_paths(&repo, &salvage.copied);
-    let ledger = match commit_pipeline_ledger(
-        &w,
-        &repo,
-        &version_id,
-        Some(&tip),
-        paths,
-        fingerprints,
-        &format!("已合并进 {}", w.base_branch),
-    ) {
-        Ok(ok) => ok,
-        Err(_) => false,
-    };
+    pending.files_applied = salvage.failed.is_empty();
+    save_delivery_pending(&w.id, &pending)?;
+    let ledger = pending.files_applied
+        && crate::review_contract::record_pending_fact(&repo, &w.id, &pending.fact).is_ok();
     let merged_at = crate::sessions::now_iso();
     if let Err(e) = conn.execute(
         "UPDATE workspaces SET merged_at=?1 WHERE id=?2",
@@ -1565,7 +1762,11 @@ fn merge_impl_with_guard(
             salvage: Some(salvage),
         });
     }
-    if archive && ledger {
+    if ledger {
+        fs::remove_file(delivery_pending_path(&w.id)?)
+            .map_err(|e| format!("文件已进入项目，恢复标记未清理：{e}"))?;
+    }
+    if archive && ledger && salvage.conflicts.is_empty() && salvage.failed.is_empty() {
         if let Err(e) = archive_impl_with_guard(conn, id, ensure_no_active_tasks) {
             return Ok(WorkspaceMergeResultDto {
                 merged: true,
@@ -1995,6 +2196,11 @@ fn machine_acceptance_satisfied(root: &Path, criteria: &[String], since: SystemT
         .iter()
         .filter_map(|raw| raw.strip_prefix("machine:"))
         .all(|rule| {
+            if let Some(path) = rule.strip_prefix("optional-empty:") {
+                return rooted_existing_path(root, path)
+                    .and_then(|p| fs::metadata(p).ok())
+                    .is_some_and(|m| m.is_file() && m.modified().is_ok_and(|t| t >= since));
+            }
             if let Some(path) = rule.strip_prefix("file:") {
                 return artifact_produced_since(root, path, since);
             }
@@ -2055,7 +2261,11 @@ fn machine_acceptance_satisfied(root: &Path, criteria: &[String], since: SystemT
                     _ => false,
                 };
             }
-            if let Some(rest) = rule.strip_prefix("records:") {
+            let allow_empty = rule.starts_with("records-allow-empty:");
+            if let Some(rest) = rule
+                .strip_prefix("records:")
+                .or_else(|| rule.strip_prefix("records-allow-empty:"))
+            {
                 let Some((path, fields)) = rest.split_once("::") else {
                     return false;
                 };
@@ -2084,7 +2294,7 @@ fn machine_acceptance_satisfied(root: &Path, criteria: &[String], since: SystemT
                     .or_else(|| value.get("records").and_then(Value::as_array))
                     .or_else(|| value.get("rows").and_then(Value::as_array));
                 let Some(rows) = rows else { return false };
-                if rows.is_empty() || rows.len() > 5000 {
+                if (!allow_empty && rows.is_empty()) || rows.len() > 5000 {
                     return false;
                 }
                 let required: Vec<&str> = fields
@@ -2145,11 +2355,18 @@ pub(crate) fn pending_artifact_checks_impl(conn: &Connection) -> Vec<PendingArti
         };
         let since: SystemTime = created.into();
         let root = PathBuf::from(&w.worktree_path);
-        if step
-            .expected_artifacts
-            .iter()
-            .all(|a| artifact_produced_since(&root, a, since))
-            && machine_acceptance_satisfied(&root, &step.acceptance_criteria, since)
+        if step.expected_artifacts.iter().all(|a| {
+            if step
+                .acceptance_criteria
+                .contains(&format!("machine:optional-empty:{a}"))
+            {
+                rooted_existing_path(&root, a)
+                    .and_then(|p| fs::metadata(p).ok())
+                    .is_some_and(|m| m.is_file() && m.modified().is_ok_and(|t| t >= since))
+            } else {
+                artifact_produced_since(&root, a, since)
+            }
+        }) && machine_acceptance_satisfied(&root, &step.acceptance_criteria, since)
         {
             out.push(PendingArtifactDto {
                 workspace_id: w.id,
@@ -2735,100 +2952,427 @@ fn project_root_deliverable_target(target: &str, source: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
-const DELIVERABLE_COPY_CAP: usize = 2000;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FrozenDeliverable {
+    pub path: String,
+    pub size: u64,
+    pub sha256: Option<String>,
+    pub disposition: String,
+}
 
-/// 合并后把工作区里未进 git 的 papers/、产物目录、output/ 拷到主仓同相对路径。
-/// 已存在不覆盖；保护路径下的文件跳过（保持主仓原样）；失败不阻断合并。
-fn copy_untracked_deliverables(
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliverableReviewDto {
+    pub token: String,
+    pub workspace_id: String,
+    pub project_root: String,
+    pub payload_dir: String,
+    pub files: Vec<FrozenDeliverable>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PipelineFilePending {
+    review_token: String,
+    fact: crate::projects::AcceptanceLogEntry,
+    #[serde(default)]
+    before_sha: Option<String>,
+    #[serde(default)]
+    files_applied: bool,
+    #[serde(default)]
+    tracked_after_review: Vec<String>,
+}
+
+fn save_delivery_pending(id: &str, pending: &PipelineFilePending) -> Result<(), String> {
+    crate::profiles::atomic_write(
+        &delivery_pending_path(id)?,
+        &serde_json::to_string_pretty(pending).map_err(|e| e.to_string())?,
+    )
+}
+
+fn original_merge_commit(
+    repo: &Path,
+    base: &str,
+    before: &str,
+    reviewed: &str,
+) -> Result<Option<String>, String> {
+    let history = run_git(
+        repo,
+        &[
+            "log",
+            "--first-parent",
+            "-n",
+            "1000",
+            "--format=%H %P",
+            base,
+        ],
+        Duration::from_secs(30),
+    )?;
+    Ok(history.lines().find_map(|line| {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        (parts.len() == 3 && parts[1] == before && parts[2] == reviewed)
+            .then(|| parts[0].to_string())
+    }))
+}
+
+fn delivery_review_root(id: &str) -> Result<PathBuf, String> {
+    crate::paths::validate_fs_name(id)?;
+    Ok(crate::review_contract::pending_dir()?
+        .join("delivery-reviews")
+        .join(id))
+}
+
+fn delivery_pending_path(id: &str) -> Result<PathBuf, String> {
+    Ok(delivery_review_root(id)?.join("apply-pending.json"))
+}
+
+fn read_delivery_pending(id: &str) -> Result<Option<PipelineFilePending>, String> {
+    match fs::read(delivery_pending_path(id)?) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| format!("科研产物恢复记录损坏：{e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn delivery_hash(path: &Path) -> Result<(u64, String), String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(format!("产物不是普通文件：{}", path.display()));
+    }
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hash = sha2::Sha256::new();
+    let mut size = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        size += n as u64;
+        if size > 1024 * 1024 * 1024 {
+            return Err("产物超过 1 GB 冻结预算，请拆分后评审".into());
+        }
+        hash.update(&buf[..n]);
+    }
+    Ok((size, format!("{:x}", hash.finalize())))
+}
+
+fn copy_delivery_snapshot(source: &Path, dest: &Path) -> Result<(u64, String), String> {
+    let mut input = fs::File::open(source).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dest.parent().ok_or("冻结目录无效")?).map_err(|e| e.to_string())?;
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options.open(dest).map_err(|e| e.to_string())?;
+    let mut hash = sha2::Sha256::new();
+    let mut size = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = input.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        size += n as u64;
+        if size > 1024 * 1024 * 1024 {
+            return Err("产物增长超过 1 GB，未发布快照".into());
+        }
+        hash.update(&buf[..n]);
+        output.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+    }
+    output.sync_all().map_err(|e| e.to_string())?;
+    Ok((size, format!("{:x}", hash.finalize())))
+}
+
+fn tracked_delivery_paths(worktree: &Path) -> Result<std::collections::HashSet<String>, String> {
+    let text = run_git(
+        worktree,
+        &["-c", "core.quotepath=false", "ls-files", "-z"],
+        Duration::from_secs(30),
+    )?;
+    Ok(text
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+fn delivery_paths(worktree: &Path, repo: &Path) -> Result<Vec<String>, String> {
+    let read = crate::projects::read_config_at(repo);
+    if !read.warnings.is_empty() {
+        return Err(format!(
+            "项目档案无法完整读取，未冻结产物：{}",
+            read.warnings.join("；")
+        ));
+    }
+    let dir = read.config.artifact_dir.trim().replace('\\', "/");
+    let artifact = if dir.is_empty() {
+        "artifacts"
+    } else {
+        dir.as_str()
+    };
+    if Path::new(artifact).is_absolute()
+        || artifact.split('/').any(|p| matches!(p, "" | "." | ".."))
+    {
+        return Err("产物目录必须是项目内相对路径".into());
+    }
+    let paths = crate::task_review::collect_scoped_files(
+        worktree,
+        &["papers".into(), artifact.into(), "output".into()],
+    )?;
+    if paths.len() > DELIVERABLE_COPY_CAP {
+        return Err("科研产物超过 2000 项，请缩小范围后评审".into());
+    }
+    Ok(paths)
+}
+
+fn assert_deliverables_retained(w: &WorkspaceDto, repo: &Path) -> Result<(), String> {
+    let worktree = Path::new(&w.worktree_path);
+    let tracked = tracked_delivery_paths(worktree)?;
+    for path in delivery_paths(worktree, repo)? {
+        if tracked.contains(&path) {
+            continue;
+        }
+        let source = delivery_hash(&worktree.join(&path))?;
+        if delivery_hash(&repo.join(&path)).ok().as_ref() != Some(&source) {
+            return Err(format!("非 Git 产物 {path} 尚未完整接收或在验收后变化，工作区仍保留；请先重新评审，不会随归档删除"));
+        }
+    }
+    Ok(())
+}
+
+fn freeze_deliverables(w: &WorkspaceDto, repo: &Path) -> Result<DeliverableReviewDto, String> {
+    freeze_deliverables_at(
+        &w.id,
+        Path::new(&w.worktree_path),
+        repo,
+        &crate::projects::protected_paths_at(repo)?,
+    )
+}
+
+fn freeze_deliverables_at(
+    id: &str,
     worktree: &Path,
     repo: &Path,
     protected: &[String],
-) -> SalvageReport {
-    if crate::paths::same_path(&worktree.to_string_lossy(), &repo.to_string_lossy()) {
-        return SalvageReport::default();
-    }
-    if !worktree.is_dir() || !repo.is_dir() {
-        return SalvageReport::default();
-    }
-    let artifact_dir = {
-        let raw = crate::projects::read_config_at(repo).config.artifact_dir;
-        let trimmed = raw.trim().trim_matches(['/', '\\']).replace('\\', "/");
-        if trimmed.is_empty() || trimmed.contains("..") {
-            "artifacts".to_string()
-        } else {
-            trimmed
+) -> Result<DeliverableReviewDto, String> {
+    let tracked = tracked_delivery_paths(worktree)?;
+    let token = uuid::Uuid::new_v4().to_string();
+    let dir = delivery_review_root(id)?.join(&token);
+    let result = (|| {
+        let mut review = DeliverableReviewDto {
+            token: token.clone(),
+            workspace_id: id.to_string(),
+            project_root: crate::projects::canonical_key(repo),
+            payload_dir: dir.join("payload").to_string_lossy().into_owned(),
+            files: Vec::new(),
+        };
+        let mut total = 0u64;
+        for path in delivery_paths(worktree, repo)? {
+            if tracked.contains(&path) {
+                continue;
+            }
+            let source = worktree.join(&path);
+            let size = fs::metadata(&source).map_err(|e| e.to_string())?.len();
+            let mut file = FrozenDeliverable {
+                path: path.clone(),
+                size,
+                sha256: None,
+                disposition: "copy".into(),
+            };
+            if crate::projects::path_is_protected(&path, &protected) {
+                file.disposition = "protected".into();
+            } else if repo.join(&path).exists() {
+                file.disposition = "conflict".into();
+            } else if size > 1024 * 1024 * 1024
+                || total.saturating_add(size) > 4 * 1024 * 1024 * 1024
+            {
+                file.disposition = "too_large".into();
+            }
+            if file.disposition == "copy" {
+                let (actual_size, sha) =
+                    copy_delivery_snapshot(&source, &Path::new(&review.payload_dir).join(&path))?;
+                total += actual_size;
+                if total > 4 * 1024 * 1024 * 1024 {
+                    return Err("科研产物快照超过 4 GB，未发布新快照".into());
+                }
+                file.size = actual_size;
+                file.sha256 = Some(sha);
+            }
+            review.files.push(file);
         }
-    };
-    let prefixes = ["papers".to_string(), artifact_dir, "output".to_string()];
-    let mut report = SalvageReport::default();
-    let mut failed = 0usize;
-    let mut walked = 0usize;
-    for prefix in &prefixes {
-        let src_root = worktree.join(prefix);
-        if !src_root.is_dir() {
+        crate::profiles::atomic_write(
+            &dir.join("review.json"),
+            &serde_json::to_string_pretty(&review).map_err(|e| e.to_string())?,
+        )?;
+        Ok(review)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    result
+}
+
+fn load_delivery_review(id: &str, token: &str) -> Result<DeliverableReviewDto, String> {
+    uuid::Uuid::parse_str(token).map_err(|_| "请先重新查看非 Git 产物")?;
+    let dir = delivery_review_root(id)?.join(token);
+    let mut review: DeliverableReviewDto = serde_json::from_slice(
+        &fs::read(dir.join("review.json")).map_err(|e| format!("评审快照不可用：{e}"))?,
+    )
+    .map_err(|e| e.to_string())?;
+    if review.workspace_id != id || review.token != token {
+        return Err("产物快照归属不一致".into());
+    }
+    review.payload_dir = dir.join("payload").to_string_lossy().into_owned();
+    for file in &review.files {
+        if Path::new(&file.path).is_absolute()
+            || file.path.contains('\\')
+            || file.path.split('/').any(|p| matches!(p, ".." | "." | ""))
+        {
+            return Err("产物快照包含无效路径".into());
+        }
+        if !matches!(
+            file.disposition.as_str(),
+            "copy" | "tracked" | "protected" | "conflict" | "too_large"
+        ) {
+            return Err("产物快照状态无效".into());
+        }
+    }
+    Ok(review)
+}
+
+fn check_delivery_review(
+    w: &WorkspaceDto,
+    repo: &Path,
+    token: &str,
+) -> Result<DeliverableReviewDto, String> {
+    let mut review = load_delivery_review(&w.id, token)?;
+    if !crate::paths::same_path(&review.project_root, &crate::projects::canonical_key(repo)) {
+        return Err("产物快照项目位置已变化，请重新评审".into());
+    }
+    let tracked = tracked_delivery_paths(Path::new(&w.worktree_path))?;
+    let current: std::collections::HashSet<String> =
+        delivery_paths(Path::new(&w.worktree_path), repo)?
+            .into_iter()
+            .filter(|path| !tracked.contains(path))
+            .collect();
+    if current
+        .iter()
+        .any(|path| !review.files.iter().any(|f| &f.path == path))
+    {
+        return Err("你看过之后又出现新产物，请刷新产物评审后再合并".into());
+    }
+    if review.files.iter().any(|f| f.disposition == "too_large") {
+        return Err(
+            "非 Git 产物超过冻结预算，请先拆分或移出本次交付范围后重新评审；尚未合并".into(),
+        );
+    }
+    for file in &mut review.files {
+        if file.disposition != "copy" {
             continue;
         }
-        let mut stack = vec![src_root];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for ent in entries.flatten() {
-                walked += 1;
-                if walked > DELIVERABLE_COPY_CAP {
-                    break;
-                }
-                let name = ent.file_name();
-                if name.to_string_lossy().starts_with('.') {
-                    continue;
-                }
-                let path = ent.path();
-                let Ok(meta) = fs::symlink_metadata(&path) else {
-                    continue;
-                };
-                if meta.file_type().is_symlink() {
-                    continue;
-                }
-                if meta.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if !meta.is_file() {
-                    continue;
-                }
-                let Ok(rel) = path.strip_prefix(worktree) else {
-                    continue;
-                };
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                if rel_str.is_empty() || rel_str.contains("..") {
-                    continue;
-                }
-                if crate::projects::path_is_protected(&rel_str, protected) {
-                    report.skipped_protected.push(rel_str);
-                    continue;
-                }
-                let dest = repo.join(rel);
-                if !crate::paths::path_within(&dest.to_string_lossy(), &repo.to_string_lossy()) {
-                    continue;
-                }
-                if dest.exists() {
-                    report.conflicts.push(rel_str.clone());
-                    continue;
-                }
-                if ensure_copy_dest_safe(repo, &rel_str).is_err() {
-                    failed += 1;
-                    continue;
-                }
-                match fs::copy(&path, &dest) {
-                    Ok(_) => report.copied.push(rel_str),
-                    Err(_) => failed += 1,
-                }
-            }
+        let (size, sha) = delivery_hash(&Path::new(&w.worktree_path).join(&file.path))
+            .map_err(|_| format!("{} 在看过后已删除或变化，请重看", file.path))?;
+        if size != file.size || file.sha256.as_deref() != Some(sha.as_str()) {
+            return Err(format!(
+                "{} 在你看过之后已变化，请重新查看这版产物再合并",
+                file.path
+            ));
+        }
+        if tracked.contains(&file.path) {
+            file.disposition = "tracked".into();
+            continue;
+        }
+        let (_, frozen_sha) = delivery_hash(&Path::new(&review.payload_dir).join(&file.path))?;
+        if frozen_sha != sha {
+            return Err(format!("{} 的冻结副本已损坏，未合并", file.path));
         }
     }
-    let _ = failed;
+    Ok(review)
+}
+
+fn apply_delivery_review(
+    review: &DeliverableReviewDto,
+    repo: &Path,
+    protected: &[String],
+) -> SalvageReport {
+    let mut report = SalvageReport::default();
+    for file in &review.files {
+        match file.disposition.as_str() {
+            "tracked" => continue,
+            "protected" => {
+                report.skipped_protected.push(file.path.clone());
+                continue;
+            }
+            "conflict" => {
+                report.conflicts.push(file.path.clone());
+                continue;
+            }
+            "too_large" => {
+                report.failed.push(format!("{} 超过快照预算", file.path));
+                continue;
+            }
+            _ => {}
+        }
+        let result = (|| {
+            if crate::projects::path_is_protected(&file.path, protected) {
+                return Err("保护范围已变化".to_string());
+            }
+            let source = Path::new(&review.payload_dir).join(&file.path);
+            if delivery_hash(&source)?.1.as_str() != file.sha256.as_deref().ok_or("缺少产物指纹")?
+            {
+                return Err("冻结内容与所审版本不一致".into());
+            }
+            ensure_copy_dest_safe(repo, &file.path)?;
+            let dest = repo.join(&file.path);
+            if dest.exists() {
+                if delivery_hash(&dest)?.1 == file.sha256.clone().unwrap_or_default() {
+                    return Ok(());
+                }
+                return Err("项目同名文件已变化，不覆盖".into());
+            }
+            let parent = dest.parent().ok_or("产物目标无效")?;
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            let staged = parent.join(format!(".ccode-delivery-{}.tmp", uuid::Uuid::new_v4()));
+            let copied = (|| {
+                let (_, sha) = copy_delivery_snapshot(&source, &staged)?;
+                if Some(&sha) != file.sha256.as_ref() {
+                    return Err("产物副本在复制期间变化".into());
+                }
+                // 已存在目标不能被 rename 覆盖；同目录硬链接只用于原子发布本次私有暂存，不共享工作树输入。
+                fs::hard_link(&staged, &dest)
+                    .map_err(|e| format!("发布产物失败（目标可能已出现）：{e}"))
+            })();
+            let _ = fs::remove_file(&staged);
+            copied
+        })();
+        match result {
+            Ok(()) => report.copied.push(file.path.clone()),
+            Err(e) => report.failed.push(format!("{}：{e}", file.path)),
+        }
+    }
     report
 }
+
+#[tauri::command]
+pub async fn workspace_review_deliverables(id: String) -> Result<DeliverableReviewDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let w = get_workspace(&db()?, &id)?;
+        if let Some(pending) = read_delivery_pending(&id)? {
+            return load_delivery_review(&id, &pending.review_token);
+        }
+        freeze_deliverables(&w, &live_repo_for(&w))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+const DELIVERABLE_COPY_CAP: usize = 2000;
 
 /// target → 目标目录与文件名策略：目录/通配 = 目录取静态前缀、文件名用源文件 basename；
 /// 精确文件 = 按 target 原样落（允许改名交付）
@@ -3043,6 +3587,7 @@ pub async fn merge_workspace(
     id: String,
     archive: bool,
     expect_reviewed_sha: Option<String>,
+    expect_delivery_token: Option<String>,
 ) -> Result<WorkspaceMergeResultDto, String> {
     let manager = manager.inner().clone();
     let (out, paths) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
@@ -3068,6 +3613,7 @@ pub async fn merge_workspace(
             archive,
             &ensure_idle,
             expect_reviewed_sha.as_deref(),
+            expect_delivery_token.as_deref(),
         )?;
         Ok((out, (w.worktree_path, w.repo_path)))
     })
@@ -5655,7 +6201,8 @@ mod tests {
             run_git(&fx.repo, &["rev-parse", "HEAD"], Duration::from_secs(10)).unwrap();
         fs::write(wt.join("new.txt"), "not reviewed yet").unwrap();
         commit_all_in_worktree(&wt, "next version");
-        let retried = merge_impl_with_guard(&fx.conn, &w.id, false, &|_| Ok(()), None).unwrap();
+        let retried =
+            merge_impl_with_guard(&fx.conn, &w.id, false, &|_| Ok(()), None, None).unwrap();
         assert_eq!(retried.version_id, first.version_id);
         assert!(retried.ledger_written);
         assert!(!health_impl(&fx.conn, &w.id).unwrap().ledger_pending);
@@ -5668,7 +6215,7 @@ mod tests {
         assert_eq!(ledger.len(), 1);
         assert_eq!(Some(&ledger[0].version_id), first.version_id.as_ref());
         assert!(
-            merge_impl_with_guard(&fx.conn, &w.id, false, &|_| Ok(()), None)
+            merge_impl_with_guard(&fx.conn, &w.id, false, &|_| Ok(()), None, None)
                 .unwrap_err()
                 .contains("评审")
         );
@@ -6063,6 +6610,29 @@ mod tests {
             since
         ));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explicit_empty_deliverables_do_not_accept_missing_or_malformed_files() {
+        let root = std::env::temp_dir().join(format!("mesa-zero-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let since = SystemTime::UNIX_EPOCH;
+        let criteria = vec![
+            "machine:optional-empty:to-fetch.ris".into(),
+            "machine:records-allow-empty:included.json::id,title".into(),
+        ];
+        assert!(!machine_acceptance_satisfied(&root, &criteria, since));
+        fs::write(root.join("to-fetch.ris"), "").unwrap();
+        fs::write(root.join("included.json"), "[]").unwrap();
+        assert!(machine_acceptance_satisfied(&root, &criteria, since));
+        assert!(!machine_acceptance_satisfied(
+            &root,
+            &["machine:records:included.json::id,title".into()],
+            since
+        ));
+        fs::write(root.join("included.json"), "not json").unwrap();
+        assert!(!machine_acceptance_satisfied(&root, &criteria, since));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6528,7 +7098,13 @@ mod tests {
         fs::write(wt.join("papers/b.pdf"), b"new-b").unwrap();
         fs::write(wt.join("output/main.pdf"), b"pdf").unwrap();
         fs::write(wt.join("secret.txt"), b"nope").unwrap();
-        let note = copy_untracked_deliverables(&wt, &repo, &[]).note();
+        sh(&wt, &["init", "-b", "main"]);
+        let note = apply_delivery_review(
+            &freeze_deliverables_at(&uuid::Uuid::new_v4().to_string(), &wt, &repo, &[]).unwrap(),
+            &repo,
+            &[],
+        )
+        .note();
         assert!(note.contains("2 个文件"), "{note}");
         assert_eq!(fs::read(repo.join("papers/a.pdf")).unwrap(), b"old-a");
         assert_eq!(fs::read(repo.join("papers/b.pdf")).unwrap(), b"new-b");
@@ -6547,7 +7123,19 @@ mod tests {
         fs::create_dir_all(repo.join("papers/raw")).unwrap();
         fs::write(wt.join("papers/raw/new.csv"), b"new").unwrap();
         fs::write(wt.join("papers/notes/ok.md"), b"ok").unwrap();
-        let note = copy_untracked_deliverables(&wt, &repo, &["papers/raw".to_string()]).note();
+        sh(&wt, &["init", "-b", "main"]);
+        let note = apply_delivery_review(
+            &freeze_deliverables_at(
+                &uuid::Uuid::new_v4().to_string(),
+                &wt,
+                &repo,
+                &["papers/raw".into()],
+            )
+            .unwrap(),
+            &repo,
+            &["papers/raw".into()],
+        )
+        .note();
         assert!(note.contains("1 个文件"), "{note}");
         assert!(
             !repo.join("papers/raw/new.csv").exists(),
@@ -6568,7 +7156,13 @@ mod tests {
         fs::write(wt.join("papers/dup.pdf"), b"worktree-version").unwrap();
         fs::write(repo.join("papers/dup.pdf"), b"main-version").unwrap();
         fs::write(wt.join("papers/new.pdf"), b"new").unwrap();
-        let note = copy_untracked_deliverables(&wt, &repo, &[]).note();
+        sh(&wt, &["init", "-b", "main"]);
+        let note = apply_delivery_review(
+            &freeze_deliverables_at(&uuid::Uuid::new_v4().to_string(), &wt, &repo, &[]).unwrap(),
+            &repo,
+            &[],
+        )
+        .note();
         assert!(note.contains("1 个文件"), "{note}");
         assert!(note.contains("papers/dup.pdf"), "{note}");
         assert!(note.contains("未覆盖"), "{note}");
@@ -6608,5 +7202,124 @@ mod tests {
             fs::read(fx.repo.join("papers/paper.pdf")).unwrap(),
             b"%PDF-fake"
         );
+        let fact = crate::projects::read_acceptance_log_at(&fx.repo)
+            .pop()
+            .unwrap();
+        let fingerprint = fact
+            .content_fingerprints
+            .iter()
+            .find(|f| f.path == "papers/paper.pdf")
+            .unwrap();
+        assert_eq!(
+            fingerprint.sha256.as_deref(),
+            Some(
+                delivery_hash(&wt.join("papers/paper.pdf"))
+                    .unwrap()
+                    .1
+                    .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn delivery_review_rejects_changed_bytes_even_when_git_head_did_not_change() {
+        let Some(fx) = Fixture::new() else { return };
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        let w = create_impl(
+            &fx.conn,
+            &fx.ws_root,
+            fx.repo.to_str().unwrap(),
+            "delivery-version",
+        )
+        .unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "code").unwrap();
+        commit_all_in_worktree(&wt, "feature");
+        fs::create_dir_all(wt.join("papers")).unwrap();
+        fs::write(wt.join("papers/result.pdf"), b"reviewed-pdf").unwrap();
+        let review = freeze_deliverables(&w, &fx.repo).unwrap();
+        let tip = run_git(&wt, &["rev-parse", "HEAD"], Duration::from_secs(10)).unwrap();
+        fs::write(wt.join("papers/result.pdf"), b"unreviewed-pdf").unwrap();
+        let error = merge_impl_with_guard(
+            &fx.conn,
+            &w.id,
+            false,
+            &|_| Ok(()),
+            Some(&tip),
+            Some(&review.token),
+        )
+        .unwrap_err();
+        assert!(error.contains("看过之后"), "{error}");
+        assert!(
+            !fx.repo.join("feature.txt").exists(),
+            "产物版本不匹配须在 Git 合并之前拒绝"
+        );
+        assert_eq!(
+            fs::read(Path::new(&review.payload_dir).join("papers/result.pdf")).unwrap(),
+            b"reviewed-pdf"
+        );
+        let result = apply_delivery_review(&review, &fx.repo, &[]);
+        assert!(result.failed.is_empty());
+        assert_eq!(
+            fs::read(fx.repo.join("papers/result.pdf")).unwrap(),
+            b"reviewed-pdf",
+            "应用源只认所审副本"
+        );
+        assert!(assert_deliverables_retained(&w, &fx.repo)
+            .unwrap_err()
+            .contains("仍保留"));
+    }
+
+    #[test]
+    fn pipeline_recovery_finds_original_merge_after_crash_before_commit_id_was_saved() {
+        let Some(fx) = Fixture::new() else { return };
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        let w = create_impl(
+            &fx.conn,
+            &fx.ws_root,
+            fx.repo.to_str().unwrap(),
+            "merge-recover",
+        )
+        .unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("feature.txt"), "accepted code").unwrap();
+        commit_all_in_worktree(&wt, "feature");
+        fs::create_dir_all(wt.join("papers")).unwrap();
+        fs::write(wt.join("papers/result.pdf"), b"accepted-pdf").unwrap();
+        let blocked = fx.repo.join(".ccode/acceptance-log.jsonl");
+        fs::create_dir_all(&blocked).unwrap();
+        let first = merge_impl(&fx.conn, &w.id, false).unwrap();
+        assert!(!first.ledger_written);
+        let mut pending = read_delivery_pending(&w.id).unwrap().unwrap();
+        pending.fact.version_id.clear(); // 模拟 merge 已成功、记录合并 SHA 前退出。
+        pending.files_applied = false;
+        save_delivery_pending(&w.id, &pending).unwrap();
+        fs::remove_dir(&blocked).unwrap();
+        fs::remove_file(fx.repo.join("papers/result.pdf")).unwrap();
+        fs::write(wt.join("papers/result.pdf"), b"later-pdf").unwrap();
+        fs::write(fx.repo.join("later.txt"), "later main work").unwrap();
+        commit_all_in_worktree(&fx.repo, "later main");
+        let head = run_git(&fx.repo, &["rev-parse", "HEAD"], Duration::from_secs(10)).unwrap();
+        let recovered =
+            merge_impl_with_guard(&fx.conn, &w.id, false, &|_| Ok(()), None, None).unwrap();
+        assert!(recovered.ledger_written);
+        assert_eq!(recovered.version_id, first.version_id);
+        assert_eq!(
+            run_git(&fx.repo, &["rev-parse", "HEAD"], Duration::from_secs(10)).unwrap(),
+            head
+        );
+        assert_eq!(
+            fs::read(fx.repo.join("papers/result.pdf")).unwrap(),
+            b"accepted-pdf"
+        );
+        assert!(read_delivery_pending(&w.id).unwrap().is_none());
     }
 }

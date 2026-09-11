@@ -445,7 +445,7 @@ export default function HumanTasksList({
               className={`rounded-sm px-1.5 py-1 ${
                 dropHover === task.title
                   ? "bg-cta/10 outline outline-1 outline-cta-bd"
-                  : "bg-inset"
+                  : "ccode-well"
               }`}
             >
               <div className="flex items-center gap-2">

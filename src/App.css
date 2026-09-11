@@ -530,15 +530,20 @@ body {
   isolation: isolate;
 }
 
-/* 项目页内容井（工作树卡 / 目标卡 / 文件预览 / 对话预览）。
-   深色走 inset。浅色跟页面 rail2 同色相，再往 raised 抬一档——
-   不漂成纯白，自定义主题也不必另调卡片色。 */
-.ccode-well {
-  background: var(--color-inset);
-}
+/* 全局内容卡：普通页面取 canvas，项目工作面取 rail2；嵌套卡不再叠加透明度。
+   放在 components 层，让显式的 hover/选中工具类仍能覆盖常态卡片底色。 */
+@layer components {
+  [data-surface="canvas"] {
+    --ccode-surface-base: var(--color-canvas);
+  }
 
-[data-theme$="-light"] .ccode-well {
-  background: color-mix(in srgb, var(--color-rail2) 40%, var(--color-raised));
+  [data-surface="workspace"] {
+    --ccode-surface-base: var(--color-rail2);
+  }
+
+  .ccode-well {
+    background-color: color-mix(in srgb, var(--ccode-surface-base, var(--color-canvas)) 65%, var(--color-raised));
+  }
 }
 
 .ccode-app-rail {
@@ -614,6 +619,8 @@ body {
    浅色主题下高光落在白板上近不可见，无害。入场动效直接绑在本类上：opacity + 轻微 scale，
    150ms ease-out（Linear 口径：UI 反馈 200ms 内），扁平语言下靠动效表达层级 */
 .ccode-float-surface {
+  /* 浮层内部内容卡不继承背后项目工作面的 rail2，外壳仍用 raised。 */
+  --ccode-surface-base: var(--color-canvas);
   background-color: var(--color-raised);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
   animation: ccode-pop 150ms var(--ccode-motion-ease);

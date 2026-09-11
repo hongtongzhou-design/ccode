@@ -609,7 +609,7 @@ function WorkbenchPage({
 
           {hero ? (
             <div className="space-y-2">
-            <div className="rounded-lg border border-hairline bg-raised/55 p-5 shadow-[0_1px_0_rgb(255_255_255_/_.02)]">
+            <div className="rounded-lg border border-hairline ccode-well p-5 shadow-[0_1px_0_rgb(255_255_255_/_.02)]">
               <div className="flex flex-wrap items-start justify-between gap-5">
                 <div className="min-w-0">
                   <p
@@ -695,7 +695,7 @@ function WorkbenchPage({
             {nowItems.slice(1).map((item) => (
               <div
                 key={item.path}
-                className="group flex min-h-10 w-full items-center gap-3 rounded-lg border border-hairline bg-raised/40 px-4 py-2.5 hover:bg-hover"
+                className="group flex min-h-10 w-full items-center gap-3 rounded-lg border border-hairline ccode-well px-4 py-2.5 hover:bg-hover"
               >
                 <button
                   type="button"
@@ -746,7 +746,7 @@ function WorkbenchPage({
             ))}
             </div>
           ) : (
-            <div className="rounded-lg border border-dashed border-field bg-strip px-5 py-8">
+            <div className="rounded-lg border border-dashed border-field ccode-well px-5 py-8">
               <EmptyState
                 compact
                 title="从一个项目开始"
@@ -822,7 +822,7 @@ function WorkbenchPage({
                 <button
                   key={task.id}
                   type="button"
-                  className="flex min-w-0 items-center gap-3 rounded-lg border border-hairline bg-raised/40 px-3 py-2.5 text-left hover:bg-hover"
+                  className="flex min-w-0 items-center gap-3 rounded-lg border border-hairline ccode-well px-3 py-2.5 text-left hover:bg-hover"
                   onClick={() => {
                     if (task.projectRoot) {
                       setSelectProjectReq(task.projectRoot);

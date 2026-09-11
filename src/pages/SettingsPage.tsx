@@ -7,7 +7,6 @@ import { applyTheme, useAppStore } from "../store";
 import type { AppSettings } from "../store";
 import {
   fieldClass,
-  FoldMark,
   ghostActionClass,
   hoverRevealClass,
   PageFrame,
@@ -205,8 +204,6 @@ const INSTALLABLE_FONTS: Record<string, string> = {
 type FontStatus = { id: string; family: string; installed: boolean };
 type FontInstallResult = { ok: boolean; output: string };
 
-/** 分区折叠状态在 localStorage 的键。首次仅展开高频外观，长说明按需展开。 */
-const SECTIONS_KEY = "ccode.settings.sections";
 /** 字节数白话：设置页「数据与存储」用（1 位小数，KB 起跳） */
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -220,28 +217,17 @@ function formatBytes(n: number): string {
   return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
 }
 
-const DEFAULT_COLLAPSED: Record<string, boolean> = {
-  startup: true,
-  storage: true,
-  about: true,
-  stats: true,
-  integration: true,
-  network: true,
-  update: true,
-  diag: true,
-};
-
-const SETTING_NAV: { id: string; label: string; group: "basic" | "advanced" }[] = [
+const SETTING_NAV: { id: string; label: string; group: "basic" | "management" }[] = [
   { id: "appearance", label: "外观", group: "basic" },
   { id: "startup", label: "启动行为", group: "basic" },
   { id: "hotkeys", label: "快捷键", group: "basic" },
   { id: "stats", label: "统计", group: "basic" },
-  { id: "integration", label: "集成", group: "advanced" },
-  { id: "network", label: "网络", group: "advanced" },
-  { id: "update", label: "更新", group: "advanced" },
-  { id: "diag", label: "诊断", group: "advanced" },
-  { id: "storage", label: "数据与存储", group: "advanced" },
-  { id: "about", label: "关于", group: "advanced" },
+  { id: "integration", label: "集成", group: "management" },
+  { id: "network", label: "网络", group: "management" },
+  { id: "update", label: "更新", group: "management" },
+  { id: "diag", label: "诊断", group: "management" },
+  { id: "storage", label: "数据与存储", group: "management" },
+  { id: "about", label: "关于", group: "management" },
 ];
 
 /** 依赖体检指引文案的平台参数（installGuidance 显式传参，纯逻辑不读平台） */
@@ -309,38 +295,26 @@ function DepStatusLine({
   );
 }
 
-/** 可折叠分区：标题行整行可点（高 32px），▸/▾ 指示展开状态；badge 为标题右侧状态标记 */
+/** 导航选中的分区始终展开；分区标题不是折叠操作。 */
 function Section({
   title,
-  open,
-  onToggle,
   badge,
-  active = true,
+  active,
   children,
 }: {
   title: string;
-  open: boolean;
-  onToggle: () => void;
   badge?: React.ReactNode;
-  active?: boolean;
+  active: boolean;
   children: React.ReactNode;
 }) {
   if (!active) return null;
-  // 选中的分区是当前工作面，不能被旧的折叠记忆或标题点击折成空白。
-  const effectiveOpen = active || open;
   return (
-    <section className="mt-6 first:mt-0">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={effectiveOpen}
-        className="flex h-9 w-full items-center gap-2 rounded-md px-1 text-left text-sm font-medium text-l1 transition-colors hover:bg-hover"
-      >
-        <FoldMark open={effectiveOpen} boxed />
+    <section>
+      <h2 className="mb-1 flex min-h-8 flex-wrap items-center gap-2 text-sm font-medium text-l1">
         {title}
         {badge}
-      </button>
-      {effectiveOpen && <div>{children}</div>}
+      </h2>
+      <div>{children}</div>
     </section>
   );
 }
@@ -358,13 +332,13 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-[minmax(12rem,20rem)_minmax(0,1fr)] items-center gap-x-5 py-3">
+    <div className="grid grid-cols-1 items-start gap-x-5 gap-y-2 py-3 @min-[40rem]/settings:grid-cols-[minmax(12rem,20rem)_minmax(0,1fr)] @min-[40rem]/settings:items-center">
       <div className="min-w-0">
         <div className="text-sm text-l2">{label}</div>
         {hint && <p className="mt-0.5 max-w-lg text-micro leading-4 text-l4">{hint}</p>}
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-start gap-2">{children}</div>
-      {extra && <div className="col-span-2 mt-2">{extra}</div>}
+      {extra && <div className="col-span-full mt-2">{extra}</div>}
     </div>
   );
 }
@@ -670,7 +644,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const autoOpenedUpdate = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState("appearance");
-  const [advancedNavOpen, setAdvancedNavOpen] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
   // 数值输入的本地草稿（失焦/回车才提交，避免每击键一次 IPC）
   const [fontSize, setFontSize] = useState("");
   const [fontFamily, setFontFamily] = useState("JetBrains Mono");
@@ -715,7 +689,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [fontInstallTarget, setFontInstallTarget] = useState<string | null>(
     null,
   );
-  // 分区折叠状态：首次仅展开高频外观，切换后持久化。
   // 应用版本（「关于」分区）：Tauri 从 tauri.conf.json 取，与打包产物一致
   const [appVersion, setAppVersion] = useState<string | null>(null);
   // 精确注意力标记支持清单（九家全列出，支持与否与备注以后端注册表为准）
@@ -729,36 +702,17 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       setHookSupportError(`注意力标记支持清单加载失败：${String(e)}`);
     }
   }
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
-    try {
-      const raw = localStorage.getItem(SECTIONS_KEY);
-      return raw ? JSON.parse(raw) : DEFAULT_COLLAPSED;
-    } catch {
-      return DEFAULT_COLLAPSED;
-    }
-  });
-  function toggleSection(id: string) {
-    setCollapsed((prev) => {
-      const next = { ...prev, [id]: !prev[id] };
-      try {
-        localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
-      } catch {}
-      return next;
-    });
-  }
   useEffect(() => {
-    if (SETTING_NAV.find((item) => item.id === activeSection)?.group === "advanced") {
-      setAdvancedNavOpen(true);
-    }
-  }, [activeSection]);
+    if (visible) contentRef.current?.scrollIntoView({ block: "start", inline: "nearest" });
+  }, [activeSection, visible]);
 
-  // 应用数据占用：展开「数据与存储」时读一次（递归求目录大小，不适合常驻轮询）
+  // 应用数据占用：选中「数据与存储」时读一次（递归求目录大小，不适合常驻轮询）
   const [storage, setStorage] = useState<StorageEntryDto[] | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
   useEffect(() => {
     if (
       visible &&
-      (activeSection === "storage" || !collapsed.storage) &&
+      activeSection === "storage" &&
       storage === null
     ) {
       setStorageError(null);
@@ -770,7 +724,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, activeSection, collapsed.storage]);
+  }, [visible, activeSection]);
 
   useEffect(() => {
     if (!visible) return;
@@ -1131,32 +1085,24 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  // 「诊断」分区展开（且页面可见）时拉取日志；依赖体检尚无结果时顺带探测一次
+  // 选中「诊断」（且页面可见）时拉取日志；依赖体检尚无结果时顺带探测一次
   useEffect(() => {
-    if (visible && !collapsed.diag) {
+    if (visible && activeSection === "diag") {
       loadLogs();
       if (!useAppStore.getState().depCheck) void refreshDepCheck();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, collapsed.diag]);
+  }, [visible, activeSection]);
 
-  // 收件箱 dep: 条目等外部请求：选中目标分区并强制展开（消费后清空请求）
+  // 收件箱 dep: 条目等外部请求：选中目标分区（消费后清空请求）
   useEffect(() => {
     if (!visible || !settingsSectionReq) return;
     const target = settingsSectionReq;
     setSettingsSectionReq(null);
-    setActiveSection(target);
-    setCollapsed((prev) => {
-      if (!prev[target]) return prev;
-      const next = { ...prev, [target]: false };
-      try {
-        localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
-      } catch {}
-      return next;
-    });
+    if (SETTING_NAV.some((item) => item.id === target)) setActiveSection(target);
   }, [visible, settingsSectionReq, setSettingsSectionReq]);
 
-  // 有可用更新且用户还停在默认「外观」时切到更新分区，避免芯片上一个小点没人看见。
+  // 有可用更新且用户还停在默认「外观」时切到更新分区，避免导航里的更新提示被忽略。
   // 已经点过别的分区或外部指定了分区（收件箱 dep: 等）不抢。
   useEffect(() => {
     if (!visible || !appUpdate || autoOpenedUpdate.current) return;
@@ -1288,65 +1234,59 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       {error && <p role="alert" className="mb-3 text-sm text-err-text">{error}</p>}
       {notice && <p role="status" className="mb-3 text-xs text-ok-text">{notice}</p>}
 
-      <div className="min-w-0">
-        <nav
-          aria-label="设置分区"
-          className="mb-6 flex flex-wrap gap-1.5"
-        >
-          {SETTING_NAV.map(({ id, label, group }, index) => (
-            group === "advanced" && !advancedNavOpen ? null : (
-            <div key={id} className="contents">
-              {index === 0 && <span className="basis-full text-micro font-medium uppercase tracking-wider text-l4">基础设置</span>}
-            <button
-              type="button"
-              onClick={() => {
-                setActiveSection(id);
-                setCollapsed((prev) => {
-                  if (!prev[id]) return prev;
-                  const next = { ...prev, [id]: false };
-                  try {
-                    localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
-                  } catch {}
-                  return next;
-                });
-              }}
-              className={`flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors ${
-                activeSection === id
-                  ? "border-field bg-seg-sel font-medium text-l1"
-                  : "border-field bg-strip text-l3 hover:bg-hover hover:text-l1"
-              }`}
-            >
-              {label}
-              {id === "update" && appUpdate && (
-                <span className="inline-flex items-center gap-1 text-micro text-ok-text">
-                  <span className="size-1.5 rounded-full bg-ok-text" />
-                  可更新
-                </span>
-              )}
-            </button>
+      <div className="@container">
+        <div className="grid min-w-0 gap-5 @min-[48rem]:grid-cols-[11rem_minmax(0,1fr)] @min-[48rem]:gap-7">
+          <nav aria-label="设置分区" className="self-start @min-[48rem]:sticky @min-[48rem]:top-16">
+            <div className="flex flex-wrap gap-x-6 gap-y-4 @min-[48rem]:flex-col @min-[48rem]:gap-5">
+              {([
+                { id: "basic", label: "常用" },
+                { id: "management", label: "管理" },
+              ] as const).map((group) => (
+                <div key={group.id} className="min-w-0">
+                  <p id={`settings-group-${group.id}`} className="mb-1.5 px-2.5 text-micro font-medium text-l3">
+                    {group.label}
+                  </p>
+                  <ul aria-labelledby={`settings-group-${group.id}`} className="flex flex-wrap gap-1 @min-[48rem]:flex-col">
+                    {SETTING_NAV.filter((item) => item.group === group.id).map(({ id, label }) => (
+                      <li key={id} className="min-w-0">
+                        <button
+                          id={`settings-nav-${id}`}
+                          type="button"
+                          aria-current={activeSection === id ? "page" : undefined}
+                          aria-controls="settings-content"
+                          onClick={() => setActiveSection(id)}
+                          className={`flex min-h-8 w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors ${
+                            activeSection === id
+                              ? "bg-seg-sel font-medium text-l1"
+                              : "text-l3 hover:bg-hover hover:text-l1"
+                          }`}
+                        >
+                          {label}
+                          {id === "update" && appUpdate && (
+                            <span className="inline-flex shrink-0 items-center gap-1 text-micro text-ok-text">
+                              <span aria-hidden="true" className="size-1.5 rounded-full bg-ok-text" />
+                              可更新
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </div>
-            )
-          ))}
-          <button
-            type="button"
-            aria-expanded={advancedNavOpen}
-            onClick={() => setAdvancedNavOpen((open) => !open)}
-            className="basis-full mt-2 flex items-center gap-1 text-left text-micro font-medium uppercase tracking-wider text-l4 hover:text-l1"
+          </nav>
+          <div
+            ref={contentRef}
+            id="settings-content"
+            role="region"
+            aria-labelledby={`settings-nav-${activeSection}`}
+            className="@container/settings min-w-0 scroll-mt-16"
           >
-            <span aria-hidden="true">{advancedNavOpen ? "⌄" : "›"}</span>
-            高级设置
-            {!advancedNavOpen && (
-              <span className="normal-case tracking-normal text-l4">（网络、诊断、数据与存储等）</span>
-            )}
-          </button>
-        </nav>
-        <div className="min-w-0">
 
       <Section
         title="外观"
         active={activeSection === "appearance"}
-        open={!collapsed.appearance}
-        onToggle={() => toggleSection("appearance")}
       >
         {/* 主题：七列深浅成对。色卡是该主题的小窗（左栏 + 画布 + 强调点），
             名称写在画布上用该主题自己的标题色，深浅一眼可辨。 */}
@@ -1624,7 +1564,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   </pre>
                 )}
                 {!fontInstalling && fontInstallResult && (
-                  <div className="rounded-sm bg-strip p-2 text-xs text-l2">
+                  <div className="rounded-sm ccode-well p-2 text-xs text-l2">
                     <span
                       className={
                         fontInstallResult.ok ? "text-ok-text" : "text-err-text"
@@ -1824,8 +1764,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="启动行为"
         active={activeSection === "startup"}
-        open={!collapsed.startup}
-        onToggle={() => toggleSection("startup")}
       >
         <Row
           label="想法期只读保护"
@@ -1914,7 +1852,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             <option value="labels">仅显示文字</option>
           </select>
         </Row>
-        <div className="mt-2 rounded-lg bg-strip p-3">
+        <div className="mt-2 rounded-lg ccode-well p-3">
           <div className="mb-2 flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="text-sm text-l2">顶部导航显示项目</div>
@@ -1964,8 +1902,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="快捷键"
         active={activeSection === "hotkeys"}
-        open={!collapsed.hotkeys}
-        onToggle={() => toggleSection("hotkeys")}
       >
         {/* 全部在用的绑定（命令面板/侧栏/九页切），供各行录制时互判冲突 */}
         {(() => {
@@ -1988,7 +1924,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   label="页面切换"
                 />
               </Row>
-              <div className="mt-2 rounded-lg bg-strip p-3">
+              <div className="mt-2 rounded-lg ccode-well p-3">
                 <div className="mb-2 text-xs font-medium text-l3">页面快捷键</div>
                 <div className="grid grid-cols-3 gap-2">
                   {PAGE_HOTKEY_DEFS.map((p) => (
@@ -2053,8 +1989,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="统计"
         active={activeSection === "stats"}
-        open={!collapsed.stats}
-        onToggle={() => toggleSection("stats")}
       >
         <Row label="汇率（USD→CNY）" hint="统计页下次查询生效">
           <input
@@ -2176,8 +2110,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="集成"
         active={activeSection === "integration"}
-        open={!collapsed.integration}
-        onToggle={() => toggleSection("integration")}
       >
         {hookSupportError && (
           <div className="mb-2 flex items-center gap-2 text-xs text-err-text">
@@ -2291,8 +2223,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="网络"
         active={activeSection === "network"}
-        open={!collapsed.network}
-        onToggle={() => toggleSection("network")}
       >
         <Row
           label="出网代理"
@@ -2345,8 +2275,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="更新"
         active={activeSection === "update"}
-        open={appUpdate ? true : !collapsed.update}
-        onToggle={() => toggleSection("update")}
         badge={
           appUpdate ? (
             <span className="ml-1 inline-flex items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs font-normal text-l3">
@@ -2402,7 +2330,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 <p className="mb-2 text-xs text-err-text">{appUpdateError}</p>
               )}
               {appUpdate.body && (
-                <div className="max-h-48 overflow-auto whitespace-pre-line rounded-sm bg-inset p-2 text-xs leading-5 text-l3">
+                <div className="max-h-48 overflow-auto whitespace-pre-line rounded-sm ccode-well p-2 text-xs leading-5 text-l3">
                   {appUpdate.body}
                 </div>
               )}
@@ -2436,8 +2364,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="诊断"
         active={activeSection === "diag"}
-        open={!collapsed.diag}
-        onToggle={() => toggleSection("diag")}
       >
         <Row
           label="Windows 诊断包"
@@ -2468,7 +2394,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           hint="Git / Node.js / 安装渠道"
           extra={
             depCheck ? (
-              <div className="rounded-sm bg-inset p-2">
+              <div className="rounded-sm ccode-well p-2">
                 <DepStatusLine
                   label="Git"
                   item={depCheck.git}
@@ -2558,7 +2484,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           {logs.length === 0 ? (
             <p className="text-xs text-l4">暂无日志</p>
           ) : (
-            <div className="max-h-64 overflow-auto rounded-sm bg-inset p-2 font-mono text-xs leading-5">
+            <div className="max-h-64 overflow-auto rounded-sm ccode-well p-2 font-mono text-xs leading-5">
               {logs.map((l, i) => (
                 <div key={i} className="break-all">
                   <span className="text-l4">
@@ -2587,8 +2513,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="数据与存储"
         active={activeSection === "storage"}
-        open={!collapsed.storage}
-        onToggle={() => toggleSection("storage")}
       >
         {/* 用户此前完全不知道 Mesa 在硬盘上占了多少、存在哪（v3.88 补） */}
         {storageError ? (
@@ -2635,8 +2559,6 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <Section
         title="关于"
         active={activeSection === "about"}
-        open={!collapsed.about}
-        onToggle={() => toggleSection("about")}
       >
         <Row
           label="版本"
@@ -2673,6 +2595,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           </button>
         </Row>
       </Section>
+          </div>
         </div>
       </div>
     </PageFrame>

@@ -2,9 +2,12 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+pub(crate) mod goal_storage;
 
 const MAX_TASK_INPUT_FILES: usize = 20_000;
 const MAX_TASK_INPUT_BYTES: u64 = 512 * 1024 * 1024;
@@ -190,6 +193,8 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
         ("task_id", "TEXT"),
         ("custom_runtime_id", "TEXT"),
         ("project_id", "TEXT"),
+        ("workspace_cleared", "INTEGER NOT NULL DEFAULT 0"),
+        ("review_cleared", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !run_columns.iter().any(|c| c == column) {
             conn.execute(
@@ -199,6 +204,7 @@ fn ensure_schema(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
     }
+    goal_storage::ensure_schema(conn)?;
     // 一次回填旧 Run；不重写任何 CLI 会话文件，也不合并两套 worktree 库。
     // 只回填有归属语义的 kind（§4.7 起 scratch/reader/office 闲聊的 task_id 落 NULL 是设计，不是遗留）
     let legacy = query_runs(
@@ -369,6 +375,10 @@ pub struct TaskDto {
     /// 项目稳定 id（§4.6 二期双写；旧行可能未回填 = None）
     #[serde(default)]
     pub project_id: Option<String>,
+    pub pending_apply_run_id: Option<String>,
+    pub workspace_cleared: bool,
+    pub review_cleared: bool,
+    pub storage_cleanup_pending: bool,
 }
 fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
     let input_paths: String = r.get(7)?;
@@ -394,6 +404,10 @@ fn map_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDto> {
         adopted_paths: serde_json::from_str(&r.get::<_, String>(16)?).unwrap_or_default(),
         skills: serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default(),
         project_id: r.get(18)?,
+        pending_apply_run_id: None,
+        workspace_cleared: false,
+        review_cleared: false,
+        storage_cleanup_pending: false,
     })
 }
 const TASK_COLS: &str = "id,project_root,kind,task_ref,name,description,status,input_paths,output_paths,review_required,archived_at,agent,profile_id,created_at,updated_at,identity_key,adopted_paths,skills,project_id";
@@ -496,6 +510,49 @@ fn task_rel_path(root: &Path, raw: &str, label: &str) -> Result<(String, PathBuf
         return Err(format!("{label}不能指向 Mesa 或 Git 内部目录"));
     }
     Ok((relative, canonical))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskInputEstimate {
+    pub files: usize,
+    pub bytes: u64,
+    pub limit_bytes: u64,
+    pub limit_files: usize,
+    pub allowed: bool,
+}
+
+fn estimate_task_inputs(root: &Path, paths: &[String]) -> Result<TaskInputEstimate, String> {
+    let files = crate::task_review::collect_scoped_files(root, paths)?;
+    let mut bytes = 0u64;
+    for relative in &files {
+        bytes = bytes.saturating_add(
+            fs::metadata(root.join(relative))
+                .map_err(|e| e.to_string())?
+                .len(),
+        );
+    }
+    Ok(TaskInputEstimate {
+        files: files.len(),
+        bytes,
+        limit_bytes: MAX_TASK_INPUT_BYTES,
+        limit_files: MAX_TASK_INPUT_FILES,
+        allowed: bytes <= MAX_TASK_INPUT_BYTES && files.len() <= MAX_TASK_INPUT_FILES,
+    })
+}
+
+#[tauri::command]
+pub async fn task_input_estimate(task_id: String) -> Result<TaskInputEstimate, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let task = task_by_id(&db()?, &task_id)?;
+        let root = validate_existing_dir(
+            task.project_root.as_deref().ok_or("目标没有项目")?,
+            "项目目录",
+        )?;
+        estimate_task_inputs(Path::new(&root), &task.input_paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Default)]
@@ -606,6 +663,7 @@ pub struct TaskOutputChangeDto {
     pub path: String,
     pub kind: String,
     pub bytes: u64,
+    pub too_large: bool,
 }
 
 fn push_file_change(
@@ -630,6 +688,7 @@ fn push_file_change(
             path: rel_posix(source_root, source)?,
             kind: "modified".into(),
             bytes: metadata.len(),
+            too_large: false,
         });
         return Ok(());
     }
@@ -637,6 +696,7 @@ fn push_file_change(
         path: rel_posix(source_root, source)?,
         kind: "added".into(),
         bytes: metadata.len(),
+        too_large: false,
     });
     Ok(())
 }
@@ -750,24 +810,383 @@ struct AdoptBackupFile {
 
 struct AdoptItem {
     relative: String,
-    source: PathBuf,
     target: PathBuf,
-    before: Option<Vec<u8>>,
-    after: Vec<u8>,
+    before: Option<String>,
+    after: String,
 }
 
-fn read_regular_optional(path: &Path, label: &str) -> Result<Option<Vec<u8>>, String> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{label}失败：{error}")),
-        Ok(meta) if meta.file_type().is_symlink() => {
-            Err(format!("{label}不能是符号链接：{}", path.display()))
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoalApplyFile {
+    path: String,
+    before: Option<String>,
+    after: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoalApplyJournal {
+    id: String,
+    project_root: String,
+    source_root: String,
+    backup_dir: String,
+    files: Vec<GoalApplyFile>,
+    fact: crate::projects::AcceptanceLogEntry,
+    memorize: bool,
+    phase: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalApplyPendingDto {
+    pub id: String,
+    pub version_id: String,
+    pub paths: Vec<String>,
+    pub phase: String,
+    pub note: String,
+    pub memorize: bool,
+}
+
+fn goal_journal_path(review_dir: &Path) -> PathBuf {
+    review_dir.join("apply-pending.json")
+}
+
+fn read_goal_journal(review_dir: &Path) -> Result<Option<GoalApplyJournal>, String> {
+    let path = goal_journal_path(review_dir);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            if bytes.len() > 8 * 1024 * 1024 {
+                return Err("接受恢复单超过预算，未修改项目".into());
+            }
+            let journal: GoalApplyJournal = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("接受恢复单损坏，请保留备份并检查：{e}"))?;
+            if !matches!(
+                journal.phase.as_str(),
+                "prepared" | "files_applied" | "recorded" | "rolling_back"
+            ) {
+                return Err("接受恢复单阶段无效".into());
+            }
+            uuid::Uuid::parse_str(&journal.id).map_err(|_| "接受恢复单身份无效")?;
+            if journal.fact.kind != crate::review_contract::KIND_GOAL_ADOPT
+                || journal.files.len() != journal.fact.paths.len()
+            {
+                return Err("接受恢复单的文件与决定不一致".into());
+            }
+            let base = crate::paths::canonicalize_plain(review_dir).map_err(|e| e.to_string())?;
+            for location in [&journal.source_root, &journal.backup_dir] {
+                let resolved = crate::paths::canonicalize_plain(Path::new(location))
+                    .map_err(|e| format!("接受恢复材料缺失：{e}"))?;
+                if !crate::paths::path_within_path(&resolved, &base) {
+                    return Err("接受恢复材料不在本次评审目录内".into());
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            for file in &journal.files {
+                if Path::new(&file.path).is_absolute()
+                    || validate_output_rel(&file.path)? != file.path
+                    || !journal.fact.paths.contains(&file.path)
+                    || !seen.insert(&file.path)
+                {
+                    return Err("接受恢复单包含无效相对路径".into());
+                }
+            }
+            Ok(Some(journal))
         }
-        Ok(meta) if meta.is_dir() => Err(format!("{label}是目录：{}", path.display())),
-        Ok(_) => fs::read(path)
-            .map(Some)
-            .map_err(|e| format!("{label}失败：{e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("读取接受恢复单失败：{e}")),
     }
+}
+
+fn write_goal_journal(review_dir: &Path, journal: &GoalApplyJournal) -> Result<(), String> {
+    crate::profiles::atomic_write(
+        &goal_journal_path(review_dir),
+        &serde_json::to_string_pretty(journal).map_err(|e| e.to_string())?,
+    )
+}
+
+fn clear_goal_journal(review_dir: &Path) -> Result<(), String> {
+    fs::remove_file(goal_journal_path(review_dir))
+        .map_err(|e| format!("接受已处理，但恢复标记未清理，请重试：{e}"))
+}
+
+fn goal_apply_pending(journal: &GoalApplyJournal) -> GoalApplyPendingDto {
+    GoalApplyPendingDto {
+        id: journal.id.clone(),
+        version_id: journal.fact.version_id.clone(),
+        paths: journal.fact.paths.clone(),
+        phase: journal.phase.clone(),
+        note: crate::sessions::redact_sensitive_text(&journal.fact.note),
+        memorize: journal.memorize,
+    }
+}
+
+/// 恢复单先于第一处项目写入落盘；备份与原待接受内容都不靠下一轮目录现状重建。
+fn prepare_goal_journal(
+    review_dir: &Path,
+    source: &Path,
+    project: &Path,
+    fact: crate::projects::AcceptanceLogEntry,
+    memorize: bool,
+) -> Result<GoalApplyJournal, String> {
+    if read_goal_journal(review_dir)?.is_some() {
+        return Err("还有未完成的接受操作，请先继续或恢复原文件".into());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let apply_dir = review_dir.join("applies").join(&id);
+    let source_root = if fact.frozen {
+        source.to_path_buf()
+    } else {
+        apply_dir.join("payload")
+    };
+    fs::create_dir_all(&source_root).map_err(|e| e.to_string())?;
+    let mut files = Vec::new();
+    let mut backups = Vec::new();
+    for path in &fact.paths {
+        let original = source.join(path);
+        if !fact.frozen {
+            copy_adopt_file(&original, &source_root.join(path))?;
+        }
+        let after = read_regular_optional(&source_root.join(path), "读取待接受内容")?
+            .ok_or("待接受内容不存在")?;
+        if let Some(expected) = fact
+            .content_fingerprints
+            .iter()
+            .find(|f| &f.path == path)
+            .and_then(|f| f.sha256.as_ref())
+        {
+            if &after != expected {
+                return Err(format!("{path} 与所审内容不一致，未写入项目"));
+            }
+        }
+        let target = project.join(path);
+        let before = read_regular_optional(&target, "读取项目原文件")?;
+        backups.push(AdoptItem {
+            relative: path.clone(),
+            target,
+            before: before.clone(),
+            after: after.clone(),
+        });
+        files.push(GoalApplyFile {
+            path: path.clone(),
+            before,
+            after,
+        });
+    }
+    let backup = persist_adopt_backup(&apply_dir.join("backup"), &backups)?;
+    let journal = GoalApplyJournal {
+        id,
+        project_root: project.to_string_lossy().into_owned(),
+        source_root: source_root.to_string_lossy().into_owned(),
+        backup_dir: backup.to_string_lossy().into_owned(),
+        files,
+        fact,
+        memorize,
+        phase: "prepared".into(),
+    };
+    write_goal_journal(review_dir, &journal)?;
+    Ok(journal)
+}
+
+fn check_goal_recovery_paths(journal: &GoalApplyJournal, project: &Path) -> Result<(), String> {
+    let protected = crate::projects::protected_paths_at(project)?;
+    for file in &journal.files {
+        if crate::projects::path_is_protected(&file.path, &protected) {
+            return Err(format!(
+                "保护范围已包含 {}，未继续写入，请人工处理",
+                file.path
+            ));
+        }
+        let target = project.join(&file.path);
+        let mut parent = target.parent().ok_or("接受目标路径无效")?;
+        while !parent.exists() {
+            parent = parent.parent().ok_or("接受目标路径无效")?;
+        }
+        let parent = crate::paths::canonicalize_plain(parent).map_err(|e| e.to_string())?;
+        let root = crate::paths::canonicalize_plain(project).map_err(|e| e.to_string())?;
+        if !crate::paths::path_within_path(&parent, &root) {
+            return Err("接受目标越出项目目录".into());
+        }
+    }
+    Ok(())
+}
+
+fn apply_goal_journal_with_writer(
+    review_dir: &Path,
+    project: &Path,
+    journal: &mut GoalApplyJournal,
+    mut write: impl FnMut(&Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    check_goal_recovery_paths(journal, project)?;
+    // 全批预检，再逐文件复查；已写入内容跳过，外部改动不按新基线接纳。
+    for file in &journal.files {
+        let current = read_regular_optional(&project.join(&file.path), "核对恢复目标")?;
+        if current != file.before && current.as_ref() != Some(&file.after) {
+            return Err(format!(
+                "{} 在接受期间又被修改，未覆盖；请保留恢复备份",
+                file.path
+            ));
+        }
+        if read_regular_optional(
+            &Path::new(&journal.source_root).join(&file.path),
+            "核对原版本",
+        )?
+        .as_ref()
+            != Some(&file.after)
+        {
+            return Err(format!("{} 的原待接受版本损坏，未写入", file.path));
+        }
+    }
+    for file in &journal.files {
+        let target = project.join(&file.path);
+        let current = read_regular_optional(&target, "核对接受目标")?;
+        if current.as_ref() == Some(&file.after) {
+            continue;
+        }
+        if current != file.before {
+            return Err(format!("{} 在写入前变化，恢复单已保留", file.path));
+        }
+        write(&Path::new(&journal.source_root).join(&file.path), &target)?;
+        if read_regular_optional(&target, "核对写入结果")?.as_ref() != Some(&file.after) {
+            return Err(format!("{} 写入后内容不一致，恢复单已保留", file.path));
+        }
+    }
+    journal.phase = "files_applied".into();
+    write_goal_journal(review_dir, journal)
+}
+
+fn goal_fact_recorded(project: &Path, fact: &crate::projects::AcceptanceLogEntry) -> bool {
+    crate::projects::read_acceptance_log_at(project)
+        .iter()
+        .any(|entry| {
+            entry.kind == fact.kind
+                && entry.run_id == fact.run_id
+                && entry.goal_id == fact.goal_id
+                && entry.version_id == fact.version_id
+                && entry.paths == fact.paths
+                && entry.note == fact.note
+        })
+}
+
+fn rollback_goal_journal(
+    review_dir: &Path,
+    project: &Path,
+    journal: &GoalApplyJournal,
+) -> Result<(), String> {
+    if journal.phase == "recorded" || goal_fact_recorded(project, &journal.fact) {
+        return Err("这次接受已记入账本，不能用中断恢复撤销正式成果；请创建明确的修订".into());
+    }
+    check_goal_recovery_paths(journal, project)?;
+    let mut restore = Vec::new();
+    for file in &journal.files {
+        let current = read_regular_optional(&project.join(&file.path), "检查回滚目标")?;
+        if current != file.before && current.as_ref() != Some(&file.after) {
+            return Err(format!("{} 又被外部修改，未强制回滚", file.path));
+        }
+        if let Some(before) = &file.before {
+            if read_regular_optional(
+                &Path::new(&journal.backup_dir)
+                    .join("files")
+                    .join(&file.path),
+                "检查原文件备份",
+            )?
+            .as_ref()
+                != Some(before)
+            {
+                return Err(format!("{} 的备份损坏，未恢复", file.path));
+            }
+        }
+        restore.push(AdoptItem {
+            relative: file.path.clone(),
+            target: project.join(&file.path),
+            before: file.before.clone(),
+            after: file.after.clone(),
+        });
+    }
+    // 恢复原文件本身也会中断；先记下用户选择的方向，重启后不可误继续接受。
+    let mut rolling_back = journal.clone();
+    rolling_back.phase = "rolling_back".into();
+    write_goal_journal(review_dir, &rolling_back)?;
+    let errors = rollback_adopt(&restore, Path::new(&journal.backup_dir));
+    if !errors.is_empty() {
+        return Err(format!("恢复未完成，恢复单仍保留：{}", errors.join("；")));
+    }
+    clear_goal_journal(review_dir)
+}
+
+fn finish_goal_journal(
+    conn: &Connection,
+    review_dir: &Path,
+    project: &Path,
+    journal: &mut GoalApplyJournal,
+) -> Result<(), String> {
+    if journal.phase == "rolling_back" {
+        return Err("这次操作正在恢复原文件，请继续恢复，不能改成接受成果".into());
+    }
+    // 文件阶段已持久确认或账本已有原事实时，只补后续记录；不因用户后来编辑而重复写文件。
+    if journal.phase == "prepared" && !goal_fact_recorded(project, &journal.fact) {
+        apply_goal_journal_with_writer(review_dir, project, journal, copy_adopt_file)?;
+    }
+    crate::review_contract::commit_fact(project, &journal.fact)?;
+    journal.phase = "recorded".into();
+    write_goal_journal(review_dir, journal)?;
+    if journal.memorize && !journal.fact.note.trim().is_empty() {
+        crate::projects::append_project_memory_at(
+            project,
+            &journal.fact.goal_name,
+            &journal.fact.note,
+            Some(&journal.fact.version_id),
+        )?;
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE tasks SET status='completed', adopted_paths=?2, updated_at=?3 WHERE id=?1",
+        params![
+            journal.fact.goal_id,
+            task_json_paths(&journal.fact.paths)?,
+            now_rfc3339()
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let payload = serde_json::json!({"taskId":journal.fact.goal_id,"paths":journal.fact.paths,"frozen":journal.fact.frozen,"acceptanceId":journal.id}).to_string();
+    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND event_type='task.outputs_adopted' AND payload=?2)", params![journal.fact.run_id, crate::sessions::redact_sensitive_text(&payload)], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if !exists {
+        record_event(
+            &tx,
+            &journal.fact.run_id,
+            "task.outputs_adopted",
+            Some(&payload),
+        )?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    crate::projects::record_accepted_goal_at(
+        project,
+        &journal.fact.goal_name,
+        &journal.fact.paths,
+        &journal.fact.note,
+    )?;
+    clear_goal_journal(review_dir)
+}
+
+fn read_regular_optional(path: &Path, label: &str) -> Result<Option<String>, String> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{label}失败：{e}")),
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(format!("{label}不是普通文件：{}", path.display()));
+    }
+    let mut input = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hash = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = input.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+    }
+    Ok(Some(format!("{:x}", hash.finalize())))
 }
 
 fn persist_adopt_backup(dir: &Path, items: &[AdoptItem]) -> Result<PathBuf, String> {
@@ -785,12 +1204,15 @@ fn persist_adopt_backup(dir: &Path, items: &[AdoptItem]) -> Result<PathBuf, Stri
         &serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?,
     )?;
     for item in items {
-        if let Some(bytes) = &item.before {
+        if item.before.is_some() {
             let dest = backup.join("files").join(&item.relative);
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("创建采纳备份失败：{e}"))?;
             }
-            crate::profiles::atomic_write_bytes(&dest, bytes)?;
+            copy_adopt_file(&item.target, &dest)?;
+            if read_regular_optional(&dest, "读取备份")? != item.before {
+                return Err(format!("{} 在备份期间变化，未写回", item.relative));
+            }
         }
     }
     Ok(backup)
@@ -804,11 +1226,17 @@ fn rollback_adopt(written: &[AdoptItem], backup: &Path) -> Vec<String> {
             if current == item.before {
                 return Ok(());
             }
-            if current.as_deref() != Some(item.after.as_slice()) {
+            if current.as_ref() != Some(&item.after) {
                 return Err("文件再次被外部修改，未强制回滚".to_string());
             }
             match &item.before {
-                Some(bytes) => crate::profiles::atomic_write_bytes(&item.target, bytes),
+                Some(expected) => {
+                    let saved = backup.join("files").join(&item.relative);
+                    if read_regular_optional(&saved, "核对备份")?.as_ref() != Some(expected) {
+                        return Err("备份内容变化，未强制回滚".into());
+                    }
+                    copy_adopt_file(&saved, &item.target)
+                }
                 None => fs::remove_file(&item.target).map_err(|e| e.to_string()),
             }
         })();
@@ -827,6 +1255,7 @@ thread_local! {
     static TEST_ADOPT_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
 fn adopt_state_root(project: &Path) -> Result<PathBuf, String> {
     #[cfg(test)]
     if let Some(root) = TEST_ADOPT_ROOT.with(|c| c.borrow().clone()) {
@@ -850,7 +1279,8 @@ fn adopt_selected_with_writer(
     adopt_selected_with_writer_locked(run_id, run_root, project, selected, write)
 }
 
-// 调用方持项目采纳锁：三向检查、文件应用和接受事实必须在同一临界区。
+// 旧逐文件回滚的故障夹具；生产接受统一走持久恢复单。
+#[cfg(test)]
 fn adopt_selected_with_writer_locked(
     run_id: &str,
     run_root: &Path,
@@ -863,14 +1293,13 @@ fn adopt_selected_with_writer_locked(
     for relative in selected {
         let source = run_root.join(relative);
         let target = project.join(relative);
-        let after = fs::read(&source).map_err(|e| format!("读取任务输出失败：{e}"))?;
+        let after = read_regular_optional(&source, "读取任务输出")?.ok_or("任务输出不存在")?;
         let before = read_regular_optional(&target, "读取项目文件")?;
-        if before.as_deref() == Some(after.as_slice()) {
+        if before.as_ref() == Some(&after) {
             continue;
         }
         pending.push(AdoptItem {
             relative: relative.clone(),
-            source,
             target,
             before,
             after,
@@ -887,7 +1316,12 @@ fn adopt_selected_with_writer_locked(
             if current != item.before {
                 return Err(format!("{} 在采纳期间变化，未覆盖", item.relative));
             }
-            write(&item.source, &item.target)
+            if read_regular_optional(&run_root.join(&item.relative), "核对冻结内容")?.as_ref()
+                != Some(&item.after)
+            {
+                return Err("冻结内容在写入前变化，未写回".into());
+            }
+            write(&run_root.join(&item.relative), &item.target)
         })();
         if let Err(error) = result {
             // 写入可能已替换目标后才报错；本文件也要参与回滚，不能只回滚之前的文件。
@@ -906,15 +1340,6 @@ fn adopt_selected_with_writer_locked(
         written.push(item);
     }
     Ok(())
-}
-
-fn adopt_selected_files(
-    run_id: &str,
-    run_root: &Path,
-    project: &Path,
-    selected: &[String],
-) -> Result<(), String> {
-    adopt_selected_with_writer_locked(run_id, run_root, project, selected, copy_adopt_file)
 }
 
 fn files_equal(source: &Path, target: &Path) -> Result<bool, String> {
@@ -961,11 +1386,7 @@ fn copy_project_changes(source: &Path, target: &Path) -> Result<(), String> {
 }
 
 fn task_runs_root() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::data_dir)
-        .or_else(dirs::config_dir)
-        .ok_or("无法确定 Mesa 数据目录")?;
-    let root = base.join("ccode").join("task-runs");
+    let root = goal_storage::root()?;
     fs::create_dir_all(&root).map_err(|e| format!("创建任务运行目录失败：{e}"))?;
     Ok(root)
 }
@@ -980,7 +1401,7 @@ fn task_by_id(conn: &Connection, id: &str) -> Result<TaskDto, String> {
         .optional()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Task 不存在".to_string())?;
-    resolve_task_project(conn, task)
+    goal_storage::attach(conn, resolve_task_project(conn, task)?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1188,7 +1609,11 @@ fn continue_active_goal(
 }
 
 fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
+    let storage_lock = goal_storage::lock_task(&input.task_id)?;
     let conn = db()?;
+    if goal_storage::has_pending(&conn, &input.task_id)? {
+        return Err("目标有未完成的副本清理，请先继续清理".into());
+    }
     let task = task_by_id(&conn, &input.task_id)?;
     if task.archived_at.is_some() {
         return Err("已归档的目标不能启动，请先恢复".into());
@@ -1196,6 +1621,16 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
     if task.kind != "free_research" && task.kind != "office_doc" {
         return Err("该 Task 类型由现有项目流程负责启动".into());
     }
+    for prior in query_runs(
+        &conn,
+        "WHERE task_id=?1 ORDER BY created_at DESC",
+        [&task.id],
+    )? {
+        if goal_journal_path(&task_review_dir(&task.id, &prior.id)?).exists() {
+            return Err("目标还有未完成的接受操作，请先在评审中继续或恢复原文件，再返修".into());
+        }
+    }
+    let skill_snapshots = crate::skills::snapshot_named_skills(&task.skills, &input.agent)?;
     if let Some(active) = query_runs(
         &conn,
         "WHERE task_id=?1 AND closed_at IS NULL AND internal=0 ORDER BY created_at DESC LIMIT 1",
@@ -1209,17 +1644,50 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
         {
             return Err("此目标仍有运行中的 Agent，请先停止它再更换连接".into());
         }
+        if let Some(text) = input
+            .context_text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            let root = validate_existing_dir(
+                task.project_root.as_deref().ok_or("目标没有项目")?,
+                "项目目录",
+            )?;
+            let dir = task_review_dir(&task.id, &active.id)?;
+            let environment = crate::task_review::collect_environment(
+                Path::new(&root),
+                Path::new(&active.isolation_path),
+                &active.agent,
+                &active.permission,
+                &task.input_paths,
+                &task.output_paths,
+                skill_snapshots,
+                crate::task_review::load_baseline(&dir)?,
+            )?;
+            crate::task_review::write_context_continuation(
+                &dir,
+                &active.id,
+                text,
+                environment,
+                &now_rfc3339(),
+            )?;
+        }
         if input.reuse_isolation.unwrap_or(false) {
             continue_active_goal(&conn, &task.id, &active.id, input.feedback.as_deref())?;
         }
         return Ok(active);
     }
-    let skill_snapshots = crate::skills::snapshot_named_skills(&task.skills, &input.agent)?;
     let root = validate_existing_dir(
         task.project_root.as_deref().ok_or("Task 没有关联项目")?,
         "项目根目录",
     )?;
     let reuse_isolation = input.reuse_isolation.unwrap_or(false);
+    if !reuse_isolation {
+        let estimate = estimate_task_inputs(Path::new(&root), &task.input_paths)?;
+        if !estimate.allowed {
+            return Err(format!("所选资料 {} 个文件、{:.1} MB，超过 512 MB 隔离输入预算。请选择较小资料范围；未创建副本、未启动 Agent。", estimate.files, estimate.bytes as f64 / 1024.0 / 1024.0));
+        }
+    }
     let previous = query_runs(
         &conn,
         "WHERE task_id=?1 AND internal=0 ORDER BY created_at DESC LIMIT 1",
@@ -1231,6 +1699,8 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
     let mut created_here = false;
     let run_root = if reuse_isolation {
         let previous = previous.ok_or("还没有上一版，不能在原副本上继续")?;
+        goal_storage::ensure_available(&conn, &previous, false)?;
+        goal_storage::ensure_available(&conn, &previous, true)?;
         let existing = PathBuf::from(&previous.isolation_path);
         if !existing.is_dir() {
             return Err("上一版工作目录已经不在，请重新开始这个目标".into());
@@ -1325,6 +1795,7 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
             )
         };
         if let Err(error) = baseline {
+            drop(storage_lock);
             let _ = close_run_with_result(&run.id, None, "failed", None, Some("评审基线写入失败"));
             return Err(format!("记录开工基线失败，未启动：{error}"));
         }
@@ -1339,12 +1810,25 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
         let dir = task_review_dir(&task.id, &run.id)?;
         let frozen = (|| {
             let environment = crate::task_review::collect_environment(
-                Path::new(&root), &run_root, &run.agent, &run.permission, &task.input_paths, &task.output_paths,
-                skill_snapshots, crate::task_review::load_baseline(&dir)?,
+                Path::new(&root),
+                &run_root,
+                &run.agent,
+                &run.permission,
+                &task.input_paths,
+                &task.output_paths,
+                skill_snapshots,
+                crate::task_review::load_baseline(&dir)?,
             )?;
-            crate::task_review::write_context_snapshot(&dir, &run.id, text, &now_rfc3339(), Some(environment))
+            crate::task_review::write_context_snapshot(
+                &dir,
+                &run.id,
+                text,
+                &now_rfc3339(),
+                Some(environment),
+            )
         })();
         if let Err(error) = frozen {
+            drop(storage_lock);
             let _ =
                 close_run_with_result(&run.id, None, "failed", None, Some("上下文快照写入失败"));
             return Err(format!("记录上下文快照失败，未启动：{error}"));
@@ -1356,6 +1840,28 @@ fn task_prepare_run_impl(input: PrepareTaskRunInput) -> Result<RunDto, String> {
 /// 评审证据目录：归档目标也不删，随 task-runs 树保留。
 fn task_review_dir(task_id: &str, run_id: &str) -> Result<PathBuf, String> {
     Ok(task_runs_root()?.join(task_id).join("review").join(run_id))
+}
+
+pub(crate) fn result_version_for(run_id: &str) -> Result<Option<String>, String> {
+    let run = run_get(run_id.to_string())?.ok_or("Run 不存在")?;
+    if run.task_id.is_empty() {
+        return Ok(None);
+    }
+    let dir = task_review_dir(&run.task_id, &run.id)?;
+    let Some(snapshot) = crate::task_review::load_snapshot(&dir)? else {
+        return Ok(None);
+    };
+    for change in &snapshot.changes {
+        let path = Path::new(&run.isolation_path).join(&change.path);
+        if change.too_large {
+            return Ok(None);
+        }
+        let hash = read_regular_optional(&path, "核对成果版本")?;
+        if hash != change.sha256 {
+            return Ok(None);
+        }
+    }
+    Ok(Some(format!("{}:{}", run.id, snapshot.seq)))
 }
 
 /// 结果可审与进程成败解绑（§4.4）：失败/停止的 Run 若冻结到可审成果，
@@ -1383,16 +1889,19 @@ fn freeze_task_run_evidence(run_id: &str) {
             // 无目标 Run（办公文件闲聊等）：没有任务可审，直接跳过
             return Ok(false);
         }
+        let _storage_lock = goal_storage::lock_task(&run.task_id)?;
+        if goal_storage::ensure_available(&conn, &run, false).is_err()
+            || goal_storage::ensure_available(&conn, &run, true).is_err()
+        {
+            return Ok(false);
+        }
         let task = task_by_id(&conn, &run.task_id)?;
         if !task.review_required {
             return Ok(false);
         }
         let dir = task_review_dir(&task.id, &run.id)?;
-        // 回合冻结（task_freeze_turn）已产出最新版快照时，收尾不再重复构建
-        if crate::task_review::load_snapshot(&dir)?.is_some() {
-            return Ok(false);
-        }
-        let Some(snapshot) = crate::task_review::freeze(
+        // 中断前可能在上一轮快照之后又产生部分成果；收尾再核对，内容未变不新造版本。
+        let Some(snapshot) = crate::task_review::freeze_or_refresh(
             &dir,
             &run.id,
             Path::new(&run.isolation_path),
@@ -1445,11 +1954,16 @@ pub struct TaskReviewDto {
     /// 冻结版本号（回合再冻结会递增）；采纳时回传绑定「看过的那版」。
     pub seq: Option<u32>,
     pub changes: Vec<TaskOutputChangeDto>,
+    pub freeze_required: bool,
+    pub readiness: crate::review_contract::ResultReadiness,
+    pub pending_apply: Option<GoalApplyPendingDto>,
 }
 
 fn task_output_changes_impl(run_id: &str) -> Result<TaskReviewDto, String> {
     let conn = db()?;
     let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
+    let _storage_lock = goal_storage::lock_task(&run.task_id)?;
+    goal_storage::ensure_available(&conn, &run, true)?;
     let task = task_by_id(&conn, &run.task_id)?;
     if !task.review_required {
         return Err("该任务不需要审核输出".into());
@@ -1459,12 +1973,70 @@ fn task_output_changes_impl(run_id: &str) -> Result<TaskReviewDto, String> {
         "项目根目录",
     )?;
     let dir = task_review_dir(&task.id, &run.id)?;
+    if let Some(journal) = read_goal_journal(&dir)? {
+        let changes = journal
+            .files
+            .iter()
+            .map(|file| TaskOutputChangeDto {
+                path: file.path.clone(),
+                kind: if file.before.is_some() {
+                    "modified"
+                } else {
+                    "added"
+                }
+                .into(),
+                bytes: fs::metadata(Path::new(&journal.source_root).join(&file.path))
+                    .map(|m| m.len())
+                    .unwrap_or(0),
+                too_large: false,
+            })
+            .collect();
+        return Ok(TaskReviewDto {
+            frozen: true,
+            payload_dir: Some(journal.source_root.clone()),
+            seq: None,
+            changes,
+            freeze_required: false,
+            readiness: crate::review_contract::ResultReadiness::LedgerPending,
+            pending_apply: Some(goal_apply_pending(&journal)),
+        });
+    }
     let snapshot = crate::task_review::load_snapshot(&dir)?;
     // 有冻结证据的 Run 不看进程退出状态（部分成果同样可审）；未冻结的旧 Run 维持 completed 门槛
-    if run.status != "completed" && snapshot.is_none() {
+    if run.status != "completed"
+        && snapshot.is_none()
+        && crate::task_review::load_baseline(&dir)?.is_none()
+    {
         return Err("只有已完成的 Run 才能审核输出（这次运行没有冻结证据）".into());
     }
     if let Some(snapshot) = snapshot {
+        let protected = crate::projects::protected_paths_at(Path::new(&root))?;
+        let version = format!("{}:{}", run.id, snapshot.seq);
+        let applied = crate::projects::read_acceptance_log_at(Path::new(&root))
+            .iter()
+            .any(|fact| {
+                fact.kind == crate::review_contract::KIND_GOAL_ADOPT
+                    && fact.goal_id == task.id
+                    && fact.version_id == version
+            });
+        let writable = snapshot.changes.iter().any(|change| {
+            change.kind != "deleted"
+                && !change.too_large
+                && !crate::projects::path_is_protected(&change.path, &protected)
+        });
+        let readiness =
+            crate::review_contract::result_readiness(&crate::review_contract::ReadinessInput {
+                kind: crate::review_contract::KIND_GOAL_ADOPT.into(),
+                has_snapshot: true,
+                has_adoptable: writable,
+                protected_hit: !writable
+                    && snapshot
+                        .changes
+                        .iter()
+                        .any(|change| change.kind != "deleted"),
+                ledger_has_fact: applied,
+                ..Default::default()
+            });
         let changes = snapshot
             .changes
             .iter()
@@ -1472,10 +2044,14 @@ fn task_output_changes_impl(run_id: &str) -> Result<TaskReviewDto, String> {
                 path: change.path.clone(),
                 kind: change.kind.clone(),
                 bytes: change.size,
+                too_large: change.too_large,
             })
             .collect();
         return Ok(TaskReviewDto {
             frozen: true,
+            pending_apply: None,
+            readiness,
+            freeze_required: false,
             payload_dir: Some(
                 crate::task_review::snapshot_payload_dir(&dir, &snapshot)?
                     .to_string_lossy()
@@ -1485,16 +2061,34 @@ fn task_output_changes_impl(run_id: &str) -> Result<TaskReviewDto, String> {
             changes,
         });
     }
-    // 旧 Run 或冻结失败：退回目录现算，由前端明示「未冻结」。
+    let freeze_required = crate::task_review::load_baseline(&dir)?.is_some();
+    let mut changes = list_output_changes(
+        Path::new(&run.isolation_path),
+        Path::new(&root),
+        &task.output_paths,
+    )?;
+    if freeze_required {
+        for change in &mut changes {
+            change.too_large = true;
+        }
+    }
     Ok(TaskReviewDto {
         frozen: false,
+        pending_apply: None,
+        freeze_required,
         payload_dir: None,
         seq: None,
-        changes: list_output_changes(
-            Path::new(&run.isolation_path),
-            Path::new(&root),
-            &task.output_paths,
-        )?,
+        readiness: if freeze_required {
+            crate::review_contract::ResultReadiness::Blocked
+        } else {
+            crate::review_contract::result_readiness(&crate::review_contract::ReadinessInput {
+                kind: crate::review_contract::KIND_GOAL_ADOPT.into(),
+                has_adoptable: !changes.is_empty(),
+                run_completed: run.status == "completed",
+                ..Default::default()
+            })
+        },
+        changes,
     })
 }
 
@@ -1503,6 +2097,41 @@ pub async fn task_output_changes(run_id: String) -> Result<TaskReviewDto, String
     tauri::async_runtime::spawn_blocking(move || task_output_changes_impl(&run_id))
         .await
         .map_err(|e| format!("读取任务变更失败：{e}"))?
+}
+
+#[tauri::command]
+pub async fn task_freeze_large_outputs(
+    run_id: String,
+    expect_seq: u32,
+    confirmed: bool,
+) -> Result<TaskReviewDto, String> {
+    if !confirmed {
+        return Err("需要明确确认大文件冻结预算".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db()?;
+        let run = get_run_at(&conn, &run_id)?.ok_or("运行不存在")?;
+        let storage_lock = goal_storage::lock_task(&run.task_id)?;
+        goal_storage::ensure_available(&conn, &run, false)?;
+        goal_storage::ensure_available(&conn, &run, true)?;
+        let task = task_by_id(&conn, &run.task_id)?;
+        if !task.review_required {
+            return Err("这次运行不支持成果验收".into());
+        }
+        let dir = task_review_dir(&task.id, &run.id)?;
+        crate::task_review::freeze_large(
+            &dir,
+            &run.id,
+            Path::new(&run.isolation_path),
+            &task.output_paths,
+            expect_seq,
+            &now_rfc3339(),
+        )?;
+        drop(storage_lock);
+        task_output_changes_impl(&run_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 回合结束即冻结（§4.4 交互式形态）：Agent 答完一轮但 CLI 进程不退出——
@@ -1522,6 +2151,11 @@ pub async fn task_freeze_turn(app: tauri::AppHandle, run_id: String) -> Result<b
             || !matches!(run.task_kind.as_str(), "free_research" | "office_doc")
             || run.task_id.is_empty()
         {
+            return Ok(false);
+        }
+        let _storage_lock = goal_storage::lock_task(&run.task_id)?;
+        if goal_storage::ensure_available(&conn, &run, false).is_err()
+            || goal_storage::ensure_available(&conn, &run, true).is_err() {
             return Ok(false);
         }
         let task = task_by_id(&conn, &run.task_id)?;
@@ -1592,14 +2226,25 @@ pub async fn task_run_context(run_id: String) -> Result<Option<TaskContextDto>, 
         if run.task_id.is_empty() {
             return Ok(None);
         }
+        let _storage_lock = goal_storage::lock_task(&run.task_id)?;
+        goal_storage::ensure_available(&conn, &run, true)?;
         let dir = task_review_dir(&run.task_id, &run.id)?;
-        crate::task_review::load_context_snapshot(&dir).map(|snapshot| {
+        crate::task_review::load_current_context(&dir).map(|snapshot| {
             snapshot.map(|snapshot| TaskContextDto {
                 run_id: snapshot.run_id,
                 created_at: snapshot.created_at,
                 sha256: snapshot.sha256,
-                text: snapshot.text,
-                environment: snapshot.environment,
+                text: crate::sessions::redact_sensitive_text(&snapshot.text),
+                environment: snapshot.environment.map(|mut environment| {
+                    for (_, text) in &mut environment.rules {
+                        *text = crate::sessions::redact_sensitive_text(text);
+                    }
+                    for skill in &mut environment.skills {
+                        skill.entry_text =
+                            crate::sessions::redact_sensitive_text(&skill.entry_text);
+                    }
+                    environment
+                }),
             })
         })
     })
@@ -1616,6 +2261,8 @@ fn task_adopt_outputs_impl(
 ) -> Result<TaskDto, String> {
     let conn = db()?;
     let run = get_run_at(&conn, run_id)?.ok_or("Run 不存在")?;
+    let _storage_lock = goal_storage::lock_task(&run.task_id)?;
+    goal_storage::ensure_available(&conn, &run, true)?;
     let task = task_by_id(&conn, &run.task_id)?;
     let root = validate_existing_dir(
         task.project_root.as_deref().ok_or("Task 没有关联项目")?,
@@ -1623,7 +2270,13 @@ fn task_adopt_outputs_impl(
     )?;
     let _adopt_lock = crate::review_contract::apply_lock(Path::new(&root))?;
     let dir = task_review_dir(&task.id, &run.id)?;
+    if read_goal_journal(&dir)?.is_some() {
+        return Err("有未完成的接受操作，请先继续原操作或恢复原文件；不会改为接受最新版本".into());
+    }
     let snapshot = crate::task_review::load_snapshot(&dir)?;
+    if snapshot.is_none() && crate::task_review::load_baseline(&dir)?.is_some() {
+        return Err("这次运行冻结尚未成功，不能按实时目录采纳；请先冻结成果或缩小输出范围".into());
+    }
     // 有冻结证据的 Run 不看进程退出状态（部分成果同样可采纳）；未冻结的旧 Run 维持 completed 门槛
     if run.status != "completed" && snapshot.is_none() {
         return Err("只有已完成的 Run 才能采纳输出（这次运行没有冻结证据）".into());
@@ -1681,48 +2334,37 @@ fn task_adopt_outputs_impl(
             }
         }
     }
-    if let Some(snapshot) = &snapshot {
-        // 版本绑定：人看过的 seq 与当前冻结不一致 = 看过之后又有新成果，拒绝并要求重看
-        let expect = expect_seq.ok_or("请先查看这版冻结结果，再执行采纳")?;
-        crate::review_contract::assert_seq(expect, snapshot.seq)?;
-        // 冻结路径：三向判定（项目现读 vs 开工基线 vs 冻结内容），写入源只认 payload 副本；
-        // 「看过的版本」与「写入的版本」由此逐字节绑定。
-        let baseline = crate::task_review::load_baseline(&dir)?;
-        let mut accepted = std::collections::HashMap::new();
-        for fact in crate::projects::read_acceptance_log_at(Path::new(&root)) {
-            if fact.kind == crate::review_contract::KIND_GOAL_ADOPT && fact.goal_id == task.id {
-                for file in fact.content_fingerprints {
-                    if let Some(sha) = file.sha256 {
-                        accepted.insert(file.path, sha);
+    let validate_frozen = || -> Result<(), String> {
+        if let Some(snapshot) = &snapshot {
+            // 版本绑定：人看过的 seq 与当前冻结不一致 = 看过之后又有新成果，拒绝并要求重看
+            let expect = expect_seq.ok_or("请先查看这版冻结结果，再执行采纳")?;
+            crate::review_contract::assert_seq(expect, snapshot.seq)?;
+            // 冻结路径：三向判定（项目现读 vs 开工基线 vs 冻结内容），写入源只认 payload 副本；
+            // 「看过的版本」与「写入的版本」由此逐字节绑定。
+            let baseline = crate::task_review::load_baseline(&dir)?;
+            let mut accepted = std::collections::HashMap::new();
+            for fact in crate::projects::read_acceptance_log_at(Path::new(&root)) {
+                if fact.kind == crate::review_contract::KIND_GOAL_ADOPT && fact.goal_id == task.id {
+                    for file in fact.content_fingerprints {
+                        if let Some(sha) = file.sha256 {
+                            accepted.insert(file.path, sha);
+                        }
                     }
                 }
             }
+            crate::task_review::check_adoption(
+                &dir,
+                snapshot,
+                baseline.as_ref(),
+                &selected,
+                Path::new(&root),
+                &accepted,
+            )?;
         }
-        let planned = crate::task_review::check_adoption(
-            &dir,
-            snapshot,
-            baseline.as_ref(),
-            &selected,
-            Path::new(&root),
-            &accepted,
-        )?;
-        let planned_paths: Vec<String> = planned.iter().map(|(path, _)| path.clone()).collect();
-        adopt_selected_files(
-            run_id,
-            &crate::task_review::snapshot_payload_dir(&dir, snapshot)?,
-            Path::new(&root),
-            &planned_paths,
-        )?;
-    } else {
-        adopt_selected_files(
-            run_id,
-            Path::new(&run.isolation_path),
-            Path::new(&root),
-            &selected,
-        )?;
-    }
-    // 文件已写入项目。长期接受账本必须落盘：失败要可诊断、可恢复——
-    // 返回错误引导重试（重试幂等：已写入的文件自动跳过，账本按结果版本、路径集合和意见去重）。
+        Ok(())
+    };
+    validate_frozen()?;
+    // 第一处项目写入之前持久化原版本、目标前态、备份和用户决定。
     let note = note.unwrap_or_default();
     let mut entry = crate::review_contract::fact_from_goal_adopt(
         Path::new(&root),
@@ -1747,60 +2389,68 @@ fn task_adopt_outputs_impl(
             })
             .collect();
     }
-    if let Err(error) = crate::review_contract::commit_fact(Path::new(&root), &entry) {
-        crate::logbuf::record(
-            "error",
-            "runs",
-            &format!("Run {run_id} 验收记录落盘失败：{error}"),
-        );
-        let _ = record_event(&conn, run_id, "task.accept_record_failed", Some(&error));
-        return Err(format!(
-            "文件已写入项目，但验收记录落盘失败：{error}。请再执行一次采纳以补记（已写入的文件会自动跳过）。"
-        ));
-    }
-    // 人勾选「沉淀进项目知识」才写 memory.md（Agent 自称的结论不进）。
-    // 与账本同口径 fail-closed：勾了却没写下，不能显示完整成功；按结果版本幂等，重试不重复追加。
-    if memorize.unwrap_or(false) && !note.trim().is_empty() {
-        if let Err(error) = crate::projects::append_project_memory_at(
-            Path::new(&root),
-            &task.name,
-            &note,
-            Some(&entry.version_id),
-        ) {
-            crate::logbuf::record(
-                "error",
-                "runs",
-                &format!("Run {run_id} 项目知识沉淀失败：{error}"),
-            );
-            let _ = record_event(&conn, run_id, "task.memory_failed", Some(&error));
-            return Err(format!(
-                "文件已写入项目，验收记录已记下，但项目知识未能写入：{error}。请再执行一次采纳以补记（已写入的文件会自动跳过）。"
-            ));
-        }
-    }
-    conn.execute(
-        "UPDATE tasks SET status='completed', adopted_paths=?3, updated_at=?2 WHERE id=?1",
-        params![task.id, now_rfc3339(), task_json_paths(&selected)?],
-    )
-    .map_err(|e| format!("更新 Task 完成状态失败：{e}"))?;
-    record_event(
-        &conn,
-        run_id,
-        "task.outputs_adopted",
-        Some(&serde_json::json!({"taskId": task.id, "paths": selected, "frozen": snapshot.is_some()}).to_string()),
+    let source = match &snapshot {
+        Some(snapshot) => crate::task_review::snapshot_payload_dir(&dir, snapshot)?,
+        None => PathBuf::from(&run.isolation_path),
+    };
+    let mut journal = prepare_goal_journal(
+        &dir,
+        &source,
+        Path::new(&root),
+        entry,
+        memorize.unwrap_or(false),
     )?;
-    // project-status.json 是账本的「最近摘要」投影；失败不再静默吞掉，记日志与事件供诊断。
-    if let Err(error) =
-        crate::projects::record_accepted_goal_at(Path::new(&root), &task.name, &selected, &note)
-    {
-        crate::logbuf::record(
-            "error",
-            "runs",
-            &format!("Run {run_id} 验收摘要写入失败：{error}"),
-        );
-        let _ = record_event(&conn, run_id, "task.accept_summary_failed", Some(&error));
+    if let Err(error) = validate_frozen() {
+        clear_goal_journal(&dir)?;
+        return Err(error); // 备份期间项目漂移，尚未写入；不能把变化后的文件当作新基线。
     }
+    finish_goal_journal(&conn, &dir, Path::new(&root), &mut journal).map_err(|e| {
+        format!("接受尚未完成：{e}。恢复单和备份已保留，请在评审中继续原操作或恢复原文件。")
+    })?;
     task_by_id(&conn, &run.task_id)
+}
+
+#[tauri::command]
+pub async fn task_recover_outputs(
+    run_id: String,
+    operation_id: String,
+    action: String,
+) -> Result<TaskDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db()?;
+        let run = get_run_at(&conn, &run_id)?.ok_or("运行不存在")?;
+        let _storage_lock = goal_storage::lock_task(&run.task_id)?;
+        goal_storage::ensure_available(&conn, &run, true)?;
+        let task = task_by_id(&conn, &run.task_id)?;
+        let root = validate_existing_dir(
+            task.project_root.as_deref().ok_or("目标没有项目")?,
+            "项目目录",
+        )?;
+        let _lock = crate::review_contract::apply_lock(Path::new(&root))?;
+        let dir = task_review_dir(&task.id, &run.id)?;
+        let mut journal = read_goal_journal(&dir)?.ok_or("此接受操作已处理，请刷新")?;
+        if journal.id != operation_id
+            || journal.fact.run_id != run.id
+            || journal.fact.goal_id != task.id
+        {
+            return Err("恢复请求与原接受操作不一致".into());
+        }
+        if journal.fact.project_id.is_some() {
+            if journal.fact.project_id != crate::projects::project_id_at(Path::new(&root)) {
+                return Err("恢复单项目身份不一致".into());
+            }
+        } else if !crate::paths::same_path(&journal.project_root, &root) {
+            return Err("旧恢复单项目位置不一致，未写入".into());
+        }
+        match action.as_str() {
+            "continue" => finish_goal_journal(&conn, &dir, Path::new(&root), &mut journal)?,
+            "rollback" => rollback_goal_journal(&dir, Path::new(&root), &journal)?,
+            _ => return Err("不支持的恢复操作".into()),
+        }
+        task_by_id(&conn, &task.id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1864,6 +2514,30 @@ fn list_tasks_at(
     }
 }
 
+fn attach_pending_goal_apply(conn: &Connection, task: TaskDto) -> Result<TaskDto, String> {
+    let mut task = goal_storage::attach(conn, task)?;
+    if !task.review_required {
+        return Ok(task);
+    }
+    let mut stmt = conn
+        .prepare("SELECT id FROM runs WHERE task_id=?1 ORDER BY created_at DESC")
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map([&task.id], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    for id in ids {
+        let id = id.map_err(|e| e.to_string())?;
+        if goal_journal_path(&task_review_dir(&task.id, &id)?)
+            .try_exists()
+            .map_err(|e| e.to_string())?
+        {
+            task.pending_apply_run_id = Some(id);
+            break;
+        }
+    }
+    Ok(task)
+}
+
 #[tauri::command]
 pub fn task_list(
     project_root: Option<String>,
@@ -1877,12 +2551,18 @@ pub fn task_list(
     )?;
     tasks
         .into_iter()
-        .map(|task| resolve_task_project(&conn, task))
+        .map(|task| attach_pending_goal_apply(&conn, resolve_task_project(&conn, task)?))
         .collect()
 }
 
 fn archive_goal_at(conn: &Connection, id: &str) -> Result<(), String> {
-    let task = task_by_id(conn, id)?;
+    let task = attach_pending_goal_apply(conn, task_by_id(conn, id)?)?;
+    if task.pending_apply_run_id.is_some() {
+        return Err("目标有未完成的接受操作，请先处理后再归档".into());
+    }
+    if task.storage_cleanup_pending {
+        return Err("目标有未完成的副本清理，请先继续清理".into());
+    }
     if !task.declared {
         return Err("只能归档你记下的目标".into());
     }
@@ -1913,6 +2593,9 @@ fn archive_goal_at(conn: &Connection, id: &str) -> Result<(), String> {
 
 fn unarchive_goal_at(conn: &Connection, id: &str) -> Result<TaskDto, String> {
     let task = task_by_id(conn, id)?;
+    if goal_storage::has_pending(conn, id)? {
+        return Err("目标有未完成的副本清理，请先继续清理".into());
+    }
     if !task.declared {
         return Err("只能恢复你记下的目标".into());
     }
@@ -1932,11 +2615,13 @@ fn unarchive_goal_at(conn: &Connection, id: &str) -> Result<TaskDto, String> {
 
 #[tauri::command]
 pub fn task_delete(id: String) -> Result<(), String> {
+    let _lock = goal_storage::lock_task(&id)?;
     archive_goal_at(&db()?, &id)
 }
 
 #[tauri::command]
 pub fn task_unarchive(id: String) -> Result<TaskDto, String> {
+    let _lock = goal_storage::lock_task(&id)?;
     unarchive_goal_at(&db()?, &id)
 }
 
@@ -1951,7 +2636,7 @@ pub fn task_get(id: String) -> Result<Option<TaskDto>, String> {
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    task.map(|task| resolve_task_project(&conn, task))
+    task.map(|task| goal_storage::attach(&conn, resolve_task_project(&conn, task)?))
         .transpose()
 }
 
@@ -2165,6 +2850,7 @@ pub fn open_run_impl(mut input: OpenRunInput) -> Result<RunDto, String> {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
+    goal_storage::check_open(&tx, &input)?;
     let run = open_at(&tx, input)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(run)
@@ -2290,6 +2976,9 @@ fn open_at(conn: &Connection, input: OpenRunInput) -> Result<RunDto, String> {
     get_run_at(conn, &id)?.ok_or("Run 写入后读回失败".into())
 }
 fn claim_at(conn: &Connection, id: &str) -> Result<(), String> {
+    if let Some(run) = get_run_at(conn, id)? {
+        goal_storage::ensure_available(conn, &run, false)?;
+    }
     let n = conn.execute("UPDATE runs SET status='starting' WHERE id=?1 AND status='created' AND closed_at IS NULL",[id]).map_err(|e| e.to_string())?;
     if n != 1 {
         return Err("Run 已启动或已结束，拒绝重复创建进程".into());
@@ -2362,6 +3051,9 @@ pub fn claim_interactive_start(id: &str, pty_live: bool) -> Result<(), String> {
 }
 
 fn mark_starting_for_interactive(conn: &Connection, id: &str) -> Result<(), String> {
+    if let Some(run) = get_run_at(conn, id)? {
+        goal_storage::ensure_available(conn, &run, false)?;
+    }
     let n = conn
         .execute(
             "UPDATE runs SET status='starting' WHERE id=?1 AND closed_at IS NULL AND status IN ('created','starting','running')",
@@ -2909,6 +3601,182 @@ pub fn run_open_custom(
 mod tests {
     use super::*;
 
+    fn journal_fixture() -> (PathBuf, PathBuf, PathBuf, Connection, GoalApplyJournal) {
+        let base =
+            std::env::temp_dir().join(format!("mesa-accept-recovery-{}", uuid::Uuid::new_v4()));
+        let project = base.join("project");
+        let review = base.join("review");
+        let payload = review.join("payload");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(project.join("a.md"), "old report").unwrap();
+        fs::write(project.join("paper.md"), "protected paper").unwrap();
+        fs::write(payload.join("a.md"), "reviewed report").unwrap();
+        fs::write(payload.join("b.csv"), "reviewed data").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute("INSERT INTO tasks(id,identity_key,kind,name,review_required,status,created_at,updated_at) VALUES('goal','user:recovery','free_research','整理实验记录',1,'pending_review','now','now')", []).unwrap();
+        let mut fact = crate::review_contract::fact_from_goal_adopt(
+            &project,
+            "goal",
+            "整理实验记录",
+            "run",
+            Some(1),
+            vec!["a.md".into(), "b.csv".into()],
+            "仅接受已审版本".into(),
+            true,
+            "original-time".into(),
+        );
+        fact.content_fingerprints = fact
+            .paths
+            .iter()
+            .map(|path| crate::projects::ContentFingerprint {
+                path: path.clone(),
+                size: fs::metadata(payload.join(path)).unwrap().len(),
+                sha256: read_regular_optional(&payload.join(path), "test").unwrap(),
+            })
+            .collect();
+        let journal = prepare_goal_journal(&review, &payload, &project, fact, false).unwrap();
+        (base, project, review, conn, journal)
+    }
+
+    #[test]
+    fn interrupted_acceptance_resumes_exact_original_version_after_reload() {
+        let (base, project, review, conn, mut journal) = journal_fixture();
+        let mut writes = 0;
+        let result = apply_goal_journal_with_writer(&review, &project, &mut journal, |src, dst| {
+            writes += 1;
+            if writes == 2 {
+                return Err("simulated crash".into());
+            }
+            copy_adopt_file(src, dst)
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(project.join("a.md")).unwrap(), b"reviewed report");
+        assert!(!project.join("b.csv").exists());
+        fs::write(review.join("snapshot.json"), r#"{"seq":99}"#).unwrap();
+        let mut recovered = read_goal_journal(&review).unwrap().unwrap();
+        finish_goal_journal(&conn, &review, &project, &mut recovered).unwrap();
+        assert_eq!(fs::read(project.join("b.csv")).unwrap(), b"reviewed data");
+        assert_eq!(
+            fs::read(project.join("paper.md")).unwrap(),
+            b"protected paper"
+        );
+        assert_eq!(task_by_id(&conn, "goal").unwrap().status, "completed");
+        assert!(read_goal_journal(&review).unwrap().is_none());
+        let facts = crate::projects::read_acceptance_log_at(&project);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].version_id, "run:1");
+        assert_eq!(facts[0].decided_at, "original-time");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn journal_retries_ledger_and_state_without_overwriting_later_edits() {
+        let (base, project, review, conn, mut journal) = journal_fixture();
+        let blocked = project.join(".ccode/acceptance-log.jsonl");
+        fs::create_dir_all(&blocked).unwrap();
+        assert!(finish_goal_journal(&conn, &review, &project, &mut journal).is_err());
+        let mut recovered = read_goal_journal(&review).unwrap().unwrap();
+        assert_eq!(recovered.phase, "files_applied");
+        fs::write(project.join("a.md"), "user edit after application").unwrap();
+        fs::remove_dir(&blocked).unwrap();
+        // 在账本之后模拟数据库失败；文件阶段不得重跑，目标更新与事件同事务。
+        conn.execute("DROP TABLE run_events", []).unwrap();
+        assert!(finish_goal_journal(&conn, &review, &project, &mut recovered).is_err());
+        assert_eq!(task_by_id(&conn, "goal").unwrap().status, "pending_review");
+        assert_eq!(crate::projects::read_acceptance_log_at(&project).len(), 1);
+        ensure_schema(&conn).unwrap();
+        let mut recovered = read_goal_journal(&review).unwrap().unwrap();
+        assert_eq!(recovered.phase, "recorded");
+        assert!(rollback_goal_journal(&review, &project, &recovered).is_err());
+        finish_goal_journal(&conn, &review, &project, &mut recovered).unwrap();
+        assert_eq!(
+            fs::read(project.join("a.md")).unwrap(),
+            b"user edit after application"
+        );
+        assert_eq!(crate::projects::read_acceptance_log_at(&project).len(), 1);
+        assert!(read_goal_journal(&review).unwrap().is_none());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn journal_rollback_keeps_external_edits_and_can_restore_partial_apply() {
+        let (base, project, review, _conn, mut journal) = journal_fixture();
+        let mut count = 0;
+        assert!(
+            apply_goal_journal_with_writer(&review, &project, &mut journal, |src, dst| {
+                count += 1;
+                if count > 1 {
+                    return Err("stop".into());
+                }
+                copy_adopt_file(src, dst)
+            })
+            .is_err()
+        );
+        fs::write(project.join("b.csv"), "other user's data").unwrap();
+        let journal = read_goal_journal(&review).unwrap().unwrap();
+        assert!(rollback_goal_journal(&review, &project, &journal)
+            .unwrap_err()
+            .contains("外部修改"));
+        assert_eq!(fs::read(project.join("a.md")).unwrap(), b"reviewed report");
+        fs::remove_file(project.join("b.csv")).unwrap();
+        rollback_goal_journal(&review, &project, &journal).unwrap();
+        assert_eq!(fs::read(project.join("a.md")).unwrap(), b"old report");
+        assert!(!project.join("b.csv").exists());
+        assert!(read_goal_journal(&review).unwrap().is_none());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn interrupted_rollback_cannot_be_mistaken_for_acceptance() {
+        let (base, project, review, conn, mut journal) = journal_fixture();
+        apply_goal_journal_with_writer(&review, &project, &mut journal, copy_adopt_file).unwrap();
+        journal.phase = "rolling_back".into();
+        write_goal_journal(&review, &journal).unwrap();
+        copy_adopt_file(
+            &Path::new(&journal.backup_dir).join("files/a.md"),
+            &project.join("a.md"),
+        )
+        .unwrap();
+        let mut recovered = read_goal_journal(&review).unwrap().unwrap();
+        assert!(
+            finish_goal_journal(&conn, &review, &project, &mut recovered)
+                .unwrap_err()
+                .contains("继续恢复")
+        );
+        rollback_goal_journal(&review, &project, &recovered).unwrap();
+        assert_eq!(fs::read(project.join("a.md")).unwrap(), b"old report");
+        assert!(!project.join("b.csv").exists());
+        assert!(crate::projects::read_acceptance_log_at(&project).is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn input_preflight_rejects_over_budget_before_any_copy() {
+        let root = std::env::temp_dir().join(format!("mesa-preflight-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::File::create(root.join(".git/noise"))
+            .unwrap()
+            .set_len(MAX_TASK_INPUT_BYTES * 2)
+            .unwrap();
+        fs::write(root.join("small.md"), "ok").unwrap();
+        assert!(estimate_task_inputs(&root, &[".".into()]).unwrap().allowed);
+        fs::File::create(root.join("large.dat"))
+            .unwrap()
+            .set_len(MAX_TASK_INPUT_BYTES + 1)
+            .unwrap();
+        let estimate = estimate_task_inputs(&root, &[".".into()]).unwrap();
+        assert_eq!(estimate.files, 2);
+        assert!(!estimate.allowed);
+        assert!(
+            estimate_task_inputs(&root, &["small.md".into()])
+                .unwrap()
+                .allowed
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn closing_a_run_never_reopens_an_accepted_goal() {
         for status in ["completed", "failed", "stopped"] {
@@ -3231,6 +4099,38 @@ mod tests {
         assert!(restored.archived_at.is_none());
         assert_eq!(list_tasks_at(&conn, Some("/p"), false).unwrap().len(), 1);
         unarchive_goal_at(&conn, "old").unwrap(); // 幂等
+    }
+
+    #[test]
+    fn archive_and_restore_wait_for_cleanup_pending_review_still_allowed() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO tasks(id,identity_key,kind,name,status,project_root,review_required,created_at,updated_at) VALUES('t','user:归档','free_research','归档目标','pending_review','/p',1,'n','n')",
+            [],
+        )
+        .unwrap();
+        archive_goal_at(&conn, "t").unwrap();
+        let archived: Option<String> = conn
+            .query_row("SELECT archived_at FROM tasks WHERE id='t'", [], |r| r.get(0))
+            .unwrap();
+        assert!(archived.is_some());
+        conn.execute("UPDATE tasks SET archived_at=NULL, status='completed'", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO goal_storage_pending(task_id,payload) VALUES('t','{}')",
+            [],
+        )
+        .unwrap();
+        assert!(archive_goal_at(&conn, "t")
+            .unwrap_err()
+            .contains("副本清理"));
+        conn.execute("UPDATE tasks SET archived_at='now'", []).unwrap();
+        assert!(unarchive_goal_at(&conn, "t")
+            .unwrap_err()
+            .contains("副本清理"));
+        conn.execute("DELETE FROM goal_storage_pending", []).unwrap();
+        assert!(unarchive_goal_at(&conn, "t").unwrap().archived_at.is_none());
     }
 
     #[test]

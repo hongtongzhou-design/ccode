@@ -177,9 +177,9 @@ test("an assigned agent still appears even if it currently has no connection", (
 });
 
 test("hints stay short and never promise routing", () => {
-  assert.match(projectAgentsHint("office"), /只改这个项目的默认/);
-  assert.match(projectAgentsHint("coding"), /工作树/);
-  assert.match(projectAgentsHint("research"), /目标或开步/);
+  for (const mode of ["office", "coding", "research"]) {
+    assert.equal(projectAgentsHint(mode), "默认选择仅对本项目生效。");
+  }
   assert.equal(projectAgentsEmptyWorkHint("research"), "新建目标或开步时指定谁干。");
   assert.equal(projectAgentsEmptyWorkHint("office"), "新建目标时指定谁写文档。");
   assert.equal(projectAgentsEmptyWorkHint("coding"), "在工作树里选谁开工。");
@@ -192,8 +192,8 @@ test("currentProfileLine shows the project pick, else the first connection", () 
     currentProfileLine({
       defaultProfileId: "p-codex-2",
       profiles: [
-        { id: "p-codex", name: "官方", modelLine: "官方 · gpt-5" },
-        { id: "p-codex-2", name: "网关", modelLine: "网关 · gpt-5-mini" },
+        { id: "p-codex", name: "官方", model: "gpt-5", modelLine: "官方 · gpt-5" },
+        { id: "p-codex-2", name: "网关", model: "gpt-5-mini", modelLine: "网关 · gpt-5-mini" },
       ],
     }),
     "网关 · gpt-5-mini",
@@ -201,7 +201,7 @@ test("currentProfileLine shows the project pick, else the first connection", () 
   assert.equal(
     currentProfileLine({
       defaultProfileId: "",
-      profiles: [{ id: "p-codex", name: "官方", modelLine: "官方 · gpt-5" }],
+      profiles: [{ id: "p-codex", name: "官方", model: "gpt-5", modelLine: "官方 · gpt-5" }],
     }),
     "官方 · gpt-5",
   );
@@ -214,4 +214,23 @@ test("projectBoundProfileId uses the project binding for that agent", () => {
   assert.equal(projectBoundProfileId(bound, "codex"), undefined);
   assert.equal(projectBoundProfileId({}, "kimi"), undefined);
   assert.equal(projectBoundProfileId({ kimi: "  " }, "kimi"), undefined);
+});
+
+test("roster keeps connection names and models separate, including names with separators", () => {
+  const { rows } = buildProjectAgentRoster({
+    catalog,
+    profiles: [
+      { id: "named", agent: "codex", name: "科研 · 精读", models: ["gpt-6-astra"] },
+      { id: "default", agent: "codex", name: "CLI", models: [] },
+    ],
+    hiddenProfileIds: [],
+    defaultAgent: null,
+    defaultProfiles: {},
+    tasks: [],
+    taskKinds: declaredTaskKindsForMode("coding"),
+  });
+  assert.deepEqual(rows[0].profiles.map(({ name, model }) => ({ name, model })), [
+    { name: "科研 · 精读", model: "gpt-6-astra" },
+    { name: "CLI", model: "CLI 默认" },
+  ]);
 });

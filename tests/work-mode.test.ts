@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   codingFactChips,
   codingDivergenceBar,
+  codingDivergenceLabel,
   codingDivergenceTip,
   deriveCodingKind,
   isOfficeInProgress,
@@ -259,10 +260,10 @@ test("编程事实芯片：干净已推送不占位，只亮异常", () => {
     [
       {
         key: "dirty",
-        label: "1",
+        label: "1 个文件未提交",
         mark: "dirty",
         tone: "warn",
-        tip: "1 个未提交",
+        tip: "1 个文件有未提交改动",
       },
     ],
   );
@@ -279,7 +280,7 @@ test("编程事实芯片：干净已推送不占位，只亮异常", () => {
     [
       {
         key: "remote",
-        label: "3",
+        label: "3 个提交待推送",
         mark: "unpushed",
         tone: "warn",
         tip: "未推送：比 GitHub 上该分支多 3 个提交",
@@ -311,7 +312,7 @@ test("编程事实芯片：干净已推送不占位，只亮异常", () => {
     [
       {
         key: "upstreamBehind",
-        label: "2",
+        label: "GitHub有 2 个新提交",
         mark: "upstreamBehind",
         tone: "warn",
         tip: "GitHub 上该分支有 2 个新提交，可拉取",
@@ -335,5 +336,32 @@ test("分支领先落后用状态条比例，两侧按较大值对齐", () => {
   assert.equal(
     codingDivergenceTip(3, 0, "main"),
     "待合入：比基准 main 多 3 个提交",
+  );
+});
+
+
+test("基准差异有完整短文案，双向分叉与零值不混淆", () => {
+  assert.equal(codingDivergenceLabel(0, 0, "main"), "");
+  assert.equal(codingDivergenceLabel(-1, -2, "main"), "");
+  assert.equal(codingDivergenceLabel(0, 1, "master"), "比 master 少 1 个提交");
+  assert.equal(codingDivergenceLabel(3, 0, "main"), "比 main 多 3 个提交");
+  assert.equal(codingDivergenceLabel(3, 2, "main"), "比 main 多 3、少 2 个提交");
+  assert.equal(codingDivergenceLabel(1, 0, " "), "比 基准 多 1 个提交");
+});
+
+test("无上游不推断从未推送，远程与未提交文件有独立文案", () => {
+  const facts = {
+    dirty: true, ahead: 0, behind: 1, unpushed: 0,
+    hasUpstream: false, upstreamBehind: 0, baseBranch: "master",
+  };
+  const chips = codingFactChips(facts);
+  assert.equal(chips[0]?.label, "有未提交改动");
+  assert.equal(chips[1]?.label, "未关联远程分支");
+  assert.match(chips[1]!.tip, /不代表远程没有同名分支/);
+  assert.doesNotMatch(chips[1]!.tip, /还没推到/);
+  assert.deepEqual(
+    codingFactChips({ ...facts, dirty: false, hasUpstream: true, unpushed: 2, upstreamBehind: 3 })
+      .map((chip) => chip.label),
+    ["2 个提交待推送", "远程有 3 个新提交"],
   );
 });

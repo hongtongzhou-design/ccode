@@ -2947,7 +2947,7 @@ const TerminalView = memo(function TerminalView({
             })()}
           </div>
           {advancedLaunchOpen ? (
-            <div className="mb-2 rounded-md bg-strip px-2.5 py-2">
+            <div className="mb-2 rounded-md ccode-well px-2.5 py-2">
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <span className="shrink-0 text-xs text-l3">高级启动选项</span>
                 {!showPrompt && !shellOnly && (
@@ -3148,7 +3148,7 @@ const TerminalView = memo(function TerminalView({
               }}
             >
               {cwdIssue && (
-                <div className="w-full rounded-md border border-field bg-inset px-3 py-2 text-left text-xs">
+                <div className="w-full rounded-md border border-field ccode-well px-3 py-2 text-left text-xs">
                   <div className="font-medium text-warn-text">工作目录不可用</div>
                   <div className="mt-1 truncate font-mono text-micro text-l3" title={cwdIssue}>
                     {cwdIssue}

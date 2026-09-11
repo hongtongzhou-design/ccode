@@ -18,7 +18,7 @@ import {
   FolderOpen,
   GitBranch,
   GitCompare,
-  Plus,
+  GitPullRequest,
   RefreshCw,
   Terminal,
   Upload,
@@ -29,6 +29,7 @@ import { HoverTip, useHoverTip } from "./HoverTip";
 import {
   compactPrimaryActionClass,
   fieldClass,
+  FoldMark,
   ghostActionClass,
   primaryActionClass,
   projectWellClass,
@@ -57,14 +58,12 @@ import { loadProjectContextPack } from "../project-context-load";
 import { absTime, relTime } from "../rel-time";
 import { imeBlocksEnter } from "../ime-guard";
 import {
-  CODING_KIND_LABEL,
   codingDivergenceBar,
+  codingDivergenceLabel,
   codingDivergenceTip,
   codingFactChips,
-  deriveCodingKind,
   type CodingFactChip,
   type CodingFactMark,
-  type CodingKind,
 } from "../work-mode";
 import { codingStatusLine } from "../project-status";
 
@@ -73,7 +72,6 @@ import ProjectSettingsDrawer from "./ProjectSettingsDrawer";
 import PortsSection from "./PortsSection";
 import { AGENTS } from "../types";
 import type {
-  CodingBranchDto,
   CodingMergeDto,
   CodingOpDto,
   CodingOverviewDto,
@@ -107,51 +105,6 @@ export async function loadCodingOverview(
   const dto = await invoke<CodingOverviewDto>("coding_overview", { repoPath });
   overviewCache.set(repoPath, dto);
   return dto;
-}
-
-function kindOfWorktree(w: CodingWorktreeDto, base: string): CodingKind {
-  return deriveCodingKind({
-    isBase: w.isBase || w.branch === base,
-    isPrimary: w.isPrimary,
-    dirty: w.dirty,
-    ahead: w.ahead,
-    behind: w.behind,
-    hasWorktree: true,
-  });
-}
-
-function kindOfBranch(b: CodingBranchDto): CodingKind {
-  return deriveCodingKind({
-    isBase: b.isBase,
-    isPrimary: b.isPrimary,
-    dirty: b.dirty,
-    ahead: b.ahead,
-    behind: b.behind,
-    hasWorktree: !!b.worktreePath,
-  });
-}
-
-function kindDotClass(kind: CodingKind): string {
-  if (kind === "sync" || kind === "ready") return "bg-warn-text";
-  if (kind === "dev") return "bg-ok-text";
-  if (kind === "prune") return "bg-l4";
-  return "bg-l3";
-}
-
-function KindMark({ kind }: { kind: CodingKind }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const { tip, show, hide } = useHoverTip(ref);
-  return (
-    <span
-      ref={ref}
-      onMouseEnter={show}
-      onMouseLeave={hide}
-      className="inline-flex items-center"
-    >
-      <span className={`size-1.5 rounded-full ${kindDotClass(kind)}`} />
-      <HoverTip tip={tip} text={CODING_KIND_LABEL[kind]} />
-    </span>
-  );
 }
 
 function chipToneClass(tone: CodingFactChip["tone"]): string {
@@ -202,9 +155,7 @@ function FactChipView({ chip }: { chip: CodingFactChip }) {
       className={`inline-flex items-center gap-0.5 rounded-full bg-raised px-1.5 py-px text-micro ${chipToneClass(chip.tone)}`}
     >
       <FactMarkIcon mark={chip.mark} />
-      {chip.label ? (
-        <span className="tabular-nums">{chip.label}</span>
-      ) : null}
+      <span className="tabular-nums">{chip.label}</span>
       <HoverTip tip={tip} text={chip.tip} />
     </span>
   );
@@ -230,14 +181,12 @@ function DivergenceBar({
       ref={ref}
       onMouseEnter={show}
       onMouseLeave={hide}
-      className="inline-flex items-center gap-1"
+      className="inline-flex min-w-0 max-w-full items-center gap-1"
     >
-      {bar.behind > 0 ? (
-        <span className="tabular-nums text-micro text-warn-text">{bar.behind}</span>
-      ) : (
-        <span className="w-3" />
-      )}
-      <span className="relative h-1.5 w-16 overflow-hidden rounded-full bg-inset">
+      <span
+        aria-hidden="true"
+        className="relative h-1.5 w-9 shrink-0 overflow-hidden rounded-full bg-inset"
+      >
         <span className="absolute left-1/2 top-0 h-full w-px bg-hairline" />
         <span
           className="absolute right-1/2 top-0 h-full rounded-l-full bg-warn-text"
@@ -248,11 +197,9 @@ function DivergenceBar({
           style={{ width: right }}
         />
       </span>
-      {bar.ahead > 0 ? (
-        <span className="tabular-nums text-micro text-ok-text">{bar.ahead}</span>
-      ) : (
-        <span className="w-3" />
-      )}
+      <span className={`min-w-0 break-words text-micro ${bar.behind > 0 ? "text-warn-text" : "text-ok-text"}`}>
+        {codingDivergenceLabel(bar.ahead, bar.behind, baseBranch)}
+      </span>
       <HoverTip
         tip={tip}
         text={codingDivergenceTip(bar.ahead, bar.behind, baseBranch)}
@@ -289,6 +236,7 @@ function FactChips({
   facts,
   baseBranch,
   hostKind,
+  cleanLabel = false,
 }: {
   facts: {
     dirty: boolean;
@@ -301,6 +249,7 @@ function FactChips({
   };
   baseBranch: string;
   hostKind?: "github" | "other" | null;
+  cleanLabel?: boolean;
 }) {
   const chips = codingFactChips({
     ...facts,
@@ -308,9 +257,11 @@ function FactChips({
     hostKind,
   });
   const bar = codingDivergenceBar(facts.ahead, facts.behind);
-  if (chips.length === 0 && !bar) return null;
+  if (chips.length === 0 && !bar) {
+    return cleanLabel ? <span className="text-micro text-l4">无未提交改动</span> : null;
+  }
   return (
-    <span className="inline-flex flex-wrap items-center gap-1.5">
+    <span className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
       <DivergenceBar
         ahead={facts.ahead}
         behind={facts.behind}
@@ -1059,12 +1010,12 @@ export default function CodingProjectView({
                 <GitBranch size={14} strokeWidth={1.8} className="text-l4" />
                 <h2 className="text-xs font-medium text-l2">工作树</h2>
               </div>
-              <div className="mb-3 flex gap-2">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
                 <input
                   ref={branchInputRef}
-                  className={`${fieldClass} h-8 py-0`}
+                  className={`${fieldClass} h-8 min-w-32 flex-1 py-0`}
                   value={branchName}
-                  placeholder="feature/login"
+                  placeholder="新分支名，如 feature/login"
                   aria-label="新分支名（从基准拉出）"
                   onChange={(e) => setBranchName(e.target.value)}
                   onCompositionStart={lockIme}
@@ -1095,34 +1046,17 @@ export default function CodingProjectView({
                 >
                   {creating ? "…" : `从 ${base || "基准"} 开工`}
                 </button>
-                {trees.some((w) => !w.isPrimary && !w.detached) && (
-                  <IconBtn
-                    label="再开一条"
-                    onClick={() => {
-                      const last = [...trees]
-                        .reverse()
-                        .find((w) => !w.isPrimary && !w.detached);
-                      const next = nextLaneBranchName(
-                        last?.branch || branchName || "feature/work",
-                      );
-                      if (!next) return;
-                      setBranchName(next);
-                      branchInputRef.current?.focus();
-                    }}
-                  >
-                    <Plus size={13} strokeWidth={1.8} />
-                  </IconBtn>
-                )}
                 <button
                   type="button"
                   className={`${ghostActionClass} shrink-0`}
+                  aria-expanded={pickerOpen}
                   onClick={() => setPickerOpen((v) => !v)}
                 >
                   已有分支
                 </button>
               </div>
               {pickerOpen && (
-                <div className="mb-3 rounded-lg bg-inset p-2">
+                <div className="mb-3 rounded-lg ccode-well p-2">
                   <input
                     className={`${fieldClass} mb-2 h-8 py-0`}
                     value={pickerQuery}
@@ -1176,7 +1110,6 @@ export default function CodingProjectView({
                       </li>
                     );
                   const rows = group.items.map((w) => {
-                  const kind = kindOfWorktree(w, base);
                   const label = w.detached
                     ? "游离 HEAD"
                     : w.branch || "（无分支）";
@@ -1195,6 +1128,21 @@ export default function CodingProjectView({
                         activity);
                   const merging = !!ov?.merging && ov.mergingCwd === w.path;
                   const moreItems: ContextMenuItem[] = [];
+                  if (w.isPrimary && !merging) {
+                    moreItems.push(
+                      { label: "查看改动", onSelect: () => openGit(w.path, label) },
+                      {
+                        label: "拉取",
+                        disabled: !!busy,
+                        onSelect: () => void runRemote("coding_pull", w.path, "已拉取"),
+                      },
+                      {
+                        label: "推送",
+                        disabled: !!busy,
+                        onSelect: () => void runRemote("coding_push", w.path, "已推送"),
+                      },
+                    );
+                  }
                   if (merging) {
                     moreItems.push({
                       label: "取消合并",
@@ -1215,17 +1163,6 @@ export default function CodingProjectView({
                           block: "nearest",
                         });
                       },
-                    });
-                  }
-                  if (hostKind === "github") {
-                    moreItems.push({
-                      label: w.hasUpstream
-                        ? busy === `pr:${w.path}`
-                          ? "打开中…"
-                          : "打开 Pull Request"
-                        : "先推送才能开 PR",
-                      disabled: !!busy || !w.hasUpstream,
-                      onSelect: () => void openPr(w.path),
                     });
                   }
                   moreItems.push({
@@ -1293,14 +1230,18 @@ export default function CodingProjectView({
                     });
                   }
                   return (
-                    <li key={w.path} className={projectWellClass}>
+                    <li
+                      key={w.path}
+                      aria-label={w.isPrimary ? `主仓 ${label}` : `工作树 ${displayName}`}
+                      className={projectWellClass}
+                    >
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="min-w-0 flex-1">
                           <p
                             className="flex min-w-0 items-center gap-2 text-sm font-medium text-l1"
                             title={w.path}
                           >
-                            <span className="shrink-0">{displayName}</span>
+                            <span className="min-w-0 truncate">{displayName}</span>
                             {!w.isPrimary &&
                               w.lane.branch &&
                               w.lane.branch !== displayName && (
@@ -1312,7 +1253,12 @@ export default function CodingProjectView({
                             {w.isPrimary && (
                               <BranchLabel name={label} detached={w.detached} />
                             )}
-                            {activity !== "空闲" && (
+                            {w.isBase && (
+                              <span className="shrink-0 rounded bg-inset px-1 text-micro font-normal text-l4">
+                                基准
+                              </span>
+                            )}
+                            {(!w.isPrimary || activity !== "空闲") && (
                               <span className="shrink-0 text-micro font-normal text-l4">
                                 {activityText}
                               </span>
@@ -1322,14 +1268,9 @@ export default function CodingProjectView({
                                 有冲突
                               </span>
                             )}
-                            {!merging && w.dirty && (
-                              <span className="text-xs text-warn-text">
-                                有未提交改动
-                              </span>
-                            )}
                           </p>
                         </div>
-                        <div className="flex flex-wrap items-center gap-0.5">
+                        <div className="ml-auto flex shrink-0 flex-wrap items-center gap-0.5">
                           {merging ? (
                             <button
                               type="button"
@@ -1340,65 +1281,87 @@ export default function CodingProjectView({
                             </button>
                           ) : (
                             <>
-                              <IconBtn
-                                label="进入"
-                                onClick={() =>
-                                  void enterTree(w, w.lane.name || label)
-                                }
+                              <button
+                                type="button"
+                                className={`${w.isPrimary ? ghostActionClass : rowActionClass} gap-1`}
+                                onClick={() => void enterTree(w, w.lane.name || label)}
                               >
                                 <Terminal size={13} strokeWidth={1.8} />
-                              </IconBtn>
-                              <IconBtn
-                                label="查看改动"
-                                onClick={() => openGit(w.path, label)}
-                              >
-                                <GitCompare size={13} strokeWidth={1.8} />
-                              </IconBtn>
-                              <IconBtn
-                                label="拉取"
-                                disabled={!!busy}
-                                onClick={() =>
-                                  void runRemote("coding_pull", w.path, "已拉取")
-                                }
-                              >
-                                <ArrowDownToLine size={13} strokeWidth={1.8} />
-                              </IconBtn>
-                              <IconBtn
-                                label={
-                                  w.hasUpstream
-                                    ? `推送到 origin/${w.branch || "HEAD"}`
-                                    : "第一次会推到 origin 并设上游"
-                                }
-                                disabled={!!busy}
-                                onClick={() =>
-                                  void runRemote("coding_push", w.path, "已推送")
-                                }
-                              >
-                                <ArrowUpToLine size={13} strokeWidth={1.8} />
-                              </IconBtn>
+                                进入
+                              </button>
+                              {!w.isPrimary && (
+                                <>
+                                  <IconBtn
+                                    label="查看改动"
+                                    onClick={() => openGit(w.path, label)}
+                                  >
+                                    <GitCompare size={13} strokeWidth={1.8} />
+                                  </IconBtn>
+                                  <IconBtn
+                                    label="拉取"
+                                    disabled={!!busy}
+                                    onClick={() =>
+                                      void runRemote("coding_pull", w.path, "已拉取")
+                                    }
+                                  >
+                                    <ArrowDownToLine size={13} strokeWidth={1.8} />
+                                  </IconBtn>
+                                  <IconBtn
+                                    label={
+                                      w.hasUpstream
+                                        ? `推送到 origin/${w.branch || "HEAD"}`
+                                        : "第一次会推到 origin 并设上游"
+                                    }
+                                    disabled={!!busy}
+                                    onClick={() =>
+                                      void runRemote("coding_push", w.path, "已推送")
+                                    }
+                                  >
+                                    <ArrowUpToLine size={13} strokeWidth={1.8} />
+                                  </IconBtn>
+                                </>
+                              )}
                             </>
                           )}
+                          {hostKind === "github" && (
+                            <IconBtn
+                              label={w.hasUpstream
+                                ? busy === `pr:${w.path}` ? "打开中…" : "打开 Pull Request"
+                                : "先推送才能开 PR"}
+                              disabled={!!busy || !w.hasUpstream}
+                              onClick={() => void openPr(w.path)}
+                            >
+                              <GitPullRequest size={13} strokeWidth={1.8} />
+                            </IconBtn>
+                          )}
                           {moreItems.length > 0 && (
-                          <button
-                            type="button"
-                            className={iconBtnClass}
-                            aria-label={`更多操作：${label}`}
-                            title="更多操作"
-                            onClick={(e) => openMenu(e, moreItems)}
-                          >
-                            ⋯
-                          </button>
+                            <button
+                              type="button"
+                              className={iconBtnClass}
+                              aria-label={`更多操作：${label}`}
+                              title="更多操作"
+                              onClick={(e) => openMenu(e, moreItems)}
+                            >
+                              ⋯
+                            </button>
                           )}
                         </div>
                       </div>
-                      <p className="mt-2 flex flex-wrap items-center gap-2 text-micro">
-                        <KindMark kind={kind} />
+                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-micro">
                         <FactChips
                           facts={w}
                           baseBranch={base}
                           hostKind={hostKind}
+                          cleanLabel={w.isPrimary && !merging}
                         />
-                      </p>
+                        {w.isPrimary && (
+                          <TipWrap text={absTime(w.lastCommitAt ?? null)} up={false}>
+                            <span className="text-l4">
+                              {w.lastCommitAt ? `最近提交 ${relTime(w.lastCommitAt)}` : "还没有提交"}
+                            </span>
+                          </TipWrap>
+                        )}
+                      </div>
                       {groupingPath === w.path && (
                         <form
                           className="mt-2 flex gap-2"
@@ -1431,13 +1394,26 @@ export default function CodingProjectView({
                           </button>
                         </form>
                       )}
-                      <p className="mt-1.5 font-mono text-micro text-l4">
-                        <span title={absTime(w.lastCommitAt ?? null)}>
-                          {w.lastCommitAt
-                            ? relTime(w.lastCommitAt)
-                            : "还没有提交"}
-                        </span>
-                      </p>
+                      {!w.isPrimary && (
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-micro text-l4">
+                          <TipWrap text={absTime(w.lastCommitAt ?? null)} up={false}>
+                            <span>
+                              {w.lastCommitAt ? `最近提交 ${relTime(w.lastCommitAt)}` : "还没有提交"}
+                            </span>
+                          </TipWrap>
+                          <TipWrap text={w.path}>
+                            <button
+                              type="button"
+                              className={`${ghostActionClass} gap-1`}
+                              aria-label={`打开工作树目录：${label}`}
+                              onClick={() => void revealItemInDir(w.path).catch((e) => onError(String(e)))}
+                            >
+                              <FolderOpen size={12} strokeWidth={1.8} />
+                              目录
+                            </button>
+                          </TipWrap>
+                        </div>
+                      )}
                     </li>
                   );
                   });
@@ -1449,12 +1425,21 @@ export default function CodingProjectView({
             <section>
               <button
                 type="button"
-                className="mb-2.5 flex items-center gap-2 text-xs font-medium text-l2 hover:text-l1"
+                className="mb-2.5 flex w-full items-center gap-2 text-xs font-medium text-l2 hover:text-l1"
+                aria-label="本地分支"
                 aria-expanded={branchesOpen}
                 onClick={() => setBranchesOpen((open) => !open)}
               >
-                分支
+                <FoldMark open={branchesOpen} />
+                本地分支
                 <span className="font-normal text-l4">{branches.length}</span>
+                {branches.length > 0 && (
+                  <span className="ml-auto text-micro font-normal text-l4">
+                    {branches.some((b) => !b.worktreePath)
+                      ? `${branches.filter((b) => !b.worktreePath).length} 个未检出`
+                      : "均已检出"}
+                  </span>
+                )}
               </button>
               {branchesOpen &&
                 (branches.length === 0 ? (
@@ -1462,11 +1447,10 @@ export default function CodingProjectView({
               ) : (
                 <ul className="space-y-0.5">
                   {branches.map((b) => {
-                    const kind = kindOfBranch(b);
-                    const tree = trees.find((w) => w.branch === b.name);
                     return (
                       <li
                         key={b.name}
+                        aria-label={`本地分支 ${b.name}`}
                         className="flex min-h-10 items-center gap-2 rounded-md px-2.5 hover:bg-hover"
                       >
                         <div className="min-w-0 flex-1">
@@ -1475,21 +1459,17 @@ export default function CodingProjectView({
                             {b.isBase && (
                               <span className="text-micro text-l4">基准</span>
                             )}
-                            {!b.worktreePath && (
-                              <span className="text-micro text-l4">未检出</span>
-                            )}
+                            <TipWrap text={b.worktreePath || "尚未创建工作树"} up={false}>
+                              <span className="shrink-0 text-micro text-l4">
+                                {b.worktreePath ? (b.isPrimary ? "主仓" : "已建工作树") : "未检出"}
+                              </span>
+                            </TipWrap>
                           </div>
-                          <p className="mt-0.5 flex flex-wrap items-center gap-1.5">
-                            <KindMark kind={kind} />
-                            <FactChips
-                              facts={{
-                                ...b,
-                                dirtyCount: tree?.dirtyCount,
-                              }}
-                              baseBranch={base}
-                              hostKind={hostKind}
-                            />
-                          </p>
+                          {!b.worktreePath && (
+                            <p className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                              <FactChips facts={b} baseBranch={base} hostKind={hostKind} />
+                            </p>
+                          )}
                         </div>
                         {!b.worktreePath && (
                           <button
