@@ -9,6 +9,8 @@
  *    不按「上次使用」重新挑选覆盖；原配置已删除/停用时不静默替换，
  *    返回 reselectNeeded 让 UI 提示用户重选（停用口径与 resume-profile.ts 一致：
  *    自动路径跳过停用项，手动选择才允许）。
+ * 3. 项目绑定（autoLaunchProfileId）要显示在启动栏：不能被 Codex 渠道兼容池
+ *    静默换成上次的网关。渠道和这条会话不一致时预填绑定、不自动启动。
  */
 
 import { pickResumeProfile } from "./resume-profile.ts";
@@ -42,6 +44,14 @@ export function findResumeHolderTab<T extends HolderTabLike>(
   });
 }
 
+/** 已有 resume 标签但进程不在：再点「继续」应重试启动，不能只切过去看上次的失败。 */
+export function shouldRelaunchResumeTab(st?: {
+  alive?: boolean;
+  running?: boolean;
+} | null): boolean {
+  return !(st?.alive || st?.running);
+}
+
 export interface ResumeLaunchRequest {
   agentId: string;
   provider?: string | null;
@@ -56,6 +66,8 @@ export interface ResumeLaunchPick {
   model: string;
   /** true = 原配置失效：只预填不自动启动，UI 需提示用户重选 */
   reselectNeeded: boolean;
+  /** 项目默认能显示，但和这条会话上次的 Codex 渠道不同：预填默认，不自动启动 */
+  channelChanged?: boolean;
 }
 
 export function resolveResumeLaunch<
@@ -73,11 +85,33 @@ export function resolveResumeLaunch<
   hiddenIds?: readonly string[],
   lastProfileId?: string | null,
 ): ResumeLaunchPick {
+  const hidden = hiddenIds ?? [];
+  const preferredId = req.autoLaunchProfileId?.trim();
+  if (preferredId) {
+    const preferred = profiles.find(
+      (p) => p.id === preferredId && p.agent === req.agentId,
+    );
+    if (preferred && !hidden.includes(preferred.id)) {
+      const channelPick = pickResumeProfile(
+        profiles,
+        req.agentId,
+        req.provider,
+        preferred.id,
+        hiddenIds,
+      );
+      return {
+        profileId: preferred.id,
+        model: req.model ?? preferred.models[0] ?? "",
+        reselectNeeded: false,
+        channelChanged: channelPick?.id !== preferred.id,
+      };
+    }
+  }
   if (req.profileId) {
     const orig = profiles.find(
       (p) => p.id === req.profileId && p.agent === req.agentId,
     );
-    if (orig && !(hiddenIds ?? []).includes(orig.id)) {
+    if (orig && !hidden.includes(orig.id)) {
       return {
         profileId: orig.id,
         model: req.model ?? orig.models[0] ?? "",
@@ -90,7 +124,7 @@ export function resolveResumeLaunch<
     profiles,
     req.agentId,
     req.provider,
-    req.autoLaunchProfileId ?? lastProfileId,
+    lastProfileId,
     hiddenIds,
   );
   return {

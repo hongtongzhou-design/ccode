@@ -22,6 +22,12 @@ import { confirmDialog } from "./ConfirmDialog";
 import ImagePairView, { isImagePath } from "./ImagePairView";
 import { loadArtifactRows } from "./ArtifactChecklist";
 import { Checkbox, LoadingRows, secondaryActionClass } from "./PageFrame";
+import {
+  freezeReviewedSha,
+  reviewedShaAfterCommit,
+  gitAdmissionPayload,
+  mergeAdmissionText,
+} from "../acceptance-log";
 import { defaultCommitMessage } from "../git-commit-message";
 import { useAppStore } from "../store";
 import type {
@@ -225,7 +231,7 @@ function buildChangeTree(files: GitFileDto[]): ChangeTreeNode[] {
 
 /** 健康检查拦截项：key 用于给「主仓脏」挂快速提交入口，text 为面向用户的白话文案 */
 interface HealthBlocker {
-  key: "conflict" | "conflict-unknown" | "main-dirty" | "main-off-base";
+  key: "conflict" | "conflict-unknown" | "main-dirty" | "main-off-base" | "gitdir";
   text: string;
 }
 
@@ -241,6 +247,11 @@ function blockerList(health: WorkspaceHealthDto | null): HealthBlocker[] {
     blockers.push({ key: "conflict-unknown", text: "当前 Git 版本无法预检冲突" });
   if (health.mainDirty)
     blockers.push({ key: "main-dirty", text: "主文件夹里还有没保存的改动" });
+  if (health.gitdirDetached)
+    blockers.push({
+      key: "gitdir",
+      text: "工作树与主仓脱节，请重新挂载",
+    });
   if (health.mainOffBase)
     blockers.push({ key: "main-off-base", text: "主文件夹当前不在主分支上" });
   return blockers;
@@ -985,6 +996,9 @@ function LiveWorkspaceReviewView({
   const [mergedAt, setMergedAt] = useState<string | null>(null);
   // 合并成功（保留工作区）后的「开始下一步」衔接：横幅入口只挂在本次评审的合并成功态上
   const [mergeDone, setMergeDone] = useState(false);
+  const [ledgerPending, setLedgerPending] = useState(false);
+  const [mergeVersionId, setMergeVersionId] = useState<string | null>(null);
+  const reviewedShaRef = useRef<string | null>(null);
   const [nextStep, setNextStep] = useState<{
     step: ProjectStepDto;
     cfg: ProjectConfigDto;
@@ -1086,6 +1100,12 @@ function LiveWorkspaceReviewView({
         setDiff(nextDiff);
         setStatus(nextStatus);
         setHealth(nextHealth);
+        setLedgerPending(nextHealth?.ledgerPending === true);
+        reviewedShaRef.current = freezeReviewedSha(
+          reviewedShaRef.current,
+          nextHealth?.worktreeHead,
+          !quiet,
+        );
         setUnmerged(nextUnmerged);
         if (nextUnmerged.merging && nextUnmerged.files.length > 0) {
           setConflictFiles((current) =>
@@ -1122,6 +1142,9 @@ function LiveWorkspaceReviewView({
     setResearchContext(null);
     setResearchError(null);
     setMergeDone(false);
+    setLedgerPending(false);
+    setMergeVersionId(null);
+    reviewedShaRef.current = null;
     setNextStep(null);
     setCitations(null);
     setCiteExpanded(false);
@@ -1786,8 +1809,27 @@ function LiveWorkspaceReviewView({
       const merged = await invoke<WorkspaceMergeResultDto>("merge_workspace", {
         id: diff.workspaceId,
         archive: false,
+        ...gitAdmissionPayload({
+          retry: false,
+          reviewedSha:
+            reviewedShaRef.current ??
+            latest.worktreeHead ??
+            health?.worktreeHead ??
+            null,
+        }),
       });
       if (merged.failedPhase) throw new Error(merged.message);
+      if (merged.merged && merged.ledgerWritten === false) {
+        setLedgerPending(true);
+        setMergeDone(true);
+        setMergeVersionId(merged.versionId ?? null);
+        setError(null);
+        setResult(null);
+        await refresh();
+        return;
+      }
+      setLedgerPending(false);
+      setMergeVersionId(merged.versionId ?? null);
       setResult(merged.message);
       setMergedAt(new Date().toISOString());
       setMergeDone(true);
@@ -1914,6 +1956,7 @@ function LiveWorkspaceReviewView({
     setResult(null);
     setMergeDone(false);
     let committed = false;
+    let committedHash: string | null = null;
     try {
       if (shouldCommit) {
         const commitResult = await invoke<GitCommitResultDto>("git_commit", {
@@ -1923,6 +1966,7 @@ function LiveWorkspaceReviewView({
         });
         if (!commitResult.committed) throw new Error(commitResult.message);
         committed = true;
+        committedHash = commitResult.hash;
         setMessage("");
       }
       if (shouldMerge) {
@@ -1936,11 +1980,22 @@ function LiveWorkspaceReviewView({
             `提交已完成，但尚不可合并：${reasons.join("；") || "健康检查未通过"}`,
           );
         }
+        if (committed) {
+          reviewedShaRef.current = reviewedShaAfterCommit(committedHash, latest.worktreeHead);
+        }
         const mergeResult = await invoke<WorkspaceMergeResultDto>(
           "merge_workspace",
           {
             id: diff.workspaceId,
             archive,
+            ...gitAdmissionPayload({
+              retry: false,
+              reviewedSha:
+                reviewedShaRef.current ??
+                latest.worktreeHead ??
+                health?.worktreeHead ??
+                null,
+            }),
           },
         );
         if (mergeResult.failedPhase) {
@@ -1948,6 +2003,17 @@ function LiveWorkspaceReviewView({
           await refresh(true);
           return;
         }
+        if (mergeResult.merged && mergeResult.ledgerWritten === false) {
+          setLedgerPending(true);
+          setMergeDone(true);
+          setMergeVersionId(mergeResult.versionId ?? null);
+          setError(null);
+          setResult(null);
+          await refresh(true);
+          return;
+        }
+        setLedgerPending(false);
+        setMergeVersionId(mergeResult.versionId ?? null);
         setResult(mergeResult.message);
         if (mergeResult.archived) {
           onClose();
@@ -2397,14 +2463,48 @@ function LiveWorkspaceReviewView({
 
         </div>
       )}
-      {result && (
+      {ledgerPending && diff && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-err-text">
+          <span className="min-w-0 truncate">
+            ✗ {mergeAdmissionText({ ledgerWritten: false })}
+          </span>
+          <button
+            type="button"
+            className={secondaryActionClass}
+            onClick={() => {
+              void invoke<WorkspaceMergeResultDto>("merge_workspace", {
+                id: diff.workspaceId,
+                archive: false,
+                ...gitAdmissionPayload({ retry: true }),
+              }).then((merged) => {
+                if (merged.ledgerWritten) {
+                  setLedgerPending(false);
+                  setError(null);
+                  setMergeVersionId(merged.versionId ?? mergeVersionId);
+                  setResult(merged.message);
+                  setMergedAt(new Date().toISOString());
+                } else {
+                  setError(merged.message);
+                }
+              }).catch((reason) => setError(String(reason)));
+            }}
+          >
+            再记录验收
+          </button>
+        </div>
+      )}
+      {result && !ledgerPending && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-ok-text">
-          {/* 合并成功用白话固定文案，后端消息（含分支名）降为悬浮二级信息 */}
           <span
             className="min-w-0 truncate"
             title={mergeDone ? result : undefined}
           >
-            ✓ {mergeDone ? "已合并到主分支" : result}
+            ✓ {mergeDone
+              ? mergeAdmissionText({
+                  ledgerWritten: true,
+                  versionId: mergeVersionId,
+                })
+              : result}
           </span>
           {mergeDone && nextStep && (
             <button

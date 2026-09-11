@@ -1491,9 +1491,15 @@ fn build_stats(rows: Vec<StoredUsageRow>, table: &PriceChain, rate_usd_cny: f64)
             }
         }
         if !_day.is_empty() {
-            by_day.entry(_day.clone()).or_default().add(&model, &sid, acc);
+            by_day
+                .entry(_day.clone())
+                .or_default()
+                .add(&model, &sid, acc);
             if !official && !internal {
-                by_day_billed.entry(_day).or_default().add(&model, &sid, acc);
+                by_day_billed
+                    .entry(_day)
+                    .or_default()
+                    .add(&model, &sid, acc);
             }
         }
         by_agent
@@ -2422,7 +2428,11 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                prov(&conn, "kimi", "/private/var/folders/test/ccode-ai-canonical"),
+                prov(
+                    &conn,
+                    "kimi",
+                    "/private/var/folders/test/ccode-ai-canonical"
+                ),
                 (SOURCE_CCODE_AI.into(), true, false),
                 "macOS 临时目录别名只做路径归一化，不影响来源判定"
             );
@@ -2460,10 +2470,21 @@ mod tests {
             .unwrap();
         assert_eq!(sid, "", "旧行迁移为项目级登记（session_id=''），历史不丢");
         assert_eq!(official, 1);
-        assert_eq!(created, "2026-09-01T00:00:00Z", "登记时间保留，供旧行命中口径使用");
+        assert_eq!(
+            created, "2026-09-01T00:00:00Z",
+            "登记时间保留，供旧行命中口径使用"
+        );
         // 新主键允许同项目并存项目级旧行与会话级新行
-        register_provenance_impl(&conn, "codex", "/home/u/proj", "sess-1", SOURCE_CLI, false, true)
-            .unwrap();
+        register_provenance_impl(
+            &conn,
+            "codex",
+            "/home/u/proj",
+            "sess-1",
+            SOURCE_CLI,
+            false,
+            true,
+        )
+        .unwrap();
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM usage_provenance WHERE agent='codex'",
@@ -2512,7 +2533,11 @@ mod tests {
             "按天费用同样只含可计费范围"
         );
         let day2 = stats.daily.iter().find(|d| d.day == "2026-08-02").unwrap();
-        assert_eq!(day2.cost_usd, Some(0.0), "纯订阅的一天费用记 0（同 usage_trend 口径）");
+        assert_eq!(
+            day2.cost_usd,
+            Some(0.0),
+            "纯订阅的一天费用记 0（同 usage_trend 口径）"
+        );
     }
 
     #[test]
@@ -2534,12 +2559,28 @@ mod tests {
             .unwrap_or((false, None));
         assert!(internal, "会话级 internal 登记必须被读到");
         assert_eq!(
-            session_provenance(&conn, "codex", "/home/u/proj", "watch-1", None, internal, false),
+            session_provenance(
+                &conn,
+                "codex",
+                "/home/u/proj",
+                "watch-1",
+                None,
+                internal,
+                false
+            ),
             (SOURCE_CCODE_AI.into(), true, false),
             "定时会话按 session 级标记归入内部活动"
         );
         assert_eq!(
-            session_provenance(&conn, "codex", "/home/u/proj", "interactive-1", None, false, false),
+            session_provenance(
+                &conn,
+                "codex",
+                "/home/u/proj",
+                "interactive-1",
+                None,
+                false,
+                false
+            ),
             (SOURCE_CLI.into(), false, false),
             "同项目的交互会话不被误标"
         );
@@ -2560,15 +2601,39 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         ensure_usage_schema(&conn).unwrap();
         // 会话级登记（v7 新口径）：命中只认 session_id，不看项目路径
-        register_provenance_impl(&conn, "gemini", "/home/u/proj", "sess-official", SOURCE_CLI, false, true)
-            .unwrap();
+        register_provenance_impl(
+            &conn,
+            "gemini",
+            "/home/u/proj",
+            "sess-official",
+            SOURCE_CLI,
+            false,
+            true,
+        )
+        .unwrap();
         assert_eq!(
-            session_provenance(&conn, "gemini", "/home/u/proj", "sess-official", None, false, false),
+            session_provenance(
+                &conn,
+                "gemini",
+                "/home/u/proj",
+                "sess-official",
+                None,
+                false,
+                false
+            ),
             (SOURCE_CLI.into(), false, true),
             "会话级官方登记命中"
         );
         assert_eq!(
-            session_provenance(&conn, "gemini", "/home/u/proj", "sess-api", None, false, false),
+            session_provenance(
+                &conn,
+                "gemini",
+                "/home/u/proj",
+                "sess-api",
+                None,
+                false,
+                false
+            ),
             (SOURCE_CLI.into(), false, false),
             "同项目后来的 API 会话不再被官方登记粘住"
         );
@@ -2581,22 +2646,40 @@ mod tests {
         .unwrap();
         assert_eq!(
             session_provenance(
-                &conn, "codex", "/home/u/legacy", "s-old",
-                Some("2026-08-20T10:00:00Z"), false, false,
+                &conn,
+                "codex",
+                "/home/u/legacy",
+                "s-old",
+                Some("2026-08-20T10:00:00Z"),
+                false,
+                false,
             ),
             (SOURCE_CLI.into(), false, true),
             "登记时刻之前的旧会话保持历史标记"
         );
         assert_eq!(
             session_provenance(
-                &conn, "codex", "/home/u/legacy", "s-new",
-                Some("2026-09-05T10:00:00Z"), false, false,
+                &conn,
+                "codex",
+                "/home/u/legacy",
+                "s-new",
+                Some("2026-09-05T10:00:00Z"),
+                false,
+                false,
             ),
             (SOURCE_CLI.into(), false, false),
             "登记之后新建的会话按新口径判定，旧登记不粘住新会话"
         );
         assert_eq!(
-            session_provenance(&conn, "codex", "/home/u/legacy", "s-unknown", None, false, false),
+            session_provenance(
+                &conn,
+                "codex",
+                "/home/u/legacy",
+                "s-unknown",
+                None,
+                false,
+                false
+            ),
             (SOURCE_CLI.into(), false, true),
             "创建时间缺失的旧会话按旧行为保留标记（历史不丢）"
         );

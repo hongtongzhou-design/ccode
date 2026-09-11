@@ -24,6 +24,35 @@ export type ProjectSkillPack = {
   named?: boolean;
 };
 
+/** 有研究步骤的科研项目：技能以步骤挂载为准，不用项目技能池。
+ *  无流程科研 / 办公 / 编程：池 + 目标点名。 */
+export function projectUsesSkillPool(
+  workMode?: string | null,
+  stepCount = 0,
+): boolean {
+  return !(normalizeWorkMode(workMode) === "research" && stepCount > 0);
+}
+
+/** 「写回时跳过」是普通目标验收写回的合同。有研究步骤走评审合并，编程走工作树，界面都不展示。 */
+export function projectShowsProtectedPaths(
+  workMode?: string | null,
+  stepCount = 0,
+): boolean {
+  const mode = normalizeWorkMode(workMode);
+  if (mode === "coding") return false;
+  return projectUsesSkillPool(mode, stepCount);
+}
+
+/** session = 项目页对话 / 问 AI（项目根，跟用户走）；goal = 隔离副本里的目标（验收后写回）。 */
+export type ContextPackKind = "session" | "goal";
+
+export function isGoalContextPack(
+  kind?: ContextPackKind | null,
+  writeReview?: boolean,
+): boolean {
+  return writeReview === true || kind !== "session";
+}
+
 export type ProjectContextInput = {
   name: string;
   path: string;
@@ -34,6 +63,8 @@ export type ProjectContextInput = {
   topLevel: readonly ContextPackEntry[];
   goal?: string | null;
   writeReview?: boolean;
+  /** 缺省按目标包；会话入口必须显式传 session。验收后写入视为目标包。 */
+  kind?: ContextPackKind;
   accepted?: readonly (string | AcceptedGoalPack)[];
   openGoals?: readonly string[];
   protectedPaths?: readonly string[];
@@ -44,7 +75,16 @@ export type ProjectContextInput = {
   skills?: readonly ProjectSkillPack[];
 };
 
-export function projectHomeHint(workMode?: string | null): string[] {
+export function projectHomeHint(
+  workMode?: string | null,
+  kind: ContextPackKind = "goal",
+): string[] {
+  if (kind === "session") {
+    return [
+      "这是项目里的对话，工作目录就是当前目录，不是隔离副本。",
+      "按用户这次说的做；没说的不要自己开工，也不要套固定流程。",
+    ];
+  }
   const mode = normalizeWorkMode(workMode);
   if (mode === "office") {
     return [
@@ -175,9 +215,16 @@ export function formatTopLevelMap(
   return lines.length ? lines : ["- （顶层还没有文件）"];
 }
 
+const GOAL_SKILL_DISCIPLINE =
+  "技能纪律：只做目标要求的事，范围以目标为准。只有「本目标点名要用的技能」才按其规范执行；项目技能池和其他技能只是可用工具，目标不需要就一个都不用。简单任务直接做完，不要自行引入额外流程、模板或重型技能（如文献检索/精读/综述流程）。";
+
+const SESSION_SKILL_DISCIPLINE =
+  "技能纪律：按用户这次说的做。技能是可用工具，没点名就不用。不要自行套文献检索、精读或综述流程。";
+
 /** 启动注入用的项目环境说明。纯函数；有流程开工的 TASK.md 仍走 renderTaskMd。 */
 export function renderProjectContextPack(input: ProjectContextInput): string {
   const mode = normalizeWorkMode(input.workMode);
+  const isGoal = isGoalContextPack(input.kind, input.writeReview);
   const lines = [
     `你正在项目「${input.name.trim() || "未命名"}」中工作。`,
     `工作方式：${WORK_MODE_LABEL[mode]}`,
@@ -190,7 +237,7 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
   if (topic) {
     lines.push("", "课题主题：", topic);
   }
-  const home = projectHomeHint(mode);
+  const home = projectHomeHint(mode, isGoal ? "goal" : "session");
   if (home.length) {
     lines.push("", "工作环境：", ...home.map((line) => `- ${line}`));
   }
@@ -202,15 +249,17 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
   if (decisions.length) {
     lines.push("", "人的决定：", ...decisions.map((item) => `- ${item}`));
   }
-  const protectedPaths = uniqueRuleLines(input.protectedPaths ?? []);
+  const protectedPaths = isGoal
+    ? uniqueRuleLines(input.protectedPaths ?? [])
+    : [];
   if (protectedPaths.length) {
     lines.push(
       "",
-      "这些保持原样（验收写回时不改、不另存）：",
+      "写回时跳过：",
       ...protectedPaths.map((path) => `- ${path}`),
     );
   }
-  const skills = input.skills ?? [];
+  const skills = isGoal ? (input.skills ?? []) : [];
   const namedSkills = skills.filter((skill) => skill.named);
   const poolSkills = skills.filter((skill) => !skill.named);
   const renderSkill = (skill: (typeof skills)[number]) => {
@@ -235,19 +284,15 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
     lines.push("", "项目技能池（可用工具，列出 ≠ 要用；本目标没点名的默认不用）：");
     for (const skill of poolSkills) lines.push(renderSkill(skill));
   }
-  // 技能纪律（实机反馈：Agent 会把简单目标套进重型技能流程，且把「列出」误读为「必须」）。
-  // 技能分发在 CLI 全局目录里撤不掉，能约束的是这条明示——点名才用，池里只是可用。
-  lines.push(
-    "",
-    "技能纪律：只做目标要求的事，范围以目标为准。只有「本目标点名要用的技能」才按其规范执行；项目技能池和其他技能只是可用工具，目标不需要就一个都不用。简单任务直接做完，不要自行引入额外流程、模板或重型技能（如文献检索/精读/综述流程）。",
-  );
-  const goal = input.goal?.trim();
+  // 技能分发在 CLI 全局目录里撤不掉；会话不列技能名单，只留一句别自行开工。
+  lines.push("", isGoal ? GOAL_SKILL_DISCIPLINE : SESSION_SKILL_DISCIPLINE);
+  const goal = isGoal ? input.goal?.trim() : undefined;
   if (goal) {
     lines.push("", "当前目标：", goal);
   }
   const memory = input.memory?.trim();
   if (memory) {
-    const trimmed = memory.length > 1500 ? `${memory.slice(0, 1500)}\n…（更多见 .ccode/memory.md）` : memory;
+    const trimmed = memory.length > 6000 ? `${memory.slice(0, 6000)}\n…（已按最新有效知识优先；其余见 .ccode/memory.md，不应自行恢复已作废条目）` : memory;
     lines.push("", "项目长期知识（人确认过的结论，保持一致，不要与之矛盾）：", trimmed);
   }
   const accepted = (input.accepted ?? [])
@@ -256,11 +301,13 @@ export function renderProjectContextPack(input: ProjectContextInput): string {
   if (accepted.length) {
     lines.push("", "已经验收过：", ...accepted.slice(0, 8));
   }
-  const openGoals = uniqueRuleLines(input.openGoals ?? []).slice(0, 8);
+  const openGoals = isGoal
+    ? uniqueRuleLines(input.openGoals ?? []).slice(0, 8)
+    : [];
   if (openGoals.length) {
     lines.push("", "尚未完成：", ...openGoals.map((item) => `- ${item}`));
   }
-  const feedback = input.feedback?.trim();
+  const feedback = isGoal ? input.feedback?.trim() : undefined;
   if (feedback) {
     lines.push("", "上一版的修改意见：", feedback);
   }

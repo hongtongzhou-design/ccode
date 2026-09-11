@@ -18,13 +18,20 @@ export function PageFrame({
   children,
   className = "",
   width = "wide",
+  surface = "canvas",
 }: {
   children: ReactNode;
   className?: string;
   width?: keyof typeof WIDTHS;
+  /** workspace = 项目页工作面，与项目栏同底（rail2），对象用 inset 浮起。 */
+  surface?: "canvas" | "workspace";
 }) {
   return (
-    <div className="ccode-page-frame min-h-full bg-canvas px-6 pb-6 pt-1">
+    <div
+      className={`ccode-page-frame min-h-full px-6 pb-6 pt-1 ${
+        surface === "workspace" ? "bg-rail2" : "bg-canvas"
+      }`}
+    >
       <div className={`ccode-page-content mx-auto w-full ${WIDTHS[width]} ${className}`}>
         {children}
       </div>
@@ -173,6 +180,8 @@ export function MenuSelect({
       </button>
       {open &&
         pos &&
+        typeof document !== "undefined" &&
+        document.body &&
         createPortal(
           <ul
             ref={menuRef}
@@ -525,26 +534,18 @@ export function NoticeBar({
   );
 }
 
-/** 步骤角色标记（v3.89）：ai = AI 干活你验收 / you = 要你出场 / both = 协作。
- *  步骤名保留学术术语（文献检索与筛选…），角色单独标出来——
- *  用户真正要知道的是「哪几步轮到我」，而不是这一步产出什么文件。 */
+/** 步骤角色标记（v3.89）：you = 要你出场 / both = 协作。
+ *  步骤名保留学术术语；「AI 做」与流程线「AI 干活」重复，默认不标。 */
 export function RoleBadge({ role }: { role?: string }) {
-  const r = role === "you" || role === "both" ? role : "ai";
-  const meta = {
-    ai: { text: "AI 做", cls: "text-l4" },
-    you: { text: "你来", cls: "text-cta" },
-    both: { text: "一起", cls: "text-l3" },
-  }[r];
+  if (role !== "you" && role !== "both") return null;
+  const meta =
+    role === "you"
+      ? { text: "你来", cls: "text-cta", title: "这一步主要靠你，AI 打下手" }
+      : { text: "一起", cls: "text-l3", title: "这一步你和 AI 一起定" };
   return (
     <span
-      className={`shrink-0 rounded-sm bg-inset px-1.5 py-0.5 text-micro ${meta.cls}`}
-      title={
-        r === "you"
-          ? "这一步主要靠你，AI 打下手"
-          : r === "both"
-            ? "这一步你和 AI 一起定"
-            : "这一步 AI 干活，做完你验收"
-      }
+      className={`shrink-0 rounded-sm bg-raised px-1.5 py-0.5 text-micro ${meta.cls}`}
+      title={meta.title}
     >
       {meta.text}
     </span>

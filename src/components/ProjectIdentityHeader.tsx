@@ -96,7 +96,7 @@ export default function ProjectIdentityHeader({
     registered,
     workMode: project?.workMode,
   });
-  const showMenu = registered && workMode === "research" && !liteResearch;
+  const showMenu = registered;
   const topicText = cfg?.topic?.trim() ?? "";
 
   async function submitRename(event: FormEvent) {
@@ -147,7 +147,7 @@ export default function ProjectIdentityHeader({
   }
 
   return (
-    <header className="sticky top-0 z-20 mb-4 bg-canvas py-2">
+    <header className="sticky top-0 z-20 mb-4 bg-rail2 py-2">
       <div className="flex min-h-9 min-w-0 items-center gap-2">
         {leading}
         {renaming ? (
@@ -301,24 +301,32 @@ export default function ProjectIdentityHeader({
           alignRight
           onClose={() => setMenu(null)}
           items={[
-            {
-              label: "编辑研究流程",
-              disabled: !cfg,
-              title: cfg
-                ? "编辑步骤名称、简报、预期产物和脚本"
-                : "project.toml 尚未加载完成",
-              onSelect: () => onChromeAction("editor"),
-            },
+            ...(workMode === "research" && !liteResearch
+              ? [
+                  {
+                    label: "编辑研究流程",
+                    disabled: !cfg,
+                    title: cfg
+                      ? "编辑步骤名称、简报、预期产物和脚本"
+                      : "project.toml 尚未加载完成",
+                    onSelect: () => onChromeAction("editor"),
+                  },
+                ]
+              : []),
             {
               label: "项目设置…",
-              title: "项目名 / 课题主题 / 研究流程模板 / 文献与数据 / 定时巡检",
+              title: "规则、验收记录和项目低频项",
               onSelect: () => onChromeAction("settings"),
             },
-            {
-              label: "历史",
-              title: "项目的白话保存时间线（只读）",
-              onSelect: () => onChromeAction("history"),
-            },
+            ...(workMode === "research" && !liteResearch
+              ? [
+                  {
+                    label: "历史",
+                    title: "项目的白话保存时间线（只读）",
+                    onSelect: () => onChromeAction("history"),
+                  },
+                ]
+              : []),
             {
               label: "从 Mesa 移除",
               title:

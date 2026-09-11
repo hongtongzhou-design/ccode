@@ -606,7 +606,12 @@ pub async fn download_model_db() -> Result<ModelDbStatusDto, String> {
             .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                match crate::storage::response_bytes(resp, 32 * 1024 * 1024).await.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())) {
+                match crate::storage::response_bytes(resp, 32 * 1024 * 1024)
+                    .await
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<serde_json::Value>(&bytes)
+                            .map_err(|e| e.to_string())
+                    }) {
                     Ok(v) => {
                         let entries = if is_models_dev {
                             parse_models_dev(&v)
@@ -736,10 +741,7 @@ pub(crate) fn model_context_size_authoritative_for(
 /// Best available persisted context declaration for a CLI config file.
 /// User overrides and gateway metadata win; the public database is used only
 /// when it has an explicit value, never the generic fallback estimate.
-pub(crate) fn model_context_size_for_config(
-    model: &str,
-    gateway_id: Option<&str>,
-) -> Option<i64> {
+pub(crate) fn model_context_size_for_config(model: &str, gateway_id: Option<&str>) -> Option<i64> {
     let tables = [load_override(), load_relay_for(gateway_id), load_db()];
     chain_field(&tables, model, |c| c.context)
 }

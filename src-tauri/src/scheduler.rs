@@ -266,7 +266,10 @@ struct ScheduleGuard {
 fn sched_lock() -> Result<ScheduleGuard, String> {
     let process = SCHED_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let file = crate::storage::config_lock("schedules")?;
-    Ok(ScheduleGuard { _process: process, _file: file })
+    Ok(ScheduleGuard {
+        _process: process,
+        _file: file,
+    })
 }
 
 /// 正在运行的任务 id（防重入）：tick 内与 run_schedule_now 共用
@@ -292,9 +295,15 @@ fn unmark_running(id: &str) {
 fn execution_lock_at(dir: &Path, id: &str) -> Result<fs::File, String> {
     fs::create_dir_all(dir).map_err(|e| format!("创建任务锁目录失败：{e}"))?;
     let name = format!("{:x}.lock", md5::compute(id.as_bytes()));
-    let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
-        .open(dir.join(name)).map_err(|e| format!("打开任务锁失败：{e}"))?;
-    file.try_lock().map_err(|_| "该任务正在另一个实例运行，未重复启动")?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join(name))
+        .map_err(|e| format!("打开任务锁失败：{e}"))?;
+    file.try_lock()
+        .map_err(|_| "该任务正在另一个实例运行，未重复启动")?;
     Ok(file)
 }
 
@@ -645,8 +654,7 @@ fn schedule_isolation(task: &Schedule) -> Result<PathBuf, String> {
         if !crate::paths::same_path(
             &resolve_git_common_dir(&canonical, &common),
             &resolve_git_common_dir(&root, &root_common),
-        )
-        {
+        ) {
             return Err("定时隔离目录属于其他仓库，拒绝使用".into());
         }
         return Ok(canonical);
@@ -717,7 +725,8 @@ pub(crate) fn watch_rel_ok(rel: &str) -> bool {
     !t.is_empty()
         && !t.starts_with('/')
         && !t.starts_with('\\')
-        && !t.split(['/', '\\'])
+        && !t
+            .split(['/', '\\'])
             .any(|p| p.is_empty() || p == "." || p == "..")
 }
 
@@ -750,12 +759,12 @@ pub(crate) fn copy_watch_rel(
     if dest.exists() && !overwrite {
         return Ok(false);
     }
-    let from_c = crate::paths::canonicalize_plain(from)
-        .map_err(|e| format!("源目录无法解析: {e}"))?;
+    let from_c =
+        crate::paths::canonicalize_plain(from).map_err(|e| format!("源目录无法解析: {e}"))?;
     let to_c =
         crate::paths::canonicalize_plain(to).map_err(|e| format!("目标目录无法解析: {e}"))?;
-    let src_c = crate::paths::canonicalize_plain(&src)
-        .map_err(|e| format!("源文件无法解析: {e}"))?;
+    let src_c =
+        crate::paths::canonicalize_plain(&src).map_err(|e| format!("源文件无法解析: {e}"))?;
     if !crate::paths::path_within_path(&src_c, &from_c) {
         return Err(format!("源文件不在允许目录内: {rel}"));
     }
@@ -814,16 +823,18 @@ pub fn adopt_watch_run(app: tauri::AppHandle, run_id: String) -> Result<Vec<Stri
         let _guard = sched_lock()?;
         read_schedules_at(&schedules_path()?)?
     };
-    let schedule = records.iter().find(|task| task.history.iter().any(|record| record.run_id.as_deref() == Some(&run_id) && record.status == "ok"));
+    let schedule = records.iter().find(|task| {
+        task.history
+            .iter()
+            .any(|record| record.run_id.as_deref() == Some(&run_id) && record.status == "ok")
+    });
     let Some(schedule) = schedule else {
         return Err("没有成功的运行历史，不能自动采纳；请手动对比冻结证据后合并".into());
     };
     let patterns = watch_adopt_patterns_for(&schedule.skill);
-    let project = run
-        .project_root
-        .as_deref()
-        .ok_or("Run 没有所属项目")?;
+    let project = run.project_root.as_deref().ok_or("Run 没有所属项目")?;
     let project = gated_project_root(project)?;
+    let _apply_lock = crate::review_contract::apply_lock(&project)?;
     let isolation = PathBuf::from(crate::sessions::expand_tilde(&run.isolation_path));
     if !isolation.is_dir() {
         return Err("隔离目录不存在".into());
@@ -837,8 +848,32 @@ pub fn adopt_watch_run(app: tauri::AppHandle, run_id: String) -> Result<Vec<Stri
     }
     // 保护清单读不出来 = 不可信，fail-closed 拒绝采纳（与 runs.rs 验收写回同一口径）
     let protected = crate::projects::protected_paths_at(&project)?;
-    let copied = crate::watch_review::adopt_at(&crate::watch_review::review_dir()?, &snapshot, &project, &protected, &patterns)?;
-    mark_run_adopted(&run_id).map_err(|e| format!("文件已采纳，但更新历史标记失败：{e}；重试不会重复覆盖相同内容"))?;
+    let copied = crate::watch_review::adopt_at(
+        &crate::watch_review::review_dir()?,
+        &snapshot,
+        &project,
+        &protected,
+        &patterns,
+    )?;
+    let fact = crate::projects::AcceptanceLogEntry {
+        goal_id: String::new(),
+        goal_name: schedule.skill.clone(),
+        run_id: run_id.clone(),
+        paths: copied.clone(),
+        note: "定时巡检采纳".into(),
+        frozen: true,
+        decided_at: crate::sessions::now_iso(),
+        kind: crate::review_contract::KIND_WATCH_ADOPT.into(),
+        version_id: run_id.clone(),
+        reviewed_sha: None,
+        project_id: crate::projects::project_id_at(&project),
+        scene_ref: Some(schedule.id.clone()),
+        content_fingerprints: Vec::new(),
+    };
+    crate::review_contract::commit_fact(&project, &fact)
+        .map_err(|e| format!("文件已采纳，但验收记录落盘失败：{e}。请再执行一次采纳以补记"))?;
+    mark_run_adopted(&run_id)
+        .map_err(|e| format!("文件已采纳，但更新历史标记失败：{e}；重试不会重复覆盖相同内容"))?;
     let _ = app.emit("watch-run-adopted", &run_id);
     Ok(copied)
 }
@@ -887,7 +922,21 @@ fn execute_one(id: &str) -> RunDonePayload {
         }
     };
     let task = {
-        let _g = match sched_lock() { Ok(g) => g, Err(error) => return RunDonePayload { schedule_id: id.into(), project_root: String::new(), schedule_name: "定时任务".into(), skill: String::new(), new_entries: None, status: "error".into(), summary: error, artifacts: Vec::new() } };
+        let _g = match sched_lock() {
+            Ok(g) => g,
+            Err(error) => {
+                return RunDonePayload {
+                    schedule_id: id.into(),
+                    project_root: String::new(),
+                    schedule_name: "定时任务".into(),
+                    skill: String::new(),
+                    new_entries: None,
+                    status: "error".into(),
+                    summary: error,
+                    artifacts: Vec::new(),
+                }
+            }
+        };
         match read_schedules_at(&path) {
             Ok(list) => list.into_iter().find(|t| t.id == id),
             Err(e) => {
@@ -958,8 +1007,7 @@ fn execute_one(id: &str) -> RunDonePayload {
             None,
             dedicated,
             &hidden,
-        )
-        {
+        ) {
             Ok(profile) => profile,
             Err(error) => {
                 // Profile resolution is part of the Run lifecycle too: keep a durable
@@ -1027,8 +1075,13 @@ fn execute_one(id: &str) -> RunDonePayload {
         )
         .and_then(|(output, id)| {
             run_id = Some(id);
-            crate::watch_review::freeze_at(&crate::watch_review::review_dir()?, evidence, root, &patterns)
-                .map_err(|e| format!("任务执行完成，但冻结产物证据失败，未开放自动采纳：{e}"))?;
+            crate::watch_review::freeze_at(
+                &crate::watch_review::review_dir()?,
+                evidence,
+                root,
+                &patterns,
+            )
+            .map_err(|e| format!("任务执行完成，但冻结产物证据失败，未开放自动采纳：{e}"))?;
             Ok(output)
         })
     })();
@@ -1068,7 +1121,10 @@ fn execute_one(id: &str) -> RunDonePayload {
             "ok",
             cap_summary(&crate::sessions::redact_sensitive_text(&out)),
         ),
-        Err(e) if e.contains("任务已取消") => ("cancelled", cap_summary(&crate::sessions::redact_sensitive_text(&e))),
+        Err(e) if e.contains("任务已取消") => (
+            "cancelled",
+            cap_summary(&crate::sessions::redact_sensitive_text(&e)),
+        ),
         Err(e) if is_timeout_error(&e) => (
             "timeout",
             cap_summary(&crate::sessions::redact_sensitive_text(&e)),
@@ -1148,7 +1204,13 @@ fn collect_due_ids() -> Vec<String> {
         }
     };
     let list = {
-        let _g = match sched_lock() { Ok(g) => g, Err(e) => { crate::logbuf::record("error", "scheduler", &e); return Vec::new(); } };
+        let _g = match sched_lock() {
+            Ok(g) => g,
+            Err(e) => {
+                crate::logbuf::record("error", "scheduler", &e);
+                return Vec::new();
+            }
+        };
         match read_schedules_at(&path) {
             Ok(l) => l,
             Err(e) => {
@@ -1195,7 +1257,9 @@ fn claim_due_after_lock(id: &str, due: &[String]) -> bool {
 /// 不为一个 sleep 引入 tokio 依赖。
 pub fn start_scheduler(app: tauri::AppHandle) {
     tauri::async_runtime::spawn_blocking(move || loop {
-        if crate::process::shutting_down() { break; }
+        if crate::process::shutting_down() {
+            break;
+        }
         for id in collect_due_ids() {
             let lease = match execution_lock(&id) {
                 Ok(lease) => lease,
@@ -1246,11 +1310,21 @@ pub fn list_schedules() -> Result<Vec<ScheduleDto>, String> {
     }
     drop(_g);
     let runs = crate::runs::run_list(None)?;
-    Ok(list.into_iter().map(|schedule| {
-        let mut dto = ScheduleDto::from(schedule);
-        dto.running_run_id = runs.iter().find(|r| r.task_ref.as_deref() == Some(&dto.id) && r.task_kind == "watch" && crate::process::capture_active(&r.id)).map(|r| r.id.clone());
-        dto
-    }).collect())
+    Ok(list
+        .into_iter()
+        .map(|schedule| {
+            let mut dto = ScheduleDto::from(schedule);
+            dto.running_run_id = runs
+                .iter()
+                .find(|r| {
+                    r.task_ref.as_deref() == Some(&dto.id)
+                        && r.task_kind == "watch"
+                        && crate::process::capture_active(&r.id)
+                })
+                .map(|r| r.id.clone());
+            dto
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1280,7 +1354,9 @@ pub fn delete_schedule(id: String) -> Result<(), String> {
 pub fn cancel_schedule_run(id: String) -> Result<(), String> {
     for run_id in crate::process::active_capture_ids() {
         if let Some(run) = crate::runs::run_get(run_id.clone())? {
-            if run.task_ref.as_deref() == Some(&id) && run.task_kind == "watch" { return crate::process::cancel_capture(&run_id); }
+            if run.task_ref.as_deref() == Some(&id) && run.task_kind == "watch" {
+                return crate::process::cancel_capture(&run_id);
+            }
         }
     }
     Err("没有在此实例运行的任务".into())
@@ -1301,14 +1377,18 @@ pub fn run_schedule_now(app: tauri::AppHandle, id: String) -> Result<(), String>
     }
     let lease = match execution_lock(&id) {
         Ok(lease) => lease,
-        Err(error) => { unmark_running(&id); return Err(error); }
+        Err(error) => {
+            unmark_running(&id);
+            return Err(error);
+        }
     };
     tauri::async_runtime::spawn(async move {
         let id2 = id.clone();
         let outcome = tauri::async_runtime::spawn_blocking(move || {
             let _lease = lease;
             execute_one(&id2)
-        }).await;
+        })
+        .await;
         unmark_running(&id);
         match outcome {
             Ok(payload) => emit_done(&app, payload),
@@ -2060,12 +2140,31 @@ mod tests {
         assert!(isolation.join("papers/watchlist.md").is_file());
         assert!(isolation.join("notes/inbox.md").is_file());
         let id = uuid::Uuid::new_v4().to_string();
-        let evidence = crate::watch_review::prepare(&id, &project, &isolation, &watch_adopt_patterns_for("lit-watch")).unwrap();
+        let evidence = crate::watch_review::prepare(
+            &id,
+            &project,
+            &isolation,
+            &watch_adopt_patterns_for("lit-watch"),
+        )
+        .unwrap();
         std::fs::write(isolation.join("notes/inbox.md"), "## old\n## new\n").unwrap();
         let reviews = root.join("reviews");
-        crate::watch_review::freeze_at(&reviews, evidence, &isolation, &watch_adopt_patterns_for("lit-watch")).unwrap();
+        crate::watch_review::freeze_at(
+            &reviews,
+            evidence,
+            &isolation,
+            &watch_adopt_patterns_for("lit-watch"),
+        )
+        .unwrap();
         let snapshot = crate::watch_review::load_at(&reviews, &id).unwrap();
-        let copied = crate::watch_review::adopt_at(&reviews, &snapshot, &project, &[], &watch_adopt_patterns_for("lit-watch")).unwrap();
+        let copied = crate::watch_review::adopt_at(
+            &reviews,
+            &snapshot,
+            &project,
+            &[],
+            &watch_adopt_patterns_for("lit-watch"),
+        )
+        .unwrap();
         assert!(copied.iter().any(|p| p == "notes/inbox.md"));
         assert_eq!(
             std::fs::read_to_string(project.join("notes/inbox.md")).unwrap(),
@@ -2090,9 +2189,18 @@ mod tests {
         let other = base.join("other");
         fs::create_dir_all(repo.join(".git")).unwrap();
         fs::create_dir_all(other.join(".git")).unwrap();
-        assert_eq!(resolve_git_common_dir(&repo, ".git"), crate::projects::canonical_key(&repo.join(".git")));
-        assert_ne!(resolve_git_common_dir(&repo, ".git"), resolve_git_common_dir(&other, ".git"));
-        assert_eq!(resolve_git_common_dir(&other, &repo.join(".git").to_string_lossy()), resolve_git_common_dir(&repo, ".git"));
+        assert_eq!(
+            resolve_git_common_dir(&repo, ".git"),
+            crate::projects::canonical_key(&repo.join(".git"))
+        );
+        assert_ne!(
+            resolve_git_common_dir(&repo, ".git"),
+            resolve_git_common_dir(&other, ".git")
+        );
+        assert_eq!(
+            resolve_git_common_dir(&other, &repo.join(".git").to_string_lossy()),
+            resolve_git_common_dir(&repo, ".git")
+        );
         fs::remove_dir_all(base).unwrap();
     }
 

@@ -11,7 +11,7 @@
 
 ## 终端行为（用户明确要求；配色 = VS Code Dark+ 调色板，集中在 `TerminalPage.tsx` 的 `theme` 一处）
 
-- **Run 与标签（v3.221 / v3.223 / v3.225）**：终端标签是一次 Run 的视图，不是身份。同一 `reuseKey` 只留一个活标签；标题先任务名（工作区/分支/文档）后 Agent（Agent 只在进程起来后的状态栏）。交互 `pty_spawn` 必先登记 `runs` 行（登录标签除外）；无头标 `internal` 不进工作台。启动入口用 `permission`（`discuss` / `write_tree`），旧 `readonly` 仅回落。重启白名单含 `runId`，仍禁 PTY/密钥/env。关标签后按 `runId` 恢复。细则 `docs/conventions/agent-workbench.md`。
+- **Run 与标签（v3.221 / v3.223 / v3.225）**：终端标签是一次 Run 的视图，不是身份。同一 `reuseKey` 只留一个活标签；标题先任务名（工作区/分支/文档）后 Agent（Agent 只在进程起来后的状态栏）。交互 `pty_spawn` 必先登记 `runs` 行（登录标签除外）；无头标 `internal` 不进工作台。启动入口用 `permission`（`discuss` / `write_tree`），旧 `readonly` 仅回落。重启白名单含 `runId`，仍禁 PTY/密钥/env。关标签后按 `runId` 恢复。会话恢复自动启动必须可取消（开发态 StrictMode 假卸载），失败不得写成「进程已退出」。细则 `docs/conventions/agent-workbench.md`。
 - **运行页上下文分工（v3.127）**：左栏「项目与工作区」只负责切换终端上下文；目录浏览、搜索、钻取和返回由「文件树」独立负责。文件树悬停「进入」才改变浏览根，不改变 Agent 实际运行目录；单击文件夹只原地展开/收起。两者不一致时必须显示「正在浏览 … · 终端仍在 …」并提供「回到当前目录」。Agent 运行中点击项目/工作区不得静默失败，改为在新标签打开目标上下文并给出短提示。
 - **聊天/终端按标签隔离（v3.127）**：每个终端标签独立保存显示层（聊天或终端），切换标签不继承另一标签的显示选择；两种显示层仍共享同一 PTY、会话文件和 TerminalView。
 - **项目区问 AI（v3.186）**：第一次选 Agent / 配置 / 模型，可设为默认（`ccode.askAi`）；未设默认不沿用 `lastLaunch` / 快速开聊。默认面是终端不是聊天；`previewPath` 打开右栏预览，PDF 与「查看」一样撑开。⌘/Ctrl 点问 AI 强制重选。指定了 `profileId` 时启动栏不得用上次留下的模型。
@@ -31,7 +31,7 @@
   无证据/失败任务不开放自动采纳，内容以纯文本显示；保留返回与当前目录入口，不影响底层 PTY 挂载。
 - 「停止」或 agent 退出后必须**自动回落用户登录 shell**（`$SHELL -l`，同 cwd），不死在最终画面；手动 `exit` 不自动
   重开；回落 shell 不带 profile env；agent/shell 共用 `pty.rs` 的 `spawn_tracked`，退出事件按 PTY 类型区分。
-  同一次会话：第一条真正的用户问题出现后先无头写临时标题；Agent 退出后再只用用户原话（首条意图 / 中途纠正 / 最后定题）校正一次，不送助手回复。格式 `MMDD|类型|主题`（创建日上海时区），写入 `session_meta.custom_title` 且 `title_source=auto`，不写回 CLI 源文件。人手改过的标题（`title_source=user`）不覆盖；内部会话、内容不足或没有创建日则跳过。失败静默，不挡回落 shell。
+  同一次会话：第一条真正的用户问题出现后先无头写临时标题；Agent 退出后再只用用户原话（首条意图 / 中途纠正 / 最后定题）校正一次，不送助手回复。格式 `MMDD|类型|主题`（创建日上海时区），主题 8–28 字、至少 4 个汉字、对象+动作；已占用的「类型|主题」不得重复。写入 `session_meta.custom_title` 且 `title_source=auto`，不写回 CLI 源文件。人手改过的标题（`title_source=user`）不覆盖；内部会话、内容不足或没有创建日则跳过。失败静默，不挡回落 shell。
 - **重启只恢复标签元数据，不恢复 PTY**：白名单限 label/cwd/agent/profile/model/sessionId，禁存 PTY id/scrollback/密钥/
   env/run 脚本；重开后为「上次任务，可恢复」占位，点击才建新 PTY；目录/profile 失效留在可编辑启动栏提示，禁自动换目标。
 - **预览版本与编辑缓冲（2026-09-07）**：文件预览和产物内联编辑均使用后端读取快照的 `revision` 保存，冲突时保留

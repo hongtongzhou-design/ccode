@@ -32,17 +32,6 @@ export function renderTaskMd(
   if (globals.length > 0) {
     lines.push("## 项目规则", ...globals.map((x) => `- ${x}`), "");
   }
-  const protectedPaths = (cfg.protectedPaths ?? [])
-    .map((x) => x.trim())
-    .filter(Boolean);
-  if (protectedPaths.length > 0) {
-    lines.push(
-      "## 这些保持原样",
-      "验收把独立副本写回项目时，这些文件夹或文件不改、不另存一份，副本里的改动不写回：",
-      ...protectedPaths.map((x) => `- ${x}`),
-      "",
-    );
-  }
   const litLines = litSourceSectionLines(cfg.litSource);
   if (litLines) {
     lines.push(...litLines, "");

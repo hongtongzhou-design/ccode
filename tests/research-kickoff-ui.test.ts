@@ -50,7 +50,8 @@ test("实际开工确认：上游摘要可见，决定可填写/撤回，最终�
     const confirm=()=>button('确认开始');
     assert.ok(confirm().disabled);
     const status=host.querySelector<HTMLSelectElement>('fieldset select')!;
-    const input=host.querySelector<HTMLInputElement>('input[placeholder="批准的范围、方案版本或待补内容"]')!;
+    const input=host.querySelector<HTMLInputElement>('fieldset input:not([type="checkbox"])');
+    assert.ok(input instanceof dom.window.HTMLInputElement, '决定说明输入框必须可填写');
     const choose=async(value:string)=>act(async()=>{status.value=value;status.dispatchEvent(new dom.window.Event('change',{bubbles:true}));});
     await choose('wait');
     await enter(input,'待补证据，暂不批准');

@@ -535,7 +535,7 @@ export default function ProjectFilesView({
         <section
           className={`flex h-full min-h-0 shrink-0 flex-col ${
             preview ? "w-full lg:w-[22rem] lg:pr-6" : "w-full"
-          } ${projectWellClass}`}
+          }`}
         >
           <div className="mb-2 flex shrink-0 flex-col gap-1.5">
             <div className="flex items-center gap-1">

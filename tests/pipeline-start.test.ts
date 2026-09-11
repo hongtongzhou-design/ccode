@@ -42,6 +42,20 @@ test("TASK.md 收尾：派生产物走工作区，直写项目根的是未验收
   assert.doesNotMatch(md, /必须落在上方项目根对应目录/);
 });
 
+test("TASK.md 不含目标验收的「保持原样」段", () => {
+  const md = renderTaskMd(
+    step(),
+    cfg({
+      workMode: "research",
+      steps: [step()],
+      protectedPaths: ["数据/raw"],
+    }),
+    "/tmp/p",
+  );
+  assert.doesNotMatch(md, /保持原样/);
+  assert.doesNotMatch(md, /数据\/raw/);
+});
+
 test("TASK.md 项目规则不含未填的全局设定空表", () => {
   const md = renderTaskMd(
     step(),

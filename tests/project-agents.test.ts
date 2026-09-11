@@ -5,6 +5,7 @@ import {
   currentProfileLine,
   projectAgentsEmptyWorkHint,
   projectAgentsHint,
+  projectBoundProfileId,
   resolvedTaskAgentId,
 } from "../src/project-agents.ts";
 import { declaredTaskKindsForMode, taskStatusLabel } from "../src/project-tasks.ts";
@@ -205,4 +206,12 @@ test("currentProfileLine shows the project pick, else the first connection", () 
     "官方 · gpt-5",
   );
   assert.equal(currentProfileLine({ defaultProfileId: "", profiles: [] }), null);
+});
+
+test("projectBoundProfileId uses the project binding for that agent", () => {
+  const bound = { kimi: "p-kimi-a", "claude-code": "p-claude" };
+  assert.equal(projectBoundProfileId(bound, "kimi"), "p-kimi-a");
+  assert.equal(projectBoundProfileId(bound, "codex"), undefined);
+  assert.equal(projectBoundProfileId({}, "kimi"), undefined);
+  assert.equal(projectBoundProfileId({ kimi: "  " }, "kimi"), undefined);
 });

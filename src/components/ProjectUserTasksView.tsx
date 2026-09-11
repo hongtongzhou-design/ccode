@@ -15,22 +15,20 @@ import {
 } from "../types";
 import {
   Checkbox,
-  compactPrimaryActionClass,
   EmptyState,
   FoldMark,
   ghostActionClass,
   primaryActionClass,
+  projectWellClass,
   rowActionClass,
   secondaryActionClass,
   SegTabs,
 } from "./PageFrame";
 import { Modal } from "./Modal";
 import { agentBrand } from "../agent-colors";
-import ProjectSessionsSection from "./ProjectSessionsSection";
-import { useProjectSessionsOpen } from "../project-sessions-layout";
-import ScheduleSection from "./ScheduleSection";
-import { beginProjectChat } from "./AskAiModal";
+
 import { confirmDialog } from "./ConfirmDialog";
+import ProjectSettingsDrawer from "./ProjectSettingsDrawer";
 import {
   canSaveDeclaredGoal,
   canSubmitDeclaredTask,
@@ -53,6 +51,7 @@ import {
   taskStatusLabel,
   toggleTaskMaterialPath,
   visibleDeclaredTasks,
+  archivedDeclaredTasks,
   type TaskMaterialScope,
   type TaskPermission,
 } from "../project-tasks";
@@ -60,13 +59,18 @@ import type { DirEntryDto } from "./FileTree";
 import FileTypeMark from "./FileTypeMark";
 import OfficePreviewModal from "./OfficePreviewModal";
 import { goalRunTerminalFields, prepareGoalRun } from "../goal-run";
-import ProjectRulesPanel from "./ProjectRulesPanel";
+
 import {
   goalReviewCopy,
   goalReviewFacts,
   groupReviewChanges,
 } from "../goal-review";
-import { goalCardMeta, goalsNeedAttention, projectNowLine } from "../project-status";
+import {
+  goalCardMeta,
+  goalsNeedAttention,
+  projectNowLine,
+} from "../project-status";
+import { absTime, relTime } from "../rel-time";
 
 function agentLabel(id: string): string {
   return AGENTS.find((agent) => agent.id === id)?.label ?? id;
@@ -85,16 +89,15 @@ function continueRun(run: RunDto) {
 export default function ProjectUserTasksView({
   project,
   embed = false,
-  sessionsCollapsed = false,
-  onOpenSessions,
+  chromeReq,
+  onChromeConsumed,
   onUrgentGoals,
 }: {
   project: ProjectDto;
   /** 嵌进无流程科研左栏：不重复项目名、不另开对话栏。 */
   embed?: boolean;
-  /** 无流程科研：对话收起后，重开按钮放在「目标」标题行，与办公页同一位置。 */
-  sessionsCollapsed?: boolean;
-  onOpenSessions?: () => void;
+  chromeReq?: { action: string; token: number } | null;
+  onChromeConsumed?: () => void;
   onUrgentGoals?: (urgent: boolean) => void;
 }) {
   const profiles = useAppStore((state) => state.profiles);
@@ -102,6 +105,10 @@ export default function ProjectUserTasksView({
   const setPage = useAppStore((state) => state.setPage);
   const setPendingTerminal = useAppStore((state) => state.setPendingTerminal);
   const [tasks, setTasks] = useState<TaskDto[]>([]);
+  const [archivedTasks, setArchivedTasks] = useState<TaskDto[]>([]);
+  const [archiveOpen, setArchiveOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const chromeConsumed = useRef<number | null>(null);
   const [runs, setRuns] = useState<RunDto[]>([]);
   const [events, setEvents] = useState<RunEventDto[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
@@ -111,8 +118,7 @@ export default function ProjectUserTasksView({
   const [error, setError] = useState<string | null>(null);
   const [startingId, setStartingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [sessionsOpen, setSessionsOpen] = useProjectSessionsOpen();
-  const withSessions = !embed && project.workMode === "office";
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const [configReady, setConfigReady] = useState(
     embed || project.workMode !== "research",
   );
@@ -126,12 +132,17 @@ export default function ProjectUserTasksView({
   const load = useCallback(async () => {
     if (!eligible) return;
     try {
+      const kinds = declaredTaskKindsForMode(project.workMode);
       const [nextTasks, nextRuns, nextEvents] = await Promise.all([
-        invoke<TaskDto[]>("task_list", { projectRoot: project.path }),
+        invoke<TaskDto[]>("task_list", {
+          projectRoot: project.path,
+          includeArchived: true,
+        }),
         invoke<RunDto[]>("run_list", { projectRoot: project.path }),
         invoke<RunEventDto[]>("task_goal_events", { projectRoot: project.path }),
       ]);
-      setTasks(visibleDeclaredTasks(nextTasks, declaredTaskKindsForMode(project.workMode)));
+      setTasks(visibleDeclaredTasks(nextTasks, kinds));
+      setArchivedTasks(archivedDeclaredTasks(nextTasks, kinds));
       setRuns(nextRuns);
       setEvents(nextEvents);
       setError(null);
@@ -139,6 +150,15 @@ export default function ProjectUserTasksView({
       setError(`任务读取失败：${String(reason)}`);
     }
   }, [eligible, project.path, project.workMode]);
+
+  useEffect(() => {
+    if (embed || !chromeReq) return;
+    if (chromeConsumed.current === chromeReq.token) return;
+    if (chromeReq.action !== "settings") return;
+    chromeConsumed.current = chromeReq.token;
+    setSettingsOpen(true);
+    onChromeConsumed?.();
+  }, [chromeReq, embed, onChromeConsumed]);
 
   useEffect(() => {
     if (project.workMode !== "research") {
@@ -288,7 +308,7 @@ export default function ProjectUserTasksView({
   async function deleteGoal(task: TaskDto) {
     const name = goalDisplayName(task);
     const ok = await confirmDialog(
-      `归档目标「${name}」？它会从列表收起；产出文件、会话和验收记录全部保留，之后想找回可以让我恢复。`,
+      `归档目标「${name}」？它会从列表收起；产出文件、会话和验收记录全部保留，之后可在下方「已归档」里恢复。`,
       {
         danger: true,
         confirmText: "归档",
@@ -308,14 +328,23 @@ export default function ProjectUserTasksView({
     }
   }
 
+  async function restoreGoal(task: TaskDto) {
+    setRestoringId(task.id);
+    try {
+      await invoke("task_unarchive", { id: task.id });
+      setError(null);
+      await load();
+    } catch (reason) {
+      setError(`恢复目标失败：${String(reason)}`);
+    } finally {
+      setRestoringId(null);
+    }
+  }
+
   return (
     <>
-    <div
-      className={`mb-4 flex flex-row items-start${
-        withSessions ? " ccode-project-work-well" : ""
-      }${withSessions && sessionsOpen ? " ccode-project-sessions-open" : ""}`}
-    >
-      <section className="ccode-project-work-main min-w-0 flex-1">
+    <div className="mb-4">
+      <section className="min-w-0">
         <div className="mb-3 flex items-center gap-2">
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-medium text-l1">目标</h2>
@@ -323,18 +352,6 @@ export default function ProjectUserTasksView({
               <p className="mt-1 text-sm font-medium text-l1">{nowLine}</p>
             )}
           </div>
-          {((withSessions && !sessionsOpen) ||
-            (sessionsCollapsed && onOpenSessions)) && (
-            <div className="shrink-0">
-              <ProjectSessionsSection
-                projectPath={project.path}
-                variant="sidebar"
-                collapsed
-                onToggle={onOpenSessions ?? (() => setSessionsOpen(true))}
-                title="这个项目的对话"
-              />
-            </div>
-          )}
           {tasks.length > 0 && (
             <button type="button" className={primaryActionClass} onClick={() => setCreateOpen(true)}>
               <Plus size={13} aria-hidden="true" />
@@ -399,7 +416,7 @@ export default function ProjectUserTasksView({
                         !!run &&
                         (task.status === "pending_review" || task.status === "completed");
                       return (
-                        <li key={task.id} className="group rounded-md px-1 py-2 hover:bg-hover">
+                        <li key={task.id} className={`group ${projectWellClass}`}>
                           <div className="flex items-start gap-3">
                             <span className="min-w-0 flex-1">
                               <span className="flex flex-wrap items-center gap-2">
@@ -489,70 +506,55 @@ export default function ProjectUserTasksView({
             })}
           </div>
         )}
-        <div className="mt-4">
-          <ProjectRulesPanel
-            projectPath={project.path}
-            workMode={project.workMode}
-            compact
-            onError={setError}
-          />
-        </div>
-      </section>
-      {withSessions && sessionsOpen && (
-        <aside
-          className={`ccode-project-sessions-rail ${
-            sessionsOpen ? "ccode-project-sessions-rail-open" : ""
-          }`}
-        >
-          <div className="flex min-w-0 flex-col gap-4">
-            <ProjectSessionsSection
-              projectPath={project.path}
-              variant="sidebar"
-              collapsed={false}
-              onToggle={() => setSessionsOpen(false)}
-              title="这个项目的对话"
-              onNewChat={(event) =>
-                beginProjectChat(
-                  {
-                    cwd: project.path,
-                    name: project.name,
-                    kind: "office",
-                    preferredAgent: project.defaultAgent,
-                    preferredProfile: project.defaultAgent
-                      ? project.defaultProfiles?.[project.defaultAgent]
-                      : undefined,
-                  },
-                  { forcePick: !!(event.metaKey || event.ctrlKey) },
-                )
-              }
-              empty={
-                <button
-                  type="button"
-                  className={`${compactPrimaryActionClass} w-full`}
-                  onClick={(event) =>
-                    beginProjectChat(
-                      {
-                        cwd: project.path,
-                        name: project.name,
-                        kind: "office",
-                        preferredAgent: project.defaultAgent,
-                        preferredProfile: project.defaultAgent
-                          ? project.defaultProfiles?.[project.defaultAgent]
-                          : undefined,
-                      },
-                      { forcePick: !!(event.metaKey || event.ctrlKey) },
-                    )
-                  }
-                >
-                  ＋ 发起新对话
-                </button>
-              }
-            />
-            <ScheduleSection projectRoot={project.path} steps={[]} layout="card" />
+        {archivedTasks.length > 0 && (
+          <div className="mt-4">
+            <button
+              type="button"
+              className="mb-2 flex items-center gap-1 text-micro font-medium text-l4 hover:text-l2"
+              onClick={() => setArchiveOpen((open) => !open)}
+              aria-expanded={archiveOpen}
+            >
+              <FoldMark open={archiveOpen} />
+              已归档 {archivedTasks.length}
+            </button>
+            {archiveOpen && (
+              <ul className="space-y-2">
+                {archivedTasks.map((task) => (
+                  <li key={task.id} className="flex items-start gap-3 px-1 py-2">
+                    <span className="min-w-0 flex-1">
+                      <span className="text-sm text-l2">{goalDisplayName(task)}</span>
+                      <span
+                        className="mt-1 block text-micro text-l4"
+                        title={absTime(task.archivedAt)}
+                      >
+                        {relTime(task.archivedAt)} · 已归档 · {taskStatusLabel(task.status)}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      className={secondaryActionClass}
+                      disabled={restoringId === task.id}
+                      onClick={() => void restoreGoal(task)}
+                    >
+                      {restoringId === task.id ? "恢复中…" : "恢复"}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
-        </aside>
-      )}
+        )}
+      </section>
     </div>
+    {!embed && (
+      <ProjectSettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        projectPath={project.path}
+        workMode={project.workMode}
+        onError={setError}
+      />
+    )}
       {createOpen && (
         <CreateTaskModal
           project={project}
@@ -774,7 +776,7 @@ function CreateTaskModal({
               </p>
               {poolSkills.length === 0 ? (
                 <p className="text-xs text-l4">
-                  项目技能池是空的——可先在任务页「规则 → 项目技能」从技能库添加；池子里的技能默认都不用。
+                  还没有技能。到规则里从技能库添加。
                 </p>
               ) : (
                 <div className="flex flex-wrap gap-1">
@@ -1237,6 +1239,12 @@ function ReviewOutputsModal({
             <summary className="cursor-pointer select-none">
               本次工作环境（开工时冻结，可核对这版成果基于什么材料）
             </summary>
+            {contextSnapshot.environment && <div className="mt-2 space-y-1 break-all">
+              <p>执行：{contextSnapshot.environment.agent} · 权限：{contextSnapshot.environment.permission}</p>
+              <p>资料：{contextSnapshot.environment.files.length} 项 · 输入：{contextSnapshot.environment.inputPaths.join("、")} · 产出：{contextSnapshot.environment.outputPaths.join("、")}</p>
+              {contextSnapshot.environment.skills.map((skill) => <p key={skill.name}>技能 {skill.name} · 库 {skill.libraryDigest} · Agent {skill.runtimeDigest ?? "未核对"}</p>)}
+              {contextSnapshot.environment.warnings.map((warning) => <p className="text-warn-text" key={warning}>{warning}</p>)}
+            </div>}
             <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap text-l4">
               {contextSnapshot.text}
             </pre>
@@ -1313,7 +1321,7 @@ function ReviewOutputsModal({
                           {change.kind === "deleted"
                             ? taskChangeKindLabel(change.kind)
                             : pathIsProtected(change.path, protectedPaths)
-                              ? "保持原样"
+                              ? "跳过"
                               : taskChangeKindLabel(change.kind)}
                         </span>
                       </li>

@@ -17,7 +17,6 @@ import OfficePreviewModal from "./OfficePreviewModal";
 import {
   compactPrimaryActionClass,
   iconActionClass,
-  projectWellClass,
   rowActionClass,
   searchFieldClass,
 } from "./PageFrame";
@@ -55,7 +54,7 @@ import FolderGroupedList, { useFolderChrome } from "./FolderGroupedList";
 
 import ProjectSessionsSection from "./ProjectSessionsSection";
 import { useProjectSessionsOpen } from "../project-sessions-layout";
-import ScheduleSection from "./ScheduleSection";
+
 import type { OfficeDocDto, ProjectDto } from "../types";
 
 const KIND_ICON: Record<OfficeDocKind, LucideIcon> = {
@@ -334,12 +333,13 @@ export default function OfficeProjectView({
               collapsed
               onToggle={() => setSessionsOpen(true)}
               title="这个项目的对话"
+              defaultProfiles={project?.defaultProfiles}
             />
           )}
         </div>
       </section>
 
-        <section className={`min-w-0 ${projectWellClass}`}>
+        <section className="min-w-0">
           <div className="mb-2.5 flex flex-wrap items-center gap-2">
             <FileText size={14} strokeWidth={1.8} className="text-l4" />
             <h2 className="text-xs font-medium text-l2">文档</h2>
@@ -489,6 +489,7 @@ export default function OfficeProjectView({
               collapsed={false}
               onToggle={() => setSessionsOpen(false)}
               title="这个项目的对话"
+              defaultProfiles={project?.defaultProfiles}
               onNewChat={startProjectChat}
               empty={
                 <div className="flex flex-col gap-2">
@@ -514,9 +515,6 @@ export default function OfficeProjectView({
                 </div>
               }
             />
-            {sessionsOpen && (
-              <ScheduleSection projectRoot={repoPath} steps={[]} layout="card" />
-            )}
           </div>
         </aside>
         )}

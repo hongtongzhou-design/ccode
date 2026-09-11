@@ -54,7 +54,39 @@ pub struct SkillDto {
     /// 各 agent 的分发形态（"symlink" | "copy"，list 时现算，仅启用的 agent 有键）
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub app_modes: HashMap<String, String>,
-    /// SKILL.md 是否提到 MCP（含「推荐 MCP」段）：list 时现算，不入库文件
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkillSnapshot {
+    pub name: String,
+    pub library_digest: String,
+    pub runtime_digest: Option<String>,
+    pub source_revision: Option<String>,
+    pub entry_text: String,
+}
+
+pub(crate) fn snapshot_named_skills(names: &[String], agent: &str) -> Result<Vec<SkillSnapshot>, String> {
+    if names.is_empty() { return Ok(Vec::new()); }
+    let store = SkillStore::default_paths()?;
+    let registry_text = fs::read_to_string(&store.json_path).map_err(|e| format!("读取技能库失败：{e}"))?;
+    let registry: Vec<SkillDto> = serde_json::from_str(&registry_text).map_err(|e| format!("技能库损坏：{e}"))?;
+    let runtime = agent_dirs().remove(agent);
+    let mut out = Vec::new();
+    for name in names {
+        crate::paths::validate_fs_name(name)?;
+        let skill = registry.iter().find(|s| &s.name == name).ok_or_else(|| format!("点名技能未安装：{name}"))?;
+        let library_digest = dir_manifest_hash(&store.skill_dir(name)).ok_or_else(|| format!("无法核对技能版本：{name}"))?;
+        let runtime_digest = runtime.as_ref().and_then(|dir| dir_manifest_hash(&dir.join(name)));
+        if runtime_digest.as_deref() != Some(library_digest.as_str()) {
+            return Err(format!("点名技能「{name}」尚未分发到所选 Agent 或副本已漂移，请先在技能页同步"));
+        }
+        let entry_text = fs::read_to_string(store.skill_dir(name).join("SKILL.md")).map_err(|e| format!("读取点名技能失败：{e}"))?;
+        if entry_text.len() > 256 * 1024 { return Err(format!("技能 {name} 的入口超过 256 KB，未启动")); }
+        out.push(SkillSnapshot { name: name.clone(), library_digest, runtime_digest, source_revision: skill.source_revision.clone(), entry_text });
+    }
+    Ok(out)
+}
+
+/// SKILL.md 是否提到 MCP（含「推荐 MCP」段）：list 时现算，不入库文件
     #[serde(default)]
     pub mentions_mcp: bool,
     /// SKILL.md frontmatter 声明的产物路径（目录带尾斜杠、文件写全路径）：

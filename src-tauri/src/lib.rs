@@ -35,11 +35,13 @@ mod process;
 mod profile_validation;
 mod profiles;
 mod projects;
+mod project_memory;
 mod provider_id;
 mod pty;
 mod pty_input;
 mod reader;
 mod research_quality;
+mod review_contract;
 mod runs;
 mod runtime;
 mod scheduler;
@@ -47,21 +49,22 @@ mod session_search;
 mod session_transfer;
 mod sessions;
 mod settings;
-mod storage;
-mod task_review;
 mod sheet_preview;
 mod skills;
+mod storage;
+mod task_review;
 mod tray;
 mod updater;
 mod usage;
+mod watch_review;
 mod workspaces;
 mod ws_settings;
-mod watch_review;
 mod zotero;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    static CLOSE_DIALOG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static CLOSE_DIALOG_OPEN: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     static ALLOW_CLOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static EXIT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static EXIT_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -96,15 +99,26 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if process::capture_count() > 0 && !ALLOW_CLOSE.load(std::sync::atomic::Ordering::Acquire) {
+                if process::capture_count() > 0
+                    && !ALLOW_CLOSE.load(std::sync::atomic::Ordering::Acquire)
+                {
                     use tauri_plugin_dialog::DialogExt;
                     api.prevent_close();
-                    if CLOSE_DIALOG_OPEN.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+                    if CLOSE_DIALOG_OPEN.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                        return;
+                    }
                     let window = window.clone();
-                    window.app_handle().dialog().message("仍有后台任务运行，退出将终止这些任务。确认退出？")
-                        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel).show(move |ok| {
+                    window
+                        .app_handle()
+                        .dialog()
+                        .message("仍有后台任务运行，退出将终止这些任务。确认退出？")
+                        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
+                        .show(move |ok| {
                             CLOSE_DIALOG_OPEN.store(false, std::sync::atomic::Ordering::Release);
-                            if ok { ALLOW_CLOSE.store(true, std::sync::atomic::Ordering::Release); let _ = window.close(); }
+                            if ok {
+                                ALLOW_CLOSE.store(true, std::sync::atomic::Ordering::Release);
+                                let _ = window.close();
+                            }
                         });
                 }
             }
@@ -179,11 +193,15 @@ pub fn run() {
             runs::task_list,
             runs::task_create,
             runs::task_delete,
+            runs::task_unarchive,
             runs::task_prepare_run,
             runs::task_output_changes,
             runs::task_run_context,
             runs::task_freeze_turn,
             projects::read_project_memory,
+            project_memory::project_memory_read,
+            project_memory::project_memory_update,
+            projects::read_acceptance_log,
             runs::task_adopt_outputs,
             custom_runtime::list_custom_runtimes,
             custom_runtime::save_custom_runtime,
@@ -418,6 +436,7 @@ pub fn run() {
             ai::ai_commit_message,
             ai::ai_summarize_session,
             ai::ai_auto_title_session,
+            ai::ai_retitle_all_sessions,
             ai::ai_draft_pr,
             ai::ai_conflict_advice,
             ai::ai_distill_skill,
@@ -468,9 +487,13 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-                if EXIT_READY.load(std::sync::atomic::Ordering::Acquire) { return; }
+                if EXIT_READY.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
                 api.prevent_exit();
-                if EXIT_STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+                if EXIT_STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    return;
+                }
                 let app = app.clone();
                 std::thread::spawn(move || {
                     process::shutdown_captures();

@@ -419,14 +419,30 @@ fn run_capture(
     timeout: Duration,
 ) -> Result<String, String> {
     let captured = crate::process::capture_command(cmd, timeout, 1024 * 1024)?;
-    if captured.cancelled { return Err("CLI 预检已取消".into()); }
-    if captured.timed_out { return Err(format!("CLI 预检超时（{} 秒）", timeout.as_secs())); }
-    if captured.truncated { return Err("CLI 预检输出超过 1 MB 安全上限".into()); }
+    if captured.cancelled {
+        return Err("CLI 预检已取消".into());
+    }
+    if captured.timed_out {
+        return Err(format!("CLI 预检超时（{} 秒）", timeout.as_secs()));
+    }
+    if captured.truncated {
+        return Err("CLI 预检输出超过 1 MB 安全上限".into());
+    }
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    let detail = if stderr.trim().is_empty() { stdout } else { stderr };
-    if captured.status.is_some_and(|s| s.success()) { return Ok(tail_chars(detail.trim(), 1200)); }
-    Err(format!("CLI 退出码 {:?}: {}", captured.status.and_then(|s| s.code()), tail_chars(detail.trim(), 1200)))
+    let detail = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    if captured.status.is_some_and(|s| s.success()) {
+        return Ok(tail_chars(detail.trim(), 1200));
+    }
+    Err(format!(
+        "CLI 退出码 {:?}: {}",
+        captured.status.and_then(|s| s.code()),
+        tail_chars(detail.trim(), 1200)
+    ))
 }
 
 fn codex_config_args(plan: &agents::LaunchPlan) -> Vec<String> {
@@ -962,7 +978,10 @@ async fn probe_loaded_profile(
     };
 
     let policy = &profile.request_policy;
-    let has_effort = policy.reasoning_effort.as_deref().is_some_and(|s| !s.is_empty());
+    let has_effort = policy
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
     let has_sampling = policy.temperature.is_some() || policy.top_p.is_some();
     let mut checks = Vec::new();
 
@@ -1187,7 +1206,11 @@ fn append_policy_probe_check(
             format!("{label}：被拒（HTTP {}）：{}", o.status, o.error_tail),
             Some(started.elapsed().as_millis()),
         ),
-        Err(e) => check("failed", format!("{label}：{e}"), Some(started.elapsed().as_millis())),
+        Err(e) => check(
+            "failed",
+            format!("{label}：{e}"),
+            Some(started.elapsed().as_millis()),
+        ),
     });
 }
 
@@ -1330,35 +1353,14 @@ mod tests {
         policy.temperature = Some(0.4);
         policy.top_p = Some(0.8);
         policy.reasoning_effort = Some("high".into());
-        let sampling = probe_body(
-            ApiKind::OpenAi,
-            "m",
-            &policy,
-            false,
-            true,
-            true,
-        );
+        let sampling = probe_body(ApiKind::OpenAi, "m", &policy, false, true, true);
         assert_eq!(sampling["temperature"], serde_json::json!(0.4));
         assert_eq!(sampling["top_p"], serde_json::json!(0.8));
         assert!(sampling.get("reasoning_effort").is_none());
-        let effort = probe_body(
-            ApiKind::OpenAi,
-            "m",
-            &policy,
-            true,
-            false,
-            true,
-        );
+        let effort = probe_body(ApiKind::OpenAi, "m", &policy, true, false, true);
         assert_eq!(effort["reasoning_effort"], serde_json::json!("high"));
         assert!(effort.get("temperature").is_none());
-        let anth = probe_body(
-            ApiKind::Anthropic,
-            "m",
-            &policy,
-            true,
-            false,
-            true,
-        );
+        let anth = probe_body(ApiKind::Anthropic, "m", &policy, true, false, true);
         assert!(anth.get("thinking").is_some());
         assert!(anth.get("temperature").is_none());
     }
@@ -1434,10 +1436,7 @@ mod tests {
         assert!(validate_profile_fields(&p)
             .unwrap_err()
             .contains("不能填写完整 /messages"));
-        assert!(validate_anthropic_slot_url(Some(
-            "https://relay.example.com/messages"
-        ))
-        .is_err());
+        assert!(validate_anthropic_slot_url(Some("https://relay.example.com/messages")).is_err());
     }
 
     #[test]

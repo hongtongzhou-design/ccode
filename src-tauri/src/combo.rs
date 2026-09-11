@@ -665,10 +665,7 @@ mod tests {
         assert_eq!(dto.probe_effort, "failed");
         assert_eq!(dto.probe_temperature, "never");
         assert!(dto.probe_note.as_deref().unwrap().contains("丢弃 effort"));
-        assert!(
-            dto.inject_temperature_allowed,
-            "思考档失败不得关掉采样参数"
-        );
+        assert!(dto.inject_temperature_allowed, "思考档失败不得关掉采样参数");
     }
 
     #[test]

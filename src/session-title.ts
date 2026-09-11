@@ -41,6 +41,7 @@ export function stripTitleMarkdown(text: string): string {
   t = t.replace(/__(.+?)__/g, "$1");
   t = t.replace(/`([^`]+)`/g, "$1");
   t = t.replace(/(^|[^\w*])\*(?!\s)([^*]+?)(?<!\s)\*(?=[^\w*]|$)/g, "$1$2");
+  t = t.replace(/\*\*/g, "").replace(/__/g, "");
   return t.replace(/\s+/g, " ").trim();
 }
 

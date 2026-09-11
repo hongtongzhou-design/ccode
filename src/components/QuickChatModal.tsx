@@ -107,7 +107,10 @@ export async function launchQuickChatDirect(): Promise<boolean> {
     （进程活着时不重复 resume，防 active writer 冲突）。
     Run 身份（runId/taskId/profileId）先查齐再一次性派发——先派发再补写会被终端页
     即时消费掉，补写条件不再成立，同一会话分裂成新 Run */
-export function resumeSessionInTerminal(s: SessionMetaDto): void {
+export function resumeSessionInTerminal(
+  s: SessionMetaDto,
+  opts?: { preferredProfileId?: string | null },
+): void {
   const { setPendingTerminal, setPage, liveSessions, focusTab } =
     useAppStore.getState();
   const liveTab = liveSessions[sessionRuntimeKey(s.agent, s.sessionId)];
@@ -116,6 +119,7 @@ export function resumeSessionInTerminal(s: SessionMetaDto): void {
     focusTab(liveTab);
     return;
   }
+  const preferred = opts?.preferredProfileId?.trim() || "";
   void (async () => {
     const run = await invoke<RunDto | null>("run_find", {
       reuseKey: null,
@@ -134,7 +138,10 @@ export function resumeSessionInTerminal(s: SessionMetaDto): void {
       reuseKey: `resume:${s.agent}:${s.sessionId}`,
       runId: run?.id,
       taskId: run?.taskId || undefined,
-      profileId: run?.profileId ?? undefined,
+      // 项目绑了这家配置就预填它；Codex 渠道和上次不同时启动栏仍显示绑定、不自动跑。
+      // 没绑才回落原 Run 的配置。
+      profileId: preferred ? undefined : (run?.profileId ?? undefined),
+      autoLaunchProfileId: preferred || undefined,
     });
     setPage("terminal");
   })();
@@ -163,21 +170,23 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const projectPaths = useAppStore((s) => s.projectPaths);
   const liveSessions = useAppStore((s) => s.liveSessions);
   // 随手聊历史用启动时已进 store 的会话列表现算，打开弹层不再 round-trip
-  const recent = useMemo(
-    () =>
-      pickQuickChatHistory(
-        sessions,
-        projectPaths,
-        liveSessions,
+  const recent = useMemo(() => {
+    try {
+      const rows = pickQuickChatHistory(
+        sessions ?? [],
+        projectPaths ?? [],
+        liveSessions ?? {},
         IS_WINDOWS,
-      ),
-    [sessions, projectPaths, liveSessions],
-  );
-  const latest = recent[0] ?? null;
-  const older = recent.slice(1);
+      );
+      return Array.isArray(rows) ? rows : [];
+    } catch {
+      return [];
+    }
+  }, [sessions, projectPaths, liveSessions]);
+
   // 已检测到的 agent 排在前面：没装的排后面并标注，不直接隐藏（用户可能刚装完还没重新检测）
   const installed = useMemo(
-    () => new Set(agents.filter((a) => a.binaryPath).map((a) => a.id)),
+    () => new Set((agents ?? []).filter((a) => a.binaryPath).map((a) => a.id)),
     [agents],
   );
   const agentOptions = useMemo(
@@ -191,7 +200,7 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const [agentId, setAgentId] = useState(
     () => remembered.agentId ?? agentOptions[0]?.id ?? "claude-code",
   );
-  const agentProfiles = profiles.filter((p) => p.agent === agentId);
+  const agentProfiles = (profiles ?? []).filter((p) => p.agent === agentId);
   const [profileId, setProfileId] = useState(() => remembered.profileId ?? "");
   const [cwd, setCwd] = useState(
     () => remembered.cwd?.trim() || SCRATCH_PLACEHOLDER,
@@ -346,14 +355,13 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
 
         {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
 
-        <Checkbox
-          className="mb-3 text-xs text-l3"
-          checked={alwaysAsk}
-          onChange={setAlwaysAsk}
-          label="下次仍显示此窗口"
-        />
-
-        <div className="flex items-center justify-end gap-2">
+        <div className="flex items-center gap-2">
+          <Checkbox
+            className="min-w-0 flex-1 text-xs text-l3"
+            checked={alwaysAsk}
+            onChange={setAlwaysAsk}
+            label="下次仍显示此窗口"
+          />
           <button type="button" className={secondaryActionClass} onClick={onClose}>
             取消
           </button>
@@ -385,7 +393,7 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
               </button>
             </div>
             <ul className="max-h-44 space-y-0.5 overflow-auto">
-              {(latest ? [latest, ...older] : older).map((s) => (
+              {recent.map((s) => (
                 <li key={`${s.agent}:${s.sessionId}`}>
                   <button
                     type="button"

@@ -288,10 +288,14 @@ fn run_capture_for(
     run_id: Option<&str>,
 ) -> Result<String, String> {
     let captured = crate::process::capture_command_for(cmd, timeout, 8 * 1024 * 1024, run_id)?;
-    if captured.cancelled { return Err("任务已取消".into()); }
+    if captured.cancelled {
+        return Err("任务已取消".into());
+    }
     let out = String::from_utf8_lossy(&captured.stdout);
     let err = String::from_utf8_lossy(&captured.stderr);
-    if let Some(agent) = agent { remember_headless_session(agent, &out, &err); }
+    if let Some(agent) = agent {
+        remember_headless_session(agent, &out, &err);
+    }
     if captured.timed_out {
         let detail = summarize_headless_error(format!("{out}\n{err}").trim(), expected_host);
         return Err(format!("AI 调用超时（{}s）。{detail}", timeout.as_secs()));
@@ -301,7 +305,9 @@ fn run_capture_for(
     }
     if captured.status.is_some_and(|status| status.success()) {
         let text = out.trim().to_string();
-        if text.is_empty() { return Err("AI 返回为空（无文本输出）".into()); }
+        if text.is_empty() {
+            return Err("AI 返回为空（无文本输出）".into());
+        }
         return Ok(text);
     }
     let detail = if err.trim().is_empty() { out } else { err };
@@ -388,12 +394,15 @@ pub(crate) fn ai_prompt_impl(
     );
     let run = match run {
         Ok(run) => run,
-        Err(error) => { let _ = fs::remove_dir_all(&cwd); return Err(error); }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&cwd);
+            return Err(error);
+        }
     };
     {
         let r = &run;
-        if let Err(error) = crate::runs::claim_start(&r.id)
-            .and_then(|_| crate::runs::mark_started(&r.id))
+        if let Err(error) =
+            crate::runs::claim_start(&r.id).and_then(|_| crate::runs::mark_started(&r.id))
         {
             let _ = crate::runs::close_run_with_result(
                 &r.id,
@@ -406,9 +415,27 @@ pub(crate) fn ai_prompt_impl(
             return Err(error);
         }
     }
-    let result = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, AI_TIMEOUT, Some(&run.id));
-    let status = if result.is_ok() { "completed" } else if result.as_ref().err().is_some_and(|e| e.contains("已取消")) { "stopped" } else { "failed" };
-    let closed = crate::runs::close_run_with_result(&run.id, None, status, None, (result.is_err()).then_some("无头 Agent 执行失败"));
+    let result = run_capture_for(
+        Some(&profile.agent),
+        host.as_deref(),
+        &mut cmd,
+        AI_TIMEOUT,
+        Some(&run.id),
+    );
+    let status = if result.is_ok() {
+        "completed"
+    } else if result.as_ref().err().is_some_and(|e| e.contains("已取消")) {
+        "stopped"
+    } else {
+        "failed"
+    };
+    let closed = crate::runs::close_run_with_result(
+        &run.id,
+        None,
+        status,
+        None,
+        (result.is_err()).then_some("无头 Agent 执行失败"),
+    );
     let _ = fs::remove_dir_all(&cwd);
     closed.map_err(|e| format!("Agent 已退出，但运行状态保存失败：{e}"))?;
     result
@@ -524,11 +551,29 @@ pub(crate) fn run_agent_task(
     };
     crate::runs::claim_start(&run.id)?;
     if let Err(error) = crate::runs::mark_started(&run.id) {
-        let _ = crate::runs::close_run_with_result(&run.id, None, "failed", None, Some("无头运行登记失败"));
+        let _ = crate::runs::close_run_with_result(
+            &run.id,
+            None,
+            "failed",
+            None,
+            Some("无头运行登记失败"),
+        );
         return Err(error);
     }
-    let out = run_capture_for(Some(&profile.agent), host.as_deref(), &mut cmd, timeout, Some(&run.id));
-    let status = if out.is_ok() { "completed" } else if out.as_ref().err().is_some_and(|e| e.contains("已取消")) { "stopped" } else { "failed" };
+    let out = run_capture_for(
+        Some(&profile.agent),
+        host.as_deref(),
+        &mut cmd,
+        timeout,
+        Some(&run.id),
+    );
+    let status = if out.is_ok() {
+        "completed"
+    } else if out.as_ref().err().is_some_and(|e| e.contains("已取消")) {
+        "stopped"
+    } else {
+        "failed"
+    };
     let closed = crate::runs::close_run_with_result(
         &run.id,
         None,
@@ -847,7 +892,9 @@ fn turn_too_thin(text: &str) -> bool {
         return true;
     }
     let mut rest = compact.to_lowercase();
-    for g in ["你好", "您好", "hello", "hi", "hey", "nihao", "哈喽", "在吗"] {
+    for g in [
+        "你好", "您好", "hello", "hi", "hey", "nihao", "哈喽", "在吗",
+    ] {
         rest = rest.replace(&g.to_lowercase(), "");
     }
     rest.chars().count() < 8
@@ -867,10 +914,7 @@ fn cap_chars(s: &str, max: usize) -> String {
 }
 
 /// 只取用户原话：开头看首条；聊完看首条意图 + 中途纠正 + 最后定题。不取助手回复。
-pub(crate) fn user_title_material(
-    msgs: &[crate::sessions::ChatMessageDto],
-    early: bool,
-) -> String {
+pub(crate) fn user_title_material(msgs: &[crate::sessions::ChatMessageDto], early: bool) -> String {
     let real: Vec<String> = user_turns(msgs)
         .into_iter()
         .filter(|t| !turn_too_thin(t))
@@ -879,10 +923,7 @@ pub(crate) fn user_title_material(
         return String::new();
     }
     if early || real.len() == 1 {
-        return format!(
-            "[用户·首条] {}",
-            cap_chars(&real[0], USER_TURN_CAP)
-        );
+        return format!("[用户·首条] {}", cap_chars(&real[0], USER_TURN_CAP));
     }
     let mut parts = vec![format!(
         "[用户·首条] {}",
@@ -893,18 +934,12 @@ pub(crate) fn user_title_material(
             .iter()
             .max_by_key(|s| s.chars().count())
         {
-            parts.push(format!(
-                "[用户·纠正] {}",
-                cap_chars(mid, USER_TURN_CAP)
-            ));
+            parts.push(format!("[用户·纠正] {}", cap_chars(mid, USER_TURN_CAP)));
         }
     }
     let last = real.last().unwrap();
     if last != &real[0] {
-        parts.push(format!(
-            "[用户·定题] {}",
-            cap_chars(last, USER_TURN_CAP)
-        ));
+        parts.push(format!("[用户·定题] {}", cap_chars(last, USER_TURN_CAP)));
     }
     cap_text(&parts.join("\n\n"), USER_TITLE_CAP)
 }
@@ -931,6 +966,20 @@ fn extract_title_candidate(raw: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn is_mmdd_token(s: &str) -> bool {
+    s.len() == 4 && s.chars().all(|c| c.is_ascii_digit())
+}
+
+fn theme_is_specific(theme: &str) -> bool {
+    let chars: Vec<char> = theme.chars().collect();
+    let n = chars.len();
+    let cjk = chars
+        .iter()
+        .filter(|c| **c >= '\u{4e00}' && **c <= '\u{9fff}')
+        .count();
+    (8..=28).contains(&n) && cjk >= 4
+}
+
 pub(crate) fn parse_kind_theme(line: &str) -> Option<(String, String)> {
     let line = line
         .trim()
@@ -940,42 +989,93 @@ pub(crate) fn parse_kind_theme(line: &str) -> Option<(String, String)> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    let (kind, theme) = match parts.as_slice() {
-        [k, t] => (*k, *t),
-        [_, k, t] => (*k, *t),
-        _ => return None,
+    let (kind, theme) = if parts.len() >= 3 && is_mmdd_token(parts[0]) {
+        (parts[1], parts[2..].join(""))
+    } else if parts.len() >= 2 {
+        (parts[0], parts[1..].join(""))
+    } else {
+        return None;
     };
     if !SESSION_TITLE_KINDS.contains(&kind) {
         return None;
     }
-    let chars: Vec<char> = theme.chars().collect();
-    let n = chars.len();
-    let cjk = chars
-        .iter()
-        .filter(|c| **c >= '\u{4e00}' && **c <= '\u{9fff}')
-        .count();
-    if !(4..=12).contains(&n) || cjk == 0 {
+    if !theme_is_specific(&theme) {
         return None;
     }
-    Some((kind.to_string(), theme.to_string()))
+    Some((kind.to_string(), theme))
 }
 
-fn build_session_title_prompt(material: &str, mmdd: &str, early: bool) -> String {
+fn build_session_title_prompt(material: &str, mmdd: &str, early: bool, taken: &[String]) -> String {
     let scope = if early {
         "这是临时标题，只根据用户第一条真正的问题。"
     } else {
         "根据用户自己说过的话。首条是最初意图，纠正是中途改方向，定题是最后要求。不要参考助手回复或工具调用。"
+    };
+    let occupied = if taken.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = taken.iter().take(40).map(|t| format!("- {t}")).collect();
+        format!(
+            "\n已有标题，不要重复或只改一两个字：\n{}\n",
+            lines.join("\n")
+        )
     };
     format!(
         "{scope}只输出一行，不要解释、不要引号、不要代码块。\n\
          格式：类型|主题\n\
          类型只能是以下之一：功能、设计、修复、优化、发布、探索、文档、研究。\n\
          同时符合多个类型时选最能代表这次目的的一个。\n\
-         主题：4到12个汉字，概括这次解决或讨论的核心问题；不要项目名，不要完整句子，\
-         不要「优化项目」「功能开发」「问题修复」这种空标题；优先写具体对象。\n\
-         不要输出日期（日期由系统填写，创建日为 {mmdd}）。\n\n\
+         主题：8到28个字，必须让人一眼看出「对什么做了哪一件事」。\n\
+         写成对象+动作，例如「Grok继续链合并去重」「目标卡与项目栏同底」。\n\
+         不要项目名 Mesa/Ccode，不要完整句子，不要「优化界面」「功能开发」「问题修复」「架构调整」这种空标题。\n\
+         不要输出日期（日期由系统填写，创建日为 {mmdd}）。{occupied}\n\
          ## 用户原话\n{material}"
     )
+}
+
+fn title_identity_key(title: &str) -> String {
+    let title = title.trim();
+    let parts: Vec<&str> = title
+        .split('|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.len() >= 3 && is_mmdd_token(parts[0]) {
+        format!("{}|{}", parts[1], parts[2..].join("|"))
+    } else {
+        title.to_string()
+    }
+}
+
+/// 已占用的标题按「类型|主题」去重（日期不同仍算重复）。
+pub(crate) fn uniquify_session_title(title: &str, taken: &[String]) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        return title.to_string();
+    }
+    let taken_keys: std::collections::HashSet<String> =
+        taken.iter().map(|s| title_identity_key(s)).collect();
+    let taken_exact: std::collections::HashSet<&str> = taken
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !taken_exact.contains(title) && !taken_keys.contains(&title_identity_key(title)) {
+        return title.to_string();
+    }
+    for n in 2..30 {
+        let candidate = format!("{title}·{n}");
+        if !taken_exact.contains(candidate.as_str())
+            && !taken_keys.contains(&title_identity_key(&candidate))
+        {
+            return candidate;
+        }
+    }
+    title.to_string()
+}
+
+fn mesa_auto_title_ready(title: &str, taken: &[String]) -> bool {
+    parse_kind_theme(title).is_some() && uniquify_session_title(title, taken) == title
 }
 
 fn auto_title_session_impl(
@@ -985,6 +1085,7 @@ fn auto_title_session_impl(
     file_path: &str,
     created_at: Option<&str>,
     early: bool,
+    occupied: Option<&[String]>,
 ) -> Result<Option<String>, String> {
     if crate::sessions::session_marked_internal(agent, session_id) {
         return Ok(None);
@@ -993,9 +1094,11 @@ fn auto_title_session_impl(
     if conversation_too_thin(&msgs) {
         return Ok(None);
     }
-    let mmdd = created_at
-        .and_then(shanghai_mmdd)
-        .or_else(|| first_message_timestamp(&msgs).as_deref().and_then(shanghai_mmdd));
+    let mmdd = created_at.and_then(shanghai_mmdd).or_else(|| {
+        first_message_timestamp(&msgs)
+            .as_deref()
+            .and_then(shanghai_mmdd)
+    });
     let Some(mmdd) = mmdd else {
         return Ok(None);
     };
@@ -1003,11 +1106,14 @@ fn auto_title_session_impl(
     if material.trim().is_empty() {
         return Ok(None);
     }
+    let owned = occupied
+        .map(|t| t.to_vec())
+        .unwrap_or_else(|| crate::sessions::list_custom_titles_except(agent, session_id));
     let raw = match ai_prompt_impl(
         profiles,
         None,
         Some(FN_SUMMARIZE),
-        build_session_title_prompt(&material, &mmdd, early),
+        build_session_title_prompt(&material, &mmdd, early, &owned),
     ) {
         Ok(v) => v,
         Err(_) => return Ok(None),
@@ -1019,6 +1125,7 @@ fn auto_title_session_impl(
         return Ok(None);
     };
     let title = crate::sessions::redact_sensitive_text(&format!("{mmdd}|{kind}|{theme}"));
+    let title = uniquify_session_title(&title, &owned);
     if !crate::sessions::try_set_custom_title(agent, session_id, &title)? {
         return Ok(None);
     }
@@ -1136,10 +1243,118 @@ pub async fn ai_auto_title_session(
             &file_path,
             created_at.as_deref(),
             early,
+            None,
         )
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetitleAllResultDto {
+    pub renamed: u32,
+    pub skipped: u32,
+    pub failed: u32,
+}
+
+/// 按新规则重写所有非手改标题：过短、空泛、缺 Mesa 标题、或与已有标题撞车。
+/// 人手改过的（title_source=user / 旧数据已有自定义标题）不覆盖；不写回 CLI 源文件。
+#[tauri::command]
+pub async fn ai_retitle_all_sessions(
+    store: tauri::State<'_, ProfileStore>,
+) -> Result<RetitleAllResultDto, String> {
+    let profiles = store.list()?;
+    tauri::async_runtime::spawn_blocking(move || retitle_all_sessions_impl(profiles))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn retitle_all_sessions_impl(profiles: Vec<Profile>) -> Result<RetitleAllResultDto, String> {
+    let mut sessions = crate::sessions::list_sessions_sync();
+    sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    let mut taken: Vec<String> = Vec::new();
+    let mut pending = Vec::new();
+    for s in sessions {
+        if crate::sessions::session_title_is_user_owned(&s.agent, &s.session_id) {
+            if let Some(t) = s
+                .custom_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                taken.push(t.to_string());
+            }
+            continue;
+        }
+        pending.push(s);
+    }
+
+    let mut renamed = 0u32;
+    let mut skipped = 0u32;
+    let mut failed = 0u32;
+    for s in pending {
+        if s.internal || !s.alive || s.file_path.trim().is_empty() {
+            if let Some(t) = s
+                .custom_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                taken.push(t.to_string());
+            }
+            skipped += 1;
+            continue;
+        }
+        let current = s
+            .custom_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+        if let Some(cur) = current.as_deref() {
+            if mesa_auto_title_ready(cur, &taken) {
+                taken.push(cur.to_string());
+                skipped += 1;
+                continue;
+            }
+        }
+        match auto_title_session_impl(
+            profiles.clone(),
+            &s.agent,
+            &s.session_id,
+            &s.file_path,
+            s.created_at.as_deref(),
+            false,
+            Some(&taken),
+        ) {
+            Ok(Some(title)) => {
+                taken.push(title);
+                renamed += 1;
+            }
+            Ok(None) => {
+                if let Some(cur) = current.as_deref() {
+                    let unique = uniquify_session_title(cur, &taken);
+                    if unique != cur
+                        && crate::sessions::try_set_custom_title(&s.agent, &s.session_id, &unique)
+                            .unwrap_or(false)
+                    {
+                        taken.push(unique);
+                        renamed += 1;
+                        continue;
+                    }
+                }
+                skipped += 1;
+            }
+            Err(_) => failed += 1,
+        }
+    }
+    Ok(RetitleAllResultDto {
+        renamed,
+        skipped,
+        failed,
+    })
 }
 
 #[tauri::command]
@@ -1809,14 +2024,24 @@ ERROR: Your access token could not be refreshed because your refresh token was r
         let pr = build_pr_prompt("abc123 feat: x", "5\t1\tsrc/a.rs");
         assert!(pr.contains("## 变更点"));
         assert!(pr.contains("不要编造"));
-        let t = build_session_title_prompt("[用户·首条] 加预设", "0908", true);
+        let t = build_session_title_prompt("[用户·首条] 加预设", "0908", true, &[]);
         assert!(t.contains("类型|主题"));
         assert!(t.contains("0908"));
         assert!(t.contains("第一条真正的问题"));
         assert!(t.contains("[用户·首条] 加预设"));
-        let t2 = build_session_title_prompt("[用户·定题] 改成雷达", "0908", false);
+        assert!(t.contains("8到28"));
+        assert!(t.contains("对象+动作"));
+        let t2 = build_session_title_prompt("[用户·定题] 改成雷达", "0908", false, &[]);
         assert!(t2.contains("不要参考助手回复"));
         assert!(!t2.contains("第一条真正的问题"));
+        let t3 = build_session_title_prompt(
+            "[用户·首条] 加预设",
+            "0908",
+            true,
+            &["0908|功能|Grok继续链合并去重".into()],
+        );
+        assert!(t3.contains("已有标题"));
+        assert!(t3.contains("Grok继续链合并去重"));
     }
 
     fn chat(role: &str, text: &str, ts: Option<&str>) -> crate::sessions::ChatMessageDto {
@@ -1854,26 +2079,69 @@ ERROR: Your access token could not be refreshed because your refresh token was r
     #[test]
     fn parse_kind_theme_accepts_with_or_without_date() {
         assert_eq!(
-            parse_kind_theme("修复|登录状态异常"),
-            Some(("修复".into(), "登录状态异常".into()))
+            parse_kind_theme("修复|Grok继续链合并去重"),
+            Some(("修复".into(), "Grok继续链合并去重".into()))
         );
         assert_eq!(
             parse_kind_theme("0908|优化|Agent 会话管理"),
             Some(("优化".into(), "Agent 会话管理".into()))
         );
+        assert_eq!(
+            parse_kind_theme("设计|目标卡与项目栏同底"),
+            Some(("设计".into(), "目标卡与项目栏同底".into()))
+        );
         assert!(parse_kind_theme("闲聊|随便说说").is_none());
         assert!(parse_kind_theme("修复|短").is_none());
-        assert!(parse_kind_theme("修复|这是一个远远超过十二个汉字的主题").is_none());
+        assert!(parse_kind_theme("修复|登录状态异常").is_none());
+        assert!(parse_kind_theme(
+            "修复|一二三四五六七八九十一二三四五六七八九十一二三四五六七八九"
+        )
+        .is_none());
         assert!(parse_kind_theme("hello|world").is_none());
+        assert!(parse_kind_theme("功能|Blender 预设").is_none());
         assert_eq!(
-            parse_kind_theme(&extract_title_candidate("```\n功能|Blender 预设\n```").unwrap()),
-            Some(("功能".into(), "Blender 预设".into()))
+            parse_kind_theme(
+                &extract_title_candidate("```\n功能|Grok继续链合并去重\n```").unwrap()
+            ),
+            Some(("功能".into(), "Grok继续链合并去重".into()))
         );
         assert_eq!(
             parse_kind_theme(
-                &extract_title_candidate(r#"{"text":"设计|项目环境架构"}"#).unwrap()
+                &extract_title_candidate(r#"{"text":"设计|目标卡与项目栏同底"}"#).unwrap()
             ),
-            Some(("设计".into(), "项目环境架构".into()))
+            Some(("设计".into(), "目标卡与项目栏同底".into()))
+        );
+    }
+
+    #[test]
+    fn uniquify_session_title_collides_across_dates() {
+        assert_eq!(
+            uniquify_session_title("0908|修复|Grok继续链合并去重", &[]),
+            "0908|修复|Grok继续链合并去重"
+        );
+        assert_eq!(
+            uniquify_session_title(
+                "0908|修复|Grok继续链合并去重",
+                &["0908|修复|Grok继续链合并去重".into()]
+            ),
+            "0908|修复|Grok继续链合并去重·2"
+        );
+        assert_eq!(
+            uniquify_session_title(
+                "0909|修复|Grok继续链合并去重",
+                &["0908|修复|Grok继续链合并去重".into()]
+            ),
+            "0909|修复|Grok继续链合并去重·2"
+        );
+        assert_eq!(
+            uniquify_session_title(
+                "0908|修复|Grok继续链合并去重",
+                &[
+                    "0908|修复|Grok继续链合并去重".into(),
+                    "0908|修复|Grok继续链合并去重·2".into()
+                ]
+            ),
+            "0908|修复|Grok继续链合并去重·3"
         );
     }
 

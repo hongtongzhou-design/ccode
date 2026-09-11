@@ -378,9 +378,7 @@ pub async fn fetch_gateway_catalog(
         .into_iter()
         .find(|g| g.id == gateway_id)
         .ok_or("网关不存在")?;
-    let prefer = prefer_slot
-        .as_deref()
-        .or(gw.catalog_from_slot.as_deref());
+    let prefer = prefer_slot.as_deref().or(gw.catalog_from_slot.as_deref());
     let order = catalog_slot_walk_order(prefer);
     let mut last_err = "没有可拉取的协议槽".to_string();
     for (slot, agent) in order {

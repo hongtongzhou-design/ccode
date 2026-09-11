@@ -43,6 +43,7 @@ function recoverable(s: SessionMetaDto): boolean {
 /** 默认随手聊目录：家目录下 `ccode/scratch`（与 ensure_scratch_dir 同口径）。
  *  未添加到项目的编码仓库（例如 Mesa 源码目录）不算随手聊。 */
 export function isScratchCwd(path: string, isWindows = false): boolean {
+  if (!path) return false;
   const k = pathKey(path, isWindows);
   return k.endsWith("/ccode/scratch") || k.includes("/ccode/scratch/");
 }
@@ -69,10 +70,13 @@ export function pickQuickChatSessions(
   // Windows 上可能是 verbatim/普通、大小写、分隔符三重不同。只去尾斜杠比不中。
   // isWindows 显式传入而非在此读 IS_WINDOWS：本模块是纯逻辑层，
   // 隐式依赖平台会让单测随宿主机器变化。
-  const projects = new Set(projectPaths.map((p) => pathKey(p, isWindows)));
-  return sessions
+  const projects = new Set(
+    (projectPaths ?? []).filter(Boolean).map((p) => pathKey(p, isWindows)),
+  );
+  return (sessions ?? [])
     .filter(
       (s) =>
+        s != null &&
         recoverable(s) &&
         s.workspace === null &&
         isScratchCwd(s.projectPath, isWindows) &&
@@ -91,9 +95,10 @@ export function withLiveSessionFlags(
   sessions: readonly SessionMetaDto[],
   liveSessions: Record<string, string>,
 ): SessionMetaDto[] {
-  return sessions.map((s) => {
-    const live = s.live || liveSessionKey(s.agent, s.sessionId) in liveSessions;
-    return live === s.live ? s : { ...s, live };
+  const live = liveSessions ?? {};
+  return (sessions ?? []).map((s) => {
+    const isLive = s.live || liveSessionKey(s.agent, s.sessionId) in live;
+    return isLive === s.live ? s : { ...s, live: isLive };
   });
 }
 

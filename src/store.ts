@@ -39,6 +39,7 @@ import type { DepCheckDto } from "./dep-check";
 import type { AskAiFile } from "./ask-ai";
 import { paperResourceFor } from "./lit-watch";
 import { toast } from "./toast";
+import type { ProjectSurfaceTab } from "./project-surface";
 import type {
   BindingInput,
   DetectResult,
@@ -220,7 +221,7 @@ export interface PendingTerminal {
       重复入口防标签堆积）。仅内存匹配，不进重启持久化白名单（恢复占位不参与复用） */
   reuseKey?: string;
   /** 步骤认领（「跟 AI 商量一下」）：启动 spawn 时以最终 agent/cwd 登记
-      claim_next_session_for_step，让会话归到该步骤（「本步骤的对话」按 stepName 过滤）。
+      claim_next_session_for_step，让会话归到该步骤（项目「对话」页按 stepName 过滤）。
       不在发起时提前登记——启动栏还可改 agent/目录，spawn 时的实时值才作数 */
   stepName?: string;
   /** 第 1 期 Run 身份；恢复同一 Run 时带上 */
@@ -590,10 +591,13 @@ interface AppState {
     entryId?: string;
   } | null;
   setProjectFocusReq: (req: AppState["projectFocusReq"]) => void;
+  /** 进项目页时切到指定页签（侧栏旧「定时巡检」→ 项目「定时任务」） */
+  projectSurfaceReq: ProjectSurfaceTab | null;
+  setProjectSurfaceReq: (tab: ProjectSurfaceTab | null) => void;
   /** 收件箱人工请求「去查看」的一次性请求（项目根路径）：工作区页弹出该来源的完整请求内容层 */
   helpViewReq: string | null;
   setHelpViewReq: (path: string | null) => void;
-  /** 对话页作用域筛选的一次性请求（工作区页「本步骤的对话」→ 落成 step chip） */
+  /** 对话页作用域筛选的一次性请求（落成 step / project / task / agent chip） */
   sessionScopeReq: { kind: "project" | "step" | "task" | "agent"; value: string; label: string } | null;
   setSessionScopeReq: (
     r: { kind: "project" | "step" | "task" | "agent"; value: string; label: string } | null,
@@ -835,6 +839,8 @@ export const useAppStore = create<AppState>((set, get) => {
   selectProjectReq: null,
   projectFocusReq: null,
   setProjectFocusReq: (req) => set({ projectFocusReq: req }),
+  projectSurfaceReq: null,
+  setProjectSurfaceReq: (tab) => set({ projectSurfaceReq: tab }),
   helpViewReq: null,
   setHelpViewReq: (path) => set({ helpViewReq: path }),
   setSelectProjectReq: (path) => set({ selectProjectReq: path }),

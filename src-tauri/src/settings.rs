@@ -357,7 +357,12 @@ fn settings_path() -> Result<PathBuf, String> {
 /// 缺失用默认；损坏/不可读必须保留原件，禁止下一次保存静默重置。
 fn read_checked(path: &Path) -> Result<AppSettingsDto, String> {
     match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("设置文件损坏，原文件已保留，请修复后重试：{}：{e}", path.display())),
+        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "设置文件损坏，原文件已保留，请修复后重试：{}：{e}",
+                path.display()
+            )
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AppSettingsDto::default()),
         Err(e) => Err(format!("读取设置失败：{e}")),
     }
@@ -365,7 +370,10 @@ fn read_checked(path: &Path) -> Result<AppSettingsDto, String> {
 fn read_from(path: &Path) -> AppSettingsDto {
     match read_checked(path) {
         Ok(settings) => settings,
-        Err(error) => { crate::logbuf::record("error", "settings", &error); AppSettingsDto::default() }
+        Err(error) => {
+            crate::logbuf::record("error", "settings", &error);
+            AppSettingsDto::default()
+        }
     }
 }
 
@@ -677,7 +685,13 @@ fn set_active_global_at(path: &Path, agent: &str, profile_id: Option<&str>) -> R
 
 /// 「设为全局」写成功后记录（agent → profile id）；失败只记日志不影响主流程
 pub(crate) fn record_active_global(agent: &str, profile_id: &str) {
-    let _guard = match crate::profiles::store_lock() { Ok(g) => g, Err(e) => { crate::logbuf::record("error", "settings", &e); return; } };
+    let _guard = match crate::profiles::store_lock() {
+        Ok(g) => g,
+        Err(e) => {
+            crate::logbuf::record("error", "settings", &e);
+            return;
+        }
+    };
     if let Ok(path) = settings_path() {
         if let Err(e) = set_active_global_at(&path, agent, Some(profile_id)) {
             crate::logbuf::record(
@@ -691,7 +705,13 @@ pub(crate) fn record_active_global(agent: &str, profile_id: &str) {
 
 /// 恢复备份后全局内容不再是任何 profile 的快照，清除该 agent 的追踪标记
 pub(crate) fn clear_active_global(agent: &str) {
-    let _guard = match crate::profiles::store_lock() { Ok(g) => g, Err(e) => { crate::logbuf::record("error", "settings", &e); return; } };
+    let _guard = match crate::profiles::store_lock() {
+        Ok(g) => g,
+        Err(e) => {
+            crate::logbuf::record("error", "settings", &e);
+            return;
+        }
+    };
     if let Ok(path) = settings_path() {
         if let Err(e) = set_active_global_at(&path, agent, None) {
             crate::logbuf::record("error", "settings", &format!("清除全局生效标记失败: {e}"));

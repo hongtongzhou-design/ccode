@@ -3,6 +3,7 @@
 //! 不是固定文件白名单。本模块只做文件事实，不碰数据库；编排（任务/Run  lookup、事件）在 runs.rs。
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -70,10 +71,14 @@ pub(crate) struct ResultSnapshot {
     #[serde(default)]
     pub seq: u32,
     pub changes: Vec<SnapshotChange>,
+    /// 新版副本按 UUID 独立保存；None 兼容旧版 payload/，旧副本不迁走。
+    #[serde(default)]
+    pub payload_id: Option<String>,
 }
 
 fn hash_file(path: &Path) -> Result<(String, u64), String> {
-    let mut file = fs::File::open(path).map_err(|e| format!("读取文件失败（{}）：{e}", path.display()))?;
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("读取文件失败（{}）：{e}", path.display()))?;
     let mut hasher = sha2::Sha256::new();
     let mut buffer = [0_u8; 8192];
     let mut total = 0_u64;
@@ -157,8 +162,8 @@ fn collect_scoped_files(root: &Path, output_paths: &[String]) -> Result<Vec<Stri
             .collect()
     };
     while let Some(dir_or_file) = stack.pop() {
-        let metadata = fs::symlink_metadata(&dir_or_file)
-            .map_err(|e| format!("读取任务输出失败：{e}"))?;
+        let metadata =
+            fs::symlink_metadata(&dir_or_file).map_err(|e| format!("读取任务输出失败：{e}"))?;
         if metadata.file_type().is_symlink() {
             return Err(format!("任务输出不允许符号链接：{}", dir_or_file.display()));
         }
@@ -236,6 +241,24 @@ pub(crate) fn write_baseline(
         created_at: created_at.into(),
         files,
     };
+    save_baseline(dir, &baseline)?;
+    Ok(baseline)
+}
+
+/// 返修继承原始基线，不能把尚未采纳的上一版成果当成新输入而从清单抹掉。
+pub(crate) fn continue_baseline(
+    dir: &Path,
+    run_id: &str,
+    previous_dir: &Path,
+) -> Result<RunBaseline, String> {
+    let mut baseline = load_baseline(previous_dir)?
+        .ok_or("上一版没有开工基线，无法安全续改；请重新开始目标，旧副本仍保留")?;
+    baseline.run_id = run_id.into();
+    save_baseline(dir, &baseline)?;
+    Ok(baseline)
+}
+
+fn save_baseline(dir: &Path, baseline: &RunBaseline) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("创建评审证据目录失败：{e}"))?;
     let path = dir.join("baseline.json");
     if path.exists() {
@@ -243,9 +266,8 @@ pub(crate) fn write_baseline(
     }
     crate::profiles::atomic_write_bytes(
         &path,
-        &serde_json::to_vec(&baseline).map_err(|e| e.to_string())?,
-    )?;
-    Ok(baseline)
+        &serde_json::to_vec(baseline).map_err(|e| e.to_string())?,
+    )
 }
 
 pub(crate) fn load_baseline(dir: &Path) -> Result<Option<RunBaseline>, String> {
@@ -294,24 +316,37 @@ fn build_snapshot(
                 continue;
             }
         }
-        let (sha256, size) = hash_file(&file_path)?;
         let kind = if entry.is_some() { "modified" } else { "added" };
-        let too_large = size > PAYLOAD_FILE_CAP;
+        // 哈希与副本必须来自同一次读取，避免 Agent 写入时「哈希 A、复制 B」。
+        let mut bytes = Vec::new();
+        fs::File::open(&file_path)
+            .map_err(|e| format!("读取任务输出失败：{e}"))?
+            .take(PAYLOAD_FILE_CAP + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("读取任务输出失败：{e}"))?;
+        let too_large = bytes.len() as u64 > PAYLOAD_FILE_CAP;
+        let size = if too_large {
+            cur_size.max(bytes.len() as u64)
+        } else {
+            bytes.len() as u64
+        };
+        let sha256 = if too_large {
+            None
+        } else {
+            Some(format!("{:x}", sha2::Sha256::digest(&bytes)))
+        };
         if !too_large {
             if payload_bytes + size > PAYLOAD_TOTAL_CAP {
                 return Err("冻结内容超过总预算，未写入任何快照".into());
             }
             let dest = payload.join(&relative);
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent).map_err(|e| format!("创建冻结目录失败：{e}"))?;
-            }
-            crate::profiles::atomic_write_bytes(&dest, &fs::read(run_root.join(&relative)).map_err(|e| format!("读取任务输出失败：{e}"))?)?;
+            crate::profiles::atomic_write_bytes(&dest, &bytes)?;
             payload_bytes += size;
         }
         changes.push(SnapshotChange {
             path: relative,
             kind: kind.into(),
-            sha256: Some(sha256),
+            sha256,
             size,
             too_large,
         });
@@ -334,10 +369,56 @@ fn build_snapshot(
         frozen_at: frozen_at.into(),
         seq,
         changes,
+        payload_id: None,
     }))
 }
 
-/// 收尾冻结：写唯一一份快照，拒绝改写。没有基线返回 Ok(None)。
+/// 冻结串行发布：每版先写独立副本与清单，再原子更新当前清单；失败不触碰旧版。
+fn publish_snapshot(
+    dir: &Path,
+    run_id: &str,
+    run_root: &Path,
+    output_paths: &[String],
+    frozen_at: &str,
+    refresh: bool,
+) -> Result<Option<ResultSnapshot>, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("创建评审证据目录失败：{e}"))?;
+    let _lock = crate::storage::lock_at(&dir.join("freeze.lock"))?;
+    let previous = load_snapshot(dir)?;
+    if !refresh && previous.is_some() {
+        return Err("本次运行已有冻结证据，拒绝改写".into());
+    }
+    let seq = previous
+        .map_or(0, |s| s.seq)
+        .checked_add(1)
+        .ok_or("冻结版本号已达上限")?;
+    let payload_id = uuid::Uuid::new_v4().to_string();
+    let version_dir = dir.join("versions").join(&payload_id);
+    let result = (|| {
+        let Some(mut snapshot) = build_snapshot(
+            dir,
+            &version_dir.join("payload"),
+            run_id,
+            run_root,
+            output_paths,
+            frozen_at,
+            seq,
+        )?
+        else {
+            return Ok(None);
+        };
+        snapshot.payload_id = Some(payload_id);
+        let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+        crate::profiles::atomic_write_bytes(&version_dir.join("snapshot.json"), &bytes)?;
+        crate::profiles::atomic_write_bytes(&dir.join("snapshot.json"), &bytes)?;
+        Ok(Some(snapshot))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(version_dir);
+    }
+    result
+}
+
 pub(crate) fn freeze(
     dir: &Path,
     run_id: &str,
@@ -345,23 +426,9 @@ pub(crate) fn freeze(
     output_paths: &[String],
     frozen_at: &str,
 ) -> Result<Option<ResultSnapshot>, String> {
-    let snapshot_path = dir.join("snapshot.json");
-    if snapshot_path.exists() {
-        return Err("本次运行已有冻结证据，拒绝改写".into());
-    }
-    let Some(snapshot) = build_snapshot(dir, &dir.join("payload"), run_id, run_root, output_paths, frozen_at, 1)? else {
-        return Ok(None);
-    };
-    crate::profiles::atomic_write_bytes(
-        &snapshot_path,
-        &serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?,
-    )?;
-    Ok(Some(snapshot))
+    publish_snapshot(dir, run_id, run_root, output_paths, frozen_at, false)
 }
 
-/// 回合结束再冻结（§4.4 的交互式形态：Agent 答完一轮但不退出进程）。
-/// 允许覆盖旧快照并递增 seq——「当前可审版本」随回合推进；采纳端按 seq 绑定人看过的那版。
-/// 新快照先落在 payload.new 暂存，构建成功才换入：构建失败不动旧的可用快照。
 pub(crate) fn freeze_or_refresh(
     dir: &Path,
     run_id: &str,
@@ -369,30 +436,20 @@ pub(crate) fn freeze_or_refresh(
     output_paths: &[String],
     frozen_at: &str,
 ) -> Result<Option<ResultSnapshot>, String> {
-    let prev_seq = match load_snapshot(dir)? {
-        Some(prev) => prev.seq,
-        None => 0,
-    };
-    let staged = dir.join("payload.new");
-    if staged.exists() {
-        fs::remove_dir_all(&staged).map_err(|e| format!("清理冻结暂存失败：{e}"))?;
+    publish_snapshot(dir, run_id, run_root, output_paths, frozen_at, true)
+}
+
+pub(crate) fn snapshot_payload_dir(
+    dir: &Path,
+    snapshot: &ResultSnapshot,
+) -> Result<PathBuf, String> {
+    match &snapshot.payload_id {
+        Some(id) => {
+            uuid::Uuid::parse_str(id).map_err(|_| "冻结副本标识损坏")?;
+            Ok(dir.join("versions").join(id).join("payload"))
+        }
+        None => Ok(dir.join("payload")),
     }
-    let built = build_snapshot(dir, &staged, run_id, run_root, output_paths, frozen_at, prev_seq + 1);
-    let Some(snapshot) = built? else {
-        return Ok(None);
-    };
-    let payload = dir.join("payload");
-    if payload.exists() {
-        fs::remove_dir_all(&payload).map_err(|e| format!("清理旧冻结副本失败：{e}"))?;
-    }
-    if staged.exists() {
-        fs::rename(&staged, &payload).map_err(|e| format!("换入冻结副本失败：{e}"))?;
-    }
-    crate::profiles::atomic_write_bytes(
-        &dir.join("snapshot.json"),
-        &serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?,
-    )?;
-    Ok(Some(snapshot))
 }
 
 pub(crate) fn load_snapshot(dir: &Path) -> Result<Option<ResultSnapshot>, String> {
@@ -412,11 +469,60 @@ pub(crate) fn load_snapshot(dir: &Path) -> Result<Option<ResultSnapshot>, String
 /// 「这版成果是基于什么材料做出来的」。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ContextEnvironment {
+    pub project_id: Option<String>,
+    pub project_root: String,
+    pub isolation_path: String,
+    pub agent: String,
+    pub permission: String,
+    pub input_paths: Vec<String>,
+    pub output_paths: Vec<String>,
+    pub files: Vec<BaselineEntry>,
+    pub rules: Vec<(String, String)>,
+    pub memory_sha256: String,
+    pub skills: Vec<crate::skills::SkillSnapshot>,
+    pub warnings: Vec<String>,
+}
+
+pub(crate) fn collect_environment(
+    project: &Path, run_root: &Path, agent: &str, permission: &str,
+    input_paths: &[String], output_paths: &[String], skills: Vec<crate::skills::SkillSnapshot>, baseline: Option<RunBaseline>,
+) -> Result<ContextEnvironment, String> {
+    let read = crate::projects::read_config_at(project);
+    if !read.warnings.is_empty() { return Err(format!("项目规则未能完整读取：{}", read.warnings.join("；"))); }
+    let mut rules = Vec::new();
+    for name in [".ccode/project.toml", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "TASK.md"] {
+        let path = project.join(name);
+        let mut bytes = Vec::new();
+        match fs::File::open(&path) {
+            Ok(file) => { file.take(512 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?; }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("读取规则 {name} 失败：{e}")),
+        }
+        if bytes.len() > 512 * 1024 { return Err(format!("规则 {name} 超过 512 KB，无法冻结")); }
+        rules.push((name.into(), String::from_utf8(bytes).map_err(|_| format!("规则 {name} 不是 UTF-8"))?));
+    }
+    let memory = crate::project_memory::context_at(project)?;
+    Ok(ContextEnvironment {
+        project_id: crate::projects::project_id_at(project), project_root: project.to_string_lossy().into_owned(),
+        isolation_path: run_root.to_string_lossy().into_owned(), agent: agent.into(), permission: permission.into(),
+        input_paths: input_paths.into(), output_paths: output_paths.into(), files: baseline.map(|b| b.files).unwrap_or_default(), rules,
+        memory_sha256: format!("{:x}", sha2::Sha256::digest(memory.as_bytes())), skills,
+        warnings: vec!["记录的是启动时提供的材料与技能，不证明 Agent 实际读取或执行；父目录规则、CLI 内置指令和外部工具状态未封存。大文件基线以 stat 记录，非内容封存。".into()],
+    })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ContextSnapshot {
     pub run_id: String,
     pub created_at: String,
     pub sha256: String,
     pub text: String,
+    #[serde(default)]
+    pub environment: Option<ContextEnvironment>,
+    #[serde(default)]
+    pub environment_sha256: Option<String>,
 }
 
 pub(crate) fn write_context_snapshot(
@@ -424,8 +530,12 @@ pub(crate) fn write_context_snapshot(
     run_id: &str,
     text: &str,
     created_at: &str,
+    environment: Option<ContextEnvironment>,
 ) -> Result<ContextSnapshot, String> {
+    let environment_sha256 = environment.as_ref().map(|e| serde_json::to_vec(e)
+        .map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes)))).transpose().map_err(|e| e.to_string())?;
     let snapshot = ContextSnapshot {
+        environment, environment_sha256,
         run_id: run_id.into(),
         created_at: created_at.into(),
         sha256: format!("{:x}", sha2::Sha256::digest(text.as_bytes())),
@@ -449,6 +559,12 @@ pub(crate) fn load_context_snapshot(dir: &Path) -> Result<Option<ContextSnapshot
         Ok(bytes) => {
             let snapshot: ContextSnapshot =
                 serde_json::from_slice(&bytes).map_err(|e| format!("上下文快照损坏：{e}"))?;
+            if let Some(environment) = &snapshot.environment {
+                let bytes = serde_json::to_vec(environment).map_err(|e| e.to_string())?;
+                if snapshot.environment_sha256.as_deref() != Some(format!("{:x}", sha2::Sha256::digest(bytes)).as_str()) {
+                    return Err("工作环境清单与哈希不一致".into());
+                }
+            }
             // 出站前校验内容仍与记录一致（防证据目录被外部动过）
             if snapshot.sha256 != format!("{:x}", sha2::Sha256::digest(snapshot.text.as_bytes())) {
                 return Err("上下文快照内容与哈希不一致，证据目录可能被改动".into());
@@ -460,7 +576,11 @@ pub(crate) fn load_context_snapshot(dir: &Path) -> Result<Option<ContextSnapshot
     }
 }
 
-pub(crate) fn payload_file(dir: &Path, relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn payload_file(
+    dir: &Path,
+    snapshot: &ResultSnapshot,
+    relative: &str,
+) -> Result<PathBuf, String> {
     let cleaned = relative.trim_matches('/');
     if cleaned.is_empty()
         || cleaned
@@ -469,7 +589,7 @@ pub(crate) fn payload_file(dir: &Path, relative: &str) -> Result<PathBuf, String
     {
         return Err("冻结路径必须是相对路径".into());
     }
-    Ok(dir.join("payload").join(cleaned))
+    Ok(snapshot_payload_dir(dir, snapshot)?.join(cleaned))
 }
 
 /// 采纳前逐文件三向判定：项目现读 vs 开工基线 vs 冻结内容。
@@ -481,6 +601,7 @@ pub(crate) fn check_adoption(
     baseline: Option<&RunBaseline>,
     selected: &[String],
     project_root: &Path,
+    accepted: &HashMap<String, String>,
 ) -> Result<Vec<(String, PathBuf)>, String> {
     let baseline_by_path: std::collections::HashMap<&str, &BaselineEntry> = baseline
         .map(|baseline| {
@@ -499,23 +620,40 @@ pub(crate) fn check_adoption(
             .find(|change| &change.path == relative)
             .ok_or_else(|| format!("没有可采纳的冻结变更：{relative}"))?;
         if change.kind == "deleted" {
-            return Err(format!("{relative} 在副本中被删除；删除不自动写回，请在项目中手动处理"));
+            return Err(format!(
+                "{relative} 在副本中被删除；删除不自动写回，请在项目中手动处理"
+            ));
         }
         if change.too_large {
-            return Err(format!("{relative} 超过单文件冻结上限，未进冻结副本；请手动复制"));
+            return Err(format!(
+                "{relative} 超过单文件冻结上限，未进冻结副本；请手动复制"
+            ));
         }
-        let source = payload_file(dir, relative)?;
+        let source = payload_file(dir, snapshot, relative)?;
         let (actual_sha, _) = hash_file(&source)?;
         if Some(&actual_sha) != change.sha256.as_ref() {
-            return Err(format!("{relative} 的冻结内容与记录不一致，证据目录可能被改动，拒绝采纳"));
+            return Err(format!(
+                "{relative} 的冻结内容与记录不一致，证据目录可能被改动，拒绝采纳"
+            ));
         }
         let target = project_root.join(relative);
         let target_stat = stat_sig(&target, "读取项目文件")?;
         // 项目已是目标内容 → 跳过（幂等；只在这时读内容）
-        if let (Some(_), Some(after_sha)) = (&target_stat, change.sha256.as_deref()) {
-            if hash_file(&target)?.0 == after_sha {
-                continue;
-            }
+        let target_sha = if target_stat.is_some() {
+            Some(hash_file(&target)?.0)
+        } else {
+            None
+        };
+        if target_sha.is_some() && target_sha == change.sha256 {
+            continue;
+        }
+        // 同一目标此前已接受的内容也是合法前态；只认账本中的内容哈希，不拿现读文件重设基线。
+        if target_sha
+            .as_ref()
+            .is_some_and(|sha| accepted.get(relative) == Some(sha))
+        {
+            planned.push((relative.clone(), source));
+            continue;
         }
         let allowed = match baseline_by_path.get(relative.as_str()) {
             // 新格式基线：stat 口径比对项目侧开工签名；stat 变了但小文件内容哈希一致
@@ -557,6 +695,161 @@ pub(crate) fn check_adoption(
 mod tests {
     use super::*;
 
+    #[test]
+    fn refreshing_keeps_the_previously_reviewed_payload() {
+        let (base, run, project) = fixture();
+        let review = base.join("review");
+        write_baseline(&review, "r1", &run, &project, "start").unwrap();
+        fs::write(run.join("report.md"), "reviewed version").unwrap();
+        let first = freeze(&review, "r1", &run, &[".".into()], "t1")
+            .unwrap()
+            .unwrap();
+        let baseline = load_baseline(&review).unwrap();
+        let plan = check_adoption(
+            &review,
+            &first,
+            baseline.as_ref(),
+            &["report.md".into()],
+            &project,
+            &HashMap::new(),
+        )
+        .unwrap();
+        fs::write(run.join("report.md"), "new unreviewed version").unwrap();
+        let second = freeze_or_refresh(&review, "r1", &run, &[".".into()], "t2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.seq, first.seq + 1);
+        assert_eq!(fs::read(&plan[0].1).unwrap(), b"reviewed version");
+        assert!(check_adoption(
+            &review,
+            &first,
+            baseline.as_ref(),
+            &["report.md".into()],
+            &project,
+            &HashMap::new()
+        )
+        .is_ok());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn continuation_keeps_unchanged_unaccepted_outputs() {
+        let (base, run, project) = fixture();
+        let first_review = base.join("first");
+        write_baseline(&first_review, "r1", &run, &project, "start").unwrap();
+        fs::write(run.join("data.csv"), "value\n1\n").unwrap();
+        fs::write(run.join("report.md"), "first report").unwrap();
+        freeze(&first_review, "r1", &run, &[".".into()], "t1").unwrap();
+        let next_review = base.join("second");
+        continue_baseline(&next_review, "r2", &first_review).unwrap();
+        fs::write(run.join("report.md"), "corrected report").unwrap();
+        let next = freeze(&next_review, "r2", &run, &[".".into()], "t2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            next.changes
+                .iter()
+                .map(|c| c.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["data.csv", "report.md"]
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn accepted_version_can_be_revised_without_allowing_external_drift() {
+        let (base, run, project) = fixture();
+        let review = base.join("review");
+        write_baseline(&review, "r1", &run, &project, "start").unwrap();
+        fs::write(run.join("a.md"), "first result").unwrap();
+        let first = freeze(&review, "r1", &run, &[".".into()], "t1")
+            .unwrap()
+            .unwrap();
+        fs::copy(
+            payload_file(&review, &first, "a.md").unwrap(),
+            project.join("a.md"),
+        )
+        .unwrap();
+        let accepted = HashMap::from([("a.md".into(), first.changes[0].sha256.clone().unwrap())]);
+        let next_review = base.join("next-review");
+        continue_baseline(&next_review, "r2", &review).unwrap();
+        fs::write(run.join("a.md"), "revised result").unwrap();
+        let next = freeze(&next_review, "r2", &run, &[".".into()], "t2")
+            .unwrap()
+            .unwrap();
+        let baseline = load_baseline(&next_review).unwrap();
+        assert_eq!(
+            check_adoption(
+                &next_review,
+                &next,
+                baseline.as_ref(),
+                &["a.md".into()],
+                &project,
+                &accepted
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+        fs::write(project.join("a.md"), "external change").unwrap();
+        assert!(check_adoption(
+            &next_review,
+            &next,
+            baseline.as_ref(),
+            &["a.md".into()],
+            &project,
+            &accepted
+        )
+        .is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn refreshing_legacy_snapshot_keeps_its_payload_and_failed_refresh_keeps_current() {
+        let (base, run, project) = fixture();
+        let review = base.join("review");
+        write_baseline(&review, "r1", &run, &project, "start").unwrap();
+        fs::write(run.join("a.md"), "legacy").unwrap();
+        let legacy = build_snapshot(
+            &review,
+            &review.join("payload"),
+            "r1",
+            &run,
+            &[".".into()],
+            "t1",
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        crate::profiles::atomic_write_bytes(
+            &review.join("snapshot.json"),
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        fs::write(review.join("versions"), "block directory creation").unwrap();
+        fs::write(run.join("a.md"), "next version").unwrap();
+        assert!(freeze_or_refresh(&review, "r1", &run, &[".".into()], "t2").is_err());
+        assert_eq!(load_snapshot(&review).unwrap().unwrap().seq, 1);
+        assert_eq!(
+            fs::read(payload_file(&review, &legacy, "a.md").unwrap()).unwrap(),
+            b"legacy"
+        );
+        fs::remove_file(review.join("versions")).unwrap();
+        let next = freeze_or_refresh(&review, "r1", &run, &[".".into()], "t2")
+            .unwrap()
+            .unwrap();
+        assert!(next.payload_id.is_some());
+        assert_eq!(
+            fs::read(payload_file(&review, &legacy, "a.md").unwrap()).unwrap(),
+            b"legacy"
+        );
+        assert_eq!(
+            fs::read(payload_file(&review, &next, "a.md").unwrap()).unwrap(),
+            b"next version"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
     fn fixture() -> (PathBuf, PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!("ccode-task-review-{}", uuid::Uuid::new_v4()));
         let run = base.join("run");
@@ -584,7 +877,11 @@ mod tests {
         let snap2 = freeze_or_refresh(&review, "r1", &run, &[".".to_string()], "t2")
             .unwrap()
             .unwrap();
-        assert!(snap2.changes.is_empty(), "保存未改不应报变化: {:?}", snap2.changes);
+        assert!(
+            snap2.changes.is_empty(),
+            "保存未改不应报变化: {:?}",
+            snap2.changes
+        );
         assert_eq!(snap2.seq, 2);
         // 真改 → modified，seq 再进一位；payload 跟着换
         fs::write(run.join("notes/a.md"), "a2").unwrap();
@@ -594,7 +891,10 @@ mod tests {
         assert_eq!(snap3.seq, 3);
         assert_eq!(snap3.changes.len(), 1);
         assert_eq!(snap3.changes[0].kind, "modified");
-        assert_eq!(fs::read(review.join("payload/notes/a.md")).unwrap(), b"a2");
+        assert_eq!(
+            fs::read(payload_file(&review, &snap3, "notes/a.md").unwrap()).unwrap(),
+            b"a2"
+        );
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -629,8 +929,8 @@ mod tests {
     fn context_snapshot_roundtrip_and_refuse_rewrite() {
         let (base, _run, _project) = fixture();
         let review = base.join("review");
-        write_context_snapshot(&review, "r1", "上下文全文 v1", "now").unwrap();
-        assert!(write_context_snapshot(&review, "r1", "别的内容", "later").is_err());
+        write_context_snapshot(&review, "r1", "上下文全文 v1", "now", None).unwrap();
+        assert!(write_context_snapshot(&review, "r1", "别的内容", "later", None).is_err());
         let loaded = load_context_snapshot(&review).unwrap().unwrap();
         assert_eq!(loaded.text, "上下文全文 v1");
         // 篡改内容后哈希对不上，读取即拒绝
@@ -640,7 +940,9 @@ mod tests {
         value["text"] = serde_json::Value::String("被改过".into());
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(load_context_snapshot(&review).is_err());
-        assert!(load_context_snapshot(&base.join("empty")).unwrap().is_none());
+        assert!(load_context_snapshot(&base.join("empty"))
+            .unwrap()
+            .is_none());
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -674,7 +976,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            fs::read(review.join("payload/notes/a.md")).unwrap(),
+            fs::read(payload_file(&review, &snapshot, "notes/a.md").unwrap()).unwrap(),
             b"a2"
         );
         // 冻结拒绝改写
@@ -713,6 +1015,7 @@ mod tests {
             Some(&baseline),
             &["a.md".to_string()],
             &project,
+            &HashMap::new(),
         )
         .unwrap_err();
         assert!(err.contains("开工基线"), "{err}");
@@ -724,6 +1027,7 @@ mod tests {
             Some(&baseline),
             &["a.md".to_string(), "b.md".to_string()],
             &project,
+            &HashMap::new(),
         )
         .unwrap();
         assert_eq!(planned.len(), 2);
@@ -735,24 +1039,30 @@ mod tests {
             Some(&baseline),
             &["b.md".to_string()],
             &project,
+            &HashMap::new(),
         )
         .is_err());
         fs::remove_file(project.join("b.md")).unwrap();
         // payload 被外部改动：哈希对不上，拒绝
-        fs::write(review.join("payload/a.md"), "tampered").unwrap();
+        fs::write(
+            payload_file(&review, &snapshot, "a.md").unwrap(),
+            "tampered",
+        )
+        .unwrap();
         let err = check_adoption(
             &review,
             &snapshot,
             Some(&baseline),
             &["a.md".to_string()],
             &project,
+            &HashMap::new(),
         )
         .unwrap_err();
         assert!(err.contains("不一致"), "{err}");
         // 项目已是冻结内容：跳过（幂等）
-        fs::remove_dir_all(review.join("payload")).unwrap();
-        fs::create_dir_all(review.join("payload")).unwrap();
-        fs::write(review.join("payload/a.md"), "v2").unwrap();
+        fs::remove_dir_all(snapshot_payload_dir(&review, &snapshot).unwrap()).unwrap();
+        fs::create_dir_all(snapshot_payload_dir(&review, &snapshot).unwrap()).unwrap();
+        fs::write(payload_file(&review, &snapshot, "a.md").unwrap(), "v2").unwrap();
         fs::write(project.join("a.md"), "v2").unwrap();
         let planned = check_adoption(
             &review,
@@ -760,6 +1070,7 @@ mod tests {
             Some(&baseline),
             &["a.md".to_string()],
             &project,
+            &HashMap::new(),
         )
         .unwrap();
         assert!(planned.is_empty());
@@ -784,6 +1095,7 @@ mod tests {
             Some(&baseline),
             &["a.md".to_string()],
             &project,
+            &HashMap::new(),
         )
         .unwrap_err();
         assert!(err.contains("删除"), "{err}");

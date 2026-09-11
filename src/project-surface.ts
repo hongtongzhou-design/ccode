@@ -1,4 +1,11 @@
-export type ProjectSurfaceTab = "tasks" | "files" | "agents";
+export type ProjectSurfaceTab =
+  | "chats"
+  | "tasks"
+  | "schedules"
+  | "files"
+  | "agents";
+
+export const DEFAULT_PROJECT_SURFACE_TAB: ProjectSurfaceTab = "tasks";
 
 export function projectTaskLabel(workMode: string | null | undefined): string {
   if (workMode === "coding") return "编程任务";
@@ -9,7 +16,7 @@ export function projectTaskLabel(workMode: string | null | undefined): string {
 export function projectSurfaceTabsForMode(
   _workMode: string | null | undefined,
 ): ProjectSurfaceTab[] {
-  return ["tasks", "files", "agents"];
+  return ["chats", "tasks", "schedules", "files", "agents"];
 }
 
 export function normalizeProjectSurfaceTab(
@@ -19,7 +26,7 @@ export function normalizeProjectSurfaceTab(
   const tabs = projectSurfaceTabsForMode(workMode);
   return tabs.includes(value as ProjectSurfaceTab)
     ? (value as ProjectSurfaceTab)
-    : tabs[0];
+    : DEFAULT_PROJECT_SURFACE_TAB;
 }
 
 export function projectSurfaceStorageKey(projectPath: string): string {
@@ -37,6 +44,6 @@ export function readProjectSurfaceTab(
       workMode,
     );
   } catch {
-    return projectSurfaceTabsForMode(workMode)[0];
+    return DEFAULT_PROJECT_SURFACE_TAB;
   }
 }

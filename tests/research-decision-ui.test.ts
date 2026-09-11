@@ -57,14 +57,14 @@ test("手写依据 UI：不提供默认批准，保存原文与依据后才满�
     assert.equal(decisionGate(s, disk).blocked, true);
     assert.equal(button("全部用推荐值"), undefined);
     await act(async () => buttons().find((b) => b.textContent?.startsWith("直接选择"))!.click());
-    await act(async () => button("填写依据…").click());
+    await act(async () => button("写一句…").click());
     assert.ok(button("记下").disabled, "没有填写不得提交空答案");
     const status = host.querySelector<HTMLSelectElement>("select")!;
     await act(async () => {
       status.value = "approve";
       status.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
     });
-    const input = host.querySelector<HTMLInputElement>('input[placeholder="说明范围／版本／证据，回车写进草稿"]')!;
+    const input = host.querySelector<HTMLInputElement>('input[placeholder="例如：按已精读笔记写，没全文的只写到摘要"]')!;
     const answer = "批准 design-v3 的范围 A；伦理许可 E-1，证据见人工评阅记录";
     await act(async () => {
       Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(input, answer);
@@ -77,7 +77,7 @@ test("手写依据 UI：不提供默认批准，保存原文与依据后才满�
     assert.equal(parseDecisions(disk).get(s.decisions![0].q), formatDecisionAnswer("approve", answer));
     assert.equal(decisionGate(s, disk).blocked, false);
     await render();
-    assert.ok(host.textContent!.includes("批准指定范围"), "父级刷新后显示刚保存的依据，而不是默认同意");
+    assert.ok(host.textContent!.includes("可以写"), "父级刷新后显示刚保存的依据，而不是默认同意");
     assert.equal(button("全部用推荐值"), undefined);
   } finally {
     await act(async () => root.unmount());

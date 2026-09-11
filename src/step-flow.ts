@@ -115,10 +115,6 @@ export function buildStepFlow(args: {
         pendingDecisions > 0
           ? `先定几件事（还有 ${pendingDecisions} 件）`
           : "先定几件事",
-      hint:
-        pendingDecisions > 0
-          ? "结论会写进 TASK.md"
-          : undefined,
       done: hasDraft && pendingDecisions === 0,
     });
   }

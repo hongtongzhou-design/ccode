@@ -70,6 +70,7 @@ import { skipDisconnectedOfficial } from "../resume-profile";
 import {
   findResumeHolderTab,
   resolveResumeLaunch,
+  shouldRelaunchResumeTab,
 } from "../terminal-resume";
 import { toast } from "../toast";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
@@ -388,6 +389,9 @@ function buildXtermTheme(
   };
 }
 
+/** 同一 Run 未完成的交互启动：挡住 StrictMode / 连点「运行」抢锁。 */
+const interactiveLaunchLocks = new Set<string>();
+
 /** 单个终端：独立持有 xterm 实例、PTY 引用和启动栏状态；隐藏时只 display:none，不杀进程。
  *  memo 化：启动栏自己的状态变化只重渲染本组件，不级联到兄弟标签/文件树/编辑器。 */
 const TerminalView = memo(function TerminalView({
@@ -407,6 +411,7 @@ const TerminalView = memo(function TerminalView({
   resumeSessionId,
   resumeProvider,
   autoStart,
+  resumeKick,
   prefillCommand,
   shellOnly,
   customRuntimeId,
@@ -457,6 +462,8 @@ const TerminalView = memo(function TerminalView({
   resumeProvider?: string;
   /** 首次可见时自动启动（会话恢复；有 profile 才启动，否则只预填） */
   autoStart?: boolean;
+  /** 已有 resume 标签但进程不在时，再点「继续」递增以重试启动 */
+  resumeKick?: number;
   /** run 脚本：进入 shell 后立即写入的命令行 */
   prefillCommand?: string;
   /** run 脚本标签：挂载后自动开 shell 并执行 prefillCommand（不走 agent 启动流程） */
@@ -950,6 +957,7 @@ const TerminalView = memo(function TerminalView({
   const linkStartedAtRef = useRef(0);
   const conversationRequestRef = useRef(0);
   const autoTitleEarlyRef = useRef(false);
+  const autoTitleFinalRef = useRef(false);
   const setLiveSession = useAppStore((s) => s.setLiveSession);
   const setOpenSessionReq = useAppStore((s) => s.setOpenSessionReq);
   const setPage = useAppStore((s) => s.setPage);
@@ -1683,7 +1691,9 @@ const TerminalView = memo(function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, everVisible, shellOnly, customRuntimeId]);
 
-  // 会话恢复标签：首次可见且找得到配置时自动启动一次（找不到则只预填，由用户处理）
+  // 会话恢复标签：首次可见且找得到配置时自动启动一次（找不到则只预填，由用户处理）。
+  // 启动放进 setTimeout(0)，卸载时清掉：开发态 StrictMode 会假卸载再挂一次，
+  // 同步连启两次会抢同一条 Run 锁，第二次报「此运行已在启动或执行中」。
   const autoLaunchedRef = useRef(false);
   useEffect(() => {
     if (!autoStart || !visible || !everVisible || autoLaunchedRef.current)
@@ -1704,12 +1714,24 @@ const TerminalView = memo(function TerminalView({
         return;
       }
     }
-    autoLaunchedRef.current = true;
-    if (customRuntimeId || profile) {
+    if (!(customRuntimeId || profile)) return;
+    const timer = window.setTimeout(() => {
+      if (autoLaunchedRef.current) return;
+      autoLaunchedRef.current = true;
       void (restored && !customRuntimeId ? restoreTask() : launch());
-    }
+    }, 0);
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, everVisible, autoStart, profileId, profiles, restored, officialSt, officialStReady]);
+
+  const lastResumeKickRef = useRef(0);
+  useEffect(() => {
+    if (!resumeKick || resumeKick === lastResumeKickRef.current) return;
+    lastResumeKickRef.current = resumeKick;
+    if (!visible || running || shellActive) return;
+    void launch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeKick, visible]);
 
   /** 把一个 PTY 接到 xterm 上；agent 退出时自动回落到 shell */
   async function attach(
@@ -1980,6 +2002,15 @@ const TerminalView = memo(function TerminalView({
         autoTitleEarlyRef.current = true;
         scheduleAutoTitle("early");
       }
+      if (
+        !autoTitleFinalRef.current &&
+        parsedMessages.some(
+          (m) => m.role !== "user" && m.blocks.some((b) => b.kind === "text" && b.text.trim()),
+        )
+      ) {
+        autoTitleFinalRef.current = true;
+        scheduleAutoTitle("final");
+      }
     } catch {
       // 会话文件可能写到一半，下轮再试
     }
@@ -2175,7 +2206,7 @@ const TerminalView = memo(function TerminalView({
     const filePath = ctx?.filePath;
     const createdAt = ctx?.createdAt ?? null;
     if (!agent || !sessionId || !filePath) return;
-    window.setTimeout(() => {
+    const attempt = (n: number) => {
       void invoke<string | null>("ai_auto_title_session", {
         agent,
         sessionId,
@@ -2184,13 +2215,19 @@ const TerminalView = memo(function TerminalView({
         stage,
       })
         .then((title) => {
-          if (!title) return;
+          if (!title) {
+            if (n < 2) window.setTimeout(() => attempt(n + 1), 8000);
+            return;
+          }
           const cur = linkCtxRef.current;
           if (cur?.sessionId === sessionId) setLinkedSessionTitle(title);
           void useAppStore.getState().loadSessions(true);
         })
-        .catch(() => {});
-    }, 2500);
+        .catch(() => {
+          if (n < 2) window.setTimeout(() => attempt(n + 1), 8000);
+        });
+    };
+    window.setTimeout(() => attempt(0), 2500);
   }
 
   function resetLink() {
@@ -2201,6 +2238,7 @@ const TerminalView = memo(function TerminalView({
     if (sid && linkedAgent) setLiveSession(linkedAgent, sid, null);
     invoke("release_session_claim", { claimId: tabId }).catch(() => {});
     autoTitleEarlyRef.current = false;
+    autoTitleFinalRef.current = false;
     linkCtxRef.current = null;
     convSigRef.current = "";
     olderRef.current = [];
@@ -2293,6 +2331,11 @@ const TerminalView = memo(function TerminalView({
         // 登记失败静默降级：会话不归步骤，仍可在对话页全部列表里看到
       });
     }
+    const lockKey = (runId ?? initialRunId ?? "").trim() || `tab:${tabId}`;
+    if (interactiveLaunchLocks.has(lockKey)) {
+      return null;
+    }
+    interactiveLaunchLocks.add(lockKey);
     try {
       const res = await invoke<{
         ptyId: string;
@@ -2411,12 +2454,14 @@ const TerminalView = memo(function TerminalView({
       invoke("release_session_claim", { claimId: tabId }).catch(() => {});
       stopLinkTimer();
       setLinkState("idle");
-      // cleanupPty 已杀掉旧 PTY：失败不能留下指向死 PTY 的幻影 shell 状态
+      // cleanupPty 已杀掉旧 PTY：失败不能留下指向死 PTY 的幻影 shell 状态。
+      // 启动没成功不算「进程已退出」——否则空态卡还在，上面却写进程没了。
       setShellActive(false);
       setActivePtyId(null);
-      setExited(true);
       setError(String(e));
       return null;
+    } finally {
+      interactiveLaunchLocks.delete(lockKey);
     }
   }
 
@@ -3222,6 +3267,8 @@ interface Tab {
   resumeProvider?: string;
   /** 首次可见自动启动（会话恢复） */
   autoStart?: boolean;
+  /** 已有 resume 标签但进程不在时，再点「继续」递增以重试启动 */
+  resumeKick?: number;
   /** run 脚本：进入 shell 后立即写入的命令行 */
   prefillCommand?: string;
   /** run 脚本标签：自动开 shell 执行 prefillCommand */
@@ -4331,6 +4378,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             "原配置已失效或已停用，请在启动栏重新选择连接后启动",
             "warning",
           );
+        } else if (pick.channelChanged) {
+          autoStart = false;
+          toast(
+            "已换成项目默认的连接。这条对话上次用的渠道不同，确认后点运行。",
+            "info",
+          );
         }
       }
       // 复用键：已有同 key 标签就切过去，不再新开（「快速开聊」「跟 AI 商量一下」等
@@ -4346,6 +4399,15 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           if (prompt) {
             pendingChatInjectRef.current = { tabId: existing.id, prompt };
             setInjectTick((n) => n + 1);
+          }
+          if (pt.resume && shouldRelaunchResumeTab(statuses[existing.id])) {
+            setTabs((prev) =>
+              prev.map((t) =>
+                t.id === existing.id
+                  ? { ...t, resumeKick: (t.resumeKick ?? 0) + 1 }
+                  : t,
+              ),
+            );
           }
         }
       }
@@ -5507,6 +5569,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 resumeSessionId={t.resumeSessionId}
                 resumeProvider={t.resumeProvider}
                 autoStart={t.autoStart}
+                resumeKick={t.resumeKick}
                 prefillCommand={t.prefillCommand}
                 shellOnly={t.shellOnly}
                 customRuntimeId={t.customRuntimeId}

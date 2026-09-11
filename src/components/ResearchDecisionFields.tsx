@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   DECISION_STATUS,
+  DECISION_STATUS_ASK,
+  decisionAsk,
   formatDecisionAnswer,
   parseDecisionRecords,
   setDecisionAnswer,
@@ -46,7 +48,7 @@ export default function ResearchDecisionFields({ decisions, text, disabled, evid
   }
   return <fieldset disabled={disabled} className="mb-3 space-y-2 rounded-md bg-inset p-3 text-xs">
     <legend className="px-1 font-medium text-l1">你的决定</legend>
-    <p className="text-micro text-l4">状态与说明分开填写。待补或不批准不能开工；旧纯文本不会自动变成已批准。</p>
+    <p className="text-micro text-l4">先选能不能写，再写一句范围。证据还不够或先别做，不能开工。</p>
     {decisions.map((decision) => {
       const q = decision.q.trim();
       const draft = drafts[q] ?? { status: "" as const, note: "", legacy: false };
@@ -54,17 +56,17 @@ export default function ResearchDecisionFields({ decisions, text, disabled, evid
       const record = records.get(q);
       const stale = draft.legacy || (evidenceRevision && record && (record.status === "approve" || record.status === "prepare") && record.boundRevision !== evidenceRevision);
       return <div key={decision.q} className="space-y-1 text-l2">
-        <span className="mb-1 block">{decision.q}</span>
-        <label className="block">决定状态
+        <span className="mb-1 block" title={decision.q}>{decisionAsk(decision.q)}</span>
+        <label className="block">能不能写
           <select value={draft.status} onChange={(e) => commit(decision.q, e.target.value as DecisionStatus | "", draft.note)}
             className="mt-1 w-full rounded border border-field bg-canvas px-2 py-1 text-xs text-l1 disabled:opacity-50">
             <option value="">未选择</option>
-            {STATUSES.map((key) => <option key={key} value={key}>{DECISION_STATUS[key]}</option>)}
+            {STATUSES.map((key) => <option key={key} value={key}>{DECISION_STATUS_ASK[key]}</option>)}
           </select>
         </label>
-        <label className="block">说明（范围／版本／证据位置）
+        <label className="block">范围
           <input value={draft.note} onChange={(e) => commit(decision.q, draft.status, e.target.value, false)}
-            placeholder="批准的范围、方案版本或待补内容"
+            placeholder="例如：按已精读笔记写，没全文的只写到摘要"
             className="w-full rounded border border-field bg-canvas px-2 py-1 text-xs text-l1 disabled:opacity-50" />
         </label>
         {stale && <p className="text-micro text-warn-text">{draft.legacy ? "这是旧的纯文本记录，请重新选择状态，不会自动视为已批准。" : "依据版本已变化，需要重新确认。"}</p>}

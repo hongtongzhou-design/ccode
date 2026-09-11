@@ -17,14 +17,34 @@ test("projectTaskLabel keeps the user-facing mode names", () => {
 test("project surface tabs normalize damaged values to tasks", () => {
   assert.equal(normalizeProjectSurfaceTab("files"), "files");
   assert.equal(normalizeProjectSurfaceTab("agents"), "agents");
+  assert.equal(normalizeProjectSurfaceTab("chats"), "chats");
+  assert.equal(normalizeProjectSurfaceTab("schedules"), "schedules");
   assert.equal(normalizeProjectSurfaceTab("unknown"), "tasks");
   assert.equal(normalizeProjectSurfaceTab(null), "tasks");
 });
 
-test("all work modes expose tasks, files, and agents", () => {
-  assert.deepEqual(projectSurfaceTabsForMode("office"), ["tasks", "files", "agents"]);
-  assert.deepEqual(projectSurfaceTabsForMode("research"), ["tasks", "files", "agents"]);
-  assert.deepEqual(projectSurfaceTabsForMode("coding"), ["tasks", "files", "agents"]);
+test("all work modes put chats, tasks, schedules, files, and agents in that order", () => {
+  assert.deepEqual(projectSurfaceTabsForMode("office"), [
+    "chats",
+    "tasks",
+    "schedules",
+    "files",
+    "agents",
+  ]);
+  assert.deepEqual(projectSurfaceTabsForMode("research"), [
+    "chats",
+    "tasks",
+    "schedules",
+    "files",
+    "agents",
+  ]);
+  assert.deepEqual(projectSurfaceTabsForMode("coding"), [
+    "chats",
+    "tasks",
+    "schedules",
+    "files",
+    "agents",
+  ]);
   assert.equal(normalizeProjectSurfaceTab("files", "office"), "files");
   assert.equal(
     readProjectSurfaceTab("/repo/a", {

@@ -33,6 +33,7 @@ import {
   primaryActionClass,
   projectWellClass,
   rowActionClass,
+  secondaryActionClass,
 } from "./PageFrame";
 import { useAppStore } from "../store";
 import { pathWithin } from "../path-utils";
@@ -66,11 +67,9 @@ import {
   type CodingKind,
 } from "../work-mode";
 import { codingStatusLine } from "../project-status";
-import { beginProjectChat } from "./AskAiModal";
-import ProjectRulesPanel from "./ProjectRulesPanel";
-import ProjectSessionsSection from "./ProjectSessionsSection";
-import { useProjectSessionsOpen } from "../project-sessions-layout";
-import ScheduleSection from "./ScheduleSection";
+
+
+import ProjectSettingsDrawer from "./ProjectSettingsDrawer";
 import PortsSection from "./PortsSection";
 import { AGENTS } from "../types";
 import type {
@@ -82,6 +81,11 @@ import type {
   CustomRuntimeDto,
   ProjectDto,
 } from "../types";
+import {
+  gitAdmissionPayload,
+  mergeAdmissionText,
+} from "../acceptance-log";
+
 
 const overviewCache = new Map<string, CodingOverviewDto>();
 
@@ -379,12 +383,16 @@ type LaneTree = CodingWorktreeDto & { lane: LaneOverlay };
 export default function CodingProjectView({
   project,
   repoPath,
+  chromeReq,
+  onChromeConsumed,
   onError,
   onNotice,
 }: {
   project: ProjectDto | null;
   repoPath: string;
   homeDir: string;
+  chromeReq?: { action: string; token: number } | null;
+  onChromeConsumed?: () => void;
   onError: (msg: string) => void;
   onNotice: (msg: string) => void;
 }) {
@@ -401,7 +409,16 @@ export default function CodingProjectView({
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [initNote, setInitNote] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useProjectSessionsOpen();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const chromeConsumed = useRef<number | null>(null);
+  useEffect(() => {
+    if (!chromeReq || !project) return;
+    if (chromeConsumed.current === chromeReq.token) return;
+    if (chromeReq.action !== "settings") return;
+    chromeConsumed.current = chromeReq.token;
+    setSettingsOpen(true);
+    onChromeConsumed?.();
+  }, [chromeReq, project, onChromeConsumed]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [groupingPath, setGroupingPath] = useState<string | null>(null);
@@ -417,6 +434,11 @@ export default function CodingProjectView({
   const terminalRunInputs = useAppStore((s) => s.terminalRunInputs);
   const composingLockRef = useRef(false);
   const composingFrameRef = useRef<number | null>(null);
+  const reviewedHeadRef = useRef<Record<string, string>>({});
+  const [ledgerPendingBranch, setLedgerPendingBranch] = useState<string | null>(
+    null,
+  );
+  const [ledgerBusy, setLedgerBusy] = useState(false);
 
   async function reload(opts?: { silent?: boolean }) {
     if (!opts?.silent && !overviewCache.has(repoPath)) setLoading(true);
@@ -426,6 +448,7 @@ export default function CodingProjectView({
       });
       overviewCache.set(repoPath, next);
       setOv(next);
+      setLedgerPendingBranch(next.worktrees.find((tree) => tree.ledgerPending)?.branch ?? null);
       try {
         setCustomRuntimes(await invoke<CustomRuntimeDto[]>("list_custom_runtimes"));
       } catch {
@@ -449,6 +472,8 @@ export default function CodingProjectView({
       setLoading(true);
       void reload();
     }
+    reviewedHeadRef.current = {};
+    setLedgerPendingBranch(null);
     function onVis() {
       if (document.visibilityState === "visible") void reload({ silent: true });
     }
@@ -513,6 +538,7 @@ export default function CodingProjectView({
       name: project?.name ?? title,
       path: repoPath,
       workMode: "coding",
+      kind: "session",
     });
     setPendingTerminal({
       cwd: w.path,
@@ -568,6 +594,10 @@ export default function CodingProjectView({
   }
 
   function openGit(path: string, title: string) {
+    const tree = trees.find((item) => item.path === path);
+    if (tree?.head && tree.branch) {
+      reviewedHeadRef.current[tree.branch] = tree.head;
+    }
     setPendingTerminal({
       cwd: path,
       extraEnv: {},
@@ -626,6 +656,7 @@ export default function CodingProjectView({
             path: repoPath,
             workMode: "coding",
             goal: name || r.worktree.branch || branch,
+            kind: "goal",
           });
           setPendingTerminal({
             cwd: r.worktree.path,
@@ -772,16 +803,22 @@ export default function CodingProjectView({
     }
   }
 
-  async function mergeBranch(name: string) {
+  async function mergeBranch(name: string, retry = false) {
     if (
+      !retry &&
       !(await confirmDialog(`把「${name}」合并进 ${ov?.baseBranch ?? "基准"}？`))
     )
       return;
     setBusy(`merge:${name}`);
+    if (retry) setLedgerBusy(true);
     try {
+      const tree = trees.find((item) => item.branch === name);
+      const reviewed =
+        reviewedHeadRef.current[name] ?? tree?.head ?? null;
       const r = await invoke<CodingMergeDto>("coding_merge_into_base", {
         repoPath,
         branch: name,
+        ...gitAdmissionPayload({ retry, reviewedSha: reviewed }),
       });
       if (r.code === "base_not_checked_out") {
         onNotice(r.message);
@@ -789,16 +826,27 @@ export default function CodingProjectView({
         return;
       }
       if (r.conflict) {
+        setLedgerPendingBranch(null);
         onNotice(r.message);
         openGit(r.cwd, "解决冲突");
+      } else if (r.merged && r.ledgerWritten === false) {
+        setLedgerPendingBranch(name);
+        onError(mergeAdmissionText({ ledgerWritten: false }));
       } else {
-        onNotice(r.message);
+        setLedgerPendingBranch(null);
+        onNotice(
+          mergeAdmissionText({
+            ledgerWritten: r.ledgerWritten !== false,
+            versionId: r.versionId,
+          }),
+        );
       }
       await reload();
     } catch (e) {
       onError(String(e));
     } finally {
       setBusy(null);
+      setLedgerBusy(false);
     }
   }
 
@@ -891,7 +939,6 @@ export default function CodingProjectView({
     setMenu({ x: rect.right, y: rect.bottom + 4, items });
   }
 
-  const projectName = project?.name ?? repoPath.split(/[\\/]/).pop() ?? repoPath;
   const branches = ov?.branches ?? [];
   const base = ov?.baseBranch ?? "";
   const statusLine = ov
@@ -914,12 +961,8 @@ export default function CodingProjectView({
   );
 
   return (
-    <div
-      className={`flex flex-row items-start ccode-project-work-well${
-        sessionsOpen ? " ccode-project-sessions-open" : ""
-      }`}
-    >
-      <div className="ccode-project-work-main min-w-0 flex-1 space-y-5">
+    <div className="space-y-5">
+      <div className="min-w-0 space-y-5">
         <section>
           <p className="flex flex-wrap items-center gap-2 text-xs text-l3">
             {base && (
@@ -963,17 +1006,6 @@ export default function CodingProjectView({
               </TipWrap>
             )}
             <span className="ml-auto flex items-center gap-1">
-              {ov?.isRepo && !sessionsOpen && (
-                <ProjectSessionsSection
-                  projectPath={repoPath}
-                  extraRoots={extraRoots}
-                  variant="sidebar"
-                  collapsed
-                  onToggle={() => setSessionsOpen(true)}
-                  title="这个项目的对话"
-                  onError={onError}
-                />
-              )}
               <PathActions path={repoPath} onError={onError} />
               {origin && (
                 <IconBtn
@@ -1509,52 +1541,33 @@ export default function CodingProjectView({
                 </ul>
               ))}
             </section>
-            <PortsSection roots={[repoPath, ...extraRoots]} />
-            {project && (
-              <ProjectRulesPanel
-                projectPath={project.path}
-                workMode="coding"
-                compact
-                onError={onError}
-              />
+            {ledgerPendingBranch && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-err-text">
+                <span className="min-w-0 flex-1">
+                  {mergeAdmissionText({ ledgerWritten: false })}
+                </span>
+                <button
+                  type="button"
+                  className={secondaryActionClass}
+                  disabled={ledgerBusy || !!busy}
+                  onClick={() => void mergeBranch(ledgerPendingBranch, true)}
+                >
+                  {ledgerBusy ? "记录中…" : "再记录验收"}
+                </button>
+              </div>
             )}
+            <PortsSection roots={[repoPath, ...extraRoots]} />
           </>
         )}
       </div>
-
-      {ov?.isRepo && sessionsOpen && (
-        <aside
-          className={`ccode-project-sessions-rail ${
-            sessionsOpen ? "ccode-project-sessions-rail-open" : ""
-          }`}
-        >
-          <div className="flex min-w-0 flex-col gap-4">
-            <ProjectSessionsSection
-              projectPath={repoPath}
-              extraRoots={extraRoots}
-              variant="sidebar"
-              collapsed={false}
-              onToggle={() => setSessionsOpen(false)}
-              title="这个项目的对话"
-              onError={onError}
-              onNewChat={(e) =>
-                beginProjectChat(
-                  {
-                    cwd: repoPath,
-                    name: projectName,
-                    kind: "coding",
-                    preferredAgent: project?.defaultAgent,
-                    preferredProfile: project?.defaultAgent
-                      ? project.defaultProfiles?.[project.defaultAgent]
-                      : undefined,
-                  },
-                  { forcePick: !!(e.metaKey || e.ctrlKey) },
-                )
-              }
-            />
-            <ScheduleSection projectRoot={repoPath} steps={[]} layout="card" />
-          </div>
-        </aside>
+      {project && (
+        <ProjectSettingsDrawer
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          projectPath={project.path}
+          workMode="coding"
+          onError={onError}
+        />
       )}
 
       {menu && (

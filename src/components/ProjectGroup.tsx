@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -13,13 +13,11 @@ import ArtifactChecklist, {
   formatSize,
 } from "./ArtifactChecklist";
 import TaskCardsSection from "./TaskCardsSection";
-import ScheduleSection from "./ScheduleSection";
-import LitWatchCard from "./LitWatchCard";
+
 import ResourceListSection from "./ResourceListSection";
 import ProjectUserTasksView from "./ProjectUserTasksView";
+import AcceptanceLogList from "./AcceptanceLogList";
 import ProjectRulesPanel from "./ProjectRulesPanel";
-import ProjectSessionsSection from "./ProjectSessionsSection";
-import { useProjectSessionsOpen } from "../project-sessions-layout";
 import KickoffConfirmDialog from "./KickoffConfirmDialog";
 import { HoverTip, useHoverTip } from "./HoverTip";
 import {
@@ -39,7 +37,7 @@ import { upsertLitSourceSection } from "../task-md-sections";
 import { isDecisionsOnly } from "../step-decisions";
 import { demoReadPaperResource } from "../step-flow";
 import { normSep } from "../path-utils";
-import { beginAskAi, beginProjectChat } from "./AskAiModal";
+import { beginAskAi } from "./AskAiModal";
 import { runIdForPath, type RunOverviewInput } from "../run-overview";import type {
   DiscoveredResourceDto,
   ZoteroLibraryDto,
@@ -53,6 +51,7 @@ import { runIdForPath, type RunOverviewInput } from "../run-overview";import typ
   WorkspaceDto,
   WorkspaceDriftDto,
   WorkspaceHealthDto,
+  AcceptanceLogEntryDto,
 } from "../types";
 
 const actionBtn = inlineActionClass;
@@ -335,11 +334,10 @@ export default function ProjectGroup({
   onError,
   children,
   focusStepReq,
-  projectFocusReq,
-  onProjectFocusHandled,
   pageVisible,
   chromeReq,
   onIdentityAction,
+  onChromeConsumed,
 }: {
   /** null = 未注册分组（仅按工作区 repo 归组） */
   project: ProjectDto | null;
@@ -372,20 +370,14 @@ export default function ProjectGroup({
    *  传工作区名，步骤名按 steps[].workspaceName 在本组件内解析（父级没有 cfg）；
    *  token 变化才消费，同目标重复点不重复切 */
   focusStepReq?: { wsName: string; token: number } | null;
-  /** 收件箱精确跳转：定位到文献雷达/定时任务区块。 */
-  projectFocusReq?: {
-    projectRoot: string;
-    focus: "lit" | "schedule";
-    token: number;
-    entryId?: string;
-  } | null;
-  onProjectFocusHandled?: () => void;
   /** 页面可见性（v3.97）：项目页常驻挂载，手动聚焦会跨页留存——从终端页等回来时，
    *  若聚焦的步骤已完成（ merged ），放掉手动聚焦、回落到当前步骤（第一个未完成），
    *  否则用户看到的永远是上次点过的那一步（实测：已完成的「文献检索」一直占着聚焦） */
   pageVisible?: boolean;
   chromeReq?: { action: string; token: number } | null;
   onIdentityAction?: (action: "rename" | "topic") => void;
+  /** 顶栏 ⋯ 的打开请求消费后清掉，避免切页/切页签后组件重挂又把编辑器打开。 */
+  onChromeConsumed?: () => void;
 }) {
   const registered = project !== null;
   const projectPath = project?.path ?? repoPath;
@@ -395,6 +387,7 @@ export default function ProjectGroup({
   const [cfg, setCfg] = useState<ProjectConfigDto | null>(null);
   const [cfgWarnings, setCfgWarnings] = useState<string[]>([]);
   const [cfgLoadError, setCfgLoadError] = useState<string | null>(null);
+  const [acceptLog, setAcceptLog] = useState<AcceptanceLogEntryDto[]>([]);
   /** 从磁盘重读档案卡并同步本地状态：档案卡的唯一读入口。
    *  原先四处各写一遍「read → setCfg + setCfgWarnings」，漏掉 warnings 的那处会让
    *  ⚠ 徽标停在上一次的结果；收成一个函数后本地与磁盘只有这一条同步路径。
@@ -435,6 +428,40 @@ export default function ProjectGroup({
       stale = true;
     };
   }, [project, refreshToken]);
+
+  useEffect(() => {
+    if (!project) {
+      setAcceptLog([]);
+      return;
+    }
+    let stale = false;
+    invoke<AcceptanceLogEntryDto[]>("read_acceptance_log", {
+      path: project.path,
+    })
+      .then((rows) => {
+        if (!stale) setAcceptLog(rows);
+      })
+      .catch(() => {
+        if (!stale) setAcceptLog([]);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [project, refreshToken]);
+
+  const reloadMainDirty = useCallback(() => {
+    if (!project) {
+      setMainDirty(null);
+      return;
+    }
+    invoke<{ isRepo: boolean; files: unknown[] }>("git_status", {
+      cwd: project.path,
+    })
+      .then((status) => {
+        setMainDirty(status.isRepo ? status.files.length : null);
+      })
+      .catch(() => {});
+  }, [project]);
 
   // 主仓脏检查：进项目详情读一次 + 页面刷新时重读，不轮询（开工弹层打开时会再刷新一次）
   useEffect(() => {
@@ -704,9 +731,18 @@ export default function ProjectGroup({
     }
   }
 
-  /** 空步骤横幅「不使用研究流程」：与注册后模板层同一出口，写 pipeline_opt_out */
+  /** 「不使用研究流程」：空步骤只写标记；已有步骤先确认再清空步骤表（笔记/工作区保留）。 */
   async function optOutPipeline() {
     if (!project || optingOut || applyingTemplate) return;
+    const stepCount = cfg?.steps.length ?? 0;
+    if (
+      stepCount > 0 &&
+      !(await confirmDialog(
+        `去掉研究流程？${stepCount} 个步骤会从档案卡拿掉，已有笔记、文献和工作区都保留。`,
+        { danger: true, confirmText: "不使用研究流程" },
+      ))
+    )
+      return;
     setOptingOut(true);
     try {
       await invoke("set_pipeline_opt_out", {
@@ -714,6 +750,8 @@ export default function ProjectGroup({
         optOut: true,
       });
       await reloadCfg(project.path);
+      setPickerOpen(false);
+      setSettingsOpen(false);
     } catch (reason) {
       onError(String(reason));
     } finally {
@@ -837,7 +875,8 @@ export default function ProjectGroup({
     if (chromeReq.action === "settings") setSettingsOpen(true);
     if (chromeReq.action === "editor") openEditor();
     if (chromeReq.action === "history") setHistoryOpen(true);
-  }, [chromeReq, cfg]);
+    onChromeConsumed?.();
+  }, [chromeReq, cfg, onChromeConsumed]);
 
   // 「文献与数据」落点聚焦：从流程线按所选来源跳过来时高亮对应进料入口，2.5s 后自动消退。
   // 落点统一是这一处面板（导入只此一处），高亮解决「到了之后点哪个」
@@ -845,8 +884,7 @@ export default function ProjectGroup({
   /** 「文献与数据」面板锚点：流程线里的「到「文献与数据」导入」展开后滚到这里 */
   const resPanelRef = useRef<HTMLDivElement>(null);
   /** 「◔ 定时任务」面板锚点：文献雷达卡片「◔ 定时」开抽屉后滚到这里 */
-  const schedulePanelRef = useRef<HTMLDivElement>(null);
-  const litWatchRef = useRef<HTMLDivElement>(null);
+
   const stepperScrollerRef = useRef<HTMLDivElement>(null);
   const [stepperOverflows, setStepperOverflows] = useState(false);
   useEffect(() => {
@@ -873,18 +911,6 @@ export default function ProjectGroup({
   const [zoteroDir, setZoteroDir] = useState<string | null>(null);
   const [zoteroMsg, setZoteroMsg] = useState<string | null>(null);
   const [litBusy, setLitBusy] = useState(false);
-
-  useEffect(() => {
-    if (!projectFocusReq) return;
-    if (projectFocusReq.focus === "schedule") setSettingsOpen(true);
-    const ref = projectFocusReq.focus === "schedule" ? schedulePanelRef : litWatchRef;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      ref.current?.classList.add("ring-2", "ring-cta");
-      window.setTimeout(() => ref.current?.classList.remove("ring-2", "ring-cta"), 2500);
-      onProjectFocusHandled?.();
-    }));
-  }, [projectFocusReq, onProjectFocusHandled]);
 
   /** 切换文献来源：改 project.toml 的 lit_source + 就地同步各步骤已编辑的 TASK.md 内容文件。
    *  v3.86 起改为**显式三值**（search / zotero / folder）——原先是两档开关，
@@ -1163,9 +1189,6 @@ export default function ProjectGroup({
     cfg?.pipelineOptOut &&
     (cfg.steps?.length ?? 0) === 0
   );
-  const [sessionsOpen, setSessionsOpen] = useProjectSessionsOpen();
-  const [urgentGoals, setUrgentGoals] = useState(false);
-
   useEffect(() => {
     if (liteResearch) void loadTaskCards(projectPath);
   }, [liteResearch, projectPath, loadTaskCards]);
@@ -1333,7 +1356,15 @@ export default function ProjectGroup({
   const prevPageVisibleRef = useRef(pageVisible);
   useEffect(() => {
     const becameVisible = pageVisible === true && prevPageVisibleRef.current !== true;
+    const leftPage = pageVisible === false && prevPageVisibleRef.current !== false;
     prevPageVisibleRef.current = pageVisible;
+    if (leftPage) {
+      setEditorOpen(false);
+      setSettingsOpen(false);
+      setHistoryOpen(false);
+      setKickoff(null);
+      return;
+    }
     if (!becameVisible || focusStepKey === null) return;
     const i = cfg?.steps.findIndex((s) => s.name === focusStepKey) ?? -1;
     if (i >= 0 && stepStatuses[i]?.key === "done") setFocusStepKey(null);
@@ -1394,22 +1425,8 @@ export default function ProjectGroup({
     : undefined;
   return (
     // 分组卡片收敛掉外框/底色：hairline 分隔 + 左侧缩进线分层，strip 底只保留给研究流程等必要块
-    <section
-      className={
-        liteResearch
-          ? `mb-5 flex flex-row items-start ccode-project-work-well${
-              sessionsOpen ? " ccode-project-sessions-open" : ""
-            }`
-          : "mb-5"
-      }
-    >
-      <div
-        className={
-          liteResearch
-            ? "ccode-project-work-main min-w-0 flex-1"
-            : undefined
-        }
-      >
+    <section className="mb-5">
+      <div>
 
 
       {/* 分组主体：左侧 1px 缩进线 + 透明度分层，保持原 p-4 留白节奏 */}
@@ -1523,40 +1540,7 @@ export default function ProjectGroup({
         <ProjectUserTasksView
           project={project}
           embed
-          sessionsCollapsed={!sessionsOpen}
-          onOpenSessions={() => setSessionsOpen(true)}
-          onUrgentGoals={setUrgentGoals}
         />
-      )}
-
-      {liteResearch && cfg && (
-        <div className="mb-5 space-y-5">
-          <div ref={litWatchRef}>
-          <LitWatchCard
-            projectRoot={projectPath}
-            cfg={cfg}
-            workspaces={workspaces}
-            onOpenSchedules={() => {
-              requestAnimationFrame(() =>
-                schedulePanelRef.current?.scrollIntoView({
-                  behavior: "smooth",
-                  block: "center",
-                }),
-              );
-            }}
-            onConfigChanged={() => void reloadCfg(projectPath)}
-            focusToken={
-              projectFocusReq?.focus === "lit" ? projectFocusReq.token : null
-            }
-            focusEntryId={
-              projectFocusReq?.focus === "lit"
-                ? projectFocusReq.entryId
-                : null
-            }
-            preferCollapsed={urgentGoals}
-          />
-          </div>
-        </div>
       )}
 
       {registered && cfg && cfg.steps.length === 0 && !cfg.pipelineOptOut && (
@@ -1831,6 +1815,7 @@ export default function ProjectGroup({
           workspaces={workspaces}
           refreshToken={refreshToken}
           mainDirty={mainDirty}
+          onMainDirtyRefresh={reloadMainDirty}
           focusStep={focusStepName}
           focusStatusText={focusDesc?.statusText ?? null}
           focusRunStatus={focusRunStatus}
@@ -1872,32 +1857,6 @@ export default function ProjectGroup({
           onReadPaper={demoPaper ? () => immerseResource(demoPaper) : undefined}
           readPaperPrimary={Boolean(demoPaper)}
         />
-      )}
-
-      {/* ◔ 文献雷达卡片（工作段，话题与工作区卡之间）：新命中 + 精读清单双页签；
-          「◔ 定时」开项目设置抽屉滚到定时区块（定时任务本体仍在抽屉里，单一入口不复制） */}
-      {!liteResearch && registered && cfg && (
-        <div ref={litWatchRef} className="rounded-lg transition-shadow">
-        <LitWatchCard
-          projectRoot={projectPath}
-          cfg={cfg}
-          workspaces={workspaces}
-          focusToken={projectFocusReq?.focus === "lit" ? projectFocusReq.token : null}
-          focusEntryId={
-            projectFocusReq?.focus === "lit" ? projectFocusReq.entryId : null
-          }
-          onOpenSchedules={() => {
-            setSettingsOpen(true);
-            requestAnimationFrame(() =>
-              schedulePanelRef.current?.scrollIntoView({
-                behavior: "smooth",
-                block: "center",
-              }),
-            );
-          }}
-          onConfigChanged={() => void reloadCfg(projectPath)}
-        />
-        </div>
       )}
 
       {/* ───── 项目设置抽屉（右侧滑出，不是页面、不进侧栏、不占路由） ─────
@@ -1979,6 +1938,7 @@ export default function ProjectGroup({
                           onSaved={() => void reloadCfg(projectPath)}
                           onError={onError}
                         />
+                        <AcceptanceLogList entries={acceptLog} />
                       </div>
                     )}
                     <div className="flex items-center gap-2">
@@ -2044,6 +2004,17 @@ export default function ProjectGroup({
                       >
                         另存为模板
                       </button>
+                      {cfg.steps.length > 0 && (
+                        <button
+                          type="button"
+                          className={actionBtn}
+                          disabled={optingOut}
+                          title="去掉步进器，这个文件夹只用来读文献、写笔记；步骤表清空，文件保留"
+                          onClick={() => void optOutPipeline()}
+                        >
+                          {optingOut ? "保存中…" : "不使用研究流程"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 </section>
@@ -2274,13 +2245,6 @@ export default function ProjectGroup({
         </div>
       )}
 
-      {/* 有流程科研：定时任务在抽屉（详情页只留雷达「◔ 定时」入口，不复制）。
-          无流程科研：定时任务在主区雷达下方（没有 ⋯ / 项目设置入口）。 */}
-      {registered && !liteResearch && (
-        <div ref={schedulePanelRef}>
-          <ScheduleSection projectRoot={projectPath} steps={cfg?.steps ?? []} />
-        </div>
-      )}
             </div>
           </aside>
         </div>
@@ -2292,54 +2256,8 @@ export default function ProjectGroup({
           focusStepName,
           steps: cfg?.steps ?? [],
         })}
-      {!liteResearch && registered && (
-        <div className="mt-8">
-          <ProjectSessionsSection
-            projectPath={projectPath}
-            extraRoots={workspaces.map((w) => w.worktreePath)}
-            defaultOpen
-            hideIfEmpty
-          />
-        </div>
-      )}
       </div>
       </div>
-
-      {liteResearch && sessionsOpen && (
-        <aside
-          className={`ccode-project-sessions-rail ${
-            sessionsOpen ? "ccode-project-sessions-rail-open" : ""
-          }`}
-        >
-          <div className="flex min-w-0 flex-col gap-4">
-            <ProjectSessionsSection
-              projectPath={projectPath}
-              extraRoots={workspaces.map((w) => w.worktreePath)}
-              variant="sidebar"
-              collapsed={false}
-              onToggle={() => setSessionsOpen(false)}
-              title="这个项目的对话"
-              onNewChat={(e) =>
-                beginProjectChat(
-                  {
-                    cwd: projectPath,
-                    name: displayName,
-                    kind: "research",
-                    preferredAgent: project?.defaultAgent,
-                    preferredProfile: project?.defaultAgent
-                      ? project.defaultProfiles?.[project.defaultAgent]
-                      : undefined,
-                  },
-                  { forcePick: !!(e.metaKey || e.ctrlKey) },
-                )
-              }
-            />
-            <div ref={schedulePanelRef}>
-              <ScheduleSection projectRoot={projectPath} steps={[]} layout="card" />
-            </div>
-          </div>
-        </aside>
-      )}
 
 
       {stepMenu && (

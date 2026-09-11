@@ -530,15 +530,15 @@ body {
   isolation: isolate;
 }
 
-/* 项目页内容井。浅色纯 strip 漂成白纸（v3.210），混 40% 画布才跟色相（v3.216）。
-   深色同一配方几乎贴死画布，工作树卡看不见层——改走 inset（卡片档）。
-   浅色仍禁 bg-strip / bg-raised。 */
+/* 项目页内容井（工作树卡 / 目标卡 / 文件预览 / 对话预览）。
+   深色走 inset。浅色跟页面 rail2 同色相，再往 raised 抬一档——
+   不漂成纯白，自定义主题也不必另调卡片色。 */
 .ccode-well {
   background: var(--color-inset);
 }
 
 [data-theme$="-light"] .ccode-well {
-  background: color-mix(in srgb, var(--color-canvas) 40%, var(--color-strip));
+  background: color-mix(in srgb, var(--color-rail2) 40%, var(--color-raised));
 }
 
 .ccode-app-rail {
@@ -882,7 +882,7 @@ body {
   max-height: calc(100dvh - 5rem);
   overflow: auto;
   border-left: 1px solid var(--color-hairline);
-  background: var(--color-rail2);
+  background: var(--color-inset);
   padding-left: 1rem;
   box-shadow: -12px 0 30px rgb(0 0 0 / 0.24);
   transform: translateX(100%);

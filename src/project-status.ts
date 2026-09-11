@@ -431,6 +431,39 @@ export type AcceptedGoalStatus = {
   note?: string | null;
 };
 
+export type AcceptanceLogView = {
+  goalName: string;
+  filesLabel: string;
+  note: string;
+  decidedAt: string;
+};
+
+/** 账本一行的展示字段；时间由界面用 relTime 另附，便于单测不绑墙钟。 */
+export function acceptanceLogView(entry: {
+  goalName: string;
+  paths?: readonly string[];
+  note?: string | null;
+  decidedAt: string;
+}): AcceptanceLogView {
+  const paths = (entry.paths ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item && item !== ".");
+  const filesLabel =
+    paths.length === 0 ? "未写入文件" : paths.length === 1 ? paths[0] : `${paths.length} 个文件`;
+  return {
+    goalName: entry.goalName.trim() || "目标",
+    filesLabel,
+    note: entry.note?.trim() ?? "",
+    decidedAt: entry.decidedAt,
+  };
+}
+
+/** 账本按写入顺序追加；展示取最近若干条（新的在前）。空账本不展示。 */
+export function recentAcceptanceLog<T>(entries: readonly T[], limit = 8): T[] {
+  if (limit <= 0 || entries.length === 0) return [];
+  return [...entries].reverse().slice(0, limit);
+}
+
 export function formatAcceptedStatusLine(goal: AcceptedGoalStatus): string {
   const name = goal.name.trim();
   const outputs = (goal.outputs ?? [])

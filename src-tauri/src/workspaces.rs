@@ -39,6 +39,8 @@ pub struct WorkspaceDto {
     pub stale_upstream: Option<String>,
     /// 仅创建时填充：setup 脚本的执行结果（W2）；查询路径一律 None
     pub setup_result: Option<SetupResultDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,6 +51,59 @@ pub struct WorkspaceMergeResultDto {
     pub failed_phase: Option<String>,
     pub message: String,
     pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed_sha: Option<String>,
+    pub ledger_written: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub salvage: Option<SalvageReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SalvageReport {
+    pub copied: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub skipped_protected: Vec<String>,
+}
+
+impl SalvageReport {
+    fn note(&self) -> String {
+        if self.copied.is_empty() && self.skipped_protected.is_empty() && self.conflicts.is_empty()
+        {
+            return String::new();
+        }
+        let mut note = format!(
+            "已把工作区未进 git 的文献/数据/渲染成品拷到主文件夹（{} 个文件",
+            self.copied.len()
+        );
+        if !self.skipped_protected.is_empty() {
+            note.push_str(&format!(
+                "，保护路径保持原样 {} 个",
+                self.skipped_protected.len()
+            ));
+        }
+        note.push('）');
+        if !self.conflicts.is_empty() {
+            let names = self
+                .conflicts
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、");
+            let suffix = if self.conflicts.len() > 5 {
+                format!(" 等 {} 个", self.conflicts.len())
+            } else {
+                String::new()
+            };
+            note.push_str(&format!(
+                "。{names}{suffix}在主文件夹已存在同名文件，未覆盖——请对比后手动决定保留哪份"
+            ));
+        }
+        note
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +161,10 @@ fn ensure_workspaces_table(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("初始化 workspaces 表失败: {e}"))?;
     // 轻量迁移：老库补 merged_at 列（已存在则忽略错误）
     let _ = conn.execute_batch("ALTER TABLE workspaces ADD COLUMN merged_at TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE workspaces ADD COLUMN project_id TEXT;");
+    let _ = conn.execute_batch(
+        "UPDATE workspaces SET project_id=(SELECT id FROM projects WHERE projects.path=workspaces.repo_path) WHERE project_id IS NULL AND repo_path IS NOT NULL",
+    );
     Ok(())
 }
 
@@ -145,6 +204,7 @@ fn row_to_dto(
         merged_at,
         stale_upstream: None,
         setup_result: None,
+        project_id: None,
     }
 }
 
@@ -183,12 +243,12 @@ pub(crate) fn query_workspaces(conn: &Connection) -> Result<Vec<WorkspaceDto>, S
     let mut stmt = conn
         .prepare(
             "SELECT id, repo_path, name, branch, worktree_path, base_branch,
-                    port_base, status, created_at, archived_at, merged_at FROM workspaces",
+                    port_base, status, created_at, archived_at, merged_at, project_id FROM workspaces",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
-            Ok(row_to_dto(
+            let mut dto = row_to_dto(
                 r.get(0)?,
                 r.get(1)?,
                 r.get(2)?,
@@ -200,7 +260,9 @@ pub(crate) fn query_workspaces(conn: &Connection) -> Result<Vec<WorkspaceDto>, S
                 r.get(8)?,
                 r.get(9)?,
                 r.get(10)?,
-            ))
+            );
+            dto.project_id = r.get(11).ok().flatten();
+            Ok(dto)
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.flatten().collect())
@@ -257,6 +319,40 @@ pub(crate) fn run_git(repo: &Path, args: &[&str], timeout: Duration) -> Result<S
     run_cmd(cmd, timeout)
 }
 
+/// `git merge-base --is-ancestor {branch} HEAD`：0=已合入，1=尚未。其它退出码当错误。
+pub(crate) fn git_is_ancestor(repo: &Path, branch: &str, head: &str) -> Result<bool, String> {
+    let git = crate::agents::resolve_binary("git").ok_or("找不到 git 可执行文件，请先安装 git")?;
+    let mut cmd = crate::process::background_command(git);
+    cmd.arg("-C")
+        .arg(repo)
+        .args(["merge-base", "--is-ancestor", branch, head])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = run_cmd_full(cmd, Duration::from_secs(10))?;
+    if out.timed_out {
+        return Err("操作超时".into());
+    }
+    match out.code {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
+pub(crate) fn relocate_repo_paths(
+    project_id: &str,
+    old_path: &str,
+    new_path: &str,
+) -> Result<(), String> {
+    let conn = db()?;
+    conn.execute(
+        "UPDATE workspaces SET repo_path=?3, project_id=?1 WHERE project_id=?1 OR repo_path=?2",
+        params![project_id, old_path, new_path],
+    )
+    .map_err(|e| format!("更新工作区位置失败: {e}"))?;
+    Ok(())
+}
+
 /// 子进程原始结果：conflict_probe 需要区分退出码 0/1，run_git_raw 需要未 trim 的 stdout
 struct CmdOutput {
     success: bool,
@@ -272,8 +368,12 @@ fn run_cmd_full(
     timeout: Duration,
 ) -> Result<CmdOutput, String> {
     let captured = crate::process::capture_command(&mut cmd, timeout, 32 * 1024 * 1024)?;
-    if captured.cancelled { return Err("操作已取消".into()); }
-    if captured.truncated { return Err("命令输出超过 32 MB 安全上限，请缩小操作范围".into()); }
+    if captured.cancelled {
+        return Err("操作已取消".into());
+    }
+    if captured.truncated {
+        return Err("命令输出超过 32 MB 安全上限，请缩小操作范围".into());
+    }
     Ok(CmdOutput {
         success: !captured.timed_out && captured.status.is_some_and(|s| s.success()),
         code: captured.status.and_then(|s| s.code()),
@@ -483,10 +583,11 @@ fn reserve_creating_workspace(
         .map_err(|e| format!("锁定工作区端口分配失败: {e}"))?;
     let result = (|| {
         let port_base = alloc_port_base(conn)?;
+        let project_id = crate::projects::project_id_at(repo);
         conn.execute(
             "INSERT INTO workspaces(id, repo_path, name, branch, worktree_path, base_branch,
-                                    port_base, status, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'creating', ?8)",
+                                    port_base, status, created_at, project_id)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'creating', ?8, ?9)",
             params![
                 id,
                 repo.to_string_lossy().as_ref(),
@@ -496,6 +597,7 @@ fn reserve_creating_workspace(
                 base_branch,
                 port_base,
                 created_at,
+                project_id,
             ],
         )
         .map_err(|e| format!("记录创建中工作区失败: {e}"))?;
@@ -1022,6 +1124,10 @@ pub struct WsHealthDto {
     /// 收件箱据此提示「需重新同步」（评审层 unmerged_with_base 的同口径前置）
     pub stale_base: bool,
     pub ready_to_merge: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_head: Option<String>,
+    pub gitdir_detached: bool,
+    pub ledger_pending: bool,
 }
 
 /// 基准引用固定用本地分支：与 create_impl 的起点一致（工作区从本地基准拉出，
@@ -1087,7 +1193,7 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
     let ahead = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
     let (conflict, conflict_files) = conflict_probe(&wt, &base, "HEAD");
     // 主仓库状态也是本地合并的前置条件：提前暴露，别等点了「合并」才报错
-    let repo = PathBuf::from(&w.repo_path);
+    let repo = live_repo_for(&w);
     let main_off_base = run_git(
         &repo,
         &["rev-parse", "--abbrev-ref", "HEAD"],
@@ -1095,9 +1201,16 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
     )
     .map(|cur| cur != w.base_branch)
     .unwrap_or(false);
-    let main_dirty = run_git(&repo, &["status", "--porcelain"], Duration::from_secs(30))
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
+    let main_dirty = run_git(
+        &repo,
+        &["status", "--porcelain", "--untracked-files=all"],
+        Duration::from_secs(30),
+    )
+    .map(|s| {
+        s.lines()
+            .any(|line| !crate::review_contract::is_untracked_ledger_file(line))
+    })
+    .unwrap_or(false);
     // 冲突现场是否已落后基准：仅 merge 进行中才有 MERGE_HEAD，多一次 rev-parse 只发生在此时
     let stale_base = run_git(
         &wt,
@@ -1112,6 +1225,8 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
             .unwrap_or(false)
     })
     .unwrap_or(false);
+    let worktree_head = run_git(&wt, &["rev-parse", "HEAD"], Duration::from_secs(10)).ok();
+    let gitdir_detached = gitdir_matches_repo(&wt, &repo).is_err();
     Ok(WsHealthDto {
         uncommitted,
         ahead,
@@ -1125,7 +1240,11 @@ fn health_impl(conn: &Connection, id: &str) -> Result<WsHealthDto, String> {
             && !uncommitted
             && conflict == Some(false)
             && !main_off_base
-            && !main_dirty,
+            && !main_dirty
+            && !gitdir_detached,
+        worktree_head,
+        gitdir_detached,
+        ledger_pending: crate::review_contract::pending_needs_attention(id),
     })
 }
 
@@ -1136,7 +1255,83 @@ fn merge_impl(
     id: &str,
     archive: bool,
 ) -> Result<WorkspaceMergeResultDto, String> {
-    merge_impl_with_guard(conn, id, archive, &|_| Ok(()))
+    let w = get_workspace(conn, id)?;
+    let tip = run_git(
+        Path::new(&w.repo_path),
+        &["rev-parse", &w.branch],
+        Duration::from_secs(10),
+    )?;
+    merge_impl_with_guard(conn, id, archive, &|_| Ok(()), Some(&tip))
+}
+
+fn live_repo_for(w: &WorkspaceDto) -> PathBuf {
+    if let Some(pid) = w.project_id.as_deref() {
+        if let Ok(conn) = db() {
+            if let Ok(path) = conn.query_row("SELECT path FROM projects WHERE id=?1", [pid], |r| {
+                r.get::<_, String>(0)
+            }) {
+                return PathBuf::from(path);
+            }
+        }
+    }
+    PathBuf::from(&w.repo_path)
+}
+
+fn gitdir_matches_repo(worktree: &Path, repo: &Path) -> Result<(), String> {
+    let common = run_git(
+        worktree,
+        &["rev-parse", "--git-common-dir"],
+        Duration::from_secs(10),
+    )?;
+    let common_path = if Path::new(&common).is_absolute() {
+        PathBuf::from(&common)
+    } else {
+        worktree.join(&common)
+    };
+    let Ok(common_canon) = crate::paths::canonicalize_plain(&common_path) else {
+        return Ok(());
+    };
+    let Ok(repo_git) = crate::paths::canonicalize_plain(&repo.join(".git")) else {
+        return Ok(());
+    };
+    if crate::paths::same_path(&common_canon.to_string_lossy(), &repo_git.to_string_lossy()) {
+        return Ok(());
+    }
+    // git-common-dir 可能是 .git 本身或对象库父目录
+    if crate::paths::path_within(&common_canon.to_string_lossy(), &repo.to_string_lossy()) {
+        return Ok(());
+    }
+    Err("工作树与主仓脱节，请重新挂载".into())
+}
+
+fn commit_pipeline_ledger(
+    w: &WorkspaceDto,
+    repo: &Path,
+    version_id: &str,
+    reviewed_sha: Option<&str>,
+    paths: Vec<String>,
+    fingerprints: Vec<crate::projects::ContentFingerprint>,
+    note: &str,
+) -> Result<bool, String> {
+    let entry = crate::projects::AcceptanceLogEntry {
+        goal_id: String::new(),
+        goal_name: format!("{} / {}", w.name, w.branch),
+        run_id: String::new(),
+        paths,
+        note: note.to_string(),
+        frozen: false,
+        decided_at: crate::sessions::now_iso(),
+        kind: crate::review_contract::KIND_PIPELINE_MERGE.into(),
+        version_id: version_id.to_string(),
+        reviewed_sha: reviewed_sha.map(|s| s.to_string()),
+        project_id: w
+            .project_id
+            .clone()
+            .or_else(|| crate::projects::project_id_at(repo)),
+        scene_ref: Some(w.id.clone()),
+        content_fingerprints: fingerprints,
+    };
+    crate::review_contract::record_pending_fact(repo, &w.id, &entry).map(|()| true)
 }
 
 /// ensure_no_active_tasks 透传给归档阶段：merge 成功后、worktree remove 前复查运行中任务
@@ -1145,9 +1340,70 @@ fn merge_impl_with_guard(
     id: &str,
     archive: bool,
     ensure_no_active_tasks: &dyn Fn(&str) -> Result<(), String>,
+    expect_reviewed_sha: Option<&str>,
 ) -> Result<WorkspaceMergeResultDto, String> {
     let w = get_workspace(conn, id)?;
-    let repo = PathBuf::from(&w.repo_path);
+    let repo = live_repo_for(&w);
+    let _apply_lock = crate::review_contract::apply_lock(&repo)?;
+    let already_merged = git_is_ancestor(&repo, &w.branch, &w.base_branch)?;
+    let tip = run_git(&repo, &["rev-parse", &w.branch], Duration::from_secs(10))?;
+    if crate::review_contract::read_pending(&w.id)?.is_some() || already_merged {
+        let entry = crate::review_contract::recover_fact(
+            &repo,
+            &w.id,
+            crate::review_contract::KIND_PIPELINE_MERGE,
+            &w.id,
+            &tip,
+        )?;
+        if !git_is_ancestor(&repo, &entry.version_id, &w.base_branch)? {
+            return Err("恢复凭证中的版本不在基准历史中，未重新合并".into());
+        }
+        let recording = crate::review_contract::record_pending_fact(&repo, &w.id, &entry);
+        let ledger = recording.is_ok();
+        let mut result = WorkspaceMergeResultDto {
+            merged: true,
+            archived: false,
+            failed_phase: None,
+            message: match recording {
+                Ok(()) => format!(
+                    "文件已进入项目 · {}",
+                    entry.version_id.chars().take(8).collect::<String>()
+                ),
+                Err(e) => format!("文件已进主仓，但验收记录未完成：{e}。请点「再记录验收」"),
+            },
+            output: String::new(),
+            version_id: Some(entry.version_id),
+            reviewed_sha: entry.reviewed_sha,
+            ledger_written: ledger,
+            salvage: None,
+        };
+        if !ledger {
+            return Ok(result);
+        }
+        if let Err(e) = conn.execute(
+            "UPDATE workspaces SET merged_at=COALESCE(merged_at,?1) WHERE id=?2",
+            params![entry.decided_at, id],
+        ) {
+            result.failed_phase = Some("state".into());
+            result.message = format!("文件已合并，状态记录失败：{e}；不要重新合并");
+            return Ok(result);
+        }
+        if archive {
+            match archive_impl_with_guard(conn, id, ensure_no_active_tasks) {
+                Ok(()) => {
+                    result.archived = true;
+                    result.output = "已合并并归档工作区".into();
+                    result.message = "已合并并归档".into();
+                }
+                Err(e) => {
+                    result.failed_phase = Some("archive".into());
+                    result.message = format!("文件已合并，但归档失败：{e}；工作区仍保留");
+                }
+            }
+        }
+        return Ok(result);
+    }
+    gitdir_matches_repo(Path::new(&w.worktree_path), &repo)?;
     // 前置条件：主仓库必须停在基准分支且工作区干净，否则合并会搅乱用户手头的工作
     let cur = run_git(
         &repo,
@@ -1160,7 +1416,16 @@ fn merge_impl_with_guard(
             w.base_branch
         ));
     }
-    let dirty = run_git(&repo, &["status", "--porcelain"], Duration::from_secs(30))?;
+    let dirty = run_git(
+        &repo,
+        &["status", "--porcelain", "--untracked-files=all"],
+        Duration::from_secs(30),
+    )?;
+    let dirty = dirty
+        .lines()
+        .filter(|line| !crate::review_contract::is_untracked_ledger_file(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     if !dirty.is_empty() {
         // porcelain 前两列是状态码，第三列起是路径；列出前 5 个帮用户定位
         let lines: Vec<&str> = dirty.lines().collect();
@@ -1179,24 +1444,30 @@ fn merge_impl_with_guard(
             "主仓库有未提交改动（{names}{suffix}），请先提交或 stash 再合并（或改用 PR 流程）"
         ));
     }
+    crate::review_contract::assert_reviewed_sha(expect_reviewed_sha.unwrap_or(""), &tip)?;
     // 保护路径：验收合并必须让被保护路径保持主仓原样。git 无法只按路径部分合并，
     // 任务分支改动了被保护路径时拒绝合并并说明，由人先去工作区撤掉这些改动
     // （或调整保护设置）；配置读不出时 fail-closed，不按「没有保护」合并
     let protected = crate::projects::protected_paths_at(&repo)?;
+    let range = format!("{}...{}", w.base_branch, tip);
+    let touched_raw = run_git(
+        &repo,
+        &["diff", "--name-only", &range],
+        Duration::from_secs(30),
+    )?;
+    let touched: Vec<String> = touched_raw
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
     if !protected.is_empty() {
-        let range = format!("{}...{}", w.base_branch, w.branch);
-        let touched = run_git(&repo, &["diff", "--name-only", &range], Duration::from_secs(30))?;
         let hits: Vec<&str> = touched
-            .lines()
+            .iter()
+            .map(|s| s.as_str())
             .filter(|rel| crate::projects::path_is_protected(rel, &protected))
             .collect();
         if !hits.is_empty() {
-            let names = hits
-                .iter()
-                .take(5)
-                .copied()
-                .collect::<Vec<_>>()
-                .join("、");
+            let names = hits.iter().take(5).copied().collect::<Vec<_>>().join("、");
             let suffix = if hits.len() > 5 {
                 format!(" 等 {} 个文件", hits.len())
             } else {
@@ -1211,7 +1482,7 @@ fn merge_impl_with_guard(
     // 应用内自动 merge commit 必须绕过用户全局 commit.gpgsign：无头环境调 gpg 会卡住或失败
     let mut log = match run_git(
         &repo,
-        &["-c", "commit.gpgsign=false", "merge", "--no-ff", &w.branch],
+        &["-c", "commit.gpgsign=false", "merge", "--no-ff", &tip],
         Duration::from_secs(60),
     ) {
         Ok(out) => out,
@@ -1242,11 +1513,12 @@ fn merge_impl_with_guard(
         }
     };
     let salvage = copy_untracked_deliverables(Path::new(&w.worktree_path), &repo, &protected);
-    if !salvage.is_empty() {
+    let salvage_note = salvage.note();
+    if !salvage_note.is_empty() {
         if !log.is_empty() {
             log.push('\n');
         }
-        log.push_str(&salvage);
+        log.push_str(&salvage_note);
     }
     let auto_manifest = register_expected_artifacts_at(&repo, &w.name);
     if !auto_manifest.is_empty() {
@@ -1255,6 +1527,24 @@ fn merge_impl_with_guard(
         }
         log.push_str(&auto_manifest);
     }
+    let version_id = run_git(&repo, &["rev-parse", "HEAD"], Duration::from_secs(10))?;
+    let mut paths = touched;
+    paths.extend(salvage.copied.iter().cloned());
+    paths.sort();
+    paths.dedup();
+    let fingerprints = crate::review_contract::fingerprints_from_paths(&repo, &salvage.copied);
+    let ledger = match commit_pipeline_ledger(
+        &w,
+        &repo,
+        &version_id,
+        Some(&tip),
+        paths,
+        fingerprints,
+        &format!("已合并进 {}", w.base_branch),
+    ) {
+        Ok(ok) => ok,
+        Err(_) => false,
+    };
     let merged_at = crate::sessions::now_iso();
     if let Err(e) = conn.execute(
         "UPDATE workspaces SET merged_at=?1 WHERE id=?2",
@@ -1269,10 +1559,13 @@ fn merge_impl_with_guard(
                 w.base_branch
             ),
             output: log,
+            version_id: Some(version_id),
+            reviewed_sha: Some(tip),
+            ledger_written: ledger,
+            salvage: Some(salvage),
         });
     }
-    if archive {
-        // 合并成功后走标准归档生命周期（archive 钩子 + worktree 移除 + 状态翻转）
+    if archive && ledger {
         if let Err(e) = archive_impl_with_guard(conn, id, ensure_no_active_tasks) {
             return Ok(WorkspaceMergeResultDto {
                 merged: true,
@@ -1280,6 +1573,10 @@ fn merge_impl_with_guard(
                 failed_phase: Some("archive".into()),
                 message: format!("代码已合并进 {}，但归档失败：{e}", w.base_branch),
                 output: log,
+                version_id: Some(version_id),
+                reviewed_sha: Some(tip),
+                ledger_written: ledger,
+                salvage: Some(salvage),
             });
         }
         if !log.is_empty() {
@@ -1292,18 +1589,37 @@ fn merge_impl_with_guard(
             failed_phase: None,
             message: format!("已合并进 {} 并归档工作区", w.base_branch),
             output: log,
+            version_id: Some(version_id),
+            reviewed_sha: Some(tip),
+            ledger_written: ledger,
+            salvage: Some(salvage),
         })
     } else {
         if !log.is_empty() {
             log.push('\n');
         }
         log.push_str("已合并（工作区保留，可继续干活或之后归档）");
+        let message = if ledger {
+            format!(
+                "文件已进入项目 · {}，工作区已保留",
+                &version_id.chars().take(8).collect::<String>()
+            )
+        } else {
+            format!(
+                "已合并进 {}，工作区已保留。验收记录未写下，请点「再记录验收」",
+                w.base_branch
+            )
+        };
         Ok(WorkspaceMergeResultDto {
             merged: true,
             archived: false,
             failed_phase: None,
-            message: format!("已合并进 {}，工作区已保留", w.base_branch),
+            message,
             output: log,
+            version_id: Some(version_id),
+            reviewed_sha: Some(tip),
+            ledger_written: ledger,
+            salvage: Some(salvage),
         })
     }
 }
@@ -2422,13 +2738,17 @@ fn project_root_deliverable_target(target: &str, source: &Path) -> bool {
 const DELIVERABLE_COPY_CAP: usize = 2000;
 
 /// 合并后把工作区里未进 git 的 papers/、产物目录、output/ 拷到主仓同相对路径。
-/// 已存在不覆盖；保护路径下的文件跳过（保持主仓原样）；失败不阻断合并。返回空串表示无事可做。
-fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String]) -> String {
+/// 已存在不覆盖；保护路径下的文件跳过（保持主仓原样）；失败不阻断合并。
+fn copy_untracked_deliverables(
+    worktree: &Path,
+    repo: &Path,
+    protected: &[String],
+) -> SalvageReport {
     if crate::paths::same_path(&worktree.to_string_lossy(), &repo.to_string_lossy()) {
-        return String::new();
+        return SalvageReport::default();
     }
     if !worktree.is_dir() || !repo.is_dir() {
-        return String::new();
+        return SalvageReport::default();
     }
     let artifact_dir = {
         let raw = crate::projects::read_config_at(repo).config.artifact_dir;
@@ -2440,11 +2760,8 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String
         }
     };
     let prefixes = ["papers".to_string(), artifact_dir, "output".to_string()];
-    let mut copied = 0usize;
-    let mut protected_skipped = 0usize;
+    let mut report = SalvageReport::default();
     let mut failed = 0usize;
-    // 主仓已存在同名文件 = 内容可能冲突；不静默跳过，点名交人对比。
-    let mut conflicts: Vec<String> = Vec::new();
     let mut walked = 0usize;
     for prefix in &prefixes {
         let src_root = worktree.join(prefix);
@@ -2487,7 +2804,7 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String
                     continue;
                 }
                 if crate::projects::path_is_protected(&rel_str, protected) {
-                    protected_skipped += 1;
+                    report.skipped_protected.push(rel_str);
                     continue;
                 }
                 let dest = repo.join(rel);
@@ -2495,7 +2812,7 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String
                     continue;
                 }
                 if dest.exists() {
-                    conflicts.push(rel_str.clone());
+                    report.conflicts.push(rel_str.clone());
                     continue;
                 }
                 if ensure_copy_dest_safe(repo, &rel_str).is_err() {
@@ -2503,41 +2820,14 @@ fn copy_untracked_deliverables(worktree: &Path, repo: &Path, protected: &[String
                     continue;
                 }
                 match fs::copy(&path, &dest) {
-                    Ok(_) => copied += 1,
+                    Ok(_) => report.copied.push(rel_str),
                     Err(_) => failed += 1,
                 }
             }
         }
     }
-    if copied == 0 && protected_skipped == 0 && failed == 0 && conflicts.is_empty() {
-        return String::new();
-    }
-    let mut note =
-        format!("已把工作区未进 git 的文献/数据/渲染成品拷到主文件夹（{copied} 个文件");
-    if protected_skipped > 0 {
-        note.push_str(&format!("，保护路径保持原样 {protected_skipped} 个"));
-    }
-    if failed > 0 {
-        note.push_str(&format!("，{failed} 个拷贝失败"));
-    }
-    note.push('）');
-    if !conflicts.is_empty() {
-        let names = conflicts
-            .iter()
-            .take(5)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("、");
-        let suffix = if conflicts.len() > 5 {
-            format!(" 等 {} 个", conflicts.len())
-        } else {
-            String::new()
-        };
-        note.push_str(&format!(
-            "。{names}{suffix}在主文件夹已存在同名文件，未覆盖——请对比后手动决定保留哪份"
-        ));
-    }
-    note
+    let _ = failed;
+    report
 }
 
 /// target → 目标目录与文件名策略：目录/通配 = 目录取静态前缀、文件名用源文件 basename；
@@ -2752,6 +3042,7 @@ pub async fn merge_workspace(
     manager: tauri::State<'_, crate::pty::PtyManager>,
     id: String,
     archive: bool,
+    expect_reviewed_sha: Option<String>,
 ) -> Result<WorkspaceMergeResultDto, String> {
     let manager = manager.inner().clone();
     let (out, paths) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
@@ -2771,7 +3062,13 @@ pub async fn merge_workspace(
         if archive {
             ensure_idle(&w.worktree_path)?; // 快速预检；归档内部在移除 worktree 前还会复查
         }
-        let out = merge_impl_with_guard(&conn, &id, archive, &ensure_idle)?;
+        let out = merge_impl_with_guard(
+            &conn,
+            &id,
+            archive,
+            &ensure_idle,
+            expect_reviewed_sha.as_deref(),
+        )?;
         Ok((out, (w.worktree_path, w.repo_path)))
     })
     .await
@@ -4098,6 +4395,7 @@ mod tests {
             merged_at: merged_at.map(String::from),
             stale_upstream: None,
             setup_result: None,
+            project_id: None,
         }
     }
 
@@ -5323,6 +5621,65 @@ mod tests {
     }
 
     #[test]
+    fn merge_pending_replay_never_merges_new_work_or_changes_original_version() {
+        let Some(fx) = Fixture::new() else { return };
+        sh(&fx.repo, &["add", ".env", ".envrc"]);
+        sh(
+            &fx.repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "env"],
+        );
+        let w = create_impl(
+            &fx.conn,
+            &fx.ws_root,
+            fx.repo.to_str().unwrap(),
+            "ledger-replay",
+        )
+        .unwrap();
+        let wt = PathBuf::from(&w.worktree_path);
+        fs::write(wt.join("first.txt"), "accepted").unwrap();
+        commit_all_in_worktree(&wt, "first");
+        // 让文件合并成功、账本写入失败；空目录不会污染 git status。
+        let blocked = fx.repo.join(".ccode/acceptance-log.jsonl");
+        fs::create_dir_all(&blocked).unwrap();
+        let first = merge_impl(&fx.conn, &w.id, true).unwrap();
+        assert!(first.merged && !first.ledger_written && !first.archived);
+        assert!(wt.exists(), "补账前不得归档掉工作区");
+        assert!(
+            health_impl(&fx.conn, &w.id).unwrap().ledger_pending,
+            "重新打开评审也必须看见补账待办"
+        );
+        fs::remove_dir(&blocked).unwrap();
+        fs::write(fx.repo.join("other.txt"), "other work").unwrap();
+        commit_all_in_worktree(&fx.repo, "another main commit");
+        let main_before_retry =
+            run_git(&fx.repo, &["rev-parse", "HEAD"], Duration::from_secs(10)).unwrap();
+        fs::write(wt.join("new.txt"), "not reviewed yet").unwrap();
+        commit_all_in_worktree(&wt, "next version");
+        let retried = merge_impl_with_guard(&fx.conn, &w.id, false, &|_| Ok(()), None).unwrap();
+        assert_eq!(retried.version_id, first.version_id);
+        assert!(retried.ledger_written);
+        assert!(!health_impl(&fx.conn, &w.id).unwrap().ledger_pending);
+        assert!(!fx.repo.join("new.txt").exists(), "补账不能顺便合并下一版");
+        assert_eq!(
+            run_git(&fx.repo, &["rev-parse", "HEAD"], Duration::from_secs(10)).unwrap(),
+            main_before_retry
+        );
+        let ledger = crate::projects::read_acceptance_log_at(&fx.repo);
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(Some(&ledger[0].version_id), first.version_id.as_ref());
+        assert!(
+            merge_impl_with_guard(&fx.conn, &w.id, false, &|_| Ok(()), None)
+                .unwrap_err()
+                .contains("评审")
+        );
+        // 用户确实看过下一版后，才允许新一次合并。
+        let next = merge_impl(&fx.conn, &w.id, false).unwrap();
+        assert!(next.merged && next.ledger_written);
+        assert!(fx.repo.join("new.txt").exists());
+        assert_eq!(crate::projects::read_acceptance_log_at(&fx.repo).len(), 2);
+    }
+
+    #[test]
     fn final_merge_conflict_is_aborted_in_main_repo() {
         let Some(fx) = Fixture::new() else { return };
         sh(&fx.repo, &["add", ".env", ".envrc"]);
@@ -5437,7 +5794,11 @@ mod tests {
         let Some(fx) = Fixture::new() else { return };
         fs::create_dir_all(fx.repo.join(".ccode")).unwrap();
         // 损坏的档案卡：保护清单不可信，必须拒绝合并而不是按「没有保护」继续
-        fs::write(fx.repo.join(".ccode/project.toml"), "protected_paths = [\"raw\"\n").unwrap();
+        fs::write(
+            fx.repo.join(".ccode/project.toml"),
+            "protected_paths = [\"raw\"\n",
+        )
+        .unwrap();
         sh(&fx.repo, &["add", ".env", ".envrc", ".ccode/project.toml"]);
         sh(
             &fx.repo,
@@ -6167,7 +6528,7 @@ mod tests {
         fs::write(wt.join("papers/b.pdf"), b"new-b").unwrap();
         fs::write(wt.join("output/main.pdf"), b"pdf").unwrap();
         fs::write(wt.join("secret.txt"), b"nope").unwrap();
-        let note = copy_untracked_deliverables(&wt, &repo, &[]);
+        let note = copy_untracked_deliverables(&wt, &repo, &[]).note();
         assert!(note.contains("2 个文件"), "{note}");
         assert_eq!(fs::read(repo.join("papers/a.pdf")).unwrap(), b"old-a");
         assert_eq!(fs::read(repo.join("papers/b.pdf")).unwrap(), b"new-b");
@@ -6186,23 +6547,20 @@ mod tests {
         fs::create_dir_all(repo.join("papers/raw")).unwrap();
         fs::write(wt.join("papers/raw/new.csv"), b"new").unwrap();
         fs::write(wt.join("papers/notes/ok.md"), b"ok").unwrap();
-        let note =
-            copy_untracked_deliverables(&wt, &repo, &["papers/raw".to_string()]);
+        let note = copy_untracked_deliverables(&wt, &repo, &["papers/raw".to_string()]).note();
         assert!(note.contains("1 个文件"), "{note}");
         assert!(
             !repo.join("papers/raw/new.csv").exists(),
             "保护路径下的文件不得拷进主仓"
         );
-        assert_eq!(
-            fs::read(repo.join("papers/notes/ok.md")).unwrap(),
-            b"ok"
-        );
+        assert_eq!(fs::read(repo.join("papers/notes/ok.md")).unwrap(), b"ok");
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn copy_untracked_deliverables_names_conflicts_instead_of_silent_skip() {
-        let dir = std::env::temp_dir().join(format!("ccode-salvage-conflict-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("ccode-salvage-conflict-{}", uuid::Uuid::new_v4()));
         let wt = dir.join("wt");
         let repo = dir.join("repo");
         fs::create_dir_all(wt.join("papers")).unwrap();
@@ -6210,12 +6568,15 @@ mod tests {
         fs::write(wt.join("papers/dup.pdf"), b"worktree-version").unwrap();
         fs::write(repo.join("papers/dup.pdf"), b"main-version").unwrap();
         fs::write(wt.join("papers/new.pdf"), b"new").unwrap();
-        let note = copy_untracked_deliverables(&wt, &repo, &[]);
+        let note = copy_untracked_deliverables(&wt, &repo, &[]).note();
         assert!(note.contains("1 个文件"), "{note}");
         assert!(note.contains("papers/dup.pdf"), "{note}");
         assert!(note.contains("未覆盖"), "{note}");
         // 冲突文件保持主仓版本，不被工作区覆盖
-        assert_eq!(fs::read(repo.join("papers/dup.pdf")).unwrap(), b"main-version");
+        assert_eq!(
+            fs::read(repo.join("papers/dup.pdf")).unwrap(),
+            b"main-version"
+        );
         assert_eq!(fs::read(repo.join("papers/new.pdf")).unwrap(), b"new");
         fs::remove_dir_all(&dir).ok();
     }

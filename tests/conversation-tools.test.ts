@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   groupConversationSegments,
   isAlertToolMessage,
+  isProcessBlock,
   isToolOnlyAssistant,
+  processFoldLabel,
   segmentContainsIndex,
   toolCallCount,
 } from "../src/conversation-tools.ts";
@@ -77,4 +79,19 @@ test("连续纯工具消息合成一条执行记录，正文和告警切开", ()
   }
   assert.equal(segs[2]?.kind, "message");
   assert.equal(segs[3]?.kind, "message");
+});
+
+test("process fold label collapses thinking and tools", () => {
+  const thinking: BlockDto = { kind: "thinking", text: "…", toolName: null };
+  assert.equal(isProcessBlock(thinking), true);
+  assert.equal(isProcessBlock(text("正文")), false);
+  assert.equal(processFoldLabel([thinking]), "思考过程");
+  assert.equal(
+    processFoldLabel([tool("Read"), result("ok")]),
+    "执行记录 · 1 次工具调用",
+  );
+  assert.equal(
+    processFoldLabel([thinking, tool("Bash"), result("ok")]),
+    "过程 · 思考与 1 次工具调用",
+  );
 });

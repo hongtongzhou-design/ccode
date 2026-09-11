@@ -520,6 +520,7 @@ export interface WorkspaceDto {
   staleUpstream: string | null;
   /** 仅创建时返回：setup 脚本执行结果（失败不阻断创建） */
   setupResult: SetupResultDto | null;
+  projectId?: string | null;
 }
 
 /** 引用健康检查（check_citation_health）：.md 引用键对照 references.bib 的可解析统计 */
@@ -734,6 +735,10 @@ export interface WorkspaceHealthDto {
   /** 冲突现场已落后基准（MERGE_HEAD ≠ 基准 tip），需重新同步后再选边 */
   staleBase: boolean;
   readyToMerge: boolean;
+  worktreeHead?: string | null;
+  gitdirDetached?: boolean;
+  /** 持久恢复记录需要补记；重新打开项目仍可找回。 */
+  ledgerPending?: boolean;
 }
 
 /** 产物待核验（收件箱）：活跃工作区绑定步骤的预期产物已全部产出且够新 */
@@ -784,6 +789,9 @@ export interface WorkspaceMergeResultDto {
   failedPhase: "state" | "archive" | null;
   message: string;
   output: string;
+  versionId?: string | null;
+  reviewedSha?: string | null;
+  ledgerWritten?: boolean;
 }
 
 /** 推送分支/创建 PR 的分阶段结果。 */
@@ -1116,12 +1124,12 @@ export interface ProjectConfigDto {
   settings?: string[];
   /** 人在规则编辑器里保存过完整列表。未置位时启动仍补工作方式默认规则。 */
   rulesOwned?: boolean;
-  /** 验收写回时拒绝覆盖的相对路径（目录或文件）。 */
+  /** 验收写回时拒绝覆盖的相对路径（目录或文件）。有研究步骤的科研不在界面展示。 */
   protectedPaths?: string[];
   artifactDir: string;
   resources: ProjectResourceDto[];
   steps: ProjectStepDto[];
-  /** 「不使用研究流程」显式标记：true = 隐藏模板引导横幅与定时任务区块；选模板后后端自动清回 false */
+  /** 「不使用研究流程」显式标记：true = 隐藏模板引导横幅；选 true 时同时清空步骤表。选模板后后端自动清回 false */
   pipelineOptOut?: boolean;
   /** 文献来源：search（默认，让 agent 系统检索）| zotero | folder。
    *  后两者 = 用户已有文献库，TASK.md 会加「文献来源」段把检索步骤降级为「盘点 + 查漏补缺」。
@@ -1133,7 +1141,7 @@ export interface ProjectConfigDto {
   submissionRound?: number;
   /** 文献雷达筛选：新命中展示与推送计数按期刊指标过滤；null/全空 = 不筛选 */
   litWatchFilter?: LitWatchFilterDto | null;
-  /** 项目级选用技能名单（技能库 name）：进上下文包并随执行快照记录版本；空 = 不注入技能段 */
+  /** 项目技能池（技能库 name）：仅无流程科研 / 办公 / 编程进上下文包；有研究步骤的科研不用此字段 */
   skills?: string[];
   /** 工作方式：research / coding / office；缺省 research */
   workMode?: string;
@@ -1237,6 +1245,10 @@ export interface CodingWorktreeDto {
   lastCommitAt?: string | null;
   dirtyCount?: number;
   upstreamBehind?: number;
+  /** 打开改动时记下的 worktree HEAD，合并时作 expectReviewedSha */
+  head?: string | null;
+  /** 持久恢复记录需要补记；重新打开项目仍可找回。 */
+  ledgerPending?: boolean;
 }
 
 export interface CodingBranchDto {
@@ -1315,6 +1327,9 @@ export interface CodingMergeDto {
   cwd: string;
   message: string;
   code?: "ok" | "base_not_checked_out";
+  versionId?: string | null;
+  reviewedSha?: string | null;
+  ledgerWritten?: boolean;
 }
 
 export interface OfficeDocDto {
@@ -1473,6 +1488,22 @@ export interface TaskDto {
   projectId?: string | null;
 }
 
+/** 长期验收账本 `.ccode/acceptance-log.jsonl` 的一行（只读展示） */
+export interface AcceptanceLogEntryDto {
+  goalId: string;
+  goalName: string;
+  runId: string;
+  paths: string[];
+  note: string;
+  frozen: boolean;
+  decidedAt: string;
+  kind?: string;
+  versionId?: string;
+  reviewedSha?: string | null;
+  projectId?: string | null;
+  sceneRef?: string | null;
+}
+
 export interface RunEventDto {
   id: string;
   runId: string;
@@ -1502,6 +1533,7 @@ export interface TaskContextDto {
   createdAt: string;
   sha256: string;
   text: string;
+  environment?: { projectId: string | null; projectRoot: string; isolationPath: string; agent: string; permission: string; inputPaths: string[]; outputPaths: string[]; files: { path: string; copySize?: number }[]; skills: { name: string; libraryDigest: string; runtimeDigest: string | null }[]; warnings: string[] } | null;
 }
 
 export interface RuntimeCapabilitiesDto {
@@ -1538,6 +1570,7 @@ export interface CodingLaneDto {
   branch: string;
   worktreePath: string;
   currentRunId: string | null;
+  projectId?: string | null;
 }
 
 // ===== 定时雷达（src-tauri/src/scheduler.rs） =====

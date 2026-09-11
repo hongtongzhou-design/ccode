@@ -228,10 +228,7 @@ mod tests {
 
     #[test]
     fn resolve_custom_cwd_uses_default_on_empty_or_scratch() {
-        assert_eq!(
-            resolve_custom_cwd("", Some("/proj")).unwrap(),
-            "/proj"
-        );
+        assert_eq!(resolve_custom_cwd("", Some("/proj")).unwrap(), "/proj");
         assert_eq!(
             resolve_custom_cwd("/Users/u/ccode/scratch", Some("/proj")).unwrap(),
             "/proj"

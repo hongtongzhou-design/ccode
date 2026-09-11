@@ -156,7 +156,9 @@ fn expand_contract(
     out.sort();
     out.dedup();
     if out.len() > EXPAND_CAP {
-        return Err(format!("产物契约展开超过 {EXPAND_CAP} 个文件，不能自动采纳"));
+        return Err(format!(
+            "产物契约展开超过 {EXPAND_CAP} 个文件，不能自动采纳"
+        ));
     }
     Ok(out)
 }
@@ -450,7 +452,8 @@ mod tests {
             }
         }
         fn freeze(&self) -> WatchSnapshot {
-            let evidence = prepare(&self.id, &self.project, &self.isolation, &base_patterns()).unwrap();
+            let evidence =
+                prepare(&self.id, &self.project, &self.isolation, &base_patterns()).unwrap();
             fs::write(self.isolation.join("notes/inbox.md"), "result").unwrap();
             freeze_at(&self.reviews, evidence, &self.isolation, &base_patterns()).unwrap();
             load_at(&self.reviews, &self.id).unwrap()
@@ -484,9 +487,11 @@ mod tests {
             fs::read_to_string(f.project.join("notes/inbox.md")).unwrap(),
             "result"
         );
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
-            .unwrap()
-            .is_empty());
+        assert!(
+            adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
+                .unwrap()
+                .is_empty()
+        );
         assert!(freeze_at(&f.reviews, snapshot, &f.isolation, &base_patterns()).is_err());
         assert!(f.reviews.join("backups").join(&f.id).is_dir());
     }
@@ -496,9 +501,11 @@ mod tests {
         let f = Fixture::new();
         let snapshot = f.freeze();
         fs::write(f.project.join("notes/inbox.md"), "human edits").unwrap();
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
-            .unwrap_err()
-            .contains("冲突"));
+        assert!(
+            adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
+                .unwrap_err()
+                .contains("冲突")
+        );
         assert_eq!(
             fs::read_to_string(f.project.join("notes/inbox.md")).unwrap(),
             "human edits"
@@ -510,9 +517,11 @@ mod tests {
         let f = Fixture::new();
         fs::write(f.project.join("notes/inbox.md"), "main newer").unwrap();
         let snapshot = f.freeze();
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
-            .unwrap_err()
-            .contains("冲突"));
+        assert!(
+            adopt_at(&f.reviews, &snapshot, &f.project, &[], &base_patterns())
+                .unwrap_err()
+                .contains("冲突")
+        );
         assert_eq!(
             fs::read_to_string(f.project.join("notes/inbox.md")).unwrap(),
             "main newer"
@@ -530,7 +539,10 @@ mod tests {
         fs::write(f.isolation.join("results/summary.md"), "r").unwrap();
         freeze_at(&f.reviews, evidence, &f.isolation, &patterns).unwrap();
         let snapshot = load_at(&f.reviews, &f.id).unwrap();
-        assert!(snapshot.files.iter().any(|file| file.path == "results/summary.md"));
+        assert!(snapshot
+            .files
+            .iter()
+            .any(|file| file.path == "results/summary.md"));
         let copied = adopt_at(&f.reviews, &snapshot, &f.project, &[], &patterns).unwrap();
         assert!(copied.contains(&"results/summary.md".to_string()));
         assert_eq!(
@@ -585,7 +597,14 @@ mod tests {
             .find(|x| x.path == "notes/references.bib")
             .unwrap()
             .after = Some("refs".into());
-        assert!(adopt_at(&f.reviews, &snapshot, &f.project, &["NOTES".into()], &base_patterns()).is_err());
+        assert!(adopt_at(
+            &f.reviews,
+            &snapshot,
+            &f.project,
+            &["NOTES".into()],
+            &base_patterns()
+        )
+        .is_err());
         assert!(!f.project.join("notes/references.bib").exists());
     }
 
@@ -646,13 +665,20 @@ mod tests {
             .unwrap()
             .after = Some("refs".into());
         let mut writes = 0;
-        let error = adopt_with_writer(&f.reviews, &snapshot, &f.project, &[], &base_patterns(), |path, bytes| {
-            writes += 1;
-            if writes == 2 {
-                return Err("模拟第二个文件写入失败".into());
-            }
-            replace_text(path, bytes)
-        })
+        let error = adopt_with_writer(
+            &f.reviews,
+            &snapshot,
+            &f.project,
+            &[],
+            &base_patterns(),
+            |path, bytes| {
+                writes += 1;
+                if writes == 2 {
+                    return Err("模拟第二个文件写入失败".into());
+                }
+                replace_text(path, bytes)
+            },
+        )
         .unwrap_err();
         assert!(error.contains("已尝试回滚"));
         assert_eq!(
@@ -674,14 +700,21 @@ mod tests {
             .unwrap()
             .after = Some("refs".into());
         let mut writes = 0;
-        let error = adopt_with_writer(&f.reviews, &snapshot, &f.project, &[], &base_patterns(), |path, bytes| {
-            writes += 1;
-            if writes == 2 {
-                fs::write(f.project.join("notes/inbox.md"), "changed during adoption").unwrap();
-                return Err("模拟写入失败".into());
-            }
-            replace_text(path, bytes)
-        })
+        let error = adopt_with_writer(
+            &f.reviews,
+            &snapshot,
+            &f.project,
+            &[],
+            &base_patterns(),
+            |path, bytes| {
+                writes += 1;
+                if writes == 2 {
+                    fs::write(f.project.join("notes/inbox.md"), "changed during adoption").unwrap();
+                    return Err("模拟写入失败".into());
+                }
+                replace_text(path, bytes)
+            },
+        )
         .unwrap_err();
         assert!(error.contains("未强制回滚"));
         assert_eq!(

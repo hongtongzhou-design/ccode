@@ -178,6 +178,7 @@ pub struct ProjectConfigDto {
     /// 人在规则编辑器里保存过完整列表。未置位时启动仍补工作方式默认规则。
     pub rules_owned: bool,
     /// 验收写回时拒绝覆盖的相对路径（目录或文件）。
+    /// 有研究步骤的科研界面不展示；合并/定时采纳仍认（去掉流程后设置回来）。
     pub protected_paths: Vec<String>,
     pub artifact_dir: String,
     pub resources: Vec<ResourceDto>,
@@ -197,8 +198,8 @@ pub struct ProjectConfigDto {
     pub lit_watch_filter: Option<LitWatchFilterDto>,
     /// 工作方式：research / coding / office。缺省 research（旧档案卡 = 科研）
     pub work_mode: String,
-    /// 项目级选用技能名单（技能库 name，审计 §4.9）：进入项目上下文包并随执行快照
-    /// 记录内容版本；空 = 不注入技能段（有流程科研仍按步骤挂载，与本字段互补）
+    /// 项目技能池（技能库 name，审计 §4.9）：无流程科研 / 办公 / 编程进上下文包；
+    /// 有研究步骤的科研不用此字段（技能以 steps[].skills 为准）。空 = 不写行。
     pub skills: Vec<String>,
 }
 
@@ -362,12 +363,43 @@ fn register_at(
                 |r| r.get(0),
             )
             .ok();
-        if moved.is_some() {
-            conn.execute(
+        if let Some(old) = moved.as_deref() {
+            if !crate::paths::same_path(old, &key)
+                && Path::new(old)
+                    .try_exists()
+                    .map_err(|e| format!("无法确认原项目位置：{e}"))?
+            {
+                return Err(format!("同一项目身份的原目录仍存在：{old}。这是副本或另一个检出，不会自动当作搬家；请先明确项目身份，原项目与历史记录未改动"));
+            }
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| format!("开始项目重定位失败：{e}"))?;
+            tx.execute(
                 "UPDATE projects SET path=?2, name=?3, last_opened_at=?4 WHERE id=?1",
                 params![pid, key, name, now],
             )
             .map_err(|e| format!("重连已移动项目失败: {e}"))?;
+            for table in ["tasks", "runs"] {
+                let columns: Vec<String> = tx
+                    .prepare(&format!("PRAGMA table_info({table})"))
+                    .map_err(|e| e.to_string())?
+                    .query_map([], |r| r.get(1))
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| e.to_string())?;
+                if columns.iter().any(|c| c == "project_id")
+                    && columns.iter().any(|c| c == "project_root")
+                {
+                    tx.execute(&format!("UPDATE {table} SET project_id=?1 WHERE project_id IS NULL AND project_root=?2"), params![pid, old])
+                        .map_err(|e| format!("关联旧任务项目身份失败：{e}"))?;
+                }
+            }
+            tx.commit()
+                .map_err(|e| format!("保存项目重定位失败：{e}"))?;
+            if let Some(old) = moved.as_deref() {
+                let _ = crate::workspaces::relocate_repo_paths(pid, old, &key);
+                let _ = crate::coding::relocate_lane_repo_paths(pid, old, &key);
+            }
             let created_at: Option<String> = conn
                 .query_row(
                     "SELECT created_at FROM projects WHERE path=?1",
@@ -469,10 +501,7 @@ pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, Str
                 last_opened_at: r.get(3)?,
                 work_mode: "research".into(),
                 default_agent: r.get(4)?,
-                default_profiles: serde_json::from_str(
-                    &r.get::<_, String>(5)?,
-                )
-                .unwrap_or_default(),
+                default_profiles: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
             })
         })
         .map_err(|e| format!("读取项目列表失败: {e}"))?;
@@ -523,10 +552,7 @@ pub(crate) fn clear_project_default_profile(profile_id: &str) {
     };
     let rows: Vec<(String, String)> = stmt
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .ok()
         .map(|rows| rows.flatten().collect())
@@ -536,8 +562,7 @@ pub(crate) fn clear_project_default_profile(profile_id: &str) {
         return;
     }
     for (path, raw) in rows {
-        let mut defaults: BTreeMap<String, String> =
-            serde_json::from_str(&raw).unwrap_or_default();
+        let mut defaults: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap_or_default();
         let before = defaults.len();
         defaults.retain(|_, id| id != profile_id);
         if defaults.len() == before {
@@ -987,9 +1012,10 @@ fn normalize_protected_paths(raw: &[String]) -> Vec<String> {
     unique.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     let mut kept = Vec::new();
     for path in unique {
-        if kept.iter().any(|parent: &String| {
-            path == *parent || path.starts_with(&format!("{parent}/"))
-        }) {
+        if kept
+            .iter()
+            .any(|parent: &String| path == *parent || path.starts_with(&format!("{parent}/")))
+        {
             continue;
         }
         kept.push(path);
@@ -1483,12 +1509,10 @@ pub(crate) fn protected_paths_at(project: &Path) -> Result<Vec<String>, String> 
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = fs::read_to_string(&path).map_err(|e| {
-        format!("读取 project.toml 失败，无法确认保护路径，已拒绝本次写回: {e}")
-    })?;
-    let value: toml::Value = toml::from_str(&text).map_err(|e| {
-        format!("project.toml 解析失败，无法确认保护路径，已拒绝本次写回: {e}")
-    })?;
+    let text = fs::read_to_string(&path)
+        .map_err(|e| format!("读取 project.toml 失败，无法确认保护路径，已拒绝本次写回: {e}"))?;
+    let value: toml::Value = toml::from_str(&text)
+        .map_err(|e| format!("project.toml 解析失败，无法确认保护路径，已拒绝本次写回: {e}"))?;
     match value.get("protected_paths") {
         None => Ok(Vec::new()),
         Some(toml::Value::Array(arr)) => {
@@ -1498,8 +1522,7 @@ pub(crate) fn protected_paths_at(project: &Path) -> Result<Vec<String>, String> 
                     Some(s) => raw.push(s.to_string()),
                     None => {
                         return Err(
-                            "protected_paths 含非字符串项，无法确认保护路径，已拒绝本次写回"
-                                .into(),
+                            "protected_paths 含非字符串项，无法确认保护路径，已拒绝本次写回".into(),
                         )
                     }
                 }
@@ -1861,9 +1884,22 @@ pub(crate) fn record_accepted_goal_at(
 /// 长期接受账本（`.ccode/acceptance-log.jsonl`，append-only JSONL）：
 /// project-status.json 是按目标名替换、最多 20 条的「最近摘要」，会轮换、曾被目标删除连带清掉；
 /// 账本回答「这份文件是哪次验收写进来的」——目标删除、摘要轮换都不动它。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentFingerprint {
+    pub path: String,
+    pub size: u64,
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+fn default_kind_goal_adopt() -> String {
+    "goal_adopt".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AcceptanceLogEntry {
+pub struct AcceptanceLogEntry {
     pub goal_id: String,
     pub goal_name: String,
     pub run_id: String,
@@ -1872,6 +1908,38 @@ pub(crate) struct AcceptanceLogEntry {
     /// true = 采纳的是冻结快照（review-freeze），false = 旧路径目录现读。
     pub frozen: bool,
     pub decided_at: String,
+    #[serde(default = "default_kind_goal_adopt")]
+    pub kind: String,
+    #[serde(default)]
+    pub version_id: String,
+    #[serde(default)]
+    pub reviewed_sha: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub scene_ref: Option<String>,
+    #[serde(default)]
+    pub content_fingerprints: Vec<ContentFingerprint>,
+}
+
+impl Default for AcceptanceLogEntry {
+    fn default() -> Self {
+        Self {
+            goal_id: String::new(),
+            goal_name: String::new(),
+            run_id: String::new(),
+            paths: Vec::new(),
+            note: String::new(),
+            frozen: false,
+            decided_at: String::new(),
+            kind: default_kind_goal_adopt(),
+            version_id: String::new(),
+            reviewed_sha: None,
+            project_id: None,
+            scene_ref: None,
+            content_fingerprints: Vec::new(),
+        }
+    }
 }
 
 pub(crate) fn acceptance_log_path(root: &Path) -> PathBuf {
@@ -1886,61 +1954,95 @@ pub(crate) fn memory_path(root: &Path) -> PathBuf {
     root.join(".ccode").join("memory.md")
 }
 
+#[cfg(test)]
 pub(crate) fn read_memory_at(root: &Path) -> String {
-    fs::read_to_string(memory_path(root)).unwrap_or_default()
+    crate::project_memory::read_raw(root).unwrap()
 }
 
-/// 追加一条已确认知识（带时间与出处目标）；新建文件时带头部的简短说明。
-pub(crate) fn append_project_memory_at(
-    root: &Path,
-    goal_name: &str,
-    text: &str,
-) -> Result<(), String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(());
-    }
-    let dir = root.join(".ccode");
-    fs::create_dir_all(&dir).map_err(|e| format!("创建 .ccode 目录失败: {e}"))?;
-    let path = memory_path(root);
-    let mut body = read_memory_at(root);
-    if body.is_empty() {
-        body = "# 项目长期知识\n\n# 这里只放人确认过的结论与决定（验收时沉淀）。\n\n".to_string();
-    }
-    let entry = format!(
-        "- [{}]（目标「{}」）{}\n",
-        crate::sessions::now_iso(),
-        goal_name.trim(),
-        text
-    );
-    let next = format!("{}{}", body, if body.ends_with('\n') { "" } else { "\n" }) + &entry;
-    crate::profiles::atomic_write(&path, &next)
+pub(crate) fn append_project_memory_at(root: &Path, goal_name: &str, text: &str, run_id: Option<&str>) -> Result<(), String> {
+    crate::project_memory::append_confirmed(root, goal_name, text, run_id)
 }
 
 #[tauri::command]
 pub fn read_project_memory(path: String) -> Result<String, String> {
     let root = PathBuf::from(crate::sessions::expand_tilde(&path));
-    Ok(read_memory_at(&root))
+    crate::project_memory::context_at(&root)
+}
+
+#[tauri::command]
+pub fn read_acceptance_log(path: String) -> Result<Vec<AcceptanceLogEntry>, String> {
+    let root = PathBuf::from(crate::sessions::expand_tilde(&path));
+    Ok(read_acceptance_log_at(&root))
 }
 
 pub(crate) fn read_acceptance_log_at(root: &Path) -> Vec<AcceptanceLogEntry> {
     let Ok(text) = fs::read_to_string(acceptance_log_path(root)) else {
         return Vec::new();
     };
-    text.lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
+    let mut out = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<AcceptanceLogEntry>(line) {
+            Ok(entry) => out.push(entry),
+            Err(error) => {
+                crate::logbuf::record(
+                    "warn",
+                    "projects",
+                    &format!("验收账本第 {} 行无法解析，已跳过：{error}", index + 1),
+                );
+            }
+        }
+    }
+    out
 }
 
-/// 追加一条接受记录；同一 Run 已记过则跳过（采纳重试幂等）。
-/// 并发口径：普通目标采纳全程持有该项目 adopt.lock，追加不会发生并发交错。
-pub(crate) fn append_acceptance_log_at(root: &Path, entry: &AcceptanceLogEntry) -> Result<(), String> {
+fn fact_already_recorded(existed: &[AcceptanceLogEntry], entry: &AcceptanceLogEntry) -> bool {
+    let kind = if entry.kind.is_empty() {
+        "goal_adopt"
+    } else {
+        entry.kind.as_str()
+    };
+    existed.iter().any(|item| {
+        let item_kind = if item.kind.is_empty() {
+            "goal_adopt"
+        } else {
+            item.kind.as_str()
+        };
+        match kind {
+            "watch_adopt" => item_kind == "watch_adopt" && item.run_id == entry.run_id,
+            "pipeline_merge" | "coding_merge" => {
+                item_kind == kind
+                    && item.version_id == entry.version_id
+                    && !entry.version_id.is_empty()
+            }
+            _ => {
+                let mut old_paths = item.paths.clone();
+                let mut new_paths = entry.paths.clone();
+                old_paths.sort();
+                new_paths.sort();
+                item_kind == kind
+                    && item.run_id == entry.run_id
+                    && item.goal_id == entry.goal_id
+                    && item.version_id == entry.version_id
+                    && old_paths == new_paths
+                    && item.note == entry.note
+            }
+        }
+    })
+}
+
+/// 追加一条接受记录；去重键按 kind 分化（见 review_contract）。
+/// 调用方应经 `review_contract::commit_fact` 持项目锁。
+pub(crate) fn append_acceptance_log_at(
+    root: &Path,
+    entry: &AcceptanceLogEntry,
+) -> Result<(), String> {
     use std::io::Write;
     let existed = read_acceptance_log_at(root);
-    if existed
-        .iter()
-        .any(|item| item.run_id == entry.run_id && item.goal_id == entry.goal_id)
-    {
+    if fact_already_recorded(&existed, entry) {
         return Ok(());
     }
     let dir = root.join(".ccode");
@@ -1954,7 +2056,8 @@ pub(crate) fn append_acceptance_log_at(root: &Path, entry: &AcceptanceLogEntry) 
         .map_err(|e| format!("打开接受记录失败: {e}"))?;
     file.write_all(line.as_bytes())
         .map_err(|e| format!("写入接受记录失败: {e}"))?;
-    file.sync_all().map_err(|e| format!("落盘接受记录失败: {e}"))?;
+    file.sync_all()
+        .map_err(|e| format!("落盘接受记录失败: {e}"))?;
     Ok(())
 }
 
@@ -2731,7 +2834,11 @@ pub async fn set_project_default_profile(
         if crate::agent_specs::agent_spec(&agent).is_none() {
             return Err(format!("未知 Agent：{agent}"));
         }
-        if let Some(profile_id) = profile_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        if let Some(profile_id) = profile_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
             let bindings = crate::gateway_store::load_bindings()?;
             let binding = bindings
                 .iter()
@@ -2749,8 +2856,7 @@ pub async fn set_project_default_profile(
                 |r| r.get(0),
             )
             .map_err(|_| "项目尚未注册，不能保存默认配置".to_string())?;
-        let mut defaults: BTreeMap<String, String> =
-            serde_json::from_str(&raw).unwrap_or_default();
+        let mut defaults: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap_or_default();
         if let Some(profile_id) = profile_id.map(|value| value.trim().to_string()) {
             if profile_id.is_empty() {
                 defaults.remove(&agent);
@@ -3174,12 +3280,7 @@ pub async fn write_task_draft(
     tauri::async_runtime::spawn_blocking(move || {
         let root =
             ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
-        write_task_draft_at(
-            &root,
-            &step_name,
-            &content,
-            expected_revision.as_deref(),
-        )
+        write_task_draft_at(&root, &step_name, &content, expected_revision.as_deref())
     })
     .await
     .map_err(|e| format!("写入任务书草稿失败: {e}"))?
@@ -4205,10 +4306,17 @@ pub(crate) fn append_pipeline_steps_at_with_submission(
 // ===== 「不使用研究流程」显式标记（pipeline_opt_out） =====
 // 与「稍后再选」（不写标记、保留模板引导）区分：true = 隐藏模板引导横幅与定时任务区块。
 
-/// 读-改-原子写实现（root 需已过项目门槛校验；测试直接调这里）
+/// 读-改-原子写实现（root 需已过项目门槛校验；测试直接调这里）。
+/// 选 true：同时清空步骤表（否则步进器还在），投稿元数据一并拿掉；
+/// 资源、笔记、课题主题、工作区目录都不动。
 pub(crate) fn set_pipeline_opt_out_at(root: &Path, opt_out: bool) -> Result<(), String> {
     let mut cfg = read_config_at(root).config;
     cfg.pipeline_opt_out = opt_out;
+    if opt_out {
+        cfg.steps.clear();
+        cfg.submission_mode = None;
+        cfg.submission_round = None;
+    }
     write_config_at(root, &cfg)
 }
 
@@ -4660,16 +4768,23 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
 
     #[test]
     fn project_skills_roundtrip_and_empty_omits_line() {
-        let (config, warnings) = parse_config("skills = [\"lit-search\", \" lit-search \", \"data-eda\"]\n");
+        let (config, warnings) =
+            parse_config("skills = [\"lit-search\", \" lit-search \", \"data-eda\"]\n");
         assert!(warnings.is_empty(), "{warnings:?}");
         // 去空白 + 去重
-        assert_eq!(config.skills, vec!["lit-search".to_string(), "data-eda".to_string()]);
+        assert_eq!(
+            config.skills,
+            vec!["lit-search".to_string(), "data-eda".to_string()]
+        );
         let rendered = render_config(None, &config).unwrap();
         assert!(rendered.contains("skills"), "{rendered}");
         let back = parse_config(&rendered).0;
         assert_eq!(back.skills, config.skills);
         // 空名单不写行
-        let cleared = ProjectConfigDto { skills: Vec::new(), ..config };
+        let cleared = ProjectConfigDto {
+            skills: Vec::new(),
+            ..config
+        };
         let rendered = render_config(Some(&rendered), &cleared).unwrap();
         assert!(!rendered.contains("skills"));
         // 非数组类型进 warnings 不阻断
@@ -4693,8 +4808,14 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         assert_eq!(again.id, first.id);
         // 目录移动：同一 id 在新路径注册 = 同一项目（路径改写、不建新行、created_at 保留）
         let proj_b = dir.join("b");
-        std::fs::create_dir_all(proj_b.join(".ccode")).unwrap();
-        std::fs::write(proj_b.join(".ccode/project.toml"), &toml).unwrap();
+        conn.execute_batch("CREATE TABLE tasks(project_root TEXT, project_id TEXT);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tasks(project_root) VALUES(?1)",
+            [canonical_key(&proj_a)],
+        )
+        .unwrap();
+        std::fs::rename(&proj_a, &proj_b).unwrap();
         let moved = register_at(&conn, &proj_b, "课题", "2026-09-09T02:00:00Z").unwrap();
         assert_eq!(moved.id, first.id);
         assert_eq!(moved.created_at, first.created_at);
@@ -4702,7 +4823,35 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         assert_eq!(list.len(), 1, "移动重连不得产生第二行");
         assert_eq!(list[0].path, canonical_key(&proj_b));
         assert_eq!(list[0].id, first.id);
+        let task_id: String = conn
+            .query_row("SELECT project_id FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(task_id, first.id);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registering_a_copy_never_takes_over_a_live_project() {
+        let dir = temp_dir("project-copy");
+        let original = dir.join("original");
+        let copy = dir.join("copy");
+        std::fs::create_dir_all(&original).unwrap();
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        let first = register_at(&conn, &original, "原项目", "t1").unwrap();
+        std::fs::create_dir_all(copy.join(".ccode")).unwrap();
+        let card = std::fs::read(original.join(".ccode/project.toml")).unwrap();
+        std::fs::write(copy.join(".ccode/project.toml"), &card).unwrap();
+        let error = register_at(&conn, &copy, "副本", "t2").unwrap_err();
+        assert!(error.contains("原目录仍存在"), "{error}");
+        let projects = list_projects_in(&conn).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].path, first.path);
+        assert_eq!(projects[0].name, first.name);
+        assert_eq!(
+            std::fs::read(copy.join(".ccode/project.toml")).unwrap(),
+            card
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4743,10 +4892,16 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         );
 
         // 整份解析失败 / 键类型不对 / 数组混入非字符串：保护清单不可信，一律拒绝
-        write(&root.join(".ccode/project.toml"), "protected_paths = [\"raw\"\n");
+        write(
+            &root.join(".ccode/project.toml"),
+            "protected_paths = [\"raw\"\n",
+        );
         let err = protected_paths_at(&root).unwrap_err();
         assert!(err.contains("无法确认保护路径"), "{err}");
-        write(&root.join(".ccode/project.toml"), "protected_paths = \"raw\"\n");
+        write(
+            &root.join(".ccode/project.toml"),
+            "protected_paths = \"raw\"\n",
+        );
         assert!(protected_paths_at(&root).is_err());
         write(
             &root.join(".ccode/project.toml"),
@@ -4761,12 +4916,9 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         let dir = temp_dir("project-status");
         let root = dir.join("proj");
         std::fs::create_dir_all(&root).unwrap();
-        record_accepted_goal_at(&root, "研究综述", &["论文/综述.md".into()], "引用太少")
-            .unwrap();
-        record_accepted_goal_at(&root, "研究综述", &["论文/综述.md".into()], "已补")
-            .unwrap();
-        record_accepted_goal_at(&root, "数据清洗", &["data/clean.csv".into()], "")
-            .unwrap();
+        record_accepted_goal_at(&root, "研究综述", &["论文/综述.md".into()], "引用太少").unwrap();
+        record_accepted_goal_at(&root, "研究综述", &["论文/综述.md".into()], "已补").unwrap();
+        record_accepted_goal_at(&root, "数据清洗", &["data/clean.csv".into()], "").unwrap();
         let status = read_project_status_at(&root);
         assert_eq!(status.accepted[0].name, "数据清洗");
         assert_eq!(status.accepted[1].name, "研究综述");
@@ -4780,11 +4932,13 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         let root = dir.join("proj");
         std::fs::create_dir_all(&root).unwrap();
         assert_eq!(read_memory_at(&root), "");
-        append_project_memory_at(&root, "综述", "结论A：X 显著优于 Y").unwrap();
-        append_project_memory_at(&root, "综述", "").unwrap(); // 空意见不沉淀
+        append_project_memory_at(&root, "综述", "结论A：X 显著优于 Y", Some("run-1")).unwrap();
+        append_project_memory_at(&root, "综述", "", Some("run-empty")).unwrap(); // 空意见不沉淀
+        append_project_memory_at(&root, "综述", "结论A：X 显著优于 Y", Some("run-1")).unwrap(); // 同 Run 幂等
         let text = read_memory_at(&root);
-        assert!(text.contains("项目长期知识"));
+        assert!(text.contains("mesa-memory"));
         assert_eq!(text.matches("结论A").count(), 1);
+        assert!(text.contains("\"sourceVersion\":\"run-1\""));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4801,6 +4955,9 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
             note: "已补引用".into(),
             frozen: true,
             decided_at: "2026-09-09T00:00:00Z".into(),
+            kind: "goal_adopt".into(),
+            version_id: format!("{run}:1"),
+            ..Default::default()
         };
         append_acceptance_log_at(&root, &entry("run-1")).unwrap();
         // 同一 Run 重试采纳：幂等跳过，不产生重复行
@@ -4812,6 +4969,33 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
         assert_eq!(log[1].run_id, "run-2");
         assert!(log[0].frozen);
         assert_eq!(log[0].paths, vec!["论文/综述.md".to_string()]);
+        assert_eq!(log[0].kind, "goal_adopt");
+        let mut next_version = entry("run-1");
+        next_version.version_id = "run-1:2".into();
+        append_acceptance_log_at(&root, &next_version).unwrap();
+        append_acceptance_log_at(&root, &next_version).unwrap();
+        assert_eq!(
+            read_acceptance_log_at(&root).len(),
+            3,
+            "同 Run 的新结果版本必须留下独立接受事实"
+        );
+        next_version.paths.push("data.csv".into());
+        append_acceptance_log_at(&root, &next_version).unwrap();
+        next_version.paths.reverse();
+        append_acceptance_log_at(&root, &next_version).unwrap();
+        assert_eq!(
+            read_acceptance_log_at(&root).len(),
+            4,
+            "补采纳其它文件要记账，选择顺序不制造重复"
+        );
+        // 旧七字段行必须读回一条
+        let legacy = r#"{"goalId":"g","goalName":"旧","runId":"r-old","paths":["a.md"],"note":"","frozen":false,"decidedAt":"t"}"#;
+        std::fs::write(acceptance_log_path(&root), format!("{legacy}\n")).unwrap();
+        let old = read_acceptance_log_at(&root);
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].run_id, "r-old");
+        assert_eq!(old[0].kind, "goal_adopt");
+        assert_eq!(old[0].paths, vec!["a.md".to_string()]);
         // 损坏行不拖垮整本账
         std::fs::write(
             acceptance_log_path(&root),
@@ -4822,7 +5006,7 @@ protected_paths = ["数据/raw", "数据/raw/a.csv", "../x"]
             ),
         )
         .unwrap();
-        assert_eq!(read_acceptance_log_at(&root).len(), 2);
+        assert_eq!(read_acceptance_log_at(&root).len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5682,7 +5866,8 @@ resources = ["ghost.pdf"]
         let tasks = render_tasks(Some(custom), &[]).unwrap();
         assert!(tasks.contains("Mesa 项目档案卡"), "{tasks}");
         assert!(tasks.contains("# 用户手写注释"), "{tasks}");
-        let legacy = "# Ccode 项目档案卡（工作方式 / 研究流程 / 资源清单）。\nwork_mode = \"coding\"\n";
+        let legacy =
+            "# Ccode 项目档案卡（工作方式 / 研究流程 / 资源清单）。\nwork_mode = \"coding\"\n";
         let kept = render_config(Some(legacy), &config).unwrap();
         assert!(
             kept.contains("Ccode 项目档案卡"),
@@ -5718,6 +5903,26 @@ resources = ["ghost.pdf"]
             !read_config_at(&root).config.pipeline_opt_out,
             "选了模板 = 启用流程，标记必须清掉"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opt_out_clears_steps_keeps_resources() {
+        let dir = temp_dir("opt-out-clear-steps");
+        let root = dir.join("proj");
+        write(
+            &config_path(&root),
+            "topic = \"旧课题\"\n\n[[resources]]\nname = \"一篇\"\npath = \"papers/a.pdf\"\ntype = \"paper\"\n\n[[steps]]\nname = \"文献精读\"\nworkspace_name = \"lit-notes\"\n",
+        );
+        set_pipeline_opt_out_at(&root, true).unwrap();
+        let cfg = read_config_at(&root).config;
+        assert!(cfg.pipeline_opt_out);
+        assert!(cfg.steps.is_empty());
+        assert_eq!(cfg.topic.as_deref(), Some("旧课题"));
+        assert_eq!(cfg.resources.len(), 1);
+        assert_eq!(cfg.resources[0].path, "papers/a.pdf");
+        let raw = fs::read_to_string(config_path(&root)).unwrap();
+        assert!(!raw.contains("[[steps]]"), "{raw}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6001,7 +6206,9 @@ resources = ["ghost.pdf"]
         assert!(root.join("notes").is_dir());
         assert!(root.join("references.bib").exists());
         assert!(root.join("README.md").exists());
-        let included: serde_json::Value = serde_json::from_str(&fs::read_to_string(root.join("papers/included.json")).unwrap()).unwrap();
+        let included: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join("papers/included.json")).unwrap())
+                .unwrap();
         assert_eq!(included[0]["id"], "leader-2016-demo");
         assert_eq!(included[0]["fulltextStatus"], "demo-only");
         let pdf = fs::read(root.join(DEMO_PDF_REL)).unwrap();
@@ -6061,7 +6268,10 @@ resources = ["ghost.pdf"]
         write(&root.join("papers/included.json"), "user supplied records");
         let p2 = create_demo_at(&base, &conn).unwrap();
         assert_eq!(p2.path, p.path);
-        assert_eq!(fs::read_to_string(root.join("papers/included.json")).unwrap(), "user supplied records");
+        assert_eq!(
+            fs::read_to_string(root.join("papers/included.json")).unwrap(),
+            "user supplied records"
+        );
         assert_eq!(
             fs::read_to_string(root.join("README.md")).unwrap(),
             "user edit"
@@ -6453,12 +6663,19 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
         let cfg = demo_project_config();
         write_config_at(&dir, &cfg).unwrap();
         let restored = read_config_at(&dir).config;
-        let draft = restored.steps.iter().find(|s| s.workspace_name == "draft").unwrap();
+        let draft = restored
+            .steps
+            .iter()
+            .find(|s| s.workspace_name == "draft")
+            .unwrap();
         assert_eq!(draft.decision_mode, "hard_pause");
         assert_eq!(draft.decisions.len(), 1);
         assert!(draft.decisions[0].options.is_empty());
         assert!(draft.decisions[0].q.contains("已评阅证据"));
-        assert!(restored.steps[1].inputs.iter().any(|s| s == "papers/included.json"));
+        assert!(restored.steps[1]
+            .inputs
+            .iter()
+            .any(|s| s == "papers/included.json"));
         fs::remove_dir_all(dir).ok();
     }
 
@@ -6836,7 +7053,8 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
             &config_path(&root),
             "[[steps]]\nname = \"检索筛选\"\nworkspace_name = \"lit\"\n",
         );
-        let saved = write_task_draft_at(&root, "检索筛选", "# 任务书草稿：检索筛选\n", None).unwrap();
+        let saved =
+            write_task_draft_at(&root, "检索筛选", "# 任务书草稿：检索筛选\n", None).unwrap();
         let path = root.join(&saved.rel_path);
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -6861,13 +7079,8 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
             fs::read_to_string(root.join(&first.rel_path)).unwrap(),
             "v1\n"
         );
-        let second = write_task_draft_at(
-            &root,
-            "检索筛选",
-            "v2\n",
-            first.revision.as_deref(),
-        )
-        .unwrap();
+        let second =
+            write_task_draft_at(&root, "检索筛选", "v2\n", first.revision.as_deref()).unwrap();
         assert_eq!(
             fs::read_to_string(root.join(&second.rel_path)).unwrap(),
             "v2\n"

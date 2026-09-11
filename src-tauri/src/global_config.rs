@@ -793,10 +793,8 @@ fn patch_grok_config(
     }
     let api_backend = profile.api_backend.as_deref().filter(|s| !s.is_empty());
     for m in &profile.models {
-        let ctx = crate::model_registry::model_context_size_for_config(
-            m,
-            profile.gateway_id.as_deref(),
-        );
+        let ctx =
+            crate::model_registry::model_context_size_for_config(m, profile.gateway_id.as_deref());
         if api_backend.is_none() && ctx.is_none() {
             continue;
         }
@@ -1288,8 +1286,7 @@ fn preview_plans(
     GlobalWritePreviewDto {
         files,
         skipped_policies,
-        restart_note: "已经打开的 Mesa 终端和外部 CLI 不会自动重读配置，需要新开才会生效。"
-            .into(),
+        restart_note: "已经打开的 Mesa 终端和外部 CLI 不会自动重读配置，需要新开才会生效。".into(),
         scope_note: "只改外部 CLI 的配置文件。不会改 Mesa 启动栏预选，也不会改某个项目的默认配置。"
             .into(),
     }
@@ -1921,7 +1918,7 @@ pub async fn apply_profile_global(
             let _guard = GLOBAL_CONFIG_MUTEX
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-        let _file_guard = crate::storage::config_lock("global-config")?;
+            let _file_guard = crate::storage::config_lock("global-config")?;
             let dir = backups_root()?.join(&agent);
             if !dir.join("original").join("manifest.json").is_file() {
                 return Err("当前全局文件不是 Mesa 写的，无需恢复".into());
@@ -2023,7 +2020,7 @@ pub(crate) fn register_codex_client_provider_named(
     let _guard = GLOBAL_CONFIG_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-        let _file_guard = crate::storage::config_lock("global-config")?;
+    let _file_guard = crate::storage::config_lock("global-config")?;
     let home = dirs::home_dir().ok_or("无法确定用户主目录")?;
     let cfg_path = home.join(".codex/config.toml");
     // 只写 config.toml：认证在 provider 块内 experimental_bearer_token，auth.json 完全不碰
@@ -3199,11 +3196,11 @@ mod tests {
         );
         assert_eq!(preview.files.len(), 1);
         assert_eq!(preview.files[0].action, "modify");
-        assert!(preview.files[0].changes.iter().any(|c| {
-            c.path.contains("ANTHROPIC_DEFAULT_OPUS_MODEL") && c.op == "remove"
-        }));
-        let token = preview
-            .files[0]
+        assert!(preview.files[0]
+            .changes
+            .iter()
+            .any(|c| { c.path.contains("ANTHROPIC_DEFAULT_OPUS_MODEL") && c.op == "remove" }));
+        let token = preview.files[0]
             .changes
             .iter()
             .find(|c| c.path.contains("AUTH_TOKEN"));
@@ -3219,7 +3216,8 @@ mod tests {
     fn skipped_policy_notes_cover_tui_and_extra_env() {
         let mut p = profile("qwen");
         p.request_policy.reasoning_effort = Some("high".into());
-        p.extra_env.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
+        p.extra_env
+            .insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
         let notes = skipped_policy_notes(&p);
         assert!(notes.iter().any(|n| n.contains("思考档")));
         assert!(notes.iter().any(|n| n.contains("附加环境变量")));

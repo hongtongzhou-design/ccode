@@ -119,9 +119,20 @@ export function visibleDeclaredTasks<
   tasks: readonly T[],
   kinds: ReadonlySet<string>,
 ): T[] {
-  // 已归档（archivedAt）的目标不出列表：删除即归档后数据还在，只是不再出现
+  // 已归档（archivedAt）的目标不出主列表：删除即归档后数据还在，只是不再出现
   return tasks.filter(
     (task) => kinds.has(task.kind) && isDeclaredTask(task) && !task.archivedAt,
+  );
+}
+
+export function archivedDeclaredTasks<
+  T extends { kind: string; name: string; declared?: boolean; archivedAt?: string | null },
+>(
+  tasks: readonly T[],
+  kinds: ReadonlySet<string>,
+): T[] {
+  return tasks.filter(
+    (task) => kinds.has(task.kind) && isDeclaredTask(task) && !!task.archivedAt,
   );
 }
 

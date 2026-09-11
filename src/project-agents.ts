@@ -171,3 +171,12 @@ export function currentProfileLine(
   if (selected) return selected.modelLine;
   return row.profiles[0]?.modelLine ?? null;
 }
+
+/** 项目 Agents 页为这家绑定的配置；空 = 未绑定，继续会话走原 Run / 上次使用。 */
+export function projectBoundProfileId(
+  defaultProfiles: Record<string, string> | null | undefined,
+  agentId: string,
+): string | undefined {
+  const id = defaultProfiles?.[agentId]?.trim();
+  return id || undefined;
+}

@@ -51,20 +51,50 @@ pub struct PtyManager {
     entries: Arc<Mutex<HashMap<String, PtyEntry>>>,
 }
 
-fn path_within(path: &str, root: &str) -> bool { crate::paths::path_within(path, root) }
+fn path_within(path: &str, root: &str) -> bool {
+    crate::paths::path_within(path, root)
+}
 
 impl PtyManager {
     pub(crate) fn shutdown(&self) {
-        let entries: Vec<_> = self.entries.lock().unwrap().drain().map(|(_, e)| e).collect();
+        let entries: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, e)| e)
+            .collect();
         let mut workers = Vec::new();
         for entry in entries {
             workers.push(std::thread::spawn(move || {
                 terminate_pty_child(entry.child);
-                if let Some(id) = entry.run_id { let _ = crate::runs::close_run_with_result(&id, None, "stopped", None, Some("应用退出")); }
+                if let Some(id) = entry.run_id {
+                    let _ = crate::runs::close_run_with_result(
+                        &id,
+                        None,
+                        "stopped",
+                        None,
+                        Some("应用退出"),
+                    );
+                }
             }));
         }
         let deadline = Instant::now() + Duration::from_secs(5);
-        while workers.iter().any(|w| !w.is_finished()) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
+        while workers.iter().any(|w| !w.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    pub(crate) fn has_run(&self, run_id: &str) -> bool {
+        let id = run_id.trim();
+        if id.is_empty() {
+            return false;
+        }
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .any(|entry| entry.run_id.as_deref() == Some(id))
     }
 
     /// 返回指定工作区里仍存活的 agent/run 脚本类型；普通登录 shell 不阻止归档。
@@ -265,8 +295,13 @@ const WIN32_INPUT_RECORD_GAP: std::time::Duration = std::time::Duration::from_mi
 /// 向指定 PTY 的独立队列写字节；只在查找 writer 句柄时持全局表锁。
 /// PTY 已消失（标签被秒关）时返回 Err，由调用方决定是否静默。
 fn write_pty_bytes(manager: &PtyManager, pty_id: &str, bytes: &[u8]) -> Result<(), String> {
-    let writer = manager.entries.lock().unwrap().get(pty_id)
-        .map(|entry| entry.writer.clone()).ok_or("终端不存在或已退出")?;
+    let writer = manager
+        .entries
+        .lock()
+        .unwrap()
+        .get(pty_id)
+        .map(|entry| entry.writer.clone())
+        .ok_or("终端不存在或已退出")?;
     writer.write(bytes)
 }
 
@@ -312,7 +347,9 @@ fn spawn_tracked(
     purpose: PtyPurpose,
     run_id: Option<String>,
 ) -> Result<String, String> {
-    if crate::process::shutting_down() { return Err("应用正在退出，拒绝启动终端".into()); }
+    if crate::process::shutting_down() {
+        return Err("应用正在退出，拒绝启动终端".into());
+    }
     // 声明现代终端能力：缺少这些时 CLI 会按哑终端处理，输出退化为黑白
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -427,8 +464,13 @@ fn spawn_tracked(
             let code = loop {
                 match entry.child.try_wait() {
                     Ok(Some(status)) => break status.exit_code() as i64,
-                    Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-                    _ => { terminate_pty_child(entry.child); break -1; }
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20))
+                    }
+                    _ => {
+                        terminate_pty_child(entry.child);
+                        break -1;
+                    }
                 }
             };
             if let Some(run_id) = entry.run_id {
@@ -518,8 +560,9 @@ pub fn pty_spawn(
     };
     // 恢复和新建必须兑现同一权限；能力不足不能只保留 discuss 标签。
     let plan_args = if discuss {
-        agents::readonly_launch_args(&agent_id, &plan.args)
-            .ok_or("此 Agent 不支持只讨论启动约束，请换支持只读/计划模式的 Agent 或明确选择可写权限")?
+        agents::readonly_launch_args(&agent_id, &plan.args).ok_or(
+            "此 Agent 不支持只讨论启动约束，请换支持只读/计划模式的 Agent 或明确选择可写权限",
+        )?
     } else {
         plan.args.clone()
     };
@@ -587,7 +630,7 @@ pub fn pty_spawn(
     }
     let opened_id = opened.as_ref().map(|r| r.id.clone());
     if let Some(id) = opened_id.as_deref() {
-        crate::runs::claim_start(id)?;
+        crate::runs::claim_interactive_start(id, manager.inner().has_run(id))?;
     }
     if let (Some(id), Some(sid)) = (opened_id.as_deref(), session_hint.as_deref()) {
         let _ = crate::runs::attach_session_impl(id, sid);
@@ -685,7 +728,7 @@ pub fn shell_spawn(
     };
     let run_id = run_id.filter(|s| !s.trim().is_empty());
     if let Some(id) = run_id.as_deref() {
-        crate::runs::claim_start(id)?;
+        crate::runs::claim_interactive_start(id, manager.inner().has_run(id))?;
     }
     match spawn_tracked(
         &app,
@@ -752,7 +795,7 @@ pub fn pty_spawn_custom(
     if run.runtime != "custom" {
         return Err("Run 不是 Custom Runtime".into());
     }
-    crate::runs::claim_start(&run_id)?;
+    crate::runs::claim_interactive_start(&run_id, manager.inner().has_run(&run_id))?;
     let mut cmd =
         crate::process::pty_command(std::path::Path::new(&runtime.command), &runtime.args);
     for (key, value) in runtime.env {
@@ -853,11 +896,16 @@ pub async fn pty_write(
     let (writer, paste_on) = {
         let entries = manager.entries.lock().unwrap();
         let entry = entries.get(&pty_id).ok_or("终端不存在或已退出")?;
-        (entry.writer.clone(), entry.bracketed_paste.load(Ordering::Relaxed))
+        (
+            entry.writer.clone(),
+            entry.bracketed_paste.load(Ordering::Relaxed),
+        )
     };
     // 先按 IPC 到达次序入队，再后台等待；不能让线程池调度把按键顺序打乱。
     let receipt = writer.enqueue(wrap_bracketed_paste(&data, paste_on).as_bytes(), None)?;
-    tauri::async_runtime::spawn_blocking(move || receipt.wait()).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || receipt.wait())
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Windows 专用：把终端前景/底色（OSC 10/11 回报载荷）主动推给 agent。
@@ -905,10 +953,18 @@ pub async fn pty_write_submit(
     let (writer, paste_on) = {
         let entries = manager.entries.lock().unwrap();
         let entry = entries.get(&pty_id).ok_or("终端不存在或已退出")?;
-        (entry.writer.clone(), entry.bracketed_paste.load(Ordering::Relaxed))
+        (
+            entry.writer.clone(),
+            entry.bracketed_paste.load(Ordering::Relaxed),
+        )
     };
-    let receipt = writer.enqueue_submit(wrap_bracketed_paste(&text, paste_on).as_bytes(), submit.as_bytes())?;
-    tauri::async_runtime::spawn_blocking(move || receipt.wait()).await.map_err(|e| format!("写入终端失败：{e}"))?
+    let receipt = writer.enqueue_submit(
+        wrap_bracketed_paste(&text, paste_on).as_bytes(),
+        submit.as_bytes(),
+    )?;
+    tauri::async_runtime::spawn_blocking(move || receipt.wait())
+        .await
+        .map_err(|e| format!("写入终端失败：{e}"))?
 }
 
 /// 关窗守卫用：PTY 在管且子进程尚未退出才为 true。
@@ -1040,13 +1096,17 @@ pub(crate) fn kill_process_tree(pid: u32) {
     {
         let mut cmd = crate::process::background_command("taskkill");
         cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
-        cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         if let Ok(mut taskkill) = cmd.spawn() {
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 match taskkill.try_wait() {
                     Ok(Some(_)) | Err(_) => break,
-                    Ok(None) if Instant::now() >= deadline => { let _ = taskkill.kill(); break; }
+                    Ok(None) if Instant::now() >= deadline => {
+                        let _ = taskkill.kill();
+                        break;
+                    }
                     Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 }
             }
@@ -1055,7 +1115,9 @@ pub(crate) fn kill_process_tree(pid: u32) {
 }
 
 fn terminate_pty_child(mut child: Box<dyn Child + Send + Sync>) {
-    if let Some(pid) = child.process_id() { kill_process_tree(pid); }
+    if let Some(pid) = child.process_id() {
+        kill_process_tree(pid);
+    }
     let _ = child.kill();
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -1063,7 +1125,9 @@ fn terminate_pty_child(mut child: Box<dyn Child + Send + Sync>) {
             Ok(Some(_)) | Err(_) => return,
             Ok(None) if Instant::now() >= deadline => {
                 // 最后回收不阻塞 IPC；管理表已移除，主窗口仍可响应。
-                std::thread::spawn(move || { let _ = child.wait(); });
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
                 return;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
@@ -1412,6 +1476,12 @@ mod tests {
     #[test]
     fn has_running_process_false_for_unknown_pty() {
         assert!(!has_running_process(&PtyManager::default(), "no-such-pty"));
+    }
+
+    #[test]
+    fn has_run_false_when_empty() {
+        assert!(!PtyManager::default().has_run("run-1"));
+        assert!(!PtyManager::default().has_run(""));
     }
 
     #[cfg(unix)]

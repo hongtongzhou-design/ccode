@@ -36,6 +36,7 @@ import {
   taskStatusLabel,
   toggleTaskMaterialPath,
   visibleDeclaredTasks,
+  archivedDeclaredTasks,
 } from "../src/project-tasks.ts";
 
 test("write tasks do not silently default to the whole project", () => {
@@ -101,10 +102,32 @@ test("declared tasks hide path-named conversation wrappers", () => {
         { kind: "free_research", name: "/Users/me/proj", declared: false },
         { kind: "office_doc", name: "改周报", declared: true },
         { kind: "pipeline_step", name: "文献精读", declared: true },
+        {
+          kind: "free_research",
+          name: "已归档综述",
+          declared: true,
+          archivedAt: "2026-09-09T00:00:00Z",
+        },
       ],
       new Set(["free_research", "office_doc"]),
     ).map((task) => task.name),
     ["整理筛选清单", "改周报"],
+  );
+  assert.deepEqual(
+    archivedDeclaredTasks(
+      [
+        { kind: "free_research", name: "整理筛选清单", declared: true },
+        {
+          kind: "free_research",
+          name: "已归档综述",
+          declared: true,
+          archivedAt: "2026-09-09T00:00:00Z",
+        },
+        { kind: "office_doc", name: "改周报", declared: true, archivedAt: null },
+      ],
+      new Set(["free_research", "office_doc"]),
+    ).map((task) => task.name),
+    ["已归档综述"],
   );
 });
 

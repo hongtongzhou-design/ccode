@@ -271,6 +271,10 @@ pub struct CodingWorktreeDto {
     pub last_commit_at: Option<String>,
     pub dirty_count: u32,
     pub upstream_behind: u32,
+    /// worktree HEAD；打开改动时前端冻结，合并时作 expect_reviewed_sha
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    pub ledger_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -335,6 +339,8 @@ pub struct CodingLaneDto {
     pub branch: String,
     pub worktree_path: String,
     pub current_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,6 +351,11 @@ pub struct CodingMergeDto {
     pub cwd: String,
     pub message: String,
     pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed_sha: Option<String>,
+    pub ledger_written: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -418,6 +429,7 @@ struct WorktreeRow {
     path: PathBuf,
     branch: String,
     detached: bool,
+    head: String,
 }
 
 fn parse_worktree_list(text: &str) -> Vec<WorktreeRow> {
@@ -425,34 +437,57 @@ fn parse_worktree_list(text: &str) -> Vec<WorktreeRow> {
     let mut path: Option<PathBuf> = None;
     let mut branch = String::new();
     let mut detached = false;
+    let mut head = String::new();
     let flush = |path: &mut Option<PathBuf>,
                  branch: &mut String,
                  detached: &mut bool,
+                 head: &mut String,
                  rows: &mut Vec<WorktreeRow>| {
         if let Some(p) = path.take() {
             rows.push(WorktreeRow {
                 path: p,
                 branch: std::mem::take(branch),
                 detached: *detached,
+                head: std::mem::take(head),
             });
             *detached = false;
         }
     };
     for line in text.lines() {
         if line.is_empty() {
-            flush(&mut path, &mut branch, &mut detached, &mut rows);
+            flush(
+                &mut path,
+                &mut branch,
+                &mut detached,
+                &mut head,
+                &mut rows,
+            );
             continue;
         }
         if let Some(rest) = line.strip_prefix("worktree ") {
-            flush(&mut path, &mut branch, &mut detached, &mut rows);
+            flush(
+                &mut path,
+                &mut branch,
+                &mut detached,
+                &mut head,
+                &mut rows,
+            );
             path = Some(PathBuf::from(rest));
         } else if let Some(rest) = line.strip_prefix("branch ") {
             branch = strip_heads(rest);
+        } else if let Some(rest) = line.strip_prefix("HEAD ") {
+            head = rest.trim().to_string();
         } else if line == "detached" {
             detached = true;
         }
     }
-    flush(&mut path, &mut branch, &mut detached, &mut rows);
+    flush(
+        &mut path,
+        &mut branch,
+        &mut detached,
+        &mut head,
+        &mut rows,
+    );
     rows
 }
 
@@ -468,10 +503,13 @@ fn ahead_behind(repo: &Path, left: &str, right: &str) -> (u32, u32) {
 }
 
 fn dirty_facts(path: &Path) -> (bool, u32) {
-    let Ok(s) = git(path, &["status", "--porcelain=v1"]) else {
+    let Ok(s) = git(path, &["status", "--porcelain=v1", "--untracked-files=all"]) else {
         return (false, 0);
     };
-    let n = s.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+    let n = s
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !crate::review_contract::is_untracked_ledger_file(l))
+        .count() as u32;
     (n > 0, n)
 }
 
@@ -596,7 +634,14 @@ fn overview_at(repo: &Path) -> Result<CodingOverviewDto, String> {
         if facts.merging && merging_cwd.is_none() {
             merging_cwd = Some(path_s.clone());
         }
+        let ledger_pending = !branch.is_empty()
+            && !is_base
+            && crate::review_contract::pending_needs_attention(&format!(
+                "coding-{}-{branch}",
+                crate::projects::canonical_key(&repo)
+            ));
         worktrees.push(CodingWorktreeDto {
+            ledger_pending,
             path: path_s,
             branch,
             is_primary,
@@ -610,6 +655,11 @@ fn overview_at(repo: &Path) -> Result<CodingOverviewDto, String> {
             last_commit_at: facts.last_commit_at,
             dirty_count: facts.dirty_count,
             upstream_behind: facts.upstream_behind,
+            head: if row.head.is_empty() {
+                None
+            } else {
+                Some(row.head.clone())
+            },
         });
     }
 
@@ -785,7 +835,24 @@ fn ensure_lanes_schema(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_coding_lanes_repo ON coding_lanes(repo_path);",
     )
-    .map_err(|e| format!("初始化 coding_lanes 表失败: {e}"))
+    .map_err(|e| format!("初始化 coding_lanes 表失败: {e}"))?;
+    let _ = conn.execute_batch("ALTER TABLE coding_lanes ADD COLUMN project_id TEXT;");
+    Ok(())
+}
+
+pub(crate) fn relocate_lane_repo_paths(
+    project_id: &str,
+    old_path: &str,
+    new_path: &str,
+) -> Result<(), String> {
+    let conn = crate::sessions::open_db()?;
+    ensure_lanes_schema(&conn)?;
+    conn.execute(
+        "UPDATE coding_lanes SET repo_path=?3, project_id=?1 WHERE project_id=?1 OR repo_path=?2",
+        params![project_id, old_path, new_path],
+    )
+    .map_err(|e| format!("更新编程车道位置失败: {e}"))?;
+    Ok(())
 }
 
 fn list_lanes_for(repo: &Path) -> Vec<CodingLaneDto> {
@@ -797,8 +864,8 @@ fn list_lanes_for(repo: &Path) -> Vec<CodingLaneDto> {
     }
     let key = crate::projects::canonical_key(repo);
     let mut stmt = match conn.prepare(
-        "SELECT id, repo_path, name, theme, branch, worktree_path, current_run_id
-         FROM coding_lanes WHERE repo_path = ?1 ORDER BY created_at",
+        "SELECT id, repo_path, name, theme, branch, worktree_path, current_run_id, project_id
+         FROM coding_lanes WHERE repo_path = ?1 OR project_id = (SELECT id FROM projects WHERE path=?1) ORDER BY created_at",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -812,6 +879,7 @@ fn list_lanes_for(repo: &Path) -> Vec<CodingLaneDto> {
             branch: r.get(4)?,
             worktree_path: r.get(5)?,
             current_run_id: r.get(6)?,
+            project_id: r.get(7).ok().flatten(),
         })
     });
     match rows {
@@ -921,10 +989,11 @@ pub async fn coding_upsert_lane(
             }
         });
         let now = chrono::Local::now().to_rfc3339();
+        let project_id = crate::projects::project_id_at(&repo);
         conn.execute(
-            "INSERT INTO coding_lanes (id, repo_path, name, theme, branch, worktree_path, current_run_id, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,NULL,?7)
-             ON CONFLICT(id) DO UPDATE SET name=?3, theme=?4, branch=?5, worktree_path=?6",
+            "INSERT INTO coding_lanes (id, repo_path, name, theme, branch, worktree_path, current_run_id, created_at, project_id)
+             VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,?8)
+             ON CONFLICT(id) DO UPDATE SET name=?3, theme=?4, branch=?5, worktree_path=?6, project_id=COALESCE(?8, coding_lanes.project_id)",
             params![
                 id,
                 repo.to_string_lossy().as_ref(),
@@ -933,6 +1002,7 @@ pub async fn coding_upsert_lane(
                 branch,
                 wt.to_string_lossy().as_ref(),
                 now,
+                project_id,
             ],
         )
         .map_err(|e| format!("保存车道失败: {e}"))?;
@@ -944,6 +1014,7 @@ pub async fn coding_upsert_lane(
             branch,
             worktree_path: wt.to_string_lossy().into_owned(),
             current_run_id: None,
+            project_id,
         })
     })
     .await
@@ -1178,8 +1249,13 @@ fn force_remove_at(repo: &Path, worktree_path: &str, delete_branch: bool) -> Res
     Ok(())
 }
 
-fn merge_at(repo: &Path, branch: &str) -> Result<CodingMergeDto, String> {
+fn merge_at(
+    repo: &Path,
+    branch: &str,
+    expect_reviewed_sha: Option<&str>,
+) -> Result<CodingMergeDto, String> {
     let repo = PathBuf::from(crate::projects::canonical_key(repo));
+    let _apply_lock = crate::review_contract::apply_lock(&repo)?;
     let branch = strip_heads(branch);
     let ov = overview_at(&repo)?;
     if !ov.is_repo {
@@ -1196,17 +1272,53 @@ fn merge_at(repo: &Path, branch: &str) -> Result<CodingMergeDto, String> {
             cwd: repo.to_string_lossy().into_owned(),
             message: format!("没有检出「{base}」的工作树。请先为基准建一棵工作树再合并。"),
             code: "base_not_checked_out".into(),
+            version_id: None,
+            reviewed_sha: None,
+            ledger_written: false,
         });
     };
+    let cwd = PathBuf::from(&target.path);
+    let already = crate::workspaces::git_is_ancestor(&cwd, &branch, &base)?;
+    let tip = git_long(&repo, &["rev-parse", &branch])?;
+    let pending_key = format!("coding-{}-{branch}", crate::projects::canonical_key(&repo));
+    if crate::review_contract::read_pending(&pending_key)?.is_some() || already {
+        let entry = crate::review_contract::recover_fact(
+            &repo,
+            &pending_key,
+            crate::review_contract::KIND_CODING_MERGE,
+            &branch,
+            &tip,
+        )?;
+        if !crate::workspaces::git_is_ancestor(&cwd, &entry.version_id, &base)? {
+            return Err("恢复凭证中的版本不在基准历史中，未重新合并".into());
+        }
+        let recording = crate::review_contract::record_pending_fact(&repo, &pending_key, &entry);
+        let ledger = recording.is_ok();
+        return Ok(CodingMergeDto {
+            merged: true,
+            conflict: false,
+            cwd: target.path.clone(),
+            message: match recording {
+                Ok(()) => format!(
+                    "文件已进入项目 · {}",
+                    entry.version_id.chars().take(8).collect::<String>()
+                ),
+                Err(e) => format!("文件已进主仓，但验收记录未完成：{e}。请点「再记录验收」"),
+            },
+            code: "ok".into(),
+            version_id: Some(entry.version_id),
+            reviewed_sha: entry.reviewed_sha,
+            ledger_written: ledger,
+        });
+    }
     if target.dirty {
         return Err("基准工作树有未提交改动，先提交或丢弃再合并".into());
     }
-    // 保护路径：与科研验收合并同一口径（workspaces.rs）——分支改动了被保护路径时拒绝合并，
-    // 由人先撤掉这些改动或调整保护设置；配置读不出时 fail-closed
+    crate::review_contract::assert_reviewed_sha(expect_reviewed_sha.unwrap_or(""), &tip)?;
     let protected = crate::projects::protected_paths_at(&repo)?;
+    let range = format!("{base}...{tip}");
+    let touched = git_long(&repo, &["diff", "--name-only", &range])?;
     if !protected.is_empty() {
-        let range = format!("{base}...{branch}");
-        let touched = git_long(&repo, &["diff", "--name-only", &range])?;
         let hits: Vec<&str> = touched
             .lines()
             .filter(|rel| crate::projects::path_is_protected(rel, &protected))
@@ -1224,22 +1336,60 @@ fn merge_at(repo: &Path, branch: &str) -> Result<CodingMergeDto, String> {
             ));
         }
     }
-    let cwd = PathBuf::from(&target.path);
     match git_long(
         &cwd,
-        &["-c", "commit.gpgsign=false", "merge", "--no-edit", &branch],
+        &["-c", "commit.gpgsign=false", "merge", "--no-edit", &tip],
     ) {
-        Ok(text) => Ok(CodingMergeDto {
-            merged: true,
-            conflict: false,
-            cwd: target.path.clone(),
-            message: if text.is_empty() {
-                format!("已把 {branch} 合并进 {base}")
-            } else {
-                text
-            },
-            code: "ok".into(),
-        }),
+        Ok(text) => {
+            let version_id = git_long(&cwd, &["rev-parse", "HEAD"])?;
+            let paths: Vec<String> = touched
+                .lines()
+                .map(|l| l.to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            let entry = crate::projects::AcceptanceLogEntry {
+                goal_id: String::new(),
+                goal_name: format!("{branch} → {base}"),
+                run_id: String::new(),
+                paths,
+                note: format!("已把 {branch} 合并进 {base}"),
+                frozen: false,
+                decided_at: crate::sessions::now_iso(),
+                kind: crate::review_contract::KIND_CODING_MERGE.into(),
+                version_id: version_id.clone(),
+                reviewed_sha: if tip.is_empty() {
+                    None
+                } else {
+                    Some(tip.clone())
+                },
+                project_id: crate::projects::project_id_at(&repo),
+                scene_ref: Some(branch.clone()),
+                content_fingerprints: Vec::new(),
+            };
+            let ledger =
+                crate::review_contract::record_pending_fact(&repo, &pending_key, &entry).is_ok();
+            Ok(CodingMergeDto {
+                merged: true,
+                conflict: false,
+                cwd: target.path.clone(),
+                message: if ledger {
+                    if text.is_empty() {
+                        format!(
+                            "文件已进入项目 · {}",
+                            &version_id.chars().take(8).collect::<String>()
+                        )
+                    } else {
+                        text
+                    }
+                } else {
+                    "已合并进基准，但验收记录未写下。请再点一次合并以补记".into()
+                },
+                code: "ok".into(),
+                version_id: Some(version_id),
+                reviewed_sha: if tip.is_empty() { None } else { Some(tip) },
+                ledger_written: ledger,
+            })
+        }
         Err(e) => {
             if merging_at(&cwd) {
                 Ok(CodingMergeDto {
@@ -1248,6 +1398,9 @@ fn merge_at(repo: &Path, branch: &str) -> Result<CodingMergeDto, String> {
                     cwd: target.path.clone(),
                     message: "合并冲突，请到终端改动面板解决后提交，或点「取消合并」".into(),
                     code: "ok".into(),
+                    version_id: None,
+                    reviewed_sha: None,
+                    ledger_written: false,
                 })
             } else {
                 Err(e)
@@ -1296,16 +1449,38 @@ fn run_tool(
     // 这里只打开 GitHub Desktop/浏览器，子孙窗口必须在启动器退出后继续运行。
     // 不纳入捕获任务的 kill-on-close Job；也不继承输出管道，避免等到窗口关闭才 EOF。
     let mut cmd = crate::process::background_command(bin);
-    if let Some(dir) = cwd { cmd.current_dir(dir); }
-    cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     let mut child = cmd.spawn().map_err(|e| format!("启动外部应用失败：{e}"))?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok((status.success(), if status.success() { String::new() } else { format!("启动器退出码：{:?}", status.code()) })),
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Ok(None) => { let _ = child.kill(); return Err("外部应用启动超时".into()); }
-            Err(error) => { let _ = child.kill(); return Err(format!("等待启动器失败：{error}")); }
+            Ok(Some(status)) => {
+                return Ok((
+                    status.success(),
+                    if status.success() {
+                        String::new()
+                    } else {
+                        format!("启动器退出码：{:?}", status.code())
+                    },
+                ))
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                return Err("外部应用启动超时".into());
+            }
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("等待启动器失败：{error}"));
+            }
         }
     }
 }
@@ -1647,10 +1822,13 @@ pub async fn coding_push(cwd: String) -> Result<String, String> {
 pub async fn coding_merge_into_base(
     repo_path: String,
     branch: String,
+    expect_reviewed_sha: Option<String>,
 ) -> Result<CodingMergeDto, String> {
-    tauri::async_runtime::spawn_blocking(move || merge_at(&expand(&repo_path), &branch))
-        .await
-        .map_err(|e| format!("合并失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        merge_at(&expand(&repo_path), &branch, expect_reviewed_sha.as_deref())
+    })
+    .await
+    .map_err(|e| format!("合并失败: {e}"))?
 }
 
 #[tauri::command]
@@ -1762,7 +1940,9 @@ mod tests {
         let rows = parse_worktree_list(text);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].branch, "main");
+        assert_eq!(rows[0].head, "abc");
         assert_eq!(rows[1].branch, "feature/login");
+        assert_eq!(rows[1].head, "def");
         assert!(!rows[1].detached);
     }
 
@@ -1913,10 +2093,84 @@ mod tests {
             &["-c", "commit.gpgsign=false", "commit", "-m", "feat"],
         );
         git_ok(&repo, &["checkout", "main"]);
-        let out = merge_at(&repo, "feat").unwrap();
+        let out = merge_at(
+            &repo,
+            "feat",
+            Some(&git_long(&repo, &["rev-parse", "feat"]).unwrap()),
+        )
+        .unwrap();
         assert!(out.merged, "{}", out.message);
         assert!(!out.conflict);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn merge_records_the_base_worktree_head_not_the_project_checkout() {
+        let Some(_) = git_bin() else { return };
+        let dir = tmp("base-worktree");
+        let repo = dir.join("repo");
+        let base_tree = dir.join("base");
+        fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-b", "main"]);
+        git_ok(&repo, &["config", "user.email", "t@t.dev"]);
+        git_ok(&repo, &["config", "user.name", "t"]);
+        fs::write(repo.join("a.txt"), "initial").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        git_ok(&repo, &["checkout", "-b", "feat"]);
+        fs::write(repo.join("feature.txt"), "feature").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "feat"],
+        );
+        let tip = git_long(&repo, &["rev-parse", "HEAD"]).unwrap();
+        git_ok(
+            &repo,
+            &["worktree", "add", base_tree.to_str().unwrap(), "main"],
+        );
+        fs::write(base_tree.join("base.txt"), "independent main work").unwrap();
+        git_ok(&base_tree, &["add", "."]);
+        git_ok(
+            &base_tree,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "main work"],
+        );
+        let result = merge_at(&repo, "feat", Some(&tip)).unwrap();
+        let accepted = git_long(&base_tree, &["rev-parse", "HEAD"]).unwrap();
+        assert!(result.merged && result.ledger_written);
+        assert_eq!(result.version_id.as_deref(), Some(accepted.as_str()));
+        assert_ne!(accepted, tip);
+        assert_eq!(
+            git_long(&repo, &["rev-parse", "HEAD"]).unwrap(),
+            tip,
+            "不得移动项目根检出的分支"
+        );
+        fs::write(base_tree.join("later.txt"), "later").unwrap();
+        git_ok(&base_tree, &["add", "."]);
+        git_ok(
+            &base_tree,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "later"],
+        );
+        let key = format!("coding-{}-feat", crate::projects::canonical_key(&repo));
+        let fact = crate::projects::read_acceptance_log_at(&repo).remove(0);
+        crate::review_contract::write_pending(&key, &fact).unwrap();
+        assert!(overview_at(&repo)
+            .unwrap()
+            .worktrees
+            .iter()
+            .any(|w| w.branch == "feat" && w.ledger_pending));
+        let replay = merge_at(&repo, "feat", None).unwrap();
+        assert!(!overview_at(&repo)
+            .unwrap()
+            .worktrees
+            .iter()
+            .any(|w| w.ledger_pending));
+        assert_eq!(replay.version_id, result.version_id);
+        assert_eq!(crate::projects::read_acceptance_log_at(&repo).len(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1952,7 +2206,12 @@ mod tests {
         );
         git_ok(&repo, &["checkout", "main"]);
         // 分支动了保护路径：与科研验收合并同口径，拒绝并点名
-        let err = merge_at(&repo, "feat").unwrap_err();
+        let err = merge_at(
+            &repo,
+            "feat",
+            Some(&git_long(&repo, &["rev-parse", "feat"]).unwrap()),
+        )
+        .unwrap_err();
         assert!(err.contains("保护路径"), "{err}");
         assert!(err.contains("data/x.csv"), "{err}");
         assert!(!repo.join("data").exists(), "被拒绝的合并不得触碰主仓");
@@ -1963,7 +2222,12 @@ mod tests {
             &repo,
             &["-c", "commit.gpgsign=false", "commit", "-m", "unprotect"],
         );
-        let out = merge_at(&repo, "feat").unwrap();
+        let out = merge_at(
+            &repo,
+            "feat",
+            Some(&git_long(&repo, &["rev-parse", "feat"]).unwrap()),
+        )
+        .unwrap();
         assert!(out.merged, "{}", out.message);
         fs::remove_dir_all(&dir).ok();
     }

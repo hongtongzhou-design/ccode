@@ -5,8 +5,11 @@ import {
   defaultContextRules,
   effectiveProjectRules,
   formatTopLevelMap,
+  isGoalContextPack,
   isSettingPlaceholder,
   projectHomeHint,
+  projectShowsProtectedPaths,
+  projectUsesSkillPool,
   renderProjectContextPack,
 } from "../src/project-context.ts";
 
@@ -57,7 +60,7 @@ test("pack lists accepted goals and previous review notes", () => {
   assert.match(pack, /研究综述 → 论文\/综述.md（已接受）/);
   assert.match(pack, /尚未完成/);
   assert.match(pack, /设计实验/);
-  assert.match(pack, /这些保持原样/);
+  assert.match(pack, /写回时跳过/);
   assert.match(pack, /数据\/raw/);
   assert.match(pack, /上一版的修改意见/);
   assert.match(pack, /引用太少/);
@@ -165,6 +168,21 @@ test("pack splits named goal skills from project skill pool", () => {
   assert.match(pack, /只有「本目标点名要用的技能」才按其规范执行/);
 });
 
+test("research pipeline does not use the project skill pool", () => {
+  assert.equal(projectUsesSkillPool("research", 0), true);
+  assert.equal(projectUsesSkillPool("research", 3), false);
+  assert.equal(projectUsesSkillPool(undefined, 2), false);
+  assert.equal(projectUsesSkillPool("office", 4), true);
+  assert.equal(projectUsesSkillPool("coding", 0), true);
+});
+
+test("protected paths stay on goal-review surfaces only", () => {
+  assert.equal(projectShowsProtectedPaths("research", 0), true);
+  assert.equal(projectShowsProtectedPaths("research", 3), false);
+  assert.equal(projectShowsProtectedPaths("office", 0), true);
+  assert.equal(projectShowsProtectedPaths("coding", 0), false);
+});
+
 test("pack always carries skill discipline line against over-engineering", () => {
   const pack = renderProjectContextPack({
     name: "p",
@@ -175,6 +193,58 @@ test("pack always carries skill discipline line against over-engineering", () =>
   // 没选技能也要有纪律线：技能分发在 CLI 全局目录，Agent 看得见
   assert.match(pack, /技能纪律：只做目标要求的事/);
   assert.match(pack, /不要自行引入额外流程、模板或重型技能/);
+});
+
+test("session pack follows the user instead of a goal brief", () => {
+  const pack = renderProjectContextPack({
+    name: "综述文献",
+    path: "/Users/me/综述文献",
+    workMode: "research",
+    settings: ["优先使用项目里已有的文件，不要虚构文献。"],
+    topLevel: [
+      { name: "manuscript", isDir: true },
+      { name: "notes", isDir: true },
+    ],
+    kind: "session",
+    goal: "写一篇综述",
+    openGoals: ["补实验设计"],
+    protectedPaths: ["数据/raw"],
+    skills: [{ name: "lit-search", named: false }],
+    feedback: "引用太少",
+    accepted: [{ name: "研究综述", outputs: ["论文/综述.md"] }],
+  });
+  assert.match(pack, /综述文献/);
+  assert.match(pack, /这是项目里的对话/);
+  assert.match(pack, /按用户这次说的做/);
+  assert.match(pack, /技能纪律：按用户这次说的做/);
+  assert.match(pack, /已经验收过/);
+  assert.doesNotMatch(pack, /产出经人验收后才进项目/);
+  assert.doesNotMatch(pack, /当前目标/);
+  assert.doesNotMatch(pack, /尚未完成/);
+  assert.doesNotMatch(pack, /写回时跳过/);
+  assert.doesNotMatch(pack, /本目标点名/);
+  assert.doesNotMatch(pack, /项目技能池/);
+  assert.doesNotMatch(pack, /上一版的修改意见/);
+  assert.doesNotMatch(pack, /只做目标要求的事/);
+});
+
+test("writeReview session still uses the goal pack", () => {
+  const pack = renderProjectContextPack({
+    name: "p",
+    path: "/tmp/p",
+    workMode: "research",
+    topLevel: [],
+    kind: "session",
+    writeReview: true,
+    goal: "落成稿",
+  });
+  assert.match(pack, /产出经人验收后才进项目/);
+  assert.match(pack, /当前目标：/);
+  assert.match(pack, /验收再写回/);
+  assert.equal(isGoalContextPack("session", true), true);
+  assert.equal(isGoalContextPack("session"), false);
+  assert.equal(isGoalContextPack("goal"), true);
+  assert.equal(isGoalContextPack(), true);
 });
 
 test("coding rules warn against writing the primary tree", () => {

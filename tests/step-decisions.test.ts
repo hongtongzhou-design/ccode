@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DECISIONS_HEADING,
+  decisionAsk,
   formatDecisionAnswer,
   isDecisionsOnly,
   orderedAnswers,
@@ -155,4 +156,12 @@ test("orderedAnswers：按模板顺序排，人手写的条目排在后面不丢
     { q: "纳入标准定多严", answer: "只要顶刊" },
     { q: "手写的题", answer: "手写的答案" },
   ]);
+});
+
+test("decisionAsk：合同口吻的初稿题改成人话，其它题原样", () => {
+  assert.equal(
+    decisionAsk("写作依据的已评阅证据与结论范围（仅探索/待补时明确草稿边界）"),
+    "初稿可以依据哪些已经评过的笔记？结论能写到哪一步？",
+  );
+  assert.equal(decisionAsk("综述角度怎么收"), "综述角度怎么收");
 });

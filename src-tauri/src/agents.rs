@@ -967,7 +967,11 @@ pub fn validate_launch_compatibility(
                 .get("GROK_HOME")
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
-                .or_else(|| std::env::var_os("GROK_HOME").filter(|s| !s.is_empty()).map(PathBuf::from))
+                .or_else(|| {
+                    std::env::var_os("GROK_HOME")
+                        .filter(|s| !s.is_empty())
+                        .map(PathBuf::from)
+                })
                 .or_else(|| dirs::home_dir().map(|home| home.join(".grok")))
                 .ok_or("无法确定 Grok 配置目录")?;
             let path = home.join("config.toml");
@@ -1631,7 +1635,8 @@ fn external_wrapper_dir() -> Result<PathBuf, String> {
 /// 清扫遗留的启动包装器（best-effort）：正常寿命 = 脚本首行自删 + 60s 兜底线程；
 /// 兜底线程没跑到进程就退出时，靠这里在下一次外部启动前回收，不让旧 wrapper 无限滞留。
 fn sweep_stale_external_wrappers(dir: &std::path::Path) {
-    let Some(cutoff) = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(120))
+    let Some(cutoff) =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(120))
     else {
         return;
     };
@@ -4174,15 +4179,19 @@ api_backend = "responses"
     #[test]
     fn external_ps1_script_text_carries_no_env_or_credentials() {
         // audit P0：ps1 只含自删 + 启动命令；密钥走 start 环境块继承，不落脚本
-        let text = external_ps1_script_text(
-            "C:\\tools\\claude.cmd",
-            &["读 简报".into(), "it's".into()],
+        let text =
+            external_ps1_script_text("C:\\tools\\claude.cmd", &["读 简报".into(), "it's".into()]);
+        assert!(
+            text.starts_with('\u{FEFF}'),
+            "powershell 5.1 GBK 解码坑：BOM 不能丢"
         );
-        assert!(text.starts_with('\u{FEFF}'), "powershell 5.1 GBK 解码坑：BOM 不能丢");
         assert!(text.contains("& 'C:\\tools\\claude.cmd'"));
         assert!(text.contains("'it''s'"), "单引号加倍转义");
         assert!(!text.contains("$env:"), "脚本不得写环境变量");
-        assert!(!text.contains("Remove-Item Env:"), "env_remove 也在父进程环境块完成");
+        assert!(
+            !text.contains("Remove-Item Env:"),
+            "env_remove 也在父进程环境块完成"
+        );
     }
 
     #[test]

@@ -23,6 +23,8 @@ import {
   goalsNeedAttention,
   goalCardMeta,
   formatAcceptedStatusLine,
+  acceptanceLogView,
+  recentAcceptanceLog,
 } from "../src/project-status.ts";
 
 test("编程状态行：工作树数 + 待合并 + 需同步", () => {
@@ -310,4 +312,35 @@ test("formatAcceptedStatusLine keeps the verdict and note", () => {
     }),
     /已接受/,
   );
+});
+
+test("acceptance log view and recent slice", () => {
+  assert.deepEqual(
+    acceptanceLogView({
+      goalName: "研究综述",
+      paths: ["论文/综述.md"],
+      note: "已补引用",
+      decidedAt: "2026-09-09T00:00:00Z",
+    }),
+    {
+      goalName: "研究综述",
+      filesLabel: "论文/综述.md",
+      note: "已补引用",
+      decidedAt: "2026-09-09T00:00:00Z",
+    },
+  );
+  assert.equal(
+    acceptanceLogView({
+      goalName: "  ",
+      paths: ["a.md", "b.md", "."],
+      note: null,
+      decidedAt: "t",
+    }).filesLabel,
+    "2 个文件",
+  );
+  assert.deepEqual(
+    recentAcceptanceLog([{ id: 1 }, { id: 2 }, { id: 3 }], 2).map((row) => row.id),
+    [3, 2],
+  );
+  assert.deepEqual(recentAcceptanceLog([], 8), []);
 });

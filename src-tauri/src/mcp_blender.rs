@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 use std::fs;
-use std::net::{SocketAddr, TcpStream, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -122,11 +122,7 @@ fn blender_config_root() -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        return Some(
-            dirs::data_dir()?
-                .join("Blender Foundation")
-                .join("Blender"),
-        );
+        return Some(dirs::data_dir()?.join("Blender Foundation").join("Blender"));
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -143,9 +139,7 @@ fn walk_for_manifest(dir: &Path, depth: u8) -> bool {
     };
     for e in rd.flatten() {
         let p = e.path();
-        if p.is_file()
-            && p.file_name().is_some_and(|n| n == "blender_manifest.toml")
-        {
+        if p.is_file() && p.file_name().is_some_and(|n| n == "blender_manifest.toml") {
             if let Ok(text) = fs::read_to_string(&p) {
                 if manifest_is_official_mcp(&text) {
                     return true;
@@ -175,8 +169,7 @@ pub(crate) fn addon_installed_in(config_root: &Path) -> bool {
             return true;
         }
         if addons.join("mcp").join("blender_manifest.toml").is_file() {
-            if let Ok(text) = fs::read_to_string(addons.join("mcp").join("blender_manifest.toml"))
-            {
+            if let Ok(text) = fs::read_to_string(addons.join("mcp").join("blender_manifest.toml")) {
                 if manifest_is_official_mcp(&text) {
                     return true;
                 }
@@ -377,7 +370,9 @@ mod tests {
     #[test]
     fn version_from_path_needs_separator() {
         assert_eq!(
-            version_from_path(Path::new("/Applications/Blender 5.1.app/Contents/MacOS/Blender")),
+            version_from_path(Path::new(
+                "/Applications/Blender 5.1.app/Contents/MacOS/Blender"
+            )),
             Some((5, 1))
         );
         assert_eq!(
@@ -387,7 +382,9 @@ mod tests {
             Some((5, 2))
         );
         assert_eq!(
-            version_from_path(Path::new("/Applications/Blender.app/Contents/MacOS/Blender")),
+            version_from_path(Path::new(
+                "/Applications/Blender.app/Contents/MacOS/Blender"
+            )),
             None
         );
     }
@@ -396,30 +393,30 @@ mod tests {
     fn official_mcp_manifest_id() {
         let ok = "schema_version = \"1.0.0\"\nid = \"mcp\"\nname = \"MCP\"\nblender_version_min = \"5.1.0\"\n";
         assert!(manifest_is_official_mcp(ok));
-        assert!(!manifest_is_official_mcp("id = \"something\"\nname = \"MCP\"\n"));
+        assert!(!manifest_is_official_mcp(
+            "id = \"something\"\nname = \"MCP\"\n"
+        ));
         assert!(!manifest_is_official_mcp("id = \"mcp-other\"\n"));
     }
 
     #[test]
     fn repo_ready_needs_pyproject_and_package() {
-        let root = std::env::temp_dir().join(format!(
-            "ccode-blender-mcp-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("ccode-blender-mcp-{}", uuid::Uuid::new_v4()));
         let mcp = root.join("mcp");
         fs::create_dir_all(mcp.join("blmcp")).unwrap();
         assert!(!repo_ready(&mcp));
-        fs::write(mcp.join("pyproject.toml"), "[project]\nname = \"blender-mcp\"\n").unwrap();
+        fs::write(
+            mcp.join("pyproject.toml"),
+            "[project]\nname = \"blender-mcp\"\n",
+        )
+        .unwrap();
         assert!(repo_ready(&mcp));
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn addon_scan_finds_extension_manifest() {
-        let root = std::env::temp_dir().join(format!(
-            "ccode-blender-cfg-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("ccode-blender-cfg-{}", uuid::Uuid::new_v4()));
         let ext = root
             .join("5.1")
             .join("extensions")

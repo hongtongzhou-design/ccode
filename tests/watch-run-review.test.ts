@@ -24,13 +24,17 @@ test("定时评审：冻结证据、当前目录标注、采纳确认和旧记�
   }
   const calls: string[] = [];
   let legacy = false;
+  let ledgerFail = false;
   Object.assign(dom.window, { __TAURI_INTERNALS__: { invoke: async (command: string) => {
     calls.push(command);
     if (command === "watch_run_snapshot") {
       if (legacy) throw new Error("本次运行没有冻结产物证据");
       return { runId: "r", files: [{ path: "notes/inbox.md", before: "old", initial: "old", after: '<img src=x onerror="alert(1)">' }] };
     }
-    if (command === "adopt_watch_run") return ["notes/inbox.md"];
+    if (command === "adopt_watch_run") {
+      if (ledgerFail) throw new Error("文件已采纳，但验收记录落盘失败：disk。请再执行一次采纳以补记");
+      return ["notes/inbox.md"];
+    }
     throw new Error(command);
   } } });
   const compiled = { exports: {} as Record<string, any> };
@@ -61,6 +65,17 @@ test("定时评审：冻结证据、当前目录标注、采纳确认和旧记�
     await act(async () => button("采纳进主仓").click());
     await act(async () => buttons().filter((b) => b.textContent === "采纳进主仓").at(-1)!.click());
     assert.equal(calls.filter((x) => x === "adopt_watch_run").length, 1);
+    assert.ok(button("已采纳").disabled);
+    ledgerFail = true;
+    await render("ledger");
+    await act(async () => button("采纳进主仓").click());
+    await act(async () => buttons().filter((b) => b.textContent === "采纳进主仓").at(-1)!.click());
+    assert.match(host.textContent!, /验收记录未写下/);
+    assert.ok(button("再记录验收"));
+    ledgerFail = false;
+    const adoptBeforeRetry = calls.filter((x) => x === "adopt_watch_run").length;
+    await act(async () => button("再记录验收").click());
+    assert.equal(calls.filter((x) => x === "adopt_watch_run").length, adoptBeforeRetry + 1);
     assert.ok(button("已采纳").disabled);
     await render("failed", "failed");
     assert.ok(button("采纳进主仓").disabled);

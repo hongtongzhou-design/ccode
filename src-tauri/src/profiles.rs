@@ -407,8 +407,9 @@ impl ProfileStore {
         let pending = self.path.with_file_name("gateway-split.pending.json");
         if pending.exists() {
             let result = serde_json::from_str::<crate::gateway_store::MigrationResult>(
-                &fs::read_to_string(&pending).map_err(|e| e.to_string())?
-            ).map_err(|e| format!("配置迁移恢复记录损坏，拒绝覆盖：{e}"))?;
+                &fs::read_to_string(&pending).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("配置迁移恢复记录损坏，拒绝覆盖：{e}"))?;
             return finish_split_migration(&pending, &result);
         }
         if crate::gateway_store::split_migrated() {
@@ -621,7 +622,12 @@ impl ProfileStore {
         commit_gateway_binding_files(&old_gateways, &old_bindings, &gateways, &bindings)?;
         if let Some(key) = pending_key {
             if let Err(error) = set_key(&gid, &key) {
-                let _ = commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
+                let _ = commit_gateway_binding_files(
+                    &gateways,
+                    &bindings,
+                    &old_gateways,
+                    &old_bindings,
+                );
                 return Err(error);
             }
         }
@@ -682,7 +688,12 @@ impl ProfileStore {
         commit_gateway_binding_files(&old_gateways, &old_bindings, &gateways, &bindings)?;
         if let Some(key) = pending_key {
             if let Err(error) = set_key(&new_gid, &key) {
-                let _ = commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
+                let _ = commit_gateway_binding_files(
+                    &gateways,
+                    &bindings,
+                    &old_gateways,
+                    &old_bindings,
+                );
                 return Err(error);
             }
         }
@@ -787,7 +798,11 @@ impl ProfileStore {
             .iter()
             .position(|g| g.id == gid)
             .ok_or("网关不存在")?;
-        if let Some(expected) = input.expected_gateway_revision.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(expected) = input
+            .expected_gateway_revision
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
             let current = crate::gateway_store::gateway_content_revision(&gateways[gw_idx]);
             if current != expected {
                 return Err("网关已被其他窗口修改，未写入绑定。请关闭后重新打开再保存。".into());
@@ -965,7 +980,7 @@ impl ProfileStore {
                 catalog_from_slot: None,
                 last_probe: Vec::new(),
                 slot_probes: Vec::new(),
-            revision: String::new(),
+                revision: String::new(),
             };
             let pending_key = input.api_key.filter(|k| !k.is_empty());
             if let Some(key) = &pending_key {
@@ -1131,11 +1146,23 @@ impl ProfileStore {
     }
 }
 
-fn repair_legacy_key_links(bindings: &[Binding], gateways: &[Gateway], keys: &mut std::collections::HashMap<String, String>) -> bool {
+fn repair_legacy_key_links(
+    bindings: &[Binding],
+    gateways: &[Gateway],
+    keys: &mut std::collections::HashMap<String, String>,
+) -> bool {
     let mut changed = false;
     for binding in bindings {
-        let Some(gid) = binding.gateway_id.as_ref() else { continue; };
-        if keys.contains_key(gid) || !gateways.iter().any(|gateway| gateway.id == *gid && gateway.key_hint.is_some()) { continue; }
+        let Some(gid) = binding.gateway_id.as_ref() else {
+            continue;
+        };
+        if keys.contains_key(gid)
+            || !gateways
+                .iter()
+                .any(|gateway| gateway.id == *gid && gateway.key_hint.is_some())
+        {
+            continue;
+        }
         if let Some(key) = keys.get(&binding.id).cloned() {
             keys.insert(gid.clone(), key);
             changed = true;
@@ -1145,8 +1172,16 @@ fn repair_legacy_key_links(bindings: &[Binding], gateways: &[Gateway], keys: &mu
 }
 
 /// pending 文件是恢复日志；所有阶段可重放，只有最后一步才删除完成标记。
-fn finish_split_migration(pending: &std::path::Path, result: &crate::gateway_store::MigrationResult) -> Result<(), String> {
-    finish_split_at(pending, result, || crate::gateway_store::apply_rewrites_to_settings_and_schedules(&result.rewrites), |_| Ok(()))
+fn finish_split_migration(
+    pending: &std::path::Path,
+    result: &crate::gateway_store::MigrationResult,
+) -> Result<(), String> {
+    finish_split_at(
+        pending,
+        result,
+        || crate::gateway_store::apply_rewrites_to_settings_and_schedules(&result.rewrites),
+        |_| Ok(()),
+    )
 }
 
 fn finish_split_at(
@@ -1156,14 +1191,26 @@ fn finish_split_at(
     mut after_stage: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<(), String> {
     let root = pending.parent().ok_or("迁移日志路径无效")?;
-    crate::storage::atomic_write(&root.join("gateways.json"), &serde_json::to_vec_pretty(&result.gateways).map_err(|e| e.to_string())?, true)?;
+    crate::storage::atomic_write(
+        &root.join("gateways.json"),
+        &serde_json::to_vec_pretty(&result.gateways).map_err(|e| e.to_string())?,
+        true,
+    )?;
     after_stage(1)?;
     write_keys_at(&root.join("keys.json"), &result.keys)?;
     after_stage(2)?;
-    crate::storage::atomic_write(&root.join("bindings.json"), &serde_json::to_vec_pretty(&result.bindings).map_err(|e| e.to_string())?, true)?;
+    crate::storage::atomic_write(
+        &root.join("bindings.json"),
+        &serde_json::to_vec_pretty(&result.bindings).map_err(|e| e.to_string())?,
+        true,
+    )?;
     after_stage(3)?;
     if !result.journal.entries.is_empty() {
-        crate::storage::atomic_write(&root.join("gateway-merge.json"), &serde_json::to_vec_pretty(&result.journal).map_err(|e| e.to_string())?, true)?;
+        crate::storage::atomic_write(
+            &root.join("gateway-merge.json"),
+            &serde_json::to_vec_pretty(&result.journal).map_err(|e| e.to_string())?,
+            true,
+        )?;
     }
     after_stage(4)?;
     rewrite_refs()?;
@@ -1172,11 +1219,20 @@ fn finish_split_at(
 }
 
 /// 迁移前备份 profiles.json 与 keys.json（.json.bak-gateway-split），已有原始备份不覆盖。
-fn backup_split_sidecars(profiles_path: &std::path::Path, keys_path: &std::path::Path) -> Result<(), String> {
+fn backup_split_sidecars(
+    profiles_path: &std::path::Path,
+    keys_path: &std::path::Path,
+) -> Result<(), String> {
     for path in [profiles_path, keys_path] {
         if path.exists() {
             let bak = path.with_extension("json.bak-gateway-split");
-            if !bak.exists() { crate::storage::atomic_write(&bak, &fs::read(path).map_err(|e| e.to_string())?, true)?; }
+            if !bak.exists() {
+                crate::storage::atomic_write(
+                    &bak,
+                    &fs::read(path).map_err(|e| e.to_string())?,
+                    true,
+                )?;
+            }
         }
     }
     Ok(())
@@ -1257,7 +1313,10 @@ fn read_keys_at(
         let backup = corrupt_backup_path(path);
         let backup_result = crate::storage::atomic_write(&backup, text.as_bytes(), true);
         match backup_result {
-            Ok(()) => format!("keys.json 已损坏，原件已保留并备份为 {}: {e}", backup.display()),
+            Ok(()) => format!(
+                "keys.json 已损坏，原件已保留并备份为 {}: {e}",
+                backup.display()
+            ),
             Err(error) => format!("keys.json 已损坏，原件已保留；备份失败：{error}: {e}"),
         }
     })
@@ -1281,8 +1340,8 @@ fn write_keys_at(
     let text = serde_json::to_string_pretty(keys).map_err(|e| e.to_string())?;
     let legacy_tmp = path.with_extension("tmp");
     match fs::remove_file(&legacy_tmp) {
-        Ok(()) => {},
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("清理旧密钥临时文件失败：{e}")),
     }
     crate::storage::atomic_write(path, text.as_bytes(), true)
@@ -1321,7 +1380,10 @@ pub(crate) struct StoreGuard {
 pub(crate) fn store_lock() -> Result<StoreGuard, String> {
     let process = STORE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let file = crate::storage::config_lock("profiles")?;
-    Ok(StoreGuard { _process: process, _file: file })
+    Ok(StoreGuard {
+        _process: process,
+        _file: file,
+    })
 }
 
 fn commit_gateway_binding_files(
@@ -1394,13 +1456,21 @@ pub fn get_key_for_profile(profile: &Profile) -> Result<Option<String>, String> 
 /// 漏遮极短密钥的风险低于破坏全部回放文本，故不收录（如确需覆盖短密钥，降到 6 是下限）。
 /// 展示脱敏只读文件；解析失败沿用上次成功快照，写入路径另行报错，不在展示路径改名密钥文件。
 pub(crate) fn stored_secrets() -> Vec<String> {
-    static LAST_GOOD: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    static LAST_GOOD: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+        std::sync::OnceLock::new();
     let cache = LAST_GOOD.get_or_init(Default::default);
-    let loaded = keys_path().ok().and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str::<std::collections::HashMap<String, String>>(&text).ok());
+    let loaded = keys_path()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| {
+            serde_json::from_str::<std::collections::HashMap<String, String>>(&text).ok()
+        });
     let mut last = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(keys) = loaded {
-        *last = keys.into_values().filter(|v| v.chars().count() >= 8).collect();
+        *last = keys
+            .into_values()
+            .filter(|v| v.chars().count() >= 8)
+            .collect();
     }
     last.clone()
 }
@@ -1748,7 +1818,7 @@ fn apply_import_v2(
                 catalog_from_slot: None,
                 last_probe: Vec::new(),
                 slot_probes: Vec::new(),
-            revision: String::new(),
+                revision: String::new(),
             };
             if let Some(k) = incoming.api_key.as_deref().filter(|s| !s.is_empty()) {
                 keys.insert(id.clone(), k.to_string());
@@ -1855,7 +1925,12 @@ pub fn import_gateways_v2(
     for g in &gateways {
         if let Some(k) = keys.get(&g.id) {
             if let Err(error) = set_key(&g.id, k) {
-                let _ = commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
+                let _ = commit_gateway_binding_files(
+                    &gateways,
+                    &bindings,
+                    &old_gateways,
+                    &old_bindings,
+                );
                 return Err(error);
             }
         }
@@ -2002,7 +2077,8 @@ pub fn unbind_split_merge(store: tauri::State<'_, ProfileStore>) -> Result<usize
     commit_gateway_binding_files(&old_gateways, &old_bindings, &gateways, &bindings)?;
     for (to, k) in pending_keys {
         if let Err(error) = set_key(&to, &k) {
-            let _ = commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
+            let _ =
+                commit_gateway_binding_files(&gateways, &bindings, &old_gateways, &old_bindings);
             return Err(error);
         }
     }
@@ -2022,48 +2098,105 @@ mod tests {
     #[test]
     fn legacy_key_repair_preserves_binding_and_gateway_identity() {
         let binding: Binding = serde_json::from_value(serde_json::json!({"id":"old-binding", "agent":"codex", "kind":"api", "gatewayId":"new-gateway", "models":[], "extraEnv":{}})).unwrap();
-        let mut gateway: Gateway = serde_json::from_value(serde_json::json!({"id":"new-gateway", "name":"gateway", "keyHint":"tail"})).unwrap();
-        let mut keys = [("old-binding".into(), "synthetic-key".into())].into_iter().collect();
-        assert!(repair_legacy_key_links(&[binding.clone()], &[gateway.clone()], &mut keys));
-        assert_eq!(keys.get("new-gateway").map(String::as_str), Some("synthetic-key"));
+        let mut gateway: Gateway = serde_json::from_value(
+            serde_json::json!({"id":"new-gateway", "name":"gateway", "keyHint":"tail"}),
+        )
+        .unwrap();
+        let mut keys = [("old-binding".into(), "synthetic-key".into())]
+            .into_iter()
+            .collect();
+        assert!(repair_legacy_key_links(
+            &[binding.clone()],
+            &[gateway.clone()],
+            &mut keys
+        ));
+        assert_eq!(
+            keys.get("new-gateway").map(String::as_str),
+            Some("synthetic-key")
+        );
         keys.insert("new-gateway".into(), "newer-key".into());
-        assert!(!repair_legacy_key_links(&[binding.clone()], &[gateway.clone()], &mut keys));
-        assert_eq!(keys.get("new-gateway").map(String::as_str), Some("newer-key"));
+        assert!(!repair_legacy_key_links(
+            &[binding.clone()],
+            &[gateway.clone()],
+            &mut keys
+        ));
+        assert_eq!(
+            keys.get("new-gateway").map(String::as_str),
+            Some("newer-key")
+        );
         keys.remove("new-gateway");
         gateway.key_hint = None;
-        assert!(!repair_legacy_key_links(&[binding], &[gateway], &mut keys), "明确清除的密钥不能被恢复");
+        assert!(
+            !repair_legacy_key_links(&[binding], &[gateway], &mut keys),
+            "明确清除的密钥不能被恢复"
+        );
     }
 
     #[test]
     fn migration_recovers_every_interrupted_stage_with_stable_keys() {
         for fail_at in 1..=5 {
-            let root = std::env::temp_dir().join(format!("ccode-migration-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("ccode-migration-{}", uuid::Uuid::new_v4()));
             fs::create_dir_all(&root).unwrap();
             let pending = root.join("gateway-split.pending.json");
             let result = crate::gateway_store::MigrationResult {
-                gateways: Vec::new(), bindings: Vec::new(),
-                keys: [("stable-id".to_string(), "synthetic-secret".to_string())].into_iter().collect(),
-                journal: crate::gateway_store::MergeJournal::default(), rewrites: Vec::new(),
+                gateways: Vec::new(),
+                bindings: Vec::new(),
+                keys: [("stable-id".to_string(), "synthetic-secret".to_string())]
+                    .into_iter()
+                    .collect(),
+                journal: crate::gateway_store::MergeJournal::default(),
+                rewrites: Vec::new(),
             };
-            crate::storage::atomic_write(&pending, &serde_json::to_vec(&result).unwrap(), true).unwrap();
-            assert!(finish_split_at(&pending, &result, || Ok(()), |stage| if stage == fail_at { Err("injected".into()) } else { Ok(()) }).is_err());
+            crate::storage::atomic_write(&pending, &serde_json::to_vec(&result).unwrap(), true)
+                .unwrap();
+            assert!(finish_split_at(
+                &pending,
+                &result,
+                || Ok(()),
+                |stage| if stage == fail_at {
+                    Err("injected".into())
+                } else {
+                    Ok(())
+                }
+            )
+            .is_err());
             assert!(pending.exists());
             let saved = serde_json::from_str(&fs::read_to_string(&pending).unwrap()).unwrap();
             finish_split_at(&pending, &saved, || Ok(()), |_| Ok(())).unwrap();
             assert!(!pending.exists());
-            assert_eq!(read_keys_at(&root.join("keys.json")).unwrap().get("stable-id").map(String::as_str), Some("synthetic-secret"));
+            assert_eq!(
+                read_keys_at(&root.join("keys.json"))
+                    .unwrap()
+                    .get("stable-id")
+                    .map(String::as_str),
+                Some("synthetic-secret")
+            );
             fs::remove_dir_all(root).unwrap();
         }
     }
 
     #[test]
     fn migration_keeps_pending_when_reference_update_fails() {
-        let root = std::env::temp_dir().join(format!("ccode-migration-ref-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("ccode-migration-ref-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let pending = root.join("gateway-split.pending.json");
         fs::write(&pending, "pending").unwrap();
-        let result = crate::gateway_store::MigrationResult { gateways: vec![], bindings: vec![], keys: Default::default(), journal: Default::default(), rewrites: vec![] };
-        assert!(finish_split_at(&pending, &result, || Err("refs unavailable".into()), |_| Ok(())).is_err());
+        let result = crate::gateway_store::MigrationResult {
+            gateways: vec![],
+            bindings: vec![],
+            keys: Default::default(),
+            journal: Default::default(),
+            rewrites: vec![],
+        };
+        assert!(finish_split_at(
+            &pending,
+            &result,
+            || Err("refs unavailable".into()),
+            |_| Ok(())
+        )
+        .is_err());
         assert!(pending.exists());
         fs::remove_dir_all(root).unwrap();
     }

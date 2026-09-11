@@ -29,6 +29,10 @@ pub struct ResearchRunDto {
     pub result_file: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub result_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +53,10 @@ pub struct ResearchAcceptanceDto {
     pub open_blockers: Vec<String>,
     pub run_id: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub result_version: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 fn reproductions_root() -> Result<PathBuf, String> {
@@ -61,7 +69,13 @@ fn reproductions_root() -> Result<PathBuf, String> {
 fn safe_id(value: &str) -> Result<String, String> {
     let cleaned: String = value
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     crate::paths::sanitize_fs_name(&cleaned)
 }
@@ -72,6 +86,34 @@ fn run_dir(workspace_id: &str, run_id: &str) -> Result<PathBuf, String> {
         .join(safe_id(run_id)?))
 }
 
+fn run_dir_v2(run_id: &str) -> Result<PathBuf, String> {
+    let name = crate::paths::sanitize_fs_name(run_id).unwrap_or_else(|_| run_id.to_string());
+    Ok(reproductions_root()?.join(name))
+}
+
+fn load_run_any(workspace_id: &str, run_id: &str) -> Result<ResearchRunDto, String> {
+    let old = run_dir(workspace_id, run_id)?.join("run.json");
+    if old.exists() {
+        if let Some(layout) = run_stub_target(&old) {
+            return load_run(&run_dir_v2(&layout)?.join("run.json"));
+        }
+        return load_run(&old);
+    }
+    load_run(&run_dir_v2(run_id)?.join("run.json"))
+}
+
+fn run_stub_target(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if v.get("layout").and_then(|x| x.as_str()) == Some("v2") {
+        v.get("runId")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
 fn load_run(path: &Path) -> Result<ResearchRunDto, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("读取运行记录失败: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("运行记录损坏: {e}"))
@@ -79,7 +121,10 @@ fn load_run(path: &Path) -> Result<ResearchRunDto, String> {
 
 fn save_run(dir: &Path, run: &ResearchRunDto) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("创建运行目录失败: {e}"))?;
-    crate::profiles::atomic_write(&dir.join("run.json"), &serde_json::to_string_pretty(run).map_err(|e| e.to_string())?)
+    crate::profiles::atomic_write(
+        &dir.join("run.json"),
+        &serde_json::to_string_pretty(run).map_err(|e| e.to_string())?,
+    )
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -125,6 +170,7 @@ fn python_bin() -> Result<PathBuf, String> {
         .ok_or_else(|| "未找到 python3/python，无法执行复现脚本".into())
 }
 
+#[allow(dead_code)]
 fn active_workspace(id: &str, worktree: &Path) -> Result<crate::workspaces::WorkspaceDto, String> {
     let conn = crate::workspaces::db()?;
     let ws = crate::workspaces::get_workspace(&conn, id)?;
@@ -133,8 +179,11 @@ fn active_workspace(id: &str, worktree: &Path) -> Result<crate::workspaces::Work
     }
     let tree = crate::paths::canonicalize_plain(Path::new(&ws.worktree_path))
         .map_err(|e| format!("工作区路径无效: {e}"))?;
-    let given = crate::paths::canonicalize_plain(worktree).map_err(|e| format!("工作区路径无效: {e}"))?;
-    if !crate::paths::path_within_path(&given, &tree) || !crate::paths::path_within_path(&tree, &given) {
+    let given =
+        crate::paths::canonicalize_plain(worktree).map_err(|e| format!("工作区路径无效: {e}"))?;
+    if !crate::paths::path_within_path(&given, &tree)
+        || !crate::paths::path_within_path(&tree, &given)
+    {
         return Err("工作区路径已变化，不能运行复现".into());
     }
     Ok(ws)
@@ -149,15 +198,25 @@ pub async fn research_run_reproduce(
     result_file: Option<String>,
 ) -> Result<ResearchRunDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let ws = active_workspace(&workspace_id, Path::new(&worktree_path))?;
-        let tree = crate::paths::canonicalize_plain(Path::new(&ws.worktree_path))
-            .map_err(|e| format!("工作区路径无效: {e}"))?;
+        let ws = crate::workspaces::db()
+            .ok()
+            .and_then(|conn| crate::workspaces::get_workspace(&conn, &workspace_id).ok());
+        let tree = if let Some(ref ws) = ws {
+            crate::paths::canonicalize_plain(Path::new(&ws.worktree_path))
+                .unwrap_or_else(|_| PathBuf::from(&worktree_path))
+        } else {
+            crate::paths::canonicalize_plain(Path::new(&worktree_path))
+                .map_err(|e| format!("工作区路径无效: {e}"))?
+        };
         let rel = entry.trim().replace('\\', "/");
         if rel.is_empty() || rel.starts_with('/') || rel.split('/').any(|p| p == ".." || p == ".") {
             return Err("复现入口必须是项目内相对路径".into());
         }
         let script = tree.join(&rel);
-        if !crate::paths::path_within_path(&crate::paths::canonicalize_plain(&script).map_err(|e| format!("复现入口无效: {e}"))?, &tree) {
+        if !crate::paths::path_within_path(
+            &crate::paths::canonicalize_plain(&script).map_err(|e| format!("复现入口无效: {e}"))?,
+            &tree,
+        ) {
             return Err("复现入口不在工作区内".into());
         }
         if !script.is_file() {
@@ -165,11 +224,17 @@ pub async fn research_run_reproduce(
         }
         let revision = sha256_file(&script)?;
         let run_id = format!("r-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
-        let out = run_dir(&workspace_id, &run_id)?;
+        let out = run_dir_v2(&run_id)?;
         if out.exists() {
             return Err("运行目录已存在".into());
         }
-        if crate::paths::path_within_path(&out, &tree) || crate::paths::path_within_path(&tree, &out) {
+        let stub_dir = run_dir(&workspace_id, &run_id)?;
+        fs::create_dir_all(&stub_dir).map_err(|e| format!("创建运行目录失败: {e}"))?;
+        let stub = serde_json::json!({"layout":"v2","runId": run_id});
+        crate::profiles::atomic_write(&stub_dir.join("run.json"), &stub.to_string())?;
+        if crate::paths::path_within_path(&out, &tree)
+            || crate::paths::path_within_path(&tree, &out)
+        {
             return Err("输出必须独立于输入项目".into());
         }
         fs::create_dir_all(&out).map_err(|e| format!("创建输出目录失败: {e}"))?;
@@ -204,6 +269,8 @@ pub async fn research_run_reproduce(
             result_file: result_file.filter(|s| !s.trim().is_empty()),
             started_at: started,
             finished_at: None,
+            project_id: crate::projects::project_id_at(&tree),
+            result_version: None,
         };
         save_run(&out, &run)?;
         let mut cmd = crate::process::background_command(&python);
@@ -235,8 +302,11 @@ pub async fn research_run_reproduce(
 }
 
 #[tauri::command]
-pub async fn research_get_run(workspace_id: String, run_id: String) -> Result<ResearchRunDto, String> {
-    tauri::async_runtime::spawn_blocking(move || load_run(&run_dir(&workspace_id, &run_id)?.join("run.json")))
+pub async fn research_get_run(
+    workspace_id: String,
+    run_id: String,
+) -> Result<ResearchRunDto, String> {
+    tauri::async_runtime::spawn_blocking(move || load_run_any(&workspace_id, &run_id))
         .await
         .map_err(|e| format!("读取运行记录失败: {e}"))?
 }
@@ -248,14 +318,20 @@ pub async fn research_read_run_file(
     path: String,
 ) -> Result<crate::fs_tree::FilePreviewDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let dir = run_dir(&workspace_id, &run_id)?;
+        let run = load_run_any(&workspace_id, &run_id)?;
+        let dir = PathBuf::from(&run.output_dir);
         let rel = path.trim().replace('\\', "/");
-        if rel.is_empty() || rel.starts_with('/') || rel.split('/').any(|p| p == ".." || p.is_empty()) {
+        if rel.is_empty()
+            || rel.starts_with('/')
+            || rel.split('/').any(|p| p == ".." || p.is_empty())
+        {
             return Err("结果路径必须是本次输出内的相对路径".into());
         }
         let file = dir.join(&rel);
-        let canon = crate::paths::canonicalize_plain(&file).map_err(|e| format!("结果文件不存在: {e}"))?;
-        let root = crate::paths::canonicalize_plain(&dir).map_err(|e| format!("运行目录无效: {e}"))?;
+        let canon =
+            crate::paths::canonicalize_plain(&file).map_err(|e| format!("结果文件不存在: {e}"))?;
+        let root =
+            crate::paths::canonicalize_plain(&dir).map_err(|e| format!("运行目录无效: {e}"))?;
         if !crate::paths::path_within_path(&canon, &root) {
             return Err("结果文件不在本次输出目录内".into());
         }
@@ -284,17 +360,30 @@ pub async fn research_save_acceptance(
     record: ResearchAcceptanceDto,
 ) -> Result<ResearchAcceptanceDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if !matches!(record.verdict.as_str(), "accept" | "accept_with_conditions" | "return") {
+        if !matches!(
+            record.verdict.as_str(),
+            "accept" | "accept_with_conditions" | "return"
+        ) {
             return Err("验收决定必须是接受、有条件接受或退回".into());
         }
         if record.conclusion_scope.trim().is_empty() {
             return Err("请写明接受的结论范围".into());
         }
-        let root = crate::projects::ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
+        let root = crate::projects::ensure_task_project_root(Path::new(
+            &crate::sessions::expand_tilde(&project_root),
+        ))?;
         let mut rows = load_acceptances(&root)?;
         let mut saved = record;
         saved.created_at = crate::sessions::now_iso();
-        rows.retain(|r| !(r.workspace_id == saved.workspace_id && r.step_name == saved.step_name));
+        if let Some(ver) = saved.result_version.as_deref().filter(|s| !s.is_empty()) {
+            rows.retain(|r| {
+                !(r.step_name == saved.step_name && r.result_version.as_deref() == Some(ver))
+            });
+        } else {
+            rows.retain(|r| {
+                !(r.workspace_id == saved.workspace_id && r.step_name == saved.step_name)
+            });
+        }
         rows.push(saved.clone());
         let dir = root.join(".ccode");
         fs::create_dir_all(&dir).map_err(|e| format!("创建项目记录目录失败: {e}"))?;
@@ -315,7 +404,9 @@ pub async fn research_get_acceptance(
     step_name: String,
 ) -> Result<Option<ResearchAcceptanceDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let root = crate::projects::ensure_task_project_root(Path::new(&crate::sessions::expand_tilde(&project_root)))?;
+        let root = crate::projects::ensure_task_project_root(Path::new(
+            &crate::sessions::expand_tilde(&project_root),
+        ))?;
         Ok(load_acceptances(&root)?
             .into_iter()
             .rev()
@@ -351,8 +442,13 @@ mod tests {
             "--output",
             out.to_str().unwrap(),
         ]);
-        let captured = crate::process::capture_command(&mut cmd, Duration::from_secs(20), 4096).unwrap();
-        assert!(captured.status.unwrap().success(), "{}", String::from_utf8_lossy(&captured.stderr));
+        let captured =
+            crate::process::capture_command(&mut cmd, Duration::from_secs(20), 4096).unwrap();
+        assert!(
+            captured.status.unwrap().success(),
+            "{}",
+            String::from_utf8_lossy(&captured.stderr)
+        );
         assert!(out.join("verification.json").is_file());
         assert!(!tmp.join("verification.json").exists());
         let _ = fs::remove_dir_all(&tmp);

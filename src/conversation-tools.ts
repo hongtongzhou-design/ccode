@@ -82,3 +82,17 @@ export function toolCallCount(blocks: readonly BlockDto[]): number {
   const uses = blocks.filter((block) => block.kind === "tool_use").length;
   return uses || blocks.length;
 }
+
+export function isProcessBlock(block: BlockDto): boolean {
+  return block.kind === "thinking" || isToolBlock(block);
+}
+
+/** 预览里思考+工具收成一条折叠行的标题。 */
+export function processFoldLabel(blocks: readonly BlockDto[]): string {
+  const thinking = blocks.some((block) => block.kind === "thinking");
+  const tools = blocks.filter(isToolBlock);
+  const calls = tools.length === 0 ? 0 : toolCallCount(tools);
+  if (thinking && calls > 0) return `过程 · 思考与 ${calls} 次工具调用`;
+  if (thinking) return "思考过程";
+  return `执行记录 · ${calls} 次工具调用`;
+}

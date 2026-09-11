@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { effectiveProjectRules } from "../project-context";
+import {
+  effectiveProjectRules,
+  projectShowsProtectedPaths,
+  projectUsesSkillPool,
+} from "../project-context";
 import {
   pathIsProtected,
   protectableEntries,
@@ -37,7 +41,6 @@ export default function ProjectRulesPanel({
   onError?: (message: string) => void;
 }) {
   const mode = normalizeWorkMode(workMode);
-  const showProtect = mode !== "coding";
   const [open, setOpen] = useState(defaultOpen);
   const [config, setConfig] = useState<ProjectConfigDto | null>(null);
   const [rulesDraft, setRulesDraft] = useState("");
@@ -54,10 +57,12 @@ export default function ProjectRulesPanel({
 
   const load = useCallback(async () => {
     let nextProtected: string[] = [];
+    let listed: ProjectConfigDto | null = null;
     try {
       const read = await invoke<ProjectConfigReadDto>("read_project_config", {
         path: projectPath,
       });
+      listed = read.config;
       setConfig(read.config);
       setRulesDraft(
         effectiveProjectRules(
@@ -76,7 +81,13 @@ export default function ProjectRulesPanel({
       setError(message);
       onError?.(message);
     }
-    if (!showProtect) {
+    const protect =
+      listed != null &&
+      projectShowsProtectedPaths(
+        workMode ?? listed.workMode,
+        listed.steps.length,
+      );
+    if (!protect) {
       setEntries([]);
       return;
     }
@@ -89,7 +100,7 @@ export default function ProjectRulesPanel({
     } catch {
       setEntries(protectableEntries([], nextProtected, workMode));
     }
-  }, [onError, projectPath, showProtect, workMode]);
+  }, [onError, projectPath, workMode]);
 
   useEffect(() => {
     let stale = false;
@@ -173,6 +184,10 @@ export default function ProjectRulesPanel({
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean).length;
+  const showProtect =
+    config != null && projectShowsProtectedPaths(mode, config.steps.length);
+  const showSkillPool =
+    config != null && projectUsesSkillPool(mode, config.steps.length);
   const suggested = new Set(
     suggestProtectedPaths(
       mode,
@@ -184,10 +199,13 @@ export default function ProjectRulesPanel({
   const featuredFolders = folders.filter(
     (entry) => suggested.has(entry.path) || pathIsProtected(entry.path, protectedPaths),
   );
-  const visibleFolders = showAllFolders ? folders : featuredFolders;
-  const extraFolders = folders.filter(
-    (entry) => !visibleFolders.some((item) => item.path === entry.path),
-  );
+  const showAllProtectFolders = showAllFolders || suggested.size === 0;
+  const visibleFolders = showAllProtectFolders ? folders : featuredFolders;
+  const extraFolders = showAllProtectFolders
+    ? []
+    : folders.filter(
+        (entry) => !visibleFolders.some((item) => item.path === entry.path),
+      );
   const protectedFiles = files.filter((entry) =>
     pathIsProtected(entry.path, protectedPaths),
   );
@@ -195,7 +213,7 @@ export default function ProjectRulesPanel({
   const summary = [
     ruleCount ? `${ruleCount}` : "默认",
     showProtect && protectedPaths.length ? `⊘${protectedPaths.length}` : null,
-    skillNames.length ? `✦${skillNames.length}` : null,
+    showSkillPool && skillNames.length ? `✦${skillNames.length}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -250,7 +268,7 @@ export default function ProjectRulesPanel({
                 aria-expanded={protectOpen}
               >
                 <FoldMark open={protectOpen} />
-                <span className="text-xs text-l3">保持原样</span>
+                <span className="text-xs text-l3">写回时跳过</span>
                 {protectedPaths.length > 0 && (
                   <span className="text-micro text-l4">{protectedPaths.length}</span>
                 )}
@@ -260,10 +278,6 @@ export default function ProjectRulesPanel({
                   <p className="mt-1.5 text-micro text-l4">项目里还没有可勾的项。</p>
                 ) : (
                   <>
-                    <p className="mt-1.5 text-micro text-l4">
-                      长期保护：验收写回时不改这些路径。（单次任务给 Agent
-                      看什么，在新建目标的「资料」里选，那是另一回事。）
-                    </p>
                     {visibleFolders.length > 0 && (
                     <ul className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5">
                       {visibleFolders.map(renderProtectRow)}
@@ -275,9 +289,7 @@ export default function ProjectRulesPanel({
                         className="mt-1 text-micro text-l4 hover:text-l2"
                         onClick={() => setShowAllFolders(true)}
                       >
-                        {visibleFolders.length === 0
-                          ? `选择文件夹（${extraFolders.length}）`
-                          : `其余文件夹 ${extraFolders.length}…`}
+                        其余 {extraFolders.length}…
                       </button>
                     )}
                     {protectedFiles.length > 0 && (
@@ -311,12 +323,13 @@ export default function ProjectRulesPanel({
                         })();
                       }}
                     >
-                      ＋ 选择文件添加保护…
+                      ＋ 文件
                     </button>
                   </>
                 ))}
             </div>
           )}
+          {showSkillPool && (
           <div>
             <button
               type="button"
@@ -325,16 +338,13 @@ export default function ProjectRulesPanel({
               aria-expanded={skillsOpen}
             >
               <FoldMark open={skillsOpen} />
-              <span className="text-xs text-l3">项目技能池</span>
+              <span className="text-xs text-l3">技能</span>
               {skillNames.length > 0 && (
                 <span className="text-micro text-l4">{skillNames.length}</span>
               )}
             </button>
             {skillsOpen && (
               <>
-                <p className="mt-1 text-micro text-l4">
-                  从技能库添加进来、新建目标时可以点名。添加 ≠ 启用——池子里的技能默认都不用。
-                </p>
                 {skillNames.length > 0 && (
                   <ul className="mt-1.5 flex flex-wrap gap-1">
                     {skillNames.map((name) => (
@@ -389,6 +399,7 @@ export default function ProjectRulesPanel({
               </>
             )}
           </div>
+          )}
           <div className="flex items-center gap-2 text-micro">
             {saved && <span className="text-ok-text">✓ 已保存</span>}
             {error && <span className="text-err-text">{error}</span>}

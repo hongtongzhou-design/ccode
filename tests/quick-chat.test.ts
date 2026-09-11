@@ -128,6 +128,7 @@ test("随手聊历史：只列 scratch，排除工作区/已注册项目/其他�
 });
 
 test("isScratchCwd 认家目录下 ccode/scratch，含子路径；Windows 折叠大小写", () => {
+  assert.equal(isScratchCwd(""), false);
   assert.equal(isScratchCwd("/Users/u/ccode/scratch"), true);
   assert.equal(isScratchCwd("/Users/u/ccode/scratch/notes"), true);
   assert.equal(isScratchCwd("/Users/u/Documents/Ccode"), false);

@@ -15,12 +15,21 @@ import { buildTaskMdPreview } from "../pipeline-start";
 import { isDecisionsOnly } from "../step-decisions";
 import { AGENTS } from "../types";
 import type {
+  GitCommitResultDto,
+  GitFileDto,
   ProjectConfigDto,
   ProjectStepDto,
   TaskCardDto,
   TaskDraftDto,
   WorkspaceDto,
 } from "../types";
+import { statusBadgeTitle } from "../git-status-groups";
+import {
+  historySaveBlockedReason,
+  historySaveMessage,
+  historySavePaths,
+} from "../main-history-save";
+import FileTypeMark from "./FileTypeMark";
 
 const actionBtn = inlineActionClass;
 const fieldSm =
@@ -69,6 +78,7 @@ export default function TaskCardsSection({
   onOpenResources,
   onSetLitSource,
   litBusy,
+  onMainDirtyRefresh,
 }: {
   projectPath: string;
   steps: ProjectStepDto[];
@@ -80,6 +90,8 @@ export default function TaskCardsSection({
   /** 项目文件夹里未存入历史的改动数（null = 非 git 仓库/未知）：非零时标题行右侧提醒。
    *  「主仓/未提交」是 git 术语，用户看不懂——文案按 user-guide 术语表走白话（提交 = 存入历史） */
   mainDirty: number | null;
+  /** 就地存进历史成功后，父级重读 git_status 计数 */
+  onMainDirtyRefresh?: () => void;
   /** 步骤聚焦（v3.70）：聚焦步骤名；null = 项目无研究步骤（只显示「未挂步骤」桶） */
   focusStep?: string | null;
   /** 聚焦步骤的状态白话短语（聚焦头部用；由父级 describeStep 口径派生） */
@@ -118,7 +130,6 @@ export default function TaskCardsSection({
   const deleteCard = useAppStore((s) => s.deleteCard);
   const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setPage = useAppStore((s) => s.setPage);
-  const setSessionScopeReq = useAppStore((s) => s.setSessionScopeReq);
   const updateSettings = useAppStore((s) => s.updateSettings);
   // 想法期只读保护开关（settings.json，默认开）
   const discussGuard = useAppStore((s) => s.settings?.discussReadonly !== false);
@@ -133,6 +144,12 @@ export default function TaskCardsSection({
   const guardHard =
     detected?.find((a) => a.id === guardAgentId)?.readonlySupported ?? true;
   const [error, setError] = useState<string | null>(null);
+  const [dirtyOpen, setDirtyOpen] = useState(false);
+  const [dirtyFiles, setDirtyFiles] = useState<GitFileDto[]>([]);
+  const [dirtyMerging, setDirtyMerging] = useState(false);
+  const [dirtyLoading, setDirtyLoading] = useState(false);
+  const [dirtySaving, setDirtySaving] = useState(false);
+  const [dirtyError, setDirtyError] = useState<string | null>(null);
   // 新建内联表单（「未挂步骤」桶的「＋ 添加想法」）
   const [creatingIn, setCreatingIn] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
@@ -160,6 +177,39 @@ export default function TaskCardsSection({
     };
   }, [projectPath, refreshToken, loadTaskCards]);
 
+  useEffect(() => {
+    if (mainDirty === null || mainDirty === 0) {
+      setDirtyOpen(false);
+      setDirtyFiles([]);
+      setDirtyError(null);
+    }
+  }, [mainDirty]);
+
+  useEffect(() => {
+    if (!dirtyOpen) return;
+    let stale = false;
+    setDirtyLoading(true);
+    setDirtyError(null);
+    invoke<{ isRepo: boolean; files: GitFileDto[]; merging?: boolean }>(
+      "git_status",
+      { cwd: projectPath },
+    )
+      .then((status) => {
+        if (stale) return;
+        setDirtyFiles(status.isRepo ? status.files : []);
+        setDirtyMerging(status.merging === true);
+      })
+      .catch((reason) => {
+        if (!stale) setDirtyError(String(reason));
+      })
+      .finally(() => {
+        if (!stale) setDirtyLoading(false);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [dirtyOpen, projectPath, refreshToken]);
+
   // 分桶只服务「未挂步骤」桶（失效步骤的卡也并入此桶）；聚焦步骤的讨论入口在流程线 chips
   const buckets = bucketCardsByStep(
     cards ?? [],
@@ -175,6 +225,7 @@ export default function TaskCardsSection({
   const focusIdx = focusStepDto
     ? steps.findIndex((s) => s.name === focusStepDto.name)
     : -1;
+  const dirtyBlocked = historySaveBlockedReason(dirtyFiles, dirtyMerging);
   /** 想法区零态入口（「＋ 话题」）是否常显：有卡 → 常现（管理已有讨论）；
    *  无卡 → 仅 role=you 的步骤常显（人主导的步骤开放讨论最有价值，如综述大纲聊角度/创新点）。
    *  纯执行步骤（检索/清洗等 role≠you 且无卡）不显示——多个没约束对象的入口只会让人问「这是干嘛的」；
@@ -314,7 +365,7 @@ export default function TaskCardsSection({
     }
   }
 
-  /** 主仓提醒行点击：开主仓 shell 标签并直接落到「改动」页签（pendingTerminal.rightTab 一次性交接） */
+  /** 要看 diff 才去运行页改动面板；一键存进历史不走这里。 */
   function openMainChanges() {
     setPendingTerminal({
       cwd: projectPath,
@@ -324,6 +375,31 @@ export default function TaskCardsSection({
       rightTab: "git",
     });
     setPage("terminal");
+  }
+
+  async function saveMainHistory() {
+    const blocked = historySaveBlockedReason(dirtyFiles, dirtyMerging);
+    if (blocked) {
+      setDirtyError(blocked);
+      return;
+    }
+    setDirtySaving(true);
+    setDirtyError(null);
+    try {
+      await invoke<GitCommitResultDto>("git_commit", {
+        cwd: projectPath,
+        message: historySaveMessage(focusStep, dirtyFiles),
+        push: false,
+        paths: historySavePaths(dirtyFiles),
+      });
+      setDirtyOpen(false);
+      setDirtyFiles([]);
+      onMainDirtyRefresh?.();
+    } catch (reason) {
+      setDirtyError(String(reason));
+    } finally {
+      setDirtySaving(false);
+    }
   }
 
   /** 继续（已绑定工作区的卡）：开终端新会话，cwd = 工作树，预填「阅读 TASK.md 并继续任务」。
@@ -565,12 +641,13 @@ export default function TaskCardsSection({
             话题{cards && cards.length > 0 ? `（${cards.length}）` : ""}
           </span>
         )}
-        {/* 主仓改动协同提醒（与开工弹层同款口径，只提醒不阻断）：小 chip 降噪，点击跳改动面板 */}
+        {/* 主仓改动：就地展开名单并一键存进历史，不跳运行页。只提醒不阻断。 */}
         {mainDirty !== null && mainDirty > 0 && (
           <button
             type="button"
-            onClick={openMainChanges}
-            title={`你在项目文件夹里改了 ${mainDirty} 个文件，还没存入历史（文件本身不会丢）。每一步的 agent 在一份独立副本里干活，只看得到最近一次存入历史的内容——想让它看到这些改动，点这里先存一下`}
+            onClick={() => setDirtyOpen((open) => !open)}
+            aria-expanded={dirtyOpen}
+            title={`你在项目文件夹里改了 ${mainDirty} 个文件，还没存入历史（文件本身不会丢）。下一步 Agent 只看得到最近一次存入历史的内容。`}
             className="ml-auto flex shrink-0 items-center gap-1 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2"
           >
             {/* 状态圆点用 warn 的文字档：底色档在浅色主题是浅黄，1.5px 圆点会看不见 */}
@@ -581,6 +658,52 @@ export default function TaskCardsSection({
         {/* 「想法期只读保护」开关已迁入聚焦态想法区标题行（它只管想法卡的只读纯聊一路） */}
       </div>
       {error && <p className="mt-1 text-xs text-err-text">{error}</p>}
+      {dirtyOpen && mainDirty !== null && mainDirty > 0 && (
+        <div className="mt-1.5 rounded-md bg-inset px-2.5 py-2">
+          {dirtyLoading && (
+            <p className="text-micro text-l4">正在列出改动…</p>
+          )}
+          {!dirtyLoading && dirtyFiles.length > 0 && (
+            <ul className="max-h-32 space-y-0.5 overflow-auto">
+              {dirtyFiles.map((file) => (
+                <li
+                  key={file.path}
+                  className="flex min-w-0 items-center gap-2 text-xs text-l2"
+                  title={`${file.path} · ${statusBadgeTitle(file.status)}`}
+                >
+                  <FileTypeMark path={file.path} />
+                  <span className="truncate">
+                    {file.path.split(/[\\/]/).pop() || file.path}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {!dirtyLoading && dirtyBlocked && (
+            <p className="mt-1 text-micro text-l3">{dirtyBlocked}</p>
+          )}
+          {dirtyError && (
+            <p className="mt-1 text-micro text-err-text">{dirtyError}</p>
+          )}
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className={actionBtn}
+              disabled={dirtyLoading || dirtySaving || !!dirtyBlocked}
+              onClick={() => void saveMainHistory()}
+            >
+              {dirtySaving ? "保存中…" : "存进历史"}
+            </button>
+            <button
+              type="button"
+              className="text-micro text-l4 hover:text-l2"
+              onClick={openMainChanges}
+            >
+              打开改动
+            </button>
+          </div>
+        </div>
+      )}
       {/* ───── 当前步骤卡（v3.85 三段式的第②段）─────
           「现在该干嘛」以前摊在三处：步进器给状态色、聚焦头给白话短语、流程线给动作，
           三者是三条独立细带（这也是「详情页不够清楚 / 线条化」的直接来源）。
@@ -588,8 +711,8 @@ export default function TaskCardsSection({
           StepFlow 传 bare 去掉自带底色，由这张卡统一承载。 */}
       {focusStep && focusStepDto ? (
         /* shadow-sm：当前步骤卡是本屏唯一「现在该干嘛」答案，微弱投影把它从画布上抬起来（v3.92 走查） */
-        <div className="mt-2 rounded-lg bg-inset p-3 shadow-sm">
-          <div className="mb-2 flex items-center gap-2">
+        <div className="mt-2 rounded-lg bg-inset px-4 py-3.5 shadow-sm">
+          <div className="mb-3 flex items-center gap-2">
           {onFocusIndex && (
             <button
               type="button"
@@ -642,7 +765,7 @@ export default function TaskCardsSection({
                     「想法期只读保护」开关只管只读纯聊这一路，设置页不加行。
                     与「跟 AI 商量一下」是两层东西，文案对仗点破：商量=边聊边改 TASK.md（改合同），
                     想法=先聊不改稿、点 ◈ 沉淀才进任务书（先发散后收编） */}
-                <div className="group flex items-center gap-2">
+                <div className="group flex flex-wrap items-center gap-2">
                   {ideaCards.length > 0 && (
                     <span className="text-xs text-l4">
                       聊过的（{ideaCards.length}）
@@ -675,33 +798,23 @@ export default function TaskCardsSection({
                       </button>
                     </form>
                   ) : (
-                    <>
-                      {ideaCards.length === 0 && (
-                        <span
-                          className="text-xs text-l4"
-                          title="想法卡在只读会话里聊，不动任何文件；聊出结论后点卡片上的「◈ 沉淀进任务书」才追加进 TASK.md。要直接改 TASK.md 用上面的「跟 AI 商量一下」"
-                        >
-                          想法先聊，确认后写入任务书
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIdeaName("");
-                          setIdeaFormOpen(true);
-                        }}
-                        title="自己起个话题开聊（如综述角度、创新点），结论可以沉淀进任务书"
-                        className={`${actionBtn} ${ideaCards.length === 0 ? "text-l3" : `text-l4 ${hoverRevealClass}`} hover:text-l1`}
-                      >
-                        ＋ 话题
-                      </button>
-                    </>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIdeaName("");
+                        setIdeaFormOpen(true);
+                      }}
+                      title="自己起个话题开聊（如综述角度、创新点）；聊完点卡片上的「◈ 沉淀进任务书」才追加进 TASK.md。要直接改任务书用「跟 AI 商量一下」"
+                      className={`${actionBtn} ${ideaCards.length === 0 ? "text-l3" : `text-l4 ${hoverRevealClass}`} hover:text-l1`}
+                    >
+                      ＋ 话题
+                    </button>
                   )}
                   {/* 跟随想法区同步出现（v3.89，用户要求）：没聊过话题时它没有约束对象，
                       孤零零挂在右下角只会让人问「这管的是什么」 */}
                   {ideaCards.length > 0 && (
                   <span
-                    className="ml-auto flex shrink-0 items-center gap-1"
+                    className="flex shrink-0 items-center gap-1"
                     title={
                       guardHard
                         ? `开启后以只读/计划模式启动 ${guardAgentLabel}——进程级参数，约束工具执行（计划模式不等同于 OS 沙箱）`
@@ -757,27 +870,6 @@ export default function TaskCardsSection({
             onOpenResources={onOpenResources}
             onSetLitSource={onSetLitSource}
             litBusy={litBusy}
-            agentContent={
-              <span className="flex flex-wrap items-center gap-1">
-                {/* 反向链接（v3.88）：会话早就带 stepName，但只在对话页单向展示、没有入口。
-                    这里落成结构化 scope chip，不是往搜索框塞字符串 */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSessionScopeReq({
-                      kind: "step",
-                      value: focusStepDto.name,
-                      label: focusStepDto.name,
-                    });
-                    setPage("sessions");
-                  }}
-                  title="到对话页只看这一步的会话"
-                  className={`${actionBtn} text-l4 hover:text-l1`}
-                >
-                  本步骤的对话
-                </button>
-              </span>
-            }
             ws={workspaces.find(
               (w) =>
                 w.name === focusStepDto.workspaceName && w.status === "active",

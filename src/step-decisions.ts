@@ -12,7 +12,8 @@ export const DECISIONS_HEADING = "## 已定方向";
 /** 小节内的答案行：`- 问题：答案`（全角冒号，与模板文案同一套标点） */
 const ANSWER_LINE = /^-\s*(.+?)：(.*)$/;
 
-/** 决定状态与说明分开；标签是闭集，不从「同意／拒绝」等自由文本猜测授权。 */
+/** 决定状态与说明分开；标签是闭集，不从「同意／拒绝」等自由文本猜测授权。
+ *  落盘仍用这些词；界面用 DECISION_STATUS_ASK。 */
 export const DECISION_STATUS = {
   approve: "批准指定范围",
   prepare: "仅允许准备",
@@ -21,6 +22,25 @@ export const DECISION_STATUS = {
 } as const;
 
 export type DecisionStatus = keyof typeof DECISION_STATUS;
+
+/** 界面短标签：同一闭集，不另造状态。 */
+export const DECISION_STATUS_ASK: Record<DecisionStatus, string> = {
+  approve: "可以写",
+  prepare: "只准备，先不写正文",
+  wait: "证据还不够",
+  reject: "先别做这步",
+};
+
+/** 合同口吻的题 → 界面上的人话。存草稿仍用原题，避免改文案丢答案。 */
+const DECISION_ASK: Record<string, string> = {
+  "写作依据的已评阅证据与结论范围（仅探索/待补时明确草稿边界）":
+    "初稿可以依据哪些已经评过的笔记？结论能写到哪一步？",
+};
+
+export function decisionAsk(q: string): string {
+  const t = q.trim();
+  return DECISION_ASK[t] ?? t;
+}
 
 export interface DecisionRecord {
   q: string;

@@ -6,7 +6,6 @@ import { AGENTS, type ProjectDto, type TaskDto } from "../types";
 import {
   ghostActionClass,
   hoverRevealClass,
-  projectWellClass,
   secondaryActionClass,
 } from "./PageFrame";
 import { agentBrand } from "../agent-colors";
@@ -131,7 +130,7 @@ export default function ProjectAgentsView({
   }
 
   return (
-    <section className={projectWellClass}>
+    <section>
       <div className="mb-4 flex items-baseline gap-3">
         <h2 className="text-sm font-medium text-l1">Agents</h2>
         <p className="min-w-0 flex-1 truncate text-xs text-l4">

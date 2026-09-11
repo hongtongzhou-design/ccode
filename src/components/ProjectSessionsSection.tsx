@@ -28,6 +28,7 @@ import {
   tidySessionTitle,
 } from "../session-title";
 import { resumeSessionInTerminal } from "./QuickChatModal";
+import { projectBoundProfileId } from "../project-agents";
 import type { SessionMetaDto } from "../types";
 
 function sessionKey(s: SessionMetaDto) {
@@ -66,6 +67,7 @@ export default function ProjectSessionsSection({
   onNewChat,
   onToggle,
   onError,
+  defaultProfiles,
 }: {
   projectPath: string;
   extraRoots?: string[];
@@ -82,6 +84,8 @@ export default function ProjectSessionsSection({
   onNewChat?: (e: { metaKey: boolean; ctrlKey: boolean }) => void;
   onToggle?: () => void;
   onError?: (msg: string) => void;
+  /** 项目 Agents 页为各家绑定的配置；继续会话时优先用 */
+  defaultProfiles?: Record<string, string> | null;
 }) {
   const sessions = useAppStore((s) => s.sessions);
   const loadSessions = useAppStore((s) => s.loadSessions);
@@ -433,7 +437,14 @@ export default function ProjectSessionsSection({
                               : "源文件已失效，无法继续"
                           }
                           aria-label="继续"
-                          onClick={() => resumeSessionInTerminal(s)}
+                          onClick={() =>
+                            resumeSessionInTerminal(s, {
+                              preferredProfileId: projectBoundProfileId(
+                                defaultProfiles,
+                                s.agent,
+                              ),
+                            })
+                          }
                         >
                           ▶
                         </button>

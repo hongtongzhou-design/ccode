@@ -258,6 +258,29 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
   editingRef.current = editing !== null;
   const selectedRef = useRef<SessionMetaDto | null>(null);
   selectedRef.current = selected;
+  const retitleAllTriedRef = useRef(false);
+
+  // 打开对话页时按新规则补起名：过短、空泛、缺 Mesa 标题、或互相撞车。手改过的不覆盖。
+  useEffect(() => {
+    if (!visible || retitleAllTriedRef.current) return;
+    if (sessions.length === 0) return;
+    retitleAllTriedRef.current = true;
+    let cancelled = false;
+    void invoke<{ renamed: number; skipped: number; failed: number }>(
+      "ai_retitle_all_sessions",
+    )
+      .then(async (result) => {
+        if (cancelled) return;
+        if (result.renamed > 0) await loadSessions(true);
+        if (result.failed > 0) retitleAllTriedRef.current = false;
+      })
+      .catch(() => {
+        if (!cancelled) retitleAllTriedRef.current = false;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, sessions.length, loadSessions]);
 
   // 只有已注册项目才提供「查看项目」；随手聊和内部 AI 不伪装成项目。
   useEffect(() => {
@@ -323,7 +346,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
     return () => window.clearTimeout(timer);
   }, [query, q]);
 
-  // 工作区页「本步骤的对话」：落成作用域 chip（结构化筛选，不是往搜索框塞字符串）
+  // 一次性作用域请求：落成 chip（结构化筛选，不是往搜索框塞字符串）
   useEffect(() => {
     if (!sessionScopeReq) return;
     const req = sessionScopeReq;

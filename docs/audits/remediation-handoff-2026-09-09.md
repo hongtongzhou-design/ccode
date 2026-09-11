@@ -4,6 +4,28 @@
 > 读法：先看 §1 改动地图，再按 §2 逐条核验（每条都有可执行的检查方法），§3 是已知边界与后续方案。
 > 基线文档：`docs/audits/architecture-audit-2026-09-09.md`（十大问题清单与各自状态）。
 
+## 2026-09-10 补充核验口径
+
+本节覆盖旧交接文件里已被替代的约束；未列出的历史验证范围保持原样。
+
+- 冻结副本改为不可变版本目录；同 Run 再冻结不替换旧版。旧格式 payload 保留可读。
+- 返修继承原始基线与未采纳成果；已接受文件按账本内容哈希作为合法前态，外部改动仍拒绝。
+- 接受后的退出不能重开目标；用户显式返修才重开。普通目标接受记录按版本、路径集合和意见幂等。
+- 四种写回入口共用项目锁。Git 补账重放原版本/路径/时间，不合并新增工作；补账未完成不归档，凭证缺失不猜测。
+- 目标/Run 定位按 ProjectId；真正移动时关联旧记录，现存同 ID 副本拒绝自动接管。Git 指针和原生会话源文件不自动修复/改写。
+
+新增重点回归：`task_review::tests::refreshing_keeps_the_previously_reviewed_payload`、
+`continuation_keeps_unchanged_unaccepted_outputs`、`accepted_version_can_be_revised_without_allowing_external_drift`、
+`runs::tests::closing_a_run_never_reopens_an_accepted_goal`、`moved_project_resolves_goal_and_run_without_rewriting_history`、
+`workspaces::tests::merge_pending_replay_never_merges_new_work_or_changes_original_version`、
+`coding::tests::merge_records_the_base_worktree_head_not_the_project_checkout`。
+
+2026-09-10 本轮自动化结果：`npm test` 829 通过；`npm run build` 通过（保留大 chunk 提示）；
+`cargo test --offline --lib -- --test-threads=4` 1069 通过、1 忽略；`cargo check --offline --lib` 通过（仍有编译警告）；
+`git diff --check` 通过。原科研开工 UI 测试及连续合并/归档测试均已恢复通过。
+
+源码/自动化检查不等于 Mesa Dev 实机交互或九家 CLI × 三平台验收；仍需按下文实机清单确认。
+
 ## 1. 改动地图
 
 | 提交 | 内容 |
@@ -51,8 +73,8 @@ npm run build                             # 生产构建
 
 ### 关键不变量（代码走读核对点）
 
-1. **人审的就是写入的**：`task_adopt_outputs_impl` 的写入源只能是 `review/<run>/payload/`，
-   且 `check_adoption` 先校 payload 哈希、再查项目侧开工基线；`expectSeq` 不一致拒绝。
+1. **人审的就是写入的**：`task_adopt_outputs_impl` 的写入源只能是所审版本的不可变 payload（旧证据仍读 `review/<run>/payload/`），
+   且 `check_adoption` 先校所审版本的 payload 哈希、再查开工/已接受基线；`expectSeq` 缺失或不一致拒绝。
 2. **失败清理不删旧成果**：`cleanup_failed_prepare(created_here, …)`，复用目录 created_here=false。
 3. **删除永不自动写回**：snapshot 的 `deleted` 只进证据，采纳路径过滤。
 4. **接受账本必写**：`append_acceptance_log_at` 失败 → 采纳整体返回可见错误（重试幂等）。
@@ -76,14 +98,15 @@ npm run build                             # 生产构建
 ## 3. 已知边界与后续方案
 
 **明确未做（有意保留）**：
-- §4.6 二期只做了双写+回填：读取侧（tasks/runs/会话归属）仍按路径查询，全量迁移待单独一批；
-  项目搬家后历史关联仍指旧路径。
-- 归档案面：归档后无 UI 恢复入口（数据都在，命令行/下一版 UI 可恢复）。
+- §4.6：目标/Run 已按 ID 解析当前位置；历史路径与原生会话来源保留。跨机恢复、Git 指针修复与完整复制项目 UX 仍需单独验收。
 - Memory 没有「Agent 提议区」——Agent 的结论只能经人勾选沉淀，没有独立提议通道。
 - Result Readiness 没有独立字段（由快照存在性隐式表达）。
 - 技能纪律是提示词级约束，不是硬闸；实机仍滥用的话需要「目标级白名单硬约束」评估。
 - 科研流水线/编程链路不走 task_review 冻结（它们走 Git 评审链），统一契约是后续话题。
 - watch 契约展开只收 ≤2MB UTF-8 文本；二进制产出留在隔离目录不自动采纳。
+
+**同日已补（优化批次）**：归档案面（`task_unarchive` + 目标页折叠恢复）；验收账本只读展示；
+`task_list` 默认不含归档行；沉淀知识失败 fail-closed 且按 run_id 幂等。
 
 **风险点（审查重点）**：
 - stat 快路径用 mtime（纳秒）+ size 判「未变」，小文件另有内容哈希兜底；mtime 被人为回拨的对抗场景不在防护范围（本地单人使用前提）。
@@ -93,8 +116,7 @@ npm run build                             # 生产构建
   `src-tauri/src/ai.rs` +365 行。
 
 **后续优先级（与 audit 文档 P1/P2 对齐）**：
-1. 实机走查 §2 全部 8 条。
+1. 实机走查 §2 全部 8 条，外加归档恢复与验收记录展示。
 2. §4.6 引用迁移全量收口（含「会话页恢复不带目标身份」缝隙）。
-3. 归档案面（恢复入口）。
-4. 科研复现能力解绑 workspace_id。
-5. P2：PPT 预览组合、大输入低复制成本、冲突对比增强。
+3. 科研复现能力解绑 workspace_id。
+4. P2：PPT 预览组合、大输入低复制成本、冲突对比增强。

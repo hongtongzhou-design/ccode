@@ -70,6 +70,10 @@ test("展示标题去掉 markdown 装饰，不把符号当主题", () => {
   assert.equal(tidySessionText("# 当 Agent 越来越强"), "当 Agent 越来越强");
   assert.equal(tidySessionText("**修好登录**"), "修好登录");
   assert.equal(tidySessionText("用 `git status` 看改动"), "用 git status 看改动");
+  assert.equal(
+    tidySessionText("审计报告 **审计结论: B 级"),
+    "审计报告 审计结论: B 级",
+  );
 });
 
 test("剥掉 user_query 标签，标题留完整句子", () => {

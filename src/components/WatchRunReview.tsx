@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirmDialog } from "./ConfirmDialog";
+import { secondaryActionClass } from "./PageFrame";
+import { watchAdoptText, watchLedgerFailed } from "../acceptance-log";
 import type { RunDto } from "../types";
 
 interface SnapshotFile {
@@ -21,6 +23,7 @@ export default function WatchRunReview({ run, onClose, currentDirectory }: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [adopted, setAdopted] = useState(false);
+  const [ledgerPending, setLedgerPending] = useState(false);
   const [showCurrent, setShowCurrent] = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -30,16 +33,31 @@ export default function WatchRunReview({ run, onClose, currentDirectory }: {
     return () => { cancelled = true; };
   }, [run.id]);
   const changed = snapshot?.files.filter((file) => file.initial !== file.after) ?? [];
-  async function adopt() {
-    if (busy || !snapshot || adopted) return;
-    if (!(await confirmDialog("将这次运行的冻结产物采纳进主仓？保存前会检查版本冲突和保护路径，并备份原文件；冲突时不自动覆盖。", { confirmText: "采纳进主仓" }))) return;
+  async function adopt(retry = false) {
+    if (busy || !snapshot || (adopted && !ledgerPending)) return;
+    if (
+      !retry &&
+      !(await confirmDialog("将这次运行的冻结产物采纳进主仓？保存前会检查版本冲突和保护路径，并备份原文件；冲突时不自动覆盖。", { confirmText: "采纳进主仓" }))
+    )
+      return;
     setBusy(true);
     setError(null);
     try {
       await invoke<string[]>("adopt_watch_run", { runId: run.id });
       setAdopted(true);
-    } catch (reason) { setError(String(reason)); }
-    finally { setBusy(false); }
+      setLedgerPending(false);
+    } catch (reason) {
+      const message = String(reason);
+      if (watchLedgerFailed(message)) {
+        setAdopted(true);
+        setLedgerPending(true);
+        setError(watchAdoptText(false));
+      } else {
+        setError(message);
+      }
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <div className="absolute inset-0 z-30 flex min-h-0 flex-col bg-canvas">
@@ -49,7 +67,17 @@ export default function WatchRunReview({ run, onClose, currentDirectory }: {
         <button type="button" onClick={() => setShowCurrent((v) => !v)} className="rounded-sm px-2 py-1 text-l3 hover:bg-hover">
           {showCurrent ? "回到冻结产物" : "查看当前工作目录"}
         </button>
-        {!showCurrent && <button type="button" disabled={busy || adopted || !snapshot || run.status !== "completed" || changed.length === 0}
+        {!showCurrent && ledgerPending && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void adopt(true)}
+            className={secondaryActionClass}
+          >
+            {busy ? "记录中…" : "再记录验收"}
+          </button>
+        )}
+        {!showCurrent && !ledgerPending && <button type="button" disabled={busy || adopted || !snapshot || run.status !== "completed" || changed.length === 0}
           onClick={() => void adopt()} className="rounded-sm border border-cta-bd bg-cta px-3 py-1 text-cta-text disabled:opacity-50">
           {busy ? "正在采纳…" : adopted ? "已采纳" : "采纳进主仓"}
         </button>}

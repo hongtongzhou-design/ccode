@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Bot, Files, ListChecks } from "lucide-react";
+import { Bot, Clock3, Files, ListChecks, MessageSquare } from "lucide-react";
 import {
   projectTaskLabel,
   projectSurfaceTabsForMode,
@@ -8,7 +8,9 @@ import {
 import type { ProjectDto } from "../types";
 
 const TAB_ICONS = {
+  chats: MessageSquare,
   tasks: ListChecks,
+  schedules: Clock3,
   files: Files,
   agents: Bot,
 } as const;
@@ -28,7 +30,9 @@ export default function ProjectSurfaceTabs({
 }) {
   if (!project) return <>{children}</>;
   const labels: Record<ProjectSurfaceTab, string> = {
+    chats: "对话",
     tasks: projectTaskLabel(project.workMode),
+    schedules: "定时任务",
     files: "文件",
     agents: "Agents",
   };

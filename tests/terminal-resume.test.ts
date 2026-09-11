@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   findResumeHolderTab,
   resolveResumeLaunch,
+  shouldRelaunchResumeTab,
 } from "../src/terminal-resume.ts";
 
 const tab = (id: string, extra: Record<string, unknown> = {}) => ({
@@ -89,6 +90,13 @@ test("resume 兜底：不活的标签不命中", () => {
   );
 });
 
+test("已有 resume 标签但没在跑：再点继续应重试启动", () => {
+  assert.equal(shouldRelaunchResumeTab(undefined), true);
+  assert.equal(shouldRelaunchResumeTab(st(false)), true);
+  assert.equal(shouldRelaunchResumeTab(st(true)), false);
+  assert.equal(shouldRelaunchResumeTab({ alive: false, running: true }), false);
+});
+
 const apiProfile = (id: string, agent = "codex") => ({
   id,
   agent,
@@ -146,4 +154,42 @@ test("恢复未带原配置：沿用 pickResumeProfile 挑选（wished 优先）
   );
   assert.equal(pick.profileId, "p-b");
   assert.equal(pick.reselectNeeded, false);
+  assert.equal(pick.channelChanged, false);
+});
+
+const officialProfile = (id: string) => ({
+  id,
+  agent: "codex",
+  baseUrl: null,
+  accountType: "official" as const,
+  models: ["gpt-5"],
+});
+
+test("项目默认官方账号：启动栏用官方，不因网关会话而显示上次的网关", () => {
+  const profiles = [officialProfile("p-official"), apiProfile("p-gw")];
+  const pick = resolveResumeLaunch(
+    profiles,
+    {
+      agentId: "codex",
+      provider: "ccode",
+      autoLaunchProfileId: "p-official",
+    },
+    [],
+    "p-gw",
+  );
+  assert.equal(pick.profileId, "p-official");
+  assert.equal(pick.model, "gpt-5");
+  assert.equal(pick.reselectNeeded, false);
+  assert.equal(pick.channelChanged, true);
+});
+
+test("项目默认与会话渠道一致时仍自动启动", () => {
+  const profiles = [officialProfile("p-official"), apiProfile("p-gw")];
+  const pick = resolveResumeLaunch(profiles, {
+    agentId: "codex",
+    provider: "openai",
+    autoLaunchProfileId: "p-official",
+  });
+  assert.equal(pick.profileId, "p-official");
+  assert.equal(pick.channelChanged, false);
 });

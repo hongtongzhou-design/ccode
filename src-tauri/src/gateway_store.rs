@@ -122,7 +122,11 @@ pub fn url_fingerprint(url: &str) -> String {
 }
 
 pub fn key_presence_fp(has_key: bool) -> String {
-    if has_key { "has".into() } else { "none".into() }
+    if has_key {
+        "has".into()
+    } else {
+        "none".into()
+    }
 }
 
 pub fn gateway_content_revision(gateway: &Gateway) -> String {
@@ -188,8 +192,7 @@ pub fn probe_record_still_valid(gateway: &Gateway, rec: &crate::profiles::ProbeR
         return false;
     };
     let url = slot_url(&gateway.slots, slot).unwrap_or("");
-    rec.url_fp == url_fingerprint(url)
-        && rec.key_fp == key_presence_fp(gateway.key_hint.is_some())
+    rec.url_fp == url_fingerprint(url) && rec.key_fp == key_presence_fp(gateway.key_hint.is_some())
 }
 
 pub fn invalidate_slot_probes(gateway: &mut Gateway, slot: Slot) {
@@ -584,8 +587,7 @@ pub fn refresh_profile_connection_state(
 
 // ===== 迁移 =====
 
-#[derive(Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MigrationResult {
     pub gateways: Vec<Gateway>,
     pub bindings: Vec<Binding>,
@@ -840,8 +842,12 @@ pub fn migrate_from_profiles(
     }
 }
 
-pub fn apply_rewrites_to_settings_and_schedules(rewrites: &[(String, String)]) -> Result<(), String> {
-    if rewrites.is_empty() { return Ok(()); }
+pub fn apply_rewrites_to_settings_and_schedules(
+    rewrites: &[(String, String)],
+) -> Result<(), String> {
+    if rewrites.is_empty() {
+        return Ok(());
+    }
     crate::settings::rewrite_profile_refs(rewrites)?;
     crate::scheduler::rewrite_profile_ids(rewrites)?;
     crate::sessions::rewrite_session_profile_ids(rewrites)?;

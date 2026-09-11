@@ -332,8 +332,7 @@ mod tests {
         assert!(!text.contains("gwuser"), "base_url 用户名也剥掉: {text}");
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
-            v["profiles"][0]["baseUrl"],
-            "https://***@api.example.com:8443/v1",
+            v["profiles"][0]["baseUrl"], "https://***@api.example.com:8443/v1",
             "保留 scheme/host/port 供诊断"
         );
     }
@@ -364,6 +363,9 @@ mod tests {
             ..Default::default()
         };
         sanitize_settings_for_dump(&mut plain);
-        assert_eq!(plain.outbound_proxy.as_deref(), Some("socks5://127.0.0.1:7891"));
+        assert_eq!(
+            plain.outbound_proxy.as_deref(),
+            Some("socks5://127.0.0.1:7891")
+        );
     }
 }

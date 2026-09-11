@@ -35,10 +35,8 @@ import {
   SegTabs,
   fieldClass,
   ghostActionClass,
-  hoverRevealClass,
   iconActionClass,
   projectWellClass,
-  rowActionClass,
   searchFieldClass,
 } from "./PageFrame";
 import { LIST_PREVIEW_CAP } from "../lit-list";
@@ -53,7 +51,6 @@ import {
   groupEntriesByDay,
   groupEntriesByKeyword,
   includedLineFor,
-  isRead,
   loadLitDismissed,
   readLitWatchBodyOpen,
   writeLitWatchBodyOpen,
@@ -61,7 +58,6 @@ import {
   litWatchFilterActive,
   litWatchFilterLabel,
   metricsTooltip,
-  paperResourceFor,
   pdfUrlFor,
   staleLitHint,
   weeklyBuckets,
@@ -82,21 +78,13 @@ import type {
   WatchInboxDto,
   WatchSubscriptionDto,
 } from "../lit-watch";
-import type { DirEntryDto } from "./FileTree";
 import type {
   ProjectConfigDto,
-  ProjectResourceDto,
   LitWatchFilterDto,
   ScheduleDto,
   SchedulerRunDonePayload,
   WorkspaceDto,
 } from "../types";
-
-/** 资源 path 可能是绝对路径（Zotero 登记）；相对的一律按项目根拼 */
-function absResourcePath(projectRoot: string, path: string): string {
-  if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) return path;
-  return `${projectRoot}/${path}`;
-}
 
 function HeadIcon({
   label,
@@ -490,214 +478,6 @@ function WatchEntryRow({
   );
 }
 
-/** 精读清单：未读全列（超 10 条先收起）、已读默认折叠——清单随精读步骤能攒到上百条，
- *  平铺会把雷达卡片撑爆 */
-function IncludedList({
-  included,
-  resources,
-  projectRoot,
-  noteNames,
-  downloading,
-  onOpenPdf,
-  onDownload,
-  onAttach,
-  onRemove,
-}: {
-  included: IncludedEntryDto[];
-  resources: ProjectResourceDto[];
-  projectRoot: string;
-  noteNames: string[];
-  downloading: Set<string>;
-  onOpenPdf: (relPath: string) => void;
-  onDownload: (key: string, link: string, title: string) => void;
-  onAttach: (title: string) => void;
-  onRemove: (entry: IncludedEntryDto) => void;
-}) {
-  const UNREAD_CAP = 10;
-  const [showAllUnread, setShowAllUnread] = useState(false);
-  const [readOpen, setReadOpen] = useState(false);
-  const unread = included.filter((e) => !isRead(e, noteNames));
-  const readOnes = included.filter((e) => isRead(e, noteNames));
-  const visibleUnread = showAllUnread ? unread : unread.slice(0, UNREAD_CAP);
-  const renderRow = (entry: IncludedEntryDto, read: boolean) => {
-    const pdf = paperResourceFor(entry, resources);
-    return (
-      <IncludedRow
-        key={entry.lineId}
-        entry={entry}
-        read={read}
-        pdfPath={pdf ? absResourcePath(projectRoot, pdf) : null}
-        downloading={downloading.has(entry.lineId)}
-        onOpen={() => pdf && onOpenPdf(pdf)}
-        onDownload={() => onDownload(entry.lineId, entry.link, entry.title)}
-        onAttach={() => onAttach(entry.title)}
-        onRemove={() => onRemove(entry)}
-      />
-    );
-  };
-  return (
-    <ul className="mt-1 space-y-0.5">
-      {visibleUnread.map((e) => renderRow(e, false))}
-      {unread.length > UNREAD_CAP && (
-        <li className="px-2 py-1">
-          <button
-            type="button"
-            onClick={() => setShowAllUnread((v) => !v)}
-            className="text-xs text-l4 hover:text-l2"
-          >
-            <span className="inline-flex items-center gap-1">
-              <FoldMark open={showAllUnread} />
-              {showAllUnread
-                ? "收起"
-                : `展开其余 ${unread.length - UNREAD_CAP} 条未读`}
-            </span>
-          </button>
-        </li>
-      )}
-      {readOnes.length > 0 && (
-        <li className="px-2 py-1">
-          <button
-            type="button"
-            onClick={() => setReadOpen((v) => !v)}
-            className="text-xs text-l4 hover:text-l2"
-          >
-            <span className="inline-flex items-center gap-1">
-              <FoldMark open={readOpen} /> 已读 {readOnes.length} 条
-            </span>
-          </button>
-        </li>
-      )}
-      {readOpen && readOnes.map((e) => renderRow(e, true))}
-    </ul>
-  );
-}
-
-/** 精读清单行：状态点（已读绿/未读灰）+ 标题 + 作者年份 + 主按钮（开读 / ↓ 全文）+ ⋯ */
-function IncludedRow({
-  entry,
-  read,
-  pdfPath,
-  downloading,
-  onOpen,
-  onDownload,
-  onAttach,
-  onRemove,
-}: {
-  entry: IncludedEntryDto;
-  read: boolean;
-  /** 已下载 PDF 的绝对路径；null = 还没下载 */
-  pdfPath: string | null;
-  downloading: boolean;
-  onOpen: () => void;
-  onDownload: () => void;
-  onAttach: () => void;
-  onRemove: () => void;
-}) {
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const dotRef = useRef<HTMLSpanElement>(null);
-  const { tip, show, hide } = useHoverTip(dotRef);
-  // 与命中条目同一分流口径：免费直链可下载，落地页/DOI 直接给来源入口
-  const fulltext = fulltextLinkFor(entry.link);
-  const pdfRef = useRef<HTMLButtonElement>(null);
-  const pdfTip = useHoverTip(pdfRef, true);
-  return (
-    <li className="group flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 hover:bg-hover">
-      <span
-        ref={dotRef}
-        onMouseEnter={show}
-        onMouseLeave={hide}
-        className={`size-2 shrink-0 rounded-full ${read ? "bg-ok-text" : "bg-l4"}`}
-      />
-      <HoverTip tip={tip} text={read ? "已读（notes/ 里有对应笔记）" : "未读"} />
-      <span className="min-w-0 flex-1 truncate text-sm text-l2">
-        {entry.title}
-      </span>
-      {entry.authorsYear && (
-        <span className="shrink-0 text-micro text-l4">{entry.authorsYear}</span>
-      )}
-      {pdfPath ? (
-        <button
-          type="button"
-          className={`${rowActionClass} shrink-0`}
-          onClick={onOpen}
-        >
-          开读
-        </button>
-      ) : fulltext.kind === "pdf" ? (
-        <>
-          <button
-            ref={pdfRef}
-            type="button"
-            className={`${rowActionClass} shrink-0`}
-            disabled={downloading}
-            onMouseEnter={pdfTip.show}
-            onMouseLeave={pdfTip.hide}
-            onClick={onDownload}
-          >
-            {downloading ? "↓ 下载中…" : "↓ 全文"}
-          </button>
-          <HoverTip tip={pdfTip.tip} text="开放获取全文，免费直接下载" up />
-        </>
-      ) : fulltext.kind === "source" ? (
-        <button
-          type="button"
-          className={`${rowActionClass} shrink-0`}
-          title="没有免费全文直链，打开来源页面获取"
-          onClick={() => void openUrl(sourceUrl(entry.link))}
-        >
-          ↗ 来源
-        </button>
-      ) : null}
-      <button
-        type="button"
-        aria-label={`更多操作：${entry.title}`}
-        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-xs text-l3 hover:bg-hover hover:text-l1 ${hoverRevealClass}`}
-        onClick={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          setMenu({ x: rect.right, y: rect.bottom + 4 });
-        }}
-      >
-        ⋯
-      </button>
-      {menu && (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          alignRight
-          onClose={() => setMenu(null)}
-          items={[
-            ...(!pdfPath
-              ? [
-                  {
-                    label: "↓ 获取全文",
-                    disabled: fulltext.kind !== "pdf",
-                    title:
-                      fulltext.kind === "pdf"
-                        ? fulltext.url
-                        : "没有免费全文直链，用「↗ 来源」打开来源页",
-                    onSelect: onDownload,
-                  },
-                  {
-                    label: "关联本地 PDF…",
-                    title: "已手动下载全文？选中文件，自动复制进 papers/ 并登记",
-                    onSelect: onAttach,
-                  },
-                ]
-              : []),
-            {
-              label: "打开来源",
-              disabled: !entry.link.trim(),
-              title: entry.link.trim() ? entry.link : "这条没有链接",
-              onSelect: () => void openUrl(sourceUrl(entry.link)),
-            },
-            { label: "移出清单", danger: true, onSelect: onRemove },
-          ]}
-        />
-      )}
-    </li>
-  );
-}
-
 /** 订阅弹层（w-[36rem] 富表单档）：表格化编辑 watchlist.md（关键词 + 来源多选 + 备注） */
 function SubscriptionsModal({
   projectRoot,
@@ -1067,10 +847,8 @@ function FilterModal({
 }
 
 /**
- * 项目详情工作段的「◔ 文献雷达」卡片（lit_watch.rs + scheduler.rs 的前端）：
- * 新命中（趋势 + 日分组 + 处置动作）/ 精读清单（已读状态 + 开读）双页签；
- * 订阅与定时任务的编辑入口也在卡头（定时区块在项目设置抽屉里，onOpenSchedules 开抽屉滚动过去）。
- * 列表自取自刷：挂载拉一次，scheduler-run-done 事件到达重拉。
+ * 科研任务「现在」：定时巡检推来的新文献。默认收起；有新命中头上写篇数。
+ * 精读清单在文件页，这里只处理新命中。订阅/筛选/定时入口仍在卡头（定时滚到项目设置）。
  */
 export default function LitWatchCard({
   projectRoot,
@@ -1089,7 +867,7 @@ export default function LitWatchCard({
   onOpenSchedules: () => void;
   /** 下载 PDF 会登记进 project.toml 资源清单：通知父级重读档案卡 */
   onConfigChanged: () => void;
-  /** 收件箱跳转时切回「新命中」页签。 */
+  /** 收件箱跳转：展开雷达并滚到这一条。 */
   focusToken?: number | null;
   /** 有进行中/待验收目标时默认收起，把「项目现在」让出来。 */
   preferCollapsed?: boolean;
@@ -1100,11 +878,8 @@ export default function LitWatchCard({
   const [followups, setFollowups] = useState<WatchFollowupDto[]>([]);
   const [subs, setSubs] = useState<WatchSubscriptionDto[] | null>(null);
   const [included, setIncluded] = useState<IncludedEntryDto[] | null>(null);
-  /** notes/ 目录文件名（已读判定用）；目录不存在 = 空表 = 全部未读 */
-  const [noteNames, setNoteNames] = useState<string[]>([]);
   const [schedules, setSchedules] = useState<ScheduleDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"new" | "included">("new");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   /** 「新命中」页签内的分组视图：按日期（默认）/ 按关键词 */
   const [groupBy, setGroupBy] = useState<"day" | "keyword">("day");
@@ -1133,7 +908,6 @@ export default function LitWatchCard({
     null,
   );
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const setReaderReq = useAppStore((s) => s.setReaderReq);
   const setPage = useAppStore((s) => s.setPage);
   const setWorkspaceReviewRequest = useAppStore(
     (s) => s.setWorkspaceReviewRequest,
@@ -1172,13 +946,12 @@ export default function LitWatchCard({
 
   useEffect(() => {
     if (focusToken == null) return;
-    setTab("new");
     setRadarOpen(true);
     if (focusEntryId) setExpandedId(focusEntryId);
   }, [focusToken, focusEntryId, setRadarOpen]);
 
   async function load() {
-    const [inbox, subList, includedList, scheduleList, notes] =
+    const [inbox, subList, includedList, scheduleList] =
       await Promise.all([
         invoke<WatchInboxDto>("list_watch_entries", { projectRoot }).catch(
           (reason) => {
@@ -1194,11 +967,6 @@ export default function LitWatchCard({
           projectRoot,
         }).catch(() => null),
         invoke<ScheduleDto[]>("list_schedules").catch(() => null),
-        // notes 目录不存在 = 还没有笔记 = 全部未读（诚实回落，不硬猜）
-        invoke<DirEntryDto[]>("list_dir", {
-          path: `${projectRoot}/notes`,
-          showHidden: false,
-        }).catch(() => [] as DirEntryDto[]),
       ]);
     if (inbox) {
       setEntries(inbox.entries);
@@ -1220,7 +988,6 @@ export default function LitWatchCard({
     if (includedList) setIncluded(includedList);
     if (scheduleList)
       setSchedules(schedulesForProject(scheduleList, projectRoot));
-    setNoteNames(notes.filter((n) => !n.isDir).map((n) => n.name));
   }
 
   useEffect(() => {
@@ -1356,17 +1123,15 @@ export default function LitWatchCard({
         ...includedLineFor(entry),
       });
       if (res.added) {
-        showToast("已加入精读清单");
+        showToast("已加入精读清单，到文件页看");
         setIncluded(
           await invoke<IncludedEntryDto[]>("list_included_entries", {
             projectRoot,
           }),
         );
       } else {
-        showToast("已在精读清单");
+        showToast("已在精读清单，到文件页看");
       }
-      const pdf = paperResourceFor(entry, cfg.resources ?? []);
-      if (pdf) openPdf(pdf);
     } catch (reason) {
       setError(String(reason));
     }
@@ -1384,7 +1149,6 @@ export default function LitWatchCard({
         fileNameHint,
       });
       showToast(`已下载：${res.name}`);
-      // PDF 已登记进 project.toml 资源清单：让父级重读，精读行主按钮随即变「开读」
       onConfigChanged();
     } catch (reason) {
       setError(String(reason));
@@ -1418,32 +1182,7 @@ export default function LitWatchCard({
     }
   }
 
-  async function removeIncluded(entry: IncludedEntryDto) {
-    try {
-      await invoke("remove_included_entry", {
-        projectRoot,
-        lineId: entry.lineId,
-      });
-      setIncluded(
-        await invoke<IncludedEntryDto[]>("list_included_entries", {
-          projectRoot,
-        }),
-      );
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }
-
-  /** 精读清单「开读」→ 沉浸式阅读区（批次 B1：笔记 | PDF | 对话 三栏） */
-  function openPdf(relPath: string) {
-    const abs = absResourcePath(projectRoot, relPath);
-    setReaderReq({ pdfPath: abs, projectRoot });
-    setPage("terminal");
-  }
-
-  const resources: ProjectResourceDto[] = cfg.resources ?? [];
-  // 雷达筛选（存 project.toml）：只过滤「新命中」展示，精读清单是用户自选的不动；
-  // 指标未知的条目放行不误伤（entryPassesFilter 口径），「查看全部」可临时看被筛掉的
+  // 雷达筛选（存 project.toml）：只过滤新命中；指标未知的条目放行不误伤
   const filter = cfg.litWatchFilter;
   const filterOn = litWatchFilterActive(filter);
   const undismissed = filterLitDismissed(entries ?? [], dismissed);
@@ -1541,11 +1280,14 @@ export default function LitWatchCard({
         >
           <FoldMark open={bodyOpen} boxed />
           <h2 className="text-xs font-medium text-l2">
-            文献雷达
-            {visibleEntries.length > 0 ? `（${visibleEntries.length}）` : ""}
+            {visibleEntries.length > 0
+              ? `文献雷达 · ${visibleEntries.length} 篇`
+              : lastRunAt
+                ? `文献雷达 · 上次巡检 ${relTime(lastRunAt)}`
+                : "文献雷达"}
           </h2>
         </button>
-        {lastRunAt && (
+        {visibleEntries.length > 0 && lastRunAt && (
           <span className="text-micro text-l4">
             上次巡检 {relTime(lastRunAt)}
           </span>
@@ -1640,18 +1382,7 @@ export default function LitWatchCard({
 
       {bodyOpen && (subs !== null && !hasSubs ? null : (
         <div className={projectWellClass}>
-        <>
-          <SegTabs
-            className="mt-2"
-            items={[
-              { id: "new" as const, label: `新命中 ${visibleEntries.length}` },
-              { id: "included" as const, label: `精读清单 ${included?.length ?? 0}` },
-            ]}
-            value={tab}
-            onChange={setTab}
-          />
-          {tab === "new" &&
-            (entries === null ? (
+            {entries === null ? (
               <LoadingRows compact />
             ) : (
               <>
@@ -1836,28 +1567,7 @@ export default function LitWatchCard({
                   </div>
                 )}
               </>
-            ))}
-          {tab === "included" &&
-            (included === null ? (
-              <LoadingRows compact />
-            ) : included.length === 0 ? (
-              <p className="mt-2 px-2 text-xs text-l4">
-                还没有精读条目。在「新命中」里点书签加进来。
-              </p>
-            ) : (
-              <IncludedList
-                included={included}
-                resources={resources}
-                projectRoot={projectRoot}
-                noteNames={noteNames}
-                downloading={downloading}
-                onOpenPdf={openPdf}
-                onDownload={(key, link, title) => void download(key, link, title)}
-                onAttach={(title) => void attachPdf(title)}
-                onRemove={(entry) => void removeIncluded(entry)}
-              />
-            ))}
-        </>
+            )}
         </div>
       ))}
 

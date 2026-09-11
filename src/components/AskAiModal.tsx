@@ -34,6 +34,7 @@ export function beginAskAi(
       path: file.root || file.cwd,
       workMode: file.workMode,
       writeReview: false,
+      kind: "session",
     });
     const userPrompt =
       file.prompt !== undefined
@@ -126,6 +127,7 @@ export default function AskAiModal() {
   );
   const [writeReview, setWriteReview] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!req) return;
@@ -185,7 +187,8 @@ export default function AskAiModal() {
   }
 
   async function start() {
-    if (!profileId) return;
+    if (!profileId || starting) return;
+    setStartError(null);
     const choice = { agentId, profileId, model: model.trim() };
     saveAskAiRemembered({ ...choice, useDefault });
     const projectChat = !file.path.trim();
@@ -221,7 +224,8 @@ export default function AskAiModal() {
         });
         setPage("terminal");
         close();
-      } catch {
+      } catch (error) {
+        setStartError(String(error));
         setStarting(false);
         return;
       }
@@ -312,6 +316,7 @@ export default function AskAiModal() {
             onChange={setUseDefault}
             label="设为默认"
           />
+          {startError && <p role="alert" className="mb-2 text-xs text-err-text">{startError}</p>}
           <div className="flex items-center justify-end gap-2">
             <button
               type="button"

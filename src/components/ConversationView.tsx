@@ -5,6 +5,8 @@ import ChatMarkdown, { ChatImageCard } from "./ChatMarkdown";
 import { splitImagePaths } from "../chat-image";
 import {
   groupConversationSegments,
+  isProcessBlock,
+  processFoldLabel,
   segmentContainsIndex,
   toolCallCount,
 } from "../conversation-tools";
@@ -336,8 +338,10 @@ export default function ConversationView({
   function renderToolRun(
     run: Extract<Run, { tool: true }>,
     isUser: boolean,
+    title?: string,
+    forceOpen = false,
   ) {
-    const isOpen = expanded.has(run.key);
+    const isOpen = forceOpen || expanded.has(run.key);
     // 计数只算 tool_use：tool_result 与调用并入同一条消息（如 codex 解析），
     // 直接数块数会把一次调用显示成两次
     const callCount = toolCallCount(run.blocks);
@@ -357,7 +361,9 @@ export default function ConversationView({
           className="flex h-7 w-full items-center gap-1.5 rounded-md bg-inset/65 px-2 text-xs text-l3 hover:bg-raised hover:text-l1"
         >
           <FoldMark open={isOpen} />
-          <span className="shrink-0">执行记录 · {callCount} 次工具调用</span>
+          <span className="shrink-0">
+            {title ?? `执行记录 · ${callCount} 次工具调用`}
+          </span>
           {names.length > 0 && (
             <span className="min-w-0 truncate text-l4">
               {names.slice(0, 3).join("、")}
@@ -377,6 +383,24 @@ export default function ConversationView({
   }
 
   function renderRuns(m: ChatMessageDto, mkey: string, isUser: boolean, forceOpen = false) {
+    if (compact) {
+      const process = m.blocks.filter(isProcessBlock);
+      const rest = m.blocks.filter((block) => !isProcessBlock(block));
+      return (
+        <>
+          {process.length > 0 &&
+            renderToolRun(
+              { tool: true, blocks: process, key: `${mkey}:process` },
+              isUser,
+              processFoldLabel(process),
+              forceOpen,
+            )}
+          {rest.map((block, bi) =>
+            renderBlock(block, `${mkey}:v${bi}`, isUser, forceOpen),
+          )}
+        </>
+      );
+    }
     return runsOf(m.blocks, mkey).map((run) =>
       run.tool
         ? renderToolRun(run, isUser)

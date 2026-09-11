@@ -3012,8 +3012,7 @@ done
         let entries = agent_entries("cursor").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(
-            entries[0].1["url"],
-            "https://example.com/edited",
+            entries[0].1["url"], "https://example.com/edited",
             "重投用最新清单内容"
         );
         assert_eq!(agent_entries("kimi").unwrap().len(), 1, "kimi 意图一并重投");
@@ -3125,8 +3124,12 @@ done
 
     #[test]
     fn env_refs_scanned_embedded_and_whole() {
-        let names =
-            |v: &str| scan_env_refs(v).into_iter().map(|(_, n)| n).collect::<Vec<_>>();
+        let names = |v: &str| {
+            scan_env_refs(v)
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(names("${A} and $B"), vec!["A", "B"]);
         assert_eq!(names("Bearer ${CCODE_X}"), vec!["CCODE_X"]);
         assert_eq!(names("$A$B"), vec!["A", "B"], "相邻两个引用各自成界");
@@ -3200,8 +3203,7 @@ done
                 let mut b = [0u8; 8192];
                 let _ = s.read(&mut b);
                 let _ = s.write_all(
-                    format!("{line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                        .as_bytes(),
+                    format!("{line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
                 );
             }
         });
@@ -3619,7 +3621,11 @@ fn check_stdio_attempt(
                             .unwrap_or_default()
                     )
                 });
-                StdioAttempt::Done(health_ok(started, detail.filter(|d| !d.is_empty()), "handshake"))
+                StdioAttempt::Done(health_ok(
+                    started,
+                    detail.filter(|d| !d.is_empty()),
+                    "handshake",
+                ))
             }
             Err(e) => StdioAttempt::FrameMismatch(append_missing_hint(
                 with_stderr(format!("响应不是合法 JSON-RPC 帧：{e}")),

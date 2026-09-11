@@ -93,11 +93,14 @@ import { sortWorkspacesByAttention } from "../project-status";
 import { samePath as samePathKey } from "../path-utils";
 import { toast } from "../toast";
 import {
+  DEFAULT_PROJECT_SURFACE_TAB,
   projectSurfaceStorageKey,
   projectSurfaceTabsForMode,
   readProjectSurfaceTab,
   type ProjectSurfaceTab,
 } from "../project-surface";
+import ProjectChatsView from "../components/ProjectChatsView";
+import ProjectSchedulesView from "../components/ProjectSchedulesView";
 
 /** 保留工作区的合并已完成，且分支尚未产生新的待合并提交。 */
 function isMerged(
@@ -1295,7 +1298,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       project,
       repoPath: project.path,
       repoName: project.name,
-      list: workspaces.filter((w) => samePath(w.repoPath, project.path)),
+      list: workspaces.filter(
+        (w) =>
+          (project.id && w.projectId === project.id) ||
+          samePath(w.repoPath, project.path),
+      ),
     })),
     ...repoPaths
       .filter((rp) => !projects.some((p) => samePath(p.path, rp)))
@@ -1325,9 +1332,9 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               undefined,
               selectedGroup.project.workMode,
             );
-          return tabs.includes(stored) ? stored : tabs[0];
+          return tabs.includes(stored) ? stored : DEFAULT_PROJECT_SURFACE_TAB;
         })()
-      : "tasks";
+      : DEFAULT_PROJECT_SURFACE_TAB;
   const selectedWorkMode = selectedGroup?.project
     ? normalizeWorkMode(selectedGroup.project.workMode)
     : null;
@@ -1338,10 +1345,35 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     setIdentityChrome(null);
   }, [selectedGroupKey]);
+  useEffect(() => {
+    if (visible) return;
+    setIdentityChrome(null);
+  }, [visible]);
   function requestIdentityChrome(action: ProjectChromeAction) {
     if (action !== "rename" && action !== "topic") selectProjectSurface("tasks");
     setIdentityChrome({ action, token: Date.now() });
   }
+  function consumeIdentityChrome() {
+    setIdentityChrome(null);
+  }
+  const projectSurfaceReq = useAppStore((s) => s.projectSurfaceReq);
+  const setProjectSurfaceReq = useAppStore((s) => s.setProjectSurfaceReq);
+  useEffect(() => {
+    if (!projectSurfaceReq || !selectedProjectPath) return;
+    try {
+      localStorage.setItem(
+        projectSurfaceStorageKey(selectedProjectPath),
+        projectSurfaceReq,
+      );
+    } catch {
+      /* 存储不可用只影响本次页签 */
+    }
+    setProjectSurfaceTabs((current) => ({
+      ...current,
+      [selectedProjectPath]: projectSurfaceReq,
+    }));
+    setProjectSurfaceReq(null);
+  }, [projectSurfaceReq, selectedProjectPath, setProjectSurfaceReq]);
   function selectProjectSurface(tab: ProjectSurfaceTab) {
     if (!selectedProjectPath) return;
     try {
@@ -1725,19 +1757,27 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
     // 只在「任务」页签挂载——若该项目上次停在「文件/Agents」，请求会永远无人消费。
     // 这里一并把该项目切到任务页（写持久键 + 内存态，与 selectProjectSurface 同口径）
     const reviewReq = useAppStore.getState().taskReviewReq;
-    if (
-      reviewReq &&
+    const focusReq = useAppStore.getState().projectFocusReq;
+    let tab: ProjectSurfaceTab | null = null;
+    if (reviewReq && g.project && samePath(reviewReq.projectRoot, g.repoPath)) {
+      tab = "tasks";
+    } else if (
+      focusReq &&
       g.project &&
-      samePath(reviewReq.projectRoot, g.repoPath)
+      samePath(focusReq.projectRoot, g.repoPath) &&
+      (focusReq.focus === "lit" || focusReq.focus === "schedule")
     ) {
+      tab = "schedules";
+    }
+    if (tab) {
       try {
-        localStorage.setItem(projectSurfaceStorageKey(g.repoPath), "tasks");
+        localStorage.setItem(projectSurfaceStorageKey(g.repoPath), tab);
       } catch {
         /* 存储不可用只影响下次进来时的页签记忆 */
       }
       setProjectSurfaceTabs((current) => ({
         ...current,
-        [g.repoPath]: "tasks",
+        [g.repoPath]: tab,
       }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2045,7 +2085,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
 
   return (
-    <div className="relative flex h-full flex-col bg-canvas">
+    <div className="relative flex h-full flex-col bg-rail2">
       {/* 待你处理（全局收件箱）：文档流单行 strip（只占 32px，不顶开工作台）；
           全空不渲染。按类别拆胶囊，点胶囊展开该类明细（悬浮下拉，遮罩/Esc 关闭）。
           macOS 上收件箱收进自绘标题栏（Ghostty 式），页内 strip 不渲染（Windows/Linux 保留本 strip） */}
@@ -2236,7 +2276,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       </aside>
 
       <div className="min-w-0 flex-1 overflow-auto">
-        <PageFrame width="fluid">
+        <PageFrame width="fluid" surface="workspace">
       {selectedGroup && (
         <ProjectIdentityHeader
           project={selectedGroup.project}
@@ -2340,11 +2380,34 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           onChange={selectProjectSurface}
           taskPanel={
             selectedGroup.project && selectedWorkMode === "office" ? (
-              <ProjectUserTasksView project={selectedGroup.project} />
+              <ProjectUserTasksView
+                project={selectedGroup.project}
+                chromeReq={identityChrome}
+                onChromeConsumed={consumeIdentityChrome}
+              />
             ) : undefined
           }
         >
-        {selectedGroup.project && selectedSurfaceTab === "files" ? (
+        {selectedGroup.project && selectedSurfaceTab === "chats" ? (
+          <ProjectChatsView
+            project={selectedGroup.project}
+            extraRoots={selectedGroup.list.map((item) => item.worktreePath)}
+            onError={setError}
+          />
+        ) : selectedGroup.project && selectedSurfaceTab === "schedules" ? (
+          <ProjectSchedulesView
+            project={selectedGroup.project}
+            workspaces={selectedGroup.list}
+            focusToken={
+              projectFocusReq?.focus === "lit" ? projectFocusReq.token : null
+            }
+            focusEntryId={
+              projectFocusReq?.focus === "lit" ? projectFocusReq.entryId : null
+            }
+            onError={setError}
+            onFocusHandled={() => setProjectFocusReq(null)}
+          />
+        ) : selectedGroup.project && selectedSurfaceTab === "files" ? (
           <ProjectFilesView
             projectPath={selectedGroup.repoPath}
             workMode={selectedGroup.project.workMode}
@@ -2376,6 +2439,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             project={selectedGroup.project}
             repoPath={selectedGroup.repoPath}
             homeDir={homeDir}
+            chromeReq={identityChrome}
+            onChromeConsumed={consumeIdentityChrome}
             onError={setError}
             onNotice={setNotice}
           />
@@ -2390,13 +2455,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             drift={drift}
             refreshToken={refreshToken}
           focusStepReq={focusStepReq}
-            projectFocusReq={
-              projectFocusReq &&
-              samePath(projectFocusReq.projectRoot, selectedGroup.repoPath)
-                ? projectFocusReq
-                : null
-            }
-            onProjectFocusHandled={() => setProjectFocusReq(null)}
             pageVisible={visible}
             freshGitGuide={
               !!selectedGroup.project &&
@@ -2411,6 +2469,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             onError={setError}
             chromeReq={identityChrome}
             onIdentityAction={requestIdentityChrome}
+            onChromeConsumed={consumeIdentityChrome}
           >
             {(wsView) => {
             // 聚焦步骤可见性（纯逻辑 src/workspace-visibility.ts）：聚焦 = 绑定该步骤的工作区

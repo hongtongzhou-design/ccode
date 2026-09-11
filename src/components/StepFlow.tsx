@@ -9,6 +9,8 @@ import { Checkbox, FoldMark } from "./PageFrame";
 import { buildStepFlow, type StepFlowNode } from "../step-flow";
 import {
   DECISION_STATUS,
+  DECISION_STATUS_ASK,
+  decisionAsk,
   formatDecisionAnswer,
   isDecisionsOnly,
   parseDecisionAnswer,
@@ -263,7 +265,7 @@ export default function StepFlow({
     // 步骤认领不在此登记：启动栏还可能改 agent/目录，改由终端页 spawn 时以最终值登记
     // （pendingTerminal.stepName → TerminalView launch 时 invoke claim_next_session_for_step）。
     // 它跑在项目根（只改 TASK.md，不落步骤工作区），不登记的话 stepName 为空，
-    // 「本步骤的对话」捞不到它。
+    // 项目「对话」页按步骤筛会漏掉它。
     setPendingTerminal({
       cwd: projectPath,
       extraEnv: {},
@@ -576,7 +578,7 @@ export default function StepFlow({
           // 行为不变——点进去看产出/提交情况；状态翻转仍走 git 派生（提交→待评审）
           <span className="flex shrink-0 items-center gap-1.5">
             {agentAttention === "done" && (
-              <span className="text-xs text-done">✓ agent 已跑完</span>
+              <span className="text-xs text-l3">Agent 已跑完</span>
             )}
             <button
               type="button"
@@ -625,7 +627,7 @@ export default function StepFlow({
             ? node.human.title
             : undefined
         }
-        className={`rounded-sm py-1 pr-1.5 transition-colors duration-300 ${
+        className={`rounded-sm py-1.5 pr-1.5 transition-colors duration-300 ${
           node.kind === "human" && dropHover === node.human?.title
             ? "bg-cta/10 outline outline-1 outline-cta-bd pl-1.5"
             : isCurrent
@@ -715,11 +717,11 @@ export default function StepFlow({
             （待开始无文案、进行中预告、待评审给步骤）；agent 跑完没提交时当前节点一直停在
             agent 上，若死守 isCurrent，验收引导永远显示不出来（用户实测） */}
         {!dense && (isCurrent || node.kind === "review") && node.hint && (
-          <p className="mt-0.5 pl-9 text-micro text-l4">{node.hint}</p>
+          <p className="mt-1 pl-9 text-micro text-l4">{node.hint}</p>
         )}
         {node.kind === "input" && onSetLitSource && (
           // pl-9 与其余内容区（hint/agentContent）对齐到步骤名左缘，不顶到序号
-          <div className="ml-9">
+          <div className="ml-9 mt-1.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               {LIT_SOURCES.map((o) => {
                 const on = (litSource || "search") === o.id;
@@ -740,9 +742,7 @@ export default function StepFlow({
                   </button>
                 );
               })}
-              {/* 动作链接并进同一行（v3.89）：原先独占一行，还配一句与选项 title 重复的小字。
-                  动作跟着所选来源走；落点统一是「文献与数据」（导入只此一处），
-                  链接常驻——选了让 agent 检索也可能想补几篇 */}
+              {/* 跟在选项后面，不 ml-auto 拉到右缘——右边留给这一步的「开始」。 */}
               {(() => {
                 const cur =
                   LIT_SOURCES.find((o) => o.id === (litSource || "search")) ??
@@ -752,7 +752,7 @@ export default function StepFlow({
                     type="button"
                     onClick={() => onOpenResources(cur.focus)}
                     title={cur.hint}
-                    className="ml-auto shrink-0 rounded-sm px-1 py-0.5 text-xs text-l2 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
+                    className="shrink-0 rounded-sm px-1 py-0.5 text-xs text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
                   >
                     {cur.action}
                   </button>
@@ -765,7 +765,7 @@ export default function StepFlow({
             内容一字未动，只是换了落点，避免节点被隐藏时这些入口一起消失 */}
         {(node.kind === "discuss" ||
           (node.kind === "agent" && !hasDiscussNode)) && (
-          <div className="mt-1 space-y-1.5 pl-9">
+          <div className="mt-1.5 space-y-2 pl-9">
             {/* ── 输入准备（v3.86；v3.89 升格为独立 input 节点，排在 AI 干活之前）──
                 · 决策项：答案写进任务书草稿，纯记录，给 agent 看的合同内容
                 · 文献来源：答案写进项目配置 lit_source，要动手（导入），还会改变这一步的性质
@@ -775,8 +775,8 @@ export default function StepFlow({
             {/* 决策项 = 方式一（点卡片直接定）：可枚举的拍板点一行一题，点选即答——不开终端、不建卡、不切页。
                 与「跟 AI 商量一下」（方式二 · 聊着定）是确定 TASK.md 的两条并列路径，终点相同（v3.90 用户拍板挑明） */}
             {decisions.length > 0 && (
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   {/* 默认折叠（v3.89）：这些题**不拦着开工**（不答也能点「开始」），
                       但摊开成一列待答清单看着像必办任务——每步 0~3 件还没规律，
                       用户无从预期。降为「想省事就点两下」的快捷方式 */}
@@ -801,7 +801,7 @@ export default function StepFlow({
                         )
                       }
                       title="未拍板的一律取第一个选项（推荐值）写进草稿；已选过的不动"
-                      className="ml-auto shrink-0 rounded-sm px-1 py-0.5 text-micro text-l4 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                      className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l4 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l2 disabled:opacity-50"
                     >
                       全部用推荐值
                     </button>
@@ -818,8 +818,9 @@ export default function StepFlow({
                     >
                       <span
                         className={`shrink-0 text-xs ${picked ? "text-l3" : "text-l1"}`}
+                        title={d.q}
                       >
-                        {d.q}
+                        {decisionAsk(d.q)}
                       </span>
                       {d.options.map((opt) => {
                         const on = picked === opt || (pickedRecord?.status === "approve" && pickedRecord.note === opt);
@@ -864,7 +865,7 @@ export default function StepFlow({
                           className="rounded-full border border-cta-bd bg-cta-pill px-2 py-0.5 text-xs text-cta-pill-text hover:brightness-110"
                         >
                           {pickedRecord && pickedRecord.status !== "legacy"
-                            ? `${DECISION_STATUS[pickedRecord.status]}：${pickedRecord.note || "（无说明）"}`
+                            ? `${DECISION_STATUS_ASK[pickedRecord.status]}：${pickedRecord.note || "（无说明）"}`
                             : picked}
                         </button>
                       )}
@@ -884,7 +885,7 @@ export default function StepFlow({
                         title="选项都不合适：自己写一句，或展开去聊"
                         className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
                       >
-                        {d.options.length > 0 ? "其他…" : "填写依据…"}
+                        {d.options.length > 0 ? "其他…" : "写一句…"}
                       </button>
                     </div>
                   );
@@ -902,17 +903,15 @@ export default function StepFlow({
                       ]).then(() => setWriteOwn(null));
                     }}
                   >
-                    <span className="shrink-0 text-micro text-l4">
-                      {writeOwn.q}
-                    </span>
                     <select
                       value={writeOwn.status}
                       onChange={(e) => setWriteOwn({ ...writeOwn, status: e.target.value as DecisionStatus | "" })}
                       className="rounded-sm border border-field bg-canvas px-1.5 py-0.5 text-xs text-l1"
+                      title="可以写 = 按你写下的范围开写正文；只准备 = 还不准写正文"
                     >
-                      <option value="">选择状态</option>
+                      <option value="">能不能写？</option>
                       {(Object.keys(DECISION_STATUS) as DecisionStatus[]).map((key) => (
-                        <option key={key} value={key}>{DECISION_STATUS[key]}</option>
+                        <option key={key} value={key}>{DECISION_STATUS_ASK[key]}</option>
                       ))}
                     </select>
                     <input
@@ -924,7 +923,7 @@ export default function StepFlow({
                       onKeyDown={(e) => {
                         if (e.key === "Escape") setWriteOwn(null);
                       }}
-                      placeholder="说明范围／版本／证据，回车写进草稿"
+                      placeholder="例如：按已精读笔记写，没全文的只写到摘要"
                       className="min-w-0 flex-1 rounded-sm border border-field bg-canvas px-1.5 py-0.5 text-xs text-l1 outline-none focus:border-cta-bd"
                     />
                     <button
@@ -957,11 +956,11 @@ export default function StepFlow({
             )}
             {/* 方式一/方式二同形（v3.90 走查，用户拍板）：两条路都是「可折叠的一行」——
                 ▸ 折叠只露一行标签，▾ 展开才露动作（方式一展开是卡片、方式二展开是聊天按钮）。
-                「预览/编辑 TASK.md」是看结果不是第三条路——固定在行尾（与方式一行的
-                「全部用推荐值」同位），不参战 */}
+                「预览/编辑 TASK.md」是看结果不是第三条路——跟在本行标签后面
+                （与方式一行的「全部用推荐值」同位），不 ml-auto 拉到右缘抢「开始」。 */}
             {decisions.length > 0 ? (
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <button
                     type="button"
                     onClick={() => setChatOpen((v) => !v)}
@@ -971,17 +970,15 @@ export default function StepFlow({
                     <FoldMark open={chatOpen} boxed />
                     和 AI 商量（可选）
                   </button>
-                  <span className="ml-auto flex items-center gap-2">
-                    <button
-                      type="button"
-                      disabled={!draft}
-                      onClick={() => void openDraftInline()}
-                      title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
-                      className="rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
-                    >
-                      TASK.md
-                    </button>
-                  </span>
+                  <button
+                    type="button"
+                    disabled={!draft}
+                    onClick={() => void openDraftInline()}
+                    title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
+                    className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                  >
+                    TASK.md
+                  </button>
                 </div>
                 {chatOpen && (
                   <div className="flex flex-wrap items-center gap-2 pl-4">
@@ -993,7 +990,6 @@ export default function StepFlow({
                     >
                       {chatBusy ? "准备 TASK.md…" : "跟 AI 商量一下"}
                     </button>
-                    <span className="text-xs text-l4">结论会写入 TASK.md</span>
                   </div>
                 )}
               </div>
@@ -1009,22 +1005,15 @@ export default function StepFlow({
                 >
                   {chatBusy ? "准备 TASK.md…" : "跟 AI 商量一下"}
                 </button>
-                {!draftHasBody && (
-                  <span className="text-xs text-l4">
-                    可选 · 结论写入 TASK.md
-                  </span>
-                )}
-                <span className="ml-auto flex items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={!draft}
-                    onClick={() => void openDraftInline()}
-                    title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
-                    className="rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
-                  >
-                    TASK.md
-                  </button>
-                </span>
+                <button
+                  type="button"
+                  disabled={!draft}
+                  onClick={() => void openDraftInline()}
+                  title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
+                  className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                >
+                  TASK.md
+                </button>
               </div>
             )}
             {chatError && (
@@ -1058,7 +1047,7 @@ export default function StepFlow({
           </div>
         )}
         {node.kind === "agent" && agentContent && (
-          <div className="mt-0.5 pl-9">{agentContent}</div>
+          <div className="mt-1.5 pl-9">{agentContent}</div>
         )}
         {/* 说明只在当前节点显示：一屏同时摊开五段说明是这一页最大的噪音源。
             非当前节点的说明挂在行的 title 上（悬停可见），信息不丢。
@@ -1072,10 +1061,10 @@ export default function StepFlow({
             (!node.done &&
               node.human!.timing === "after" &&
               afterReady(node.human!))) && (
-            <div className="mt-0.5 pl-9 text-micro leading-5 text-l4">
+            <div className="mt-1 pl-9 text-micro leading-5 text-l4">
               <p className="whitespace-pre-wrap">{guidanceShort}</p>
               {guidanceShort !== guidance && (
-                <details className="mt-0.5">
+                <details className="mt-1">
                   <summary className="cursor-pointer select-none text-micro text-l4 hover:text-l2">
                     怎么做
                   </summary>
@@ -1097,7 +1086,7 @@ export default function StepFlow({
     >
       {/* 主干节点用左侧竖线串起来（连接线落在序号列正下方，1.5px 极淡）：
           没有连线时三个节点像三条独立的行，读不出「这是一条流程」 */}
-      <ol className="relative space-y-1 before:absolute before:bottom-4 before:left-[7px] before:top-4 before:w-px before:bg-hairline before:content-['']">
+      <ol className="relative space-y-3 before:absolute before:bottom-4 before:left-[7px] before:top-4 before:w-px before:bg-hairline before:content-['']">
         {flow.nodes
           .filter((n) => n.section === "main")
           .map((node) => renderNode(node, false))}
@@ -1106,11 +1095,11 @@ export default function StepFlow({
           和「定方向 / agent 执行 / 评审」平铺在一起会让人以为样样都得做 */}
       {flow.nodes.some((n) => n.section === "optional") && (
         <>
-          <div className="mt-2 flex items-center gap-2">
+          <div className="mt-3 flex items-center gap-2">
             <span className="shrink-0 text-micro text-l4">可选</span>
             <span className="h-px min-w-0 flex-1 bg-hairline" />
           </div>
-          <ol className="mt-1 space-y-0.5">
+          <ol className="mt-1.5 space-y-1">
             {flow.nodes
               .filter((n) => n.section === "optional")
               .map((node) => renderNode(node, false))}

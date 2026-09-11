@@ -49,13 +49,20 @@ pub fn get_app_log(limit: usize) -> Vec<LogEntryDto> {
         Err(_) => return Vec::new(),
     };
     let limit = limit.min(CAP);
-    let entries: Vec<_> = q.iter().skip(q.len().saturating_sub(limit)).cloned().collect();
+    let entries: Vec<_> = q
+        .iter()
+        .skip(q.len().saturating_sub(limit))
+        .cloned()
+        .collect();
     drop(q);
-    entries.into_iter().map(|mut entry| {
-        entry.source = crate::sessions::redact_sensitive_text(&entry.source);
-        entry.message = crate::sessions::redact_sensitive_text(&entry.message);
-        entry
-    }).collect()
+    entries
+        .into_iter()
+        .map(|mut entry| {
+            entry.source = crate::sessions::redact_sensitive_text(&entry.source);
+            entry.message = crate::sessions::redact_sensitive_text(&entry.message);
+            entry
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -91,7 +98,11 @@ pub fn export_app_log() -> Result<String, String> {
 pub fn log_event(level: String, source: String, message: String) {
     record(&level, &source, &message);
     #[cfg(debug_assertions)]
-    eprintln!("[{level}] {}: {}", crate::sessions::redact_sensitive_text(&source), crate::sessions::redact_sensitive_text(&message));
+    eprintln!(
+        "[{level}] {}: {}",
+        crate::sessions::redact_sensitive_text(&source),
+        crate::sessions::redact_sensitive_text(&message)
+    );
 }
 
 #[cfg(test)]
