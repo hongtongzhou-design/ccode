@@ -1066,7 +1066,7 @@ function ProfileModal({
               </label>
             )}
             {form.accountType === "api" && (
-            <div className="mb-3 rounded border border-hairline p-2">
+            <div className="mb-3 rounded border border-hairline ccode-well p-2">
               <p className="mb-2 text-xs font-medium text-l2">请求策略</p>
               {combo?.policyChannelNote && (
                 <p className="mb-1 text-[11px] text-l3">{combo.policyChannelNote}</p>
