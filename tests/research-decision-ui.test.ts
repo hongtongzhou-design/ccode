@@ -19,7 +19,7 @@ test("手写依据 UI：不提供默认批准，保存原文与依据后才满�
         "../pipeline-start": "export const buildWorkspaceTerminalRequest=async()=>({});",
         "../md-math": "export const renderMathInto=async()=>{};",
       };
-      b.onResolve({ filter: /.*/ }, (args) => args.path in stubs && args.importer.endsWith("/StepFlow.tsx") ? { path: args.path, namespace: "host-stub" } : undefined);
+      b.onResolve({ filter: /.*/ }, (args) => args.path in stubs && args.importer.replaceAll("\\", "/").endsWith("/StepFlow.tsx") ? { path: args.path, namespace: "host-stub" } : undefined);
       b.onLoad({ filter: /.*/, namespace: "host-stub" }, (args) => ({ contents: stubs[args.path], loader: "js" }));
     } }],
   });
