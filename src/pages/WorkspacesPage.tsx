@@ -2242,15 +2242,17 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             : "text-l3 hover:bg-hover hover:text-l2"
                         }`}
                       >
-                        <span
-                          className={`mt-1 size-2 shrink-0 rounded-full ${
-                            needsAttention > 0
-                              ? "bg-warn-text"
-                              : groupActive > 0
-                                ? "bg-ok-text"
-                                : "bg-l4"
-                          }`}
-                        />
+                        {/* 状态点只在「有话说」时出现：待处理=黄 / 运行中=绿；闲置不渲染灰点
+                            （一列恒灰圆点是同权重噪音，设计系统「无状态不渲染状态点」），占位保行对齐 */}
+                        {needsAttention > 0 || groupActive > 0 ? (
+                          <span
+                            className={`mt-1 size-2 shrink-0 rounded-full ${
+                              needsAttention > 0 ? "bg-warn-text" : "bg-ok-text"
+                            }`}
+                          />
+                        ) : (
+                          <span className="mt-1 size-2 shrink-0" aria-hidden="true" />
+                        )}
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium">
                             {group.project?.name ?? group.repoName}

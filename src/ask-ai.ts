@@ -1,7 +1,9 @@
 /**
  * 项目区「问 AI」：第一次选 Agent / 配置 / 模型，可设为默认。
  * 存储与 pending 纯逻辑，弹层在 AskAiModal。
+ * 项目内新会话（＋新对话 / 跟 AI 商量）优先项目 Agents 名册，不走这里的记忆跳过。
  */
+import { projectAgentLaunch } from "./project-agents.ts";
 
 const KEY = "ccode.askAi";
 
@@ -15,9 +17,9 @@ export interface AskAiFile {
   prompt?: string;
   /** 默认：有 path 就开右栏预览 */
   preview?: boolean;
-  /** 项目级默认 Agent；只影响本次弹层预选，不覆盖全局记忆。 */
+  /** 项目 Agents 页的默认 Agent；有值且能解析到连接则直接启动。 */
   preferredAgent?: string | null;
-  /** 项目级默认 profile；需与 preferredAgent 属于同一 Agent。 */
+  /** 项目 Agents 页给这家绑的配置。 */
   preferredProfile?: string | null;
   /** 项目对话：true = 隔离写入，结束后验收。 */
   writeReview?: boolean;
@@ -65,6 +67,32 @@ export function askAiCanSkip(
   if (!remembered?.useDefault || !remembered.agentId || !remembered.profileId)
     return false;
   return profiles.some((p) => p.id === remembered.profileId);
+}
+
+/** 项目绑了 Agents 就直接用；没绑才回落「问 AI」勾过的默认。⌘ 重选返回 null。 */
+export function askAiDirectLaunch(
+  file: Pick<AskAiFile, "preferredAgent" | "preferredProfile">,
+  profiles: readonly { id: string; agent: string; models?: readonly string[] }[],
+  remembered: AskAiRemembered | null,
+  forcePick?: boolean,
+): { agentId: string; profileId: string; model: string } | null {
+  if (forcePick) return null;
+  const agent = file.preferredAgent?.trim() ?? "";
+  if (agent) {
+    return projectAgentLaunch(
+      profiles,
+      agent,
+      file.preferredProfile?.trim()
+        ? { [agent]: file.preferredProfile.trim() }
+        : {},
+    );
+  }
+  if (!askAiCanSkip(remembered, profiles) || !remembered) return null;
+  return {
+    agentId: remembered.agentId,
+    profileId: remembered.profileId,
+    model: remembered.model,
+  };
 }
 
 export function buildAskAiPending(

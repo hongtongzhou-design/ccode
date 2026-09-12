@@ -14,6 +14,7 @@ import {
 import { buildTaskMdPreview } from "../pipeline-start";
 import { isDecisionsOnly } from "../step-decisions";
 import { AGENTS } from "../types";
+import { projectAgentLaunch } from "../project-agents";
 import type {
   GitCommitResultDto,
   GitFileDto,
@@ -79,6 +80,8 @@ export default function TaskCardsSection({
   onSetLitSource,
   litBusy,
   onMainDirtyRefresh,
+  preferredAgent,
+  preferredProfile,
 }: {
   projectPath: string;
   steps: ProjectStepDto[];
@@ -122,7 +125,18 @@ export default function TaskCardsSection({
   /** 输入准备（v3.86）：透传给流程线「定方向」节点的文献来源选择与就地导入 */
   onSetLitSource?: (value: string) => void | Promise<void>;
   litBusy?: boolean;
+  /** 项目 Agents 页的默认 Agent / 绑定；新会话和「跟 AI 商量一下」用这份。 */
+  preferredAgent?: string | null;
+  preferredProfile?: string | null;
 }) {
+  const profiles = useAppStore((s) => s.profiles);
+  const projectLaunch = projectAgentLaunch(
+    profiles,
+    preferredAgent,
+    preferredAgent
+      ? { [preferredAgent]: preferredProfile?.trim() ?? "" }
+      : null,
+  );
   const cards = useAppStore((s) => s.taskCards[projectPath]);
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
   const createCard = useAppStore((s) => s.createCard);
@@ -304,7 +318,7 @@ export default function TaskCardsSection({
    *  登记失败静默降级：不阻断开终端，会话事后可在对话页手动归卡 */
   function claimForCard(card: TaskCardDto) {
     invoke("claim_next_session_for_card", {
-      agent: launchBarAgent(),
+      agent: projectLaunch?.agentId ?? launchBarAgent(),
       cwd: projectPath,
       taskId: card.id,
     }).catch(() => {});
@@ -334,6 +348,9 @@ export default function TaskCardsSection({
       initialPrompt: protect
         ? `${opening}。注意：现在只讨论方案，不要修改/新建/删除任何文件，也不要在这里产出任何步骤产物（哪怕我点头）——聊到该动手的程度时，提醒我回项目页点「开工」或「跟 AI 商量一下」，那边会在独立工作区里执行。`
         : opening,
+      ...(projectLaunch ?? {}),
+      autoStart: Boolean(projectLaunch?.profileId),
+      surface: "terminal",
     });
     setPage("terminal");
   }
@@ -417,6 +434,9 @@ export default function TaskCardsSection({
       extraEnv: {},
       title: card.name,
       initialPrompt: "阅读 TASK.md 并继续任务",
+      ...(projectLaunch ?? {}),
+      autoStart: Boolean(projectLaunch?.profileId),
+      surface: "terminal",
     });
     setPage("terminal");
   }
@@ -757,6 +777,7 @@ export default function TaskCardsSection({
           <StepFlow
             bare
             runId={focusRunId}
+            projectLaunch={projectLaunch}
             discussContent={
               // 零态且非人主导步骤：整个想法区不渲染（没有入口也没有约束对象）
               !showIdeaEntry && !ideaFormOpen ? null : (

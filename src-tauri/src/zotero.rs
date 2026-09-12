@@ -93,23 +93,34 @@ fn open_snapshot(db_path: &Path) -> Result<Connection, String> {
     let source = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("只读打开 Zotero 库失败: {e}"))?;
     source
-        .busy_timeout(Duration::from_secs(2))
+        .busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     let mut snapshot = Connection::open_in_memory().map_err(|e| e.to_string())?;
     {
         let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)
             .map_err(|e| format!("建立 Zotero 一致快照失败: {e}"))?;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             match backup
-                .step(256)
+                .step(1024)
                 .map_err(|e| format!("读取 Zotero 快照失败: {e}"))?
             {
                 rusqlite::backup::StepResult::Done => break,
-                _ if Instant::now() >= deadline => {
-                    return Err("Zotero 库正在忙，未取得一致快照；请稍后重试".into())
+                rusqlite::backup::StepResult::More => {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            "Zotero 库较大，未在时限内读完。请完全退出 Zotero 后重试。".into(),
+                        );
+                    }
                 }
-                _ => std::thread::sleep(Duration::from_millis(10)),
+                _ => {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            "Zotero 正在写入库（开着或正在同步）。请完全退出 Zotero 后再导入，不要只是隐藏窗口。".into(),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
             }
         }
     }

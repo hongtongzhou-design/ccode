@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PIPELINE_TEMPLATES, pipelineStepsForTemplate } from "../src/pipeline-presets.ts";
-import { DEFAULT_RESEARCH_TOOLS, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../src/research-tools.ts";
+import { DEFAULT_RESEARCH_TOOLS, researchToolFieldsForSteps, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../src/research-tools.ts";
 import { conflictingTemplateSteps, renameConflictingSteps } from "../src/pipeline-append.ts";
 import { parseReproductionContract } from "../src/research-report.ts";
 
@@ -13,6 +13,11 @@ test("工具设置保留项目规则且可切回默认；非法值不生效", ()
   assert.deepEqual(researchToolsFromSettings(settings), tools);
   assert.deepEqual(settingsWithResearchTools(settings, DEFAULT_RESEARCH_TOOLS), ["不改原始数据", "科研工具/未来字段：保留"]);
   assert.equal(researchToolsFromSettings(["科研工具/plotting：malformed"]).plotting, "python");
+});
+
+test("旧 literature 设置键写回时剥掉，不再当工具合同", () => {
+  assert.deepEqual(researchToolsFromSettings(["科研工具/literature：zotero"]), DEFAULT_RESEARCH_TOOLS);
+  assert.deepEqual(settingsWithResearchTools(["科研工具/literature：zotero", "不改原始数据"], DEFAULT_RESEARCH_TOOLS), ["不改原始数据"]);
 });
 
 test("选择 Origin 一次补齐相关步骤合同，重应用幂等，撤销不删手工技能", () => {
@@ -31,14 +36,35 @@ test("选择 Origin 一次补齐相关步骤合同，重应用幂等，撤销不
   assert.ok(withResearchTools(withResearchTools(manual, tools), DEFAULT_RESEARCH_TOOLS).skills.includes("origin-plot"));
 });
 
-test("Blender 只挂研究设计/结构示意，不替代统计图；EndNote 来源与交付分开", () => {
-  const tools = { ...DEFAULT_RESEARCH_TOOLS, illustration: "blender" as const, literature: "endnote" as const, libraryExport: "endnote" as const };
+test("Blender 只挂研究设计/结构示意，不替代统计图；EndNote 交付不冒充检索来源", () => {
+  const tools = { ...DEFAULT_RESEARCH_TOOLS, illustration: "blender" as const, libraryExport: "endnote" as const };
   const steps = template("research-paper").steps.map((s) => withResearchTools(s, tools));
   assert.ok(steps.find((s) => s.name === "实验设计")!.skills.includes("blender-research"));
   assert.ok(!steps.find((s) => s.name === "结果分析")!.skills.includes("blender-research"));
-  assert.ok(steps[0].skills.includes("endnote-bridge"));
-  assert.ok(!steps[0].expectedArtifacts.includes("papers/endnote-import.xml"));
+  assert.ok(!steps[0].skills.includes("endnote-bridge"));
+  assert.ok(steps.at(-1)!.skills.includes("endnote-bridge"));
   assert.ok(steps.at(-1)!.expectedArtifacts.includes("papers/endnote-import.xml"));
+});
+
+test("Zotero 同步技能跟 lit_source，不跟已废除的 literature 设置", () => {
+  const search = template("research-paper").steps[0];
+  const notes = template("research-paper").steps.find((s) => s.skills.includes("lit-notes"))!;
+  assert.ok(!notes.skills.includes("zotero-sync"));
+  assert.ok(withResearchTools(notes, DEFAULT_RESEARCH_TOOLS, "artifacts", "zotero").skills.includes("zotero-sync"));
+  assert.ok(!withResearchTools(notes, DEFAULT_RESEARCH_TOOLS, "artifacts", "folder").skills.includes("zotero-sync"));
+  assert.ok(!withResearchTools(search, DEFAULT_RESEARCH_TOOLS, "artifacts", "search").requiredSkills?.includes("zotero-sync"));
+  assert.ok(withResearchTools(search, DEFAULT_RESEARCH_TOOLS, "artifacts", "zotero").requiredSkills?.includes("zotero-sync"));
+  const mounted = withResearchTools(notes, DEFAULT_RESEARCH_TOOLS, "artifacts", "zotero");
+  assert.deepEqual(withResearchTools(mounted, DEFAULT_RESEARCH_TOOLS, "artifacts", "search").skills, notes.skills);
+});
+
+test("选定模板后只出示相关工具字段", () => {
+  const dataKeys = researchToolFieldsForSteps(template("data-processing").steps).map((f) => f.key);
+  assert.deepEqual(dataKeys, ["plotting"]);
+  const reviewKeys = researchToolFieldsForSteps(template("review").steps).map((f) => f.key);
+  assert.ok(reviewKeys.includes("illustration"));
+  assert.ok(reviewKeys.includes("manuscript"));
+  assert.ok(!reviewKeys.includes("plotting"));
 });
 
 test("科研论文与毕业论文双向追加不再误复用不同稿件的同名步骤", () => {

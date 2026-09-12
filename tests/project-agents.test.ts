@@ -5,6 +5,7 @@ import {
   currentProfileLine,
   projectAgentsEmptyWorkHint,
   projectAgentsHint,
+  projectAgentLaunch,
   projectBoundProfileId,
   resolvedTaskAgentId,
 } from "../src/project-agents.ts";
@@ -214,6 +215,17 @@ test("projectBoundProfileId uses the project binding for that agent", () => {
   assert.equal(projectBoundProfileId(bound, "codex"), undefined);
   assert.equal(projectBoundProfileId({}, "kimi"), undefined);
   assert.equal(projectBoundProfileId({ kimi: "  " }, "kimi"), undefined);
+});
+
+test("projectAgentLaunch uses the Agents roster, not last launch", () => {
+  assert.equal(projectAgentLaunch(profiles, null, { codex: "p-codex-2" }), null);
+  assert.deepEqual(projectAgentLaunch(profiles, "codex", { codex: "p-codex-2" }), {
+    agentId: "codex",
+    profileId: "p-codex-2",
+    model: "gpt-5-mini",
+  });
+  assert.equal(projectAgentLaunch(profiles, "codex", { codex: "gone" })?.profileId, "p-codex");
+  assert.equal(projectAgentLaunch(profiles, "gemini", {}), null);
 });
 
 test("roster keeps connection names and models separate, including names with separators", () => {

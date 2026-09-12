@@ -50,6 +50,7 @@ import {
 } from "../chat-handoff";
 import { AGENTS, type CustomRuntimeDto, type OfficialAccountStatusDto } from "../types";
 import { resolveCustomRuntimeCwd } from "../custom-runtime";
+import { samePath } from "../path-utils";
 import { cwdIsCodingWorktree } from "../coding-git";
 import { loadCodingOverview } from "../components/CodingProjectView";
 import { normalizeWorkMode } from "../work-mode";
@@ -400,6 +401,7 @@ const TerminalView = memo(function TerminalView({
   rightOpen,
   layoutKey,
   gitTotals,
+  termBg,
   tabId,
   initialCwd,
   skipSeed,
@@ -442,6 +444,8 @@ const TerminalView = memo(function TerminalView({
   layoutKey?: string;
   /** 该标签 cwd 的 git 变更统计（Codex 风：状态行常驻 +N -N） */
   gitTotals?: { add: number; del: number } | null;
+  /** 终端画面底色（与 xterm 主题同源）：画布区涂它，和状态栏拼成一张同色圆角卡 */
+  termBg?: string;
   /** 本标签 id（liveSessions 登记用） */
   tabId: string;
   /** 不继承「上次启动」记录（兜底空标签） */
@@ -2757,7 +2761,7 @@ const TerminalView = memo(function TerminalView({
   ];
 
   return (
-    <div className={`flex h-full flex-col ${embedInPeek ? "" : "px-1 pt-2"}`}>
+    <div className={`flex h-full flex-col ${embedInPeek ? "" : "px-2 pt-2"}`}>
       {embedInPeek ? null : barExpanded ? (
         <>
           <div className="mb-1 flex min-w-0 flex-wrap items-start gap-x-1.5 gap-y-2">
@@ -2889,9 +2893,15 @@ const TerminalView = memo(function TerminalView({
             )}
             </div>
             <span className="ml-auto flex shrink-0 items-center gap-1.5">
-              {renderSkillMenu(false, true)}
-              {renderMcpMenu(false, true)}
+              {/* 未启动欢迎态不渲染技能/MCP 胶囊：一键注入的落点（首条指令）此时默认折叠、
+                  MCP 提及没有输入框可进，常驻只添噪音；启动后的收缩栏保留（v3.213 口径不变） */}
+              {!welcomeVisible && renderSkillMenu(false, true)}
+              {!welcomeVisible && renderMcpMenu(false, true)}
+              {/* 欢迎卡可见时不渲染第二个「运行」：卡片主按钮是唯一主动作（⌘↵ 仍可用），
+                  同视野双主按钮是页面显乱的根源；运行中显示「停止」，
+                  shell 面板态（无欢迎卡）才保留启动钮 */}
               {!shellOnly &&
+                (running || !welcomeVisible) &&
                 (running ? (
                   <button
                     onClick={stop}
@@ -2903,11 +2913,7 @@ const TerminalView = memo(function TerminalView({
                   <button
                     onClick={() => (restored && !customRuntimeId ? void restoreTask() : void launch())}
                     disabled={!profileId || !!profiles.find((p) => p.id === profileId)?.slotMissing}
-                    className={`inline-flex h-8 shrink-0 items-center justify-center rounded-md border px-3 text-sm disabled:opacity-50 ${
-                      welcomeVisible
-                        ? "border-field bg-inset text-l2 hover:bg-hover"
-                        : "border-cta-bd bg-cta text-cta-text hover:brightness-110"
-                    }`}
+                    className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                   >
                     {restored && !customRuntimeId ? "恢复任务" : "运行"}
                   </button>
@@ -3115,7 +3121,12 @@ const TerminalView = memo(function TerminalView({
           </button>
         </div>
       )}
-      <div className="relative flex min-h-0 flex-1">
+      {/* 终端卡上半：涂 xterm 同源底色 + 上圆角，与下方状态栏（rounded-b-xl 同底色）
+          拼成一张无缝圆角卡；宿主 px-3 py-2.5 内衬从此隐入同色，不再露灰边 */}
+      <div
+        className="relative flex min-h-0 flex-1 overflow-hidden rounded-t-xl"
+        style={{ background: termBg }}
+      >
         <div
           ref={containerRef}
           // 阅读区打开期间由 TerminalPage 按此标记把本节点搬进覆盖层右栏（DOM 搬移不重建）
@@ -3603,6 +3614,29 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   useEffect(() => {
     setTreeRoot(null);
   }, [activeCwd]);
+
+  // 文件树根落在主目录时自动收起（会话内一次性，不写持久化偏好）：
+  // 主目录树下全是系统文件夹，展开态对默认视图是纯噪音（用户反馈「页面不简洁」）。
+  // 只改视图态不动 localStorage——用户手动再展开不拦（根不变不重触发），
+  // 离开主目录后守卫复位，再回主目录时按新会话重新收一次
+  const [homeDir, setHomeDir] = useState("");
+  useEffect(() => {
+    void invoke<string>("home_dir")
+      .then(setHomeDir)
+      .catch(() => {});
+  }, []);
+  const homeTreeCollapseRef = useRef(false);
+  useEffect(() => {
+    const root = treeRoot ?? activeCwd;
+    const atHome =
+      !!root &&
+      (root === "~" || (!!homeDir && samePath(root, homeDir, IS_WINDOWS)));
+    if (atHome && treeOpen && !homeTreeCollapseRef.current) {
+      homeTreeCollapseRef.current = true;
+      setTreeOpen(false);
+    }
+    if (!atHome) homeTreeCollapseRef.current = false;
+  }, [treeRoot, activeCwd, homeDir, treeOpen]);
 
   /** 标签激活：分屏时点到右 pane 的标签则左右互换（活跃标签始终固定在左 pane） */
   function activateTab(id: string) {
@@ -4285,10 +4319,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   // 从其他页面进入终端页：右栏默认收起，只剩终端——「默认可见」会在每次
   // 切回来时摊开一个此刻没用途的面板。只有明确交接才开：预览请求（资源面板
-  // 「查看」）、pendingTerminal 指定右栏页签/预览（「主仓改动」提醒、开聊带开草稿）。
+  // 「查看」）、pendingTerminal 指定右栏页签/预览（「主仓改动」提醒、问 AI 带文件）。
   // 必须声明在下方交接消费 effect 之前：交接与切页是同一批 store 更新，
   // 消费 effect 会立刻把 pendingTerminal/previewReq 置空——本 effect 用 getState 现查，
-  // 顺序反了会把刚按交接打开的预览面板又收掉（「跟 AI 商量一下」带开 TASK.md 曾被这样关掉）。
+  // 顺序反了会把刚按交接打开的预览面板又收掉。
   const prevVisibleRef = useRef(visible);
   useEffect(() => {
     const was = prevVisibleRef.current;
@@ -4400,7 +4434,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             pendingChatInjectRef.current = { tabId: existing.id, prompt };
             setInjectTick((n) => n + 1);
           }
-          if (pt.resume && shouldRelaunchResumeTab(statuses[existing.id])) {
+          if (
+            (pt.resume && shouldRelaunchResumeTab(statuses[existing.id])) ||
+            (pt.autoStart && !statuses[existing.id]?.alive)
+          ) {
             setTabs((prev) =>
               prev.map((t) =>
                 t.id === existing.id
@@ -5309,7 +5346,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       {/* 中带：终端标签区 */}
       <div className="relative flex min-w-0 flex-1 flex-col">
         {/* 顶部标签条：常驻中带顶部 */}
-        <div className="flex h-9 items-center gap-1 overflow-hidden bg-strip px-2">
+        <div className="flex h-9 items-center gap-1 overflow-hidden px-2">
           {!rightExpanded && !treeOpen && (
             <button
               type="button"
@@ -5431,7 +5468,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           <button
             onClick={() => addTab()}
             title="新建终端标签"
-            className="flex size-8 shrink-0 items-center justify-center rounded-full border border-hairline text-sm text-l4 hover:bg-hover hover:text-l1"
+            className="flex size-8 shrink-0 items-center justify-center rounded-full text-sm text-l4 hover:bg-hover hover:text-l1"
           >
             ＋
           </button>
@@ -5558,6 +5595,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   Boolean(peekByTab[t.id])
                 }
                 gitTotals={t.id === focusedId ? gitTotals : null}
+                termBg={statusBarColors.background}
                 tabId={t.id}
                 skipSeed={t.skipSeed}
                 initialCwd={t.initialCwd}
@@ -5799,10 +5837,16 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     const chatBarHidden =
                       (surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) !== "terminal" &&
                       !(appSettings?.statusBarInChat ?? true);
+                    // 隐形占位只为「切层不改终端行列数」：已有会话/PTY 的标签切回终端会重放
+                    // transcript，必须保住几何；从没启动过的干净标签没有可保护的画面，
+                    // 占位只会白留一段空（用户反馈聊天页「下面空太大」）——直接不占位
+                    const chatReserved = !!(
+                      statuses[t.id]?.ptyId || sessionByTab[t.id]?.sessionId
+                    );
                     return (
                   <div
                     data-statusbar-host={t.id}
-                    className={`shrink-0 ${chatBarHidden ? "invisible" : ""}`}
+                    className={`shrink-0 ${chatBarHidden ? (chatReserved ? "invisible" : "hidden") : ""}`}
                     aria-hidden={chatBarHidden}
                   >
                   {(() => {

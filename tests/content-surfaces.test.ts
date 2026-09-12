@@ -32,7 +32,9 @@ function classes(file: string): Array<{ tag: string; text: string; literal: bool
 
 test("全局卡片迁移覆盖工作台/技能/MCP/连接/设置等管理页", () => {
   const minimumCards: Record<string, number> = {
-    WorkbenchPage: 4, SkillsPage: 4, McpPage: 6, ProfilesPage: 5,
+    // WorkbenchPage 4→3（2026-09-13）：空态的虚线壳卡改为管理页同款裸 EmptyState
+    // （「空状态允许保留连续画布」），内容卡只剩 hero / 正在进行行 / 待验收行三处。
+    WorkbenchPage: 3, SkillsPage: 4, McpPage: 6, ProfilesPage: 5,
     SchedulesPage: 1, SettingsPage: 6, StatsPage: 2, SessionsPage: 1,
   };
   for (const [page, minimum] of Object.entries(minimumCards)) {

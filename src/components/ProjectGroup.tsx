@@ -667,7 +667,7 @@ export default function ProjectGroup({
       try {
         await invoke("apply_pipeline_template", {
           projectRoot: projectPath,
-          steps: item.steps.map((s) => withResearchTools(s, researchToolsFromSettings(cfg.settings), cfg.artifactDir)),
+          steps: item.steps.map((s) => withResearchTools(s, researchToolsFromSettings(cfg.settings), cfg.artifactDir, cfg.litSource)),
           projectSettings: settingsForTemplateApply(item),
           strategy: "append",
           topic: templateTopic.trim() || null,
@@ -707,7 +707,7 @@ export default function ProjectGroup({
     try {
       await invoke("apply_pipeline_template", {
         projectRoot: projectPath,
-        steps: item.steps.map((s) => withResearchTools(s, researchToolsFromSettings(cfg.settings), cfg.artifactDir)),
+        steps: item.steps.map((s) => withResearchTools(s, researchToolsFromSettings(cfg.settings), cfg.artifactDir, cfg.litSource)),
         projectSettings: settingsForTemplateApply(item),
         strategy: "replace",
         topic: templateTopic.trim() || null,
@@ -928,8 +928,13 @@ export default function ProjectGroup({
     if (target === (cfg.litSource?.trim() || "search")) return;
     setLitBusy(true);
     try {
-      await saveConfig({ ...cfg, litSource: target });
-      await syncLitSourceToTaskMds(target);
+      const steps = cfg.steps.map((s) =>
+        withResearchTools(s, researchToolsFromSettings(cfg.settings), cfg.artifactDir, target),
+      );
+      const ok = await saveConfig({ ...cfg, litSource: target, steps });
+      if (ok) await syncLitSourceToTaskMds(target);
+    } catch (reason) {
+      onError(String(reason));
     } finally {
       setLitBusy(false);
     }
@@ -1011,8 +1016,12 @@ export default function ProjectGroup({
         collectionId,
         linkedAttachmentBase: zoteroAttachmentBase,
       });
-      setCfg(out.config);
       // 后端已把资源与来源一起保存；不得用导入前的 cfg 全量回写。
+      // 来源既已是 zotero，检索/精读步要补上同步技能（与流程线选择同一合同）。
+      const steps = out.config.steps.map((s) =>
+        withResearchTools(s, researchToolsFromSettings(out.config.settings), out.config.artifactDir, "zotero"),
+      );
+      await saveConfig({ ...out.config, litSource: "zotero", steps });
       await syncLitSourceToTaskMds("zotero");
       setZoteroLib(null);
       setZoteroMsg(
@@ -1812,6 +1821,12 @@ export default function ProjectGroup({
       {registered && cfg && (!liteResearch || (taskCards?.length ?? 0) > 0) && (
         <TaskCardsSection
           projectPath={projectPath}
+          preferredAgent={project?.defaultAgent}
+          preferredProfile={
+            project?.defaultAgent
+              ? project.defaultProfiles?.[project.defaultAgent]
+              : undefined
+          }
           steps={cfg.steps}
           cfg={cfg}
           workspaces={workspaces}

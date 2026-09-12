@@ -147,7 +147,7 @@ export default function ProjectIdentityHeader({
   }
 
   return (
-    <header className="sticky top-0 z-20 mb-4 bg-rail2 py-2">
+    <header className="ccode-page-header sticky top-0 z-20 mb-4 py-1.5">
       <div className="flex min-h-9 min-w-0 items-center gap-2">
         {leading}
         {renaming ? (

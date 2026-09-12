@@ -57,7 +57,7 @@ const LIT_SOURCES: {
   {
     id: "folder",
     label: "我有一堆 PDF / 题录",
-    hint: "把题录或 PDF 放进项目，开工时自动解析。",
+    hint: "把 PDF 或 RIS/XML 题录放进项目，开工时自动解析。",
     action: "去放入题录 / PDF →",
     focus: "files",
   },
@@ -100,6 +100,7 @@ export default function StepFlow({
   bare = false,
   agentAttention = null,
   runId = null,
+  projectLaunch = null,
 }: {
   projectPath: string;
   step: ProjectStepDto;
@@ -155,6 +156,8 @@ export default function StepFlow({
   agentAttention?: "confirm" | "done" | null;
   /** Explicit Run identity for the review handoff. */
   runId?: string | null;
+  /** 项目 Agents 名册解析出的启动；有则「跟 AI 商量一下」直接用它拉起。 */
+  projectLaunch?: { agentId: string; profileId: string; model: string } | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const {
@@ -245,7 +248,7 @@ export default function StepFlow({
 
   /** 聊任务书（v3.72）：讨论直接服务于 TASK.md 内容文件——非只读启动（agent 要写文件），
    *  指令约束只许新建/修改这一个文件；不用卡片的只读保护（那是不动文件口径）。
-   *  开聊同时带开文件预览（previewPath/previewRoot 交接给终端页右栏）。
+   *  直接进终端并自动启动，不打开右栏预览（看任务书用流程线弹层）。
    *  v3.90 起先播种（onSeedDraft）：空文件/仅决策答案的文件先灌入模板拼装——
    *  商量改的就是最终落盘的 TASK.md，从零起草会把简报/预期产物/提货单全丢掉 */
   const [chatBusy, setChatBusy] = useState(false);
@@ -278,9 +281,9 @@ export default function StepFlow({
         `只允许新建/修改这一个文件，其他文件一律不要动。` +
         `讨论中没定下来的问题，记到这份任务书的「## 待拍板」小节。` +
         (seeds.length > 0 ? `可以先从这几个问题聊起：${seeds.join("；")}` : ""),
-      // 文件绝对路径：播种后已存在；播种失败已在上面拦截，不会走到这里
-      previewPath: `${projectPath.replace(/[\\/]+$/, "")}/${draft.relPath}`,
-      previewRoot: projectPath,
+      ...(projectLaunch ?? {}),
+      autoStart: Boolean(projectLaunch?.profileId),
+      surface: "terminal",
       // 同一步骤的任务书讨论是同一个对话：再点「跟 AI 商量一下」切回已有标签
       reuseKey: `discuss:${projectPath}:${draft.relPath}`,
     });

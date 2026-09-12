@@ -413,12 +413,10 @@ export default function TerminalStatusBar({
 
   return (
     <div
-      className="relative flex h-8 shrink-0 items-center gap-2.5 overflow-visible px-3 text-[11px] whitespace-nowrap select-none"
+      className="relative mx-2 mb-2 flex h-8 shrink-0 items-center gap-2.5 overflow-visible rounded-b-xl px-3 text-[11px] whitespace-nowrap select-none"
       style={{
         background: colors.background,
         color: fg,
-        // 与终端画面的分隔线：比「融入」略强一档，给底栏容器感
-        borderTop: `1px solid ${fg}2e`,
       }}
     >
       {/* 左区：状态圆点 + agent · 配置 · 模型 + 思考滑块 */}

@@ -67,6 +67,13 @@ test("pickKickoffLaunch：项目默认 Agent 优先于全局记忆", () => {
   assert.equal(picked?.profileId, "p-claude");
 });
 
+test("codingTerminalLaunch：项目绑了 Agents 直接启动", () => {
+  const launch = codingTerminalLaunch(profiles, null, "codex", "p-codex");
+  assert.equal(launch?.autoStart, true);
+  assert.equal(launch?.agentId, "codex");
+  assert.equal(launch?.profileId, "p-codex");
+});
+
 test("codingTerminalLaunch：勾过默认才自动启动", () => {
   assert.equal(codingTerminalLaunch(profiles, null)?.autoStart, false);
   assert.equal(

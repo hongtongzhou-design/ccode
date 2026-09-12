@@ -11,7 +11,7 @@ import { officialModelAllowed } from "../model-switch";
 import {
   loadAskAiRemembered,
   saveAskAiRemembered,
-  askAiCanSkip,
+  askAiDirectLaunch,
   buildAskAiPending,
   type AskAiFile,
 } from "../ask-ai";
@@ -49,17 +49,14 @@ export function beginAskAi(
     const { profiles, setAskAiReq, setPendingTerminal, setPage } =
       useAppStore.getState();
     const remembered = loadAskAiRemembered();
-    const preferredMatches =
-      !next.preferredAgent || remembered?.agentId === next.preferredAgent;
-    const profileMatches =
-      !next.preferredProfile || remembered?.profileId === next.preferredProfile;
-    if (
-      !opts?.forcePick &&
-      preferredMatches &&
-      profileMatches &&
-      askAiCanSkip(remembered, profiles)
-    ) {
-      setPendingTerminal(buildAskAiPending(next, remembered!));
+    const direct = askAiDirectLaunch(
+      next,
+      profiles,
+      remembered,
+      opts?.forcePick,
+    );
+    if (direct) {
+      setPendingTerminal(buildAskAiPending(next, direct));
       setPage("terminal");
       return;
     }

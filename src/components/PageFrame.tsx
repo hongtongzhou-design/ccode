@@ -53,7 +53,7 @@ export function PageHeader({
   leading?: ReactNode;
 }) {
   return (
-    <header className="ccode-page-header sticky top-0 z-20 mb-4 flex h-12 items-center justify-between gap-4 bg-canvas">
+    <header className="ccode-page-header sticky top-0 z-20 mb-4 flex h-12 items-center justify-between gap-4">
       <div className="flex min-w-0 items-center gap-2.5">
         {leading}
         <div className="flex min-w-0 items-baseline gap-2.5">

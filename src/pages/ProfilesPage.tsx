@@ -3100,9 +3100,8 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                     )}
 
                     {list.length === 0 ? (
-                      <p className="px-4 py-3 text-xs text-l4">
-                        还没有连接。点页头「+ 添加连接」绑定网关。
-                      </p>
+                      // 只说状态不说教：页头已有「+ 添加连接」主按钮，入口不必每组复述一遍
+                      <p className="px-4 py-3 text-xs text-l4">还没有连接</p>
                     ) : (
                       // 行间极细分割线（hairline）替代卡片间距：整列垂直严格对齐，视觉节奏与官方账号行一致
                       <ul className="divide-y divide-hairline overflow-x-auto">
@@ -3179,7 +3178,7 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                               )}
                             </span>
                             <span
-                              className={`min-w-0 truncate text-xs ${profile.baseUrl || profile.accountType === "official" ? "text-l2" : "text-l4"}`}
+                              className={`min-w-0 truncate text-xs ${profile.baseUrl ? "text-l2" : "text-l4"}`}
                               title={
                                 profile.accountType === "official"
                                   ? "官方账号登录（CLI 自身认证，不注入端点/密钥）"
@@ -3188,8 +3187,9 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                                     : "使用 CLI 默认端点"
                               }
                             >
+                              {/* 官方账号没有端点可言；名称列已标「官方账号」，这里只留占位不重复 */}
                               {profile.accountType === "official"
-                                ? "官方账号"
+                                ? "—"
                                 : profile.baseUrl
                                   ? displayHost(profile.baseUrl)
                                   : "默认端点"}
@@ -3236,15 +3236,15 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                               </span>
                             ) : (
                             <span
-                              className={`flex items-center gap-1 text-xs ${
-                                profile.hasKey ? "text-ok-text" : "text-l2"
-                              }`}
+                              className="flex items-center gap-1 text-xs text-l2"
                               title={
                                 profile.hasKey
                                   ? `密钥已受限存储${profile.keyHint ? `（${profile.keyHint}）` : ""}`
                                   : "尚未填写密钥"
                               }
                             >
+                              {/* 纯状态 = 中性文字 + 语义色小圆点（设计系统口径）：
+                                  「密钥已存」是事实不是成就，亮绿整列重复会抢走视线 */}
                               <span
                                 className={`h-1.5 w-1.5 rounded-full ${
                                   profile.hasKey ? "bg-ok-text" : "bg-l4"

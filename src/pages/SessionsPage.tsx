@@ -1486,7 +1486,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     setQuery("");
                   }}
                   title={`${SCOPE_KIND_LABEL[c.kind]}：${c.value}`}
-                  className="max-w-56 truncate rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel hover:text-l1"
+                  className="max-w-56 truncate rounded-sm px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
                 >
                   <span className="text-l4">{SCOPE_KIND_LABEL[c.kind]} </span>
                   {c.label}
@@ -1499,7 +1499,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
               <button
                 type="button"
                 onClick={() => setQuery("")}
-                className="max-w-48 truncate rounded-sm bg-inset px-1.5 py-0.5 text-xs text-l2 hover:bg-seg-sel"
+                className="max-w-48 truncate rounded-sm px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
                 title="清除搜索"
               >
                 搜索：{query.trim()} ×
@@ -1524,7 +1524,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )
                   }
                   title={`移除筛选：${SCOPE_KIND_LABEL[c.kind]} ${c.value}`}
-                  className="max-w-56 truncate rounded-sm border border-cta-bd bg-cta px-1.5 py-0.5 text-xs text-cta-text"
+                  className="max-w-56 truncate rounded-sm bg-seg-sel px-1.5 py-0.5 text-xs text-l1"
                 >
                   <span className="opacity-70">{SCOPE_KIND_LABEL[c.kind]} </span>
                   {c.label} ×
@@ -1552,8 +1552,8 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                       onClick={() => toggleQuick(f.id)}
                       className={`rounded-full px-2 py-0.5 text-micro ${
                         on
-                          ? "border border-cta-bd bg-cta text-cta-text"
-                          : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+                          ? "bg-seg-sel text-l1"
+                          : "text-l3 hover:bg-hover hover:text-l1"
                       }`}
                     >
                       {f.label}
@@ -1566,7 +1566,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     onClick={() => setMoreFiltersOpen((v) => !v)}
                     aria-expanded={moreFiltersOpen}
                     title="更多快筛（近 7 天 / 内部 AI / 已归档）"
-                    className="rounded-full bg-inset px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
+                    className="rounded-full px-2 py-0.5 text-micro text-l3 hover:bg-hover hover:text-l1"
                   >
                     更多 ▾
                   </button>
@@ -1619,7 +1619,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
             className={`mt-1.5 flex h-7 w-full items-center gap-1 rounded-md px-2 text-xs ${
               filterChipLabel || treeOpen
                 ? "bg-seg-sel text-l1"
-                : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+                : "text-l3 hover:bg-hover hover:text-l1"
             }`}
           >
             <span className="shrink-0 text-l4">范围</span>
@@ -2047,7 +2047,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     </span>
                     {s.chainCount > 1 && (
                       <span
-                        className="shrink-0 rounded-sm bg-inset px-1 text-xs text-l3"
+                        className="shrink-0 px-1 text-xs text-l3"
                         title="Codex resume 链合并为一条"
                       >
                         {s.chainCount} 次继续
@@ -2149,7 +2149,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                           setSelectProjectReq(s.projectPath);
                           setPage("workspaces");
                         }}
-                        className="max-w-28 truncate rounded-sm bg-inset px-1 text-l3 hover:bg-seg-sel hover:text-l1"
+                        className="max-w-28 truncate rounded-sm px-1 text-l3 hover:text-l1"
                         title={
                           (s.stepName
                             ? `研究步骤：${s.stepName}（工作区：${s.workspace}）`
@@ -2162,7 +2162,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {s.taskName && (
                       <button
                         type="button"
-                        className="max-w-28 shrink-0 truncate rounded-sm bg-inset px-1 text-l3 hover:bg-seg-sel hover:text-l1"
+                        className="max-w-28 shrink-0 truncate rounded-sm px-1 text-l3 hover:text-l1"
                         title={`目标：${s.taskName}（点击回项目页）`}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -2175,7 +2175,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     )}
                     {s.handoffFromAgent && (
                       <span
-                        className="max-w-36 shrink-0 truncate rounded-sm bg-inset px-1 text-l3"
+                        className="max-w-36 shrink-0 truncate px-1 text-l3"
                         title={`接自 ${agentLabel(s.handoffFromAgent)} 的对话（简报接力，非记忆转移）`}
                       >
                         ⇄ 接自 {agentLabel(s.handoffFromAgent)}
@@ -2184,7 +2184,7 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                     {s.tags.slice(0, 2).map((tag) => (
                       <span
                         key={tag}
-                        className="max-w-28 truncate rounded-sm bg-inset px-1 text-l3"
+                        className="max-w-28 truncate px-1 text-l3"
                       >
                         {tag}
                       </span>

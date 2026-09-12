@@ -108,7 +108,7 @@
   **v3.91–v3.92 的对话底条规则已由 v3.125 主工作区聊天层取代**；完整回放仍可从聊天头部「↺ 历史」进入，右栏不再承载实时会话。
 - **从其他页面进入终端页，右栏默认收起（v3.90，用户拍板）**：`visible` 假→真跃迁时检查交接——
   有 previewReq / pendingTerminal.rightTab / pendingTerminal.previewPath（资源面板「查看」、
-  主仓改动提醒、开聊带开草稿）才开右栏；用户曾用成果面板按钮钉开（`ccode.terminal.rightOpen=1`）则保持打开，
+  主仓改动提醒、问 AI 带文件）才开右栏；用户曾用成果面板按钮钉开（`ccode.terminal.rightOpen=1`）则保持打开，
   否则 `setRightOpen(false)` 只剩终端。判定用
   `useAppStore.getState()` 现查（交接与切页是同一批 store 更新），不依赖 effect 顺序；页内动作
   （单击文件树文件、◫ 工作台、对话联动）照常展开，不受影响。

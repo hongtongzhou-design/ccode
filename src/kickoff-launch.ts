@@ -1,8 +1,9 @@
 /**
  * 科研开步启动配置：弹层里选 Agent/连接，确认后自动拉起。
- * 与问 AI 的记忆键独立（ccode.askAi），但挑选规则相同：记住的连接还在就用，否则该 Agent 第一个，再否则全局第一个。
+ * 项目内新会话优先 Agents 名册；没有项目默认才回落问 AI 记忆 / 上次使用。
  */
 import { askAiCanSkip, type AskAiRemembered } from "./ask-ai.ts";
+import { projectAgentLaunch } from "./project-agents.ts";
 
 export interface KickoffLaunch {
   agentId: string;
@@ -45,7 +46,7 @@ export function pickKickoffLaunch(
   return { agentId: profile.agent, profileId: profile.id, model };
 }
 
-/** 编程开工 / 进入工作树：记住的默认连接可直接拉起，否则只预填。 */
+/** 编程开工 / 进入工作树：项目绑了 Agents 就直接拉起，否则记住的默认连接可直接拉起。 */
 export function codingTerminalLaunch(
   profiles: readonly { id: string; agent: string; models?: string[] }[],
   remembered: AskAiRemembered | null,
@@ -57,17 +58,26 @@ export function codingTerminalLaunch(
   model: string;
   autoStart: boolean;
 } | null {
-  const launch = pickKickoffLaunch(
+  const project = projectAgentLaunch(
     profiles,
-    remembered,
-    null,
     preferredAgent,
-    preferredProfile,
+    preferredAgent
+      ? { [preferredAgent]: preferredProfile?.trim() ?? "" }
+      : null,
   );
+  const launch =
+    project ??
+    pickKickoffLaunch(
+      profiles,
+      remembered,
+      null,
+      preferredAgent,
+      preferredProfile,
+    );
   if (!launch) return null;
   return {
     ...launch,
-    autoStart: askAiCanSkip(remembered, profiles),
+    autoStart: !!project || askAiCanSkip(remembered, profiles),
   };
 }
 

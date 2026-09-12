@@ -735,10 +735,41 @@ fn cleanup_project_db_traces(
     (cleaned, warnings)
 }
 
+/// 目录已不在磁盘上时的降级清理：摘注册记录 + 清工作区行（只清库不动磁盘）+
+/// 人工事项/卡片勾选痕迹。定时任务由 remove_project_at 顺带清。
+/// 目录都没了，worktree/分支没有可操作对象，只能清库——磁盘上没有 Mesa 文件可删。
+fn cleanup_records_for_missing_dir(conn: &Connection, path: &Path) -> Result<String, String> {
+    // 工作区行按 repo_path 匹配删除。workspaces_of_repo 对缺失目录用原样路径比对，
+    // 与落库时的 canonical_key 口径一致（canonicalize 失败才回落原样）。
+    let workspaces = crate::workspaces::workspaces_of_repo(conn, path)?;
+    for w in &workspaces {
+        conn.execute("DELETE FROM workspaces WHERE id=?1", params![w.id])
+            .map_err(|e| format!("清理工作区记录失败: {e}"))?;
+    }
+    remove_project_at(conn, path)?;
+    let (cleaned, warn) = cleanup_project_db_traces(conn, path, &[]);
+    let mut parts: Vec<String> = vec!["注册记录".to_string()];
+    if !workspaces.is_empty() {
+        parts.push(format!("{} 个工作区记录", workspaces.len()));
+    }
+    if cleaned > 0 {
+        parts.push("勾选与归卡记录".to_string());
+    }
+    Ok(format!(
+        "项目目录已不在磁盘上，无法删除目录本身；已移除：{}{}",
+        parts.join("、"),
+        warn.first().map(|w| format!("；{w}")).unwrap_or_default()
+    ))
+}
+
 /// 删除项目目录：全部工作区（含已归档，彻底删）→ 主目录移入系统回收站（可反悔）→ 注册记录。
 /// 工作区任一删除失败即中止，已删的不回滚（错误信息由 workspaces 层说明已删哪些）。
+/// 目录已不在磁盘上时降级为只清库（注册记录 + 工作区行 + 痕迹），报「目录不在」而非 os error 2。
 fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, String> {
-    let dir = fs::canonicalize(path).map_err(|e| format!("目录不存在或不可访问: {e}"))?;
+    let dir = match fs::canonicalize(path) {
+        Ok(d) => d,
+        Err(_) => return cleanup_records_for_missing_dir(conn, path),
+    };
     if !dir.is_dir() {
         return Err("目标不是目录，拒绝删除".to_string());
     }
@@ -774,8 +805,12 @@ fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, Str
 /// 全部工作区（worktree + 分支 + 记录，彻底删——同删除项目目录口径）→ `.ccode/` 移入系统
 /// 回收站（可反悔）→ 摘注册记录。**不自动 git rm/提交**：.ccode 若被 git 跟踪过，删除会显在
 /// 改动面板，由用户自行提交（自动提交用户仓库违反既有纪律；摘要文案里提示）。
+/// 目录已不在磁盘上时与删除项目目录同口径降级：只清库。
 fn purge_project_traces_impl(conn: &Connection, path: &Path) -> Result<String, String> {
-    let dir = fs::canonicalize(path).map_err(|e| format!("目录不存在或不可访问: {e}"))?;
+    let dir = match fs::canonicalize(path) {
+        Ok(d) => d,
+        Err(_) => return cleanup_records_for_missing_dir(conn, path),
+    };
     if !dir.is_dir() {
         return Err("目标不是目录，拒绝操作".to_string());
     }
@@ -6436,14 +6471,68 @@ resources = ["ghost.pdf"]
         let err = delete_project_dir_impl(&conn, &plain).unwrap_err();
         assert!(err.contains("不是 Mesa 项目"), "{err}");
         assert!(plain.join("a.txt").exists());
-        // 不存在的路径
-        let err2 = delete_project_dir_impl(&conn, &dir.join("missing")).unwrap_err();
-        assert!(err2.contains("不存在"), "{err2}");
+        // 不存在的路径：降级为只清库（该项目未注册、无工作区时等于摘注册空操作）
+        let gone = dir.join("missing");
+        let msg_gone = delete_project_dir_impl(&conn, &gone).unwrap();
+        assert!(
+            msg_gone.contains("已不在磁盘上"),
+            "缺失目录应降级清理: {msg_gone}"
+        );
         // 文件而非目录
         let f = dir.join("file.txt");
         write(&f, "x");
         let err3 = delete_project_dir_impl(&conn, &f).unwrap_err();
         assert!(err3.contains("不是目录"), "{err3}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_project_dir_missing_dir_cleans_registration_and_workspaces() {
+        let dir = temp_dir("deldir-gone");
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        let root = dir.join("demo-proj");
+        write(&config_path(&root), "artifact_dir = \"artifacts\"\n");
+        register_at(&conn, &root, "演示", "2026-08-01T00:00:00Z").unwrap();
+        crate::workspaces::workspaces_of_repo(&conn, &root).unwrap(); // 建表
+        conn.execute(
+            "INSERT INTO workspaces(id, repo_path, name, branch, worktree_path, base_branch, port_base, status, created_at)
+             VALUES('w1', ?1, 'lit', 'ccode/lit', ?2, 'main', 4000, 'active', '2026-08-01T00:00:00Z')",
+            params![
+                root.to_string_lossy().into_owned(),
+                dir.join("wt-missing").to_string_lossy().into_owned()
+            ],
+        )
+        .unwrap();
+        // 用户在 Finder 里手动删掉项目目录后再来 Mesa 删除：不再报 os error 2，降级只清库
+        fs::remove_dir_all(&root).unwrap();
+
+        let msg = delete_project_dir_impl(&conn, &root).unwrap();
+        assert_eq!(
+            msg,
+            "项目目录已不在磁盘上，无法删除目录本身；已移除：注册记录、1 个工作区记录"
+        );
+        assert!(!is_registered_at(&conn, &root), "注册记录应被移除");
+        assert!(
+            crate::workspaces::workspaces_of_repo(&conn, &root)
+                .unwrap()
+                .is_empty(),
+            "工作区记录应被清空"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn purge_traces_missing_dir_cleans_registration() {
+        let dir = temp_dir("purge-gone");
+        let conn = db_at(&dir.join("app.db")).unwrap();
+        let root = dir.join("demo-proj");
+        write(&config_path(&root), "artifact_dir = \"artifacts\"\n");
+        register_at(&conn, &root, "演示", "2026-08-01T00:00:00Z").unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let msg = purge_project_traces_impl(&conn, &root).unwrap();
+        assert!(msg.contains("已不在磁盘上"), "{msg}");
+        assert!(!is_registered_at(&conn, &root));
         std::fs::remove_dir_all(&dir).ok();
     }
 

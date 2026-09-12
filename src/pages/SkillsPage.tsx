@@ -23,6 +23,7 @@ import {
   PageHeader,
   primaryActionClass,
   RowAction,
+  rowActionClass,
   secondaryActionClass,
   searchFieldClass,
   hoverRevealClass,
@@ -1639,7 +1640,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                       type="button"
                       disabled={builtinApplying !== null}
                       onClick={() => { void invoke<{ revision: string; files: { path: string; current: string; proposed: string }[] }>("preview_builtin_skill_update", { name }).then((preview) => setBuiltinPreview({ name, ...preview })).catch((e) => setBuiltinErrors((prev) => ({ ...prev, [name]: String(e) }))); }}
-                      className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-cta-text hover:brightness-110 disabled:opacity-50"
+                      className={rowActionClass}
                     >
                       {builtinApplying === name ? "更新中…" : "查看差异"}
                     </button>
@@ -1767,7 +1768,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-14 cursor-pointer grid-cols-[minmax(0,1fr)_120px_92px] items-center gap-3 rounded-md border border-transparent py-1.5 pl-5 pr-2 transition-colors hover:bg-hover ${
+                                className={`group grid min-h-10 cursor-pointer grid-cols-[minmax(0,1fr)_120px_92px] items-center gap-3 rounded-md border border-transparent py-1.5 pl-5 pr-2 transition-colors hover:bg-hover ${
                                   preview?.skill.id === skill.id
                                     ? "border-hairline bg-inset"
                                     : ""

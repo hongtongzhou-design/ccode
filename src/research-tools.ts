@@ -1,23 +1,24 @@
 import type { ProjectStepDto } from "./types";
 
 export interface ResearchTools {
-  literature: "files" | "zotero" | "endnote";
   libraryExport: "none" | "zotero" | "endnote";
   plotting: "python" | "origin";
   illustration: "none" | "blender";
   manuscript: "markdown" | "latex" | "word";
 }
 export const DEFAULT_RESEARCH_TOOLS: ResearchTools = {
-  literature: "files", libraryExport: "none", plotting: "python", illustration: "none", manuscript: "markdown",
+  libraryExport: "none", plotting: "python", illustration: "none", manuscript: "markdown",
 };
 export const RESEARCH_TOOL_FIELDS = [
-  { key: "literature", label: "文献主来源", options: [["files", "项目文件 / 检索"], ["zotero", "Zotero"], ["endnote", "EndNote 导出文件"]] },
   { key: "libraryExport", label: "文献库交付", options: [["none", "不写外部库"], ["zotero", "Zotero（逐批确认）"], ["endnote", "EndNote XML / RIS"]] },
   { key: "plotting", label: "数值图", options: [["python", "Python"], ["origin", "Origin（Windows）"]] },
   { key: "illustration", label: "结构 / 装置示意", options: [["none", "不需要"], ["blender", "Blender"]] },
   { key: "manuscript", label: "稿件载体", options: [["markdown", "Markdown / Quarto"], ["latex", "LaTeX（原生源码）"], ["word", "已有 Word（人工插件验收）"]] },
 ] as const;
+export type ResearchToolField = (typeof RESEARCH_TOOL_FIELDS)[number];
 const PREFIX = "科研工具/";
+/** 已废除的「文献主来源」设置键：来源只认 lit_source，写回时剥掉以免双源。 */
+const LITERATURE_SETTING = `${PREFIX}literature：`;
 export function researchToolsFromSettings(settings: readonly string[] = []): ResearchTools {
   const result = { ...DEFAULT_RESEARCH_TOOLS };
   for (const field of RESEARCH_TOOL_FIELDS) {
@@ -27,8 +28,35 @@ export function researchToolsFromSettings(settings: readonly string[] = []): Res
   return result;
 }
 export function settingsWithResearchTools(settings: readonly string[], tools: ResearchTools): string[] {
-  return [...settings.filter((s) => !RESEARCH_TOOL_FIELDS.some((f) => s.startsWith(`${PREFIX}${f.key}：`))),
+  return [...settings.filter((s) => !s.startsWith(LITERATURE_SETTING) && !RESEARCH_TOOL_FIELDS.some((f) => s.startsWith(`${PREFIX}${f.key}：`))),
     ...RESEARCH_TOOL_FIELDS.filter((f) => tools[f.key] !== DEFAULT_RESEARCH_TOOLS[f.key]).map((f) => `${PREFIX}${f.key}：${tools[f.key]}`)];
+}
+function stepTakesReading(step: Pick<ProjectStepDto, "skills">): boolean {
+  return step.skills.some((s) => s === "lit-search" || s === "lit-notes");
+}
+function stepTakesLibraryExport(step: Pick<ProjectStepDto, "expectedArtifacts" | "workspaceName">): boolean {
+  return step.expectedArtifacts.some((p) => /citation|final-check/.test(p)) || step.workspaceName === "submission-materials";
+}
+function stepTakesPlotting(step: Pick<ProjectStepDto, "skills">): boolean {
+  return step.skills.some((s) => s === "figure-forge" || s === "data-eda");
+}
+function stepTakesIllustration(step: Pick<ProjectStepDto, "workspaceName" | "skills">): boolean {
+  return step.workspaceName === "methodology" || step.workspaceName === "exp-design" || step.skills.includes("review-framework");
+}
+function stepTakesManuscript(step: Pick<ProjectStepDto, "name" | "workspaceName">): boolean {
+  return /论文|初稿|定稿|格式|投稿|回复/.test(step.name)
+    || step.workspaceName === "journal-format"
+    || step.workspaceName === "submission-materials"
+    || /^rebuttal-r\d+$/.test(step.workspaceName ?? "");
+}
+/** 选定模板后只出示与这套步骤有关的工具字段；文献来源不在此列。 */
+export function researchToolFieldsForSteps(steps: readonly ProjectStepDto[]): ResearchToolField[] {
+  return RESEARCH_TOOL_FIELDS.filter((field) => steps.some((step) => {
+    if (field.key === "libraryExport") return stepTakesLibraryExport(step);
+    if (field.key === "plotting") return stepTakesPlotting(step);
+    if (field.key === "illustration") return stepTakesIllustration(step);
+    return stepTakesManuscript(step);
+  }));
 }
 const START = "<!-- mesa-research-tools ";
 const END = "<!-- /mesa-research-tools -->";
@@ -37,8 +65,9 @@ interface Added {
   replaced?: Partial<Record<"inputs" | "anyOfInputs" | "expectedArtifacts" | "run" | "skills" | "requiredSkills", { before: unknown; after: unknown }>>;
 }
 
-/** Only remove additions recorded by this function; manual skills and other brief sections survive. */
-export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, artifactDir = "artifacts"): ProjectStepDto {
+/** Only remove additions recorded by this function; manual skills and other brief sections survive.
+ *  文献同步技能跟 `lit_source`（流程线「确定文献来源」），不跟已废除的 settings literature。 */
+export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, artifactDir = "artifacts", litSource = "search"): ProjectStepDto {
   const step = { ...source, skills: [...source.skills], requiredSkills: [...(source.requiredSkills ?? source.skills)], expectedArtifacts: [...source.expectedArtifacts], humanTasks: [...(source.humanTasks ?? [])] };
   const start = step.brief.indexOf(START);
   const end = step.brief.indexOf(END, start);
@@ -72,16 +101,17 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
     }
     notes.push(note);
   };
-  const reading = step.skills.some((s) => s === "lit-search" || s === "lit-notes");
-  const bibliography = step.expectedArtifacts.some((p) => /citation|final-check/.test(p)) || step.workspaceName === "submission-materials";
-  const figures = step.skills.some((s) => s === "figure-forge" || s === "data-eda");
-  const illustration = step.workspaceName === "methodology" || step.workspaceName === "exp-design" || step.skills.includes("review-framework");
-  if ((tools.literature === "zotero" && reading) || (tools.libraryExport === "zotero" && bibliography)) {
+  const reading = stepTakesReading(step);
+  const bibliography = stepTakesLibraryExport(step);
+  const figures = stepTakesPlotting(step);
+  const illustration = stepTakesIllustration(step);
+  const lit = litSource.trim();
+  if ((lit === "zotero" && reading) || (tools.libraryExport === "zotero" && bibliography)) {
     mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：优先读取已登记题录/PDF，API 先探测版本及读写权限。交付选择不是批量写库授权：展示条目/collection/新增与变更，获得本批明确确认后才写。已有主 bib 键不改，不复制/改名库内附件；离线可用文件继续，写库未完成如实报告。");
   }
-  if ((tools.literature === "endnote" && reading) || (tools.libraryExport === "endnote" && bibliography)) {
-    mount("endnote-bridge", ["papers/endnote-report.json"], "EndNote：来源 XML/RIS 先归一成候选并列差异，确认后才合并 references.bib，已有键不改。要求出库时交付 papers/endnote-import.xml 与 papers/endnote-report.json；Word 原件/域不被 Markdown 往返覆盖。", tools.libraryExport === "endnote" && bibliography ? "人工核对 EndNote 导入与 Word 引用插件" : undefined);
-    if (tools.libraryExport === "endnote" && bibliography && !step.expectedArtifacts.includes("papers/endnote-import.xml")) {
+  if (tools.libraryExport === "endnote" && bibliography) {
+    mount("endnote-bridge", ["papers/endnote-report.json"], "EndNote：来源 XML/RIS 先归一成候选并列差异，确认后才合并 references.bib，已有键不改。要求出库时交付 papers/endnote-import.xml 与 papers/endnote-report.json；Word 原件/域不被 Markdown 往返覆盖。", "人工核对 EndNote 导入与 Word 引用插件");
+    if (!step.expectedArtifacts.includes("papers/endnote-import.xml")) {
       step.expectedArtifacts.push("papers/endnote-import.xml"); added.artifacts.push("papers/endnote-import.xml");
     }
   }

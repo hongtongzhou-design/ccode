@@ -1,5 +1,5 @@
 import ResearchToolFields from "./ResearchToolFields";
-import { DEFAULT_RESEARCH_TOOLS, RESEARCH_TOOL_FIELDS, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../research-tools";
+import { DEFAULT_RESEARCH_TOOLS, researchToolFieldsForSteps, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../research-tools";
 import { confirmDialog } from "./ConfirmDialog";
 import { conflictingTemplateSteps, renameConflictingSteps } from "../pipeline-append";
 import { useEffect, useState } from "react";
@@ -139,12 +139,12 @@ export default function TemplatePickModal({
       const mode = tpl.id === "submission-rebuttal" ? submissionMode : undefined;
       const round = Math.max(1, Math.floor(submissionRound));
       const submission = tpl.id === "submission-rebuttal";
-      const projectSettings = [...settingsWithResearchTools(settingsForTemplateApply(tpl, filled), tools), ...RESEARCH_TOOL_FIELDS.filter((f) => tools[f.key] === DEFAULT_RESEARCH_TOOLS[f.key]).map((f) => `科研工具/${f.key}：${tools[f.key]}`)];
+      const projectSettings = settingsWithResearchTools(settingsForTemplateApply(tpl, filled), tools);
       const current = await invoke<ProjectConfigReadDto>("read_project_config", { path: projectPath });
       if (current.config.steps.length && JSON.stringify(researchToolsFromSettings(current.config.settings)) !== JSON.stringify(tools)) {
         throw new Error("已有流程的工具选择请在「编辑研究流程」统一修改，再追加模板；未改变现有步骤");
       }
-      let steps = pipelineStepsForTemplate(tpl, mode ?? "initial", round).map((s) => withResearchTools(s, tools, current.config.artifactDir));
+      let steps = pipelineStepsForTemplate(tpl, mode ?? "initial", round).map((s) => withResearchTools(s, tools, current.config.artifactDir, current.config.litSource));
       const conflicts = conflictingTemplateSteps(current.config.steps, steps);
       if (conflicts.length) {
         if (!(await confirmDialog(`这些同名步骤的交付不同：${conflicts.join("、")}。保留旧步骤，按「${tpl.name}」改名追加？`, { confirmText: "改名追加" }))) { setBusy(null); return; }
@@ -200,7 +200,6 @@ export default function TemplatePickModal({
       onClose={() => void closeLater()}
       size="lg"
     >
-        <ResearchToolFields value={tools} onChange={setTools} disabled={busy !== null} />
         {submissionTpl ? (
           <>
             <p className="mb-4 text-xs text-l3">
@@ -288,15 +287,30 @@ export default function TemplatePickModal({
             </div>
           </>
         ) : settingsTpl ? (
-          /* 第二屏「全局设定」：贯穿全程的决定，注册当下就填（留空跳过，
-             之后仍可在项目设置抽屉里补——抽屉是长期编辑处，这里是引导） */
+          /* 第二屏：选完模板再问交付工具 + 全局设定。文献来源不在这里，
+             留给检索步流程线「确定文献来源」（单一触点）。 */
           <>
             <p className="mb-4 text-xs text-l3">
-              这些设定会贯穿后续研究流程，并在每次开工时写入 TASK.md。暂时不确定的项目可以留空，之后仍可在项目设置中补充。
+              这些设定会贯穿后续研究流程，并在每次开工时写入 TASK.md。暂时不确定的项目可以留空，之后仍可在项目设置中补充。文献从哪来请在检索步骤的「确定文献来源」里选。
             </p>
-            <div className="space-y-2.5">
+            <ResearchToolFields
+              value={tools}
+              onChange={setTools}
+              disabled={busy !== null}
+              collapsible={false}
+              fields={researchToolFieldsForSteps(
+                settingsTpl.id === "submission-rebuttal"
+                  ? pipelineStepsForTemplate(settingsTpl, submissionMode, Math.max(1, Math.floor(submissionRound)))
+                  : settingsTpl.steps,
+              )}
+            />
+            <div className="mt-3 space-y-2.5">
+              {settingsTpl.projectSettings!.length > 0 && (
+                <p className="text-xs font-medium text-l2">项目全局设定</p>
+              )}
               {settingsTpl.projectSettings!.map((line, i) => {
                 const { q, hint } = splitSetting(line);
+                const depth = q === "综述深度";
                 return (
                   <label key={q} className="block">
                     <span className="mb-1 block text-xs text-l2">{q}</span>
@@ -304,12 +318,18 @@ export default function TemplatePickModal({
                       className={fieldClass}
                       value={answers[i] ?? ""}
                       placeholder={hint}
+                      title={depth ? "系统综述要另定完整方法方案，不能只把检索升到严格档。" : undefined}
                       onChange={(e) =>
                         setAnswers((prev) =>
                           prev.map((a, j) => (j === i ? e.target.value : a)),
                         )
                       }
                     />
+                    {depth && (
+                      <span className="mt-1 block text-micro text-l4">
+                        严格检索档不是系统综述
+                      </span>
+                    )}
                   </label>
                 );
               })}

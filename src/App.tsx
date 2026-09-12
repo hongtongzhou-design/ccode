@@ -461,7 +461,7 @@ function App() {
             IS_MAC,
             macFullscreen,
             "pl-3",
-          )} ${chromeHidden ? "" : "border-b border-hairline"}`}
+          )}`}
         >
             {/* 全局上下文栏：macOS Overlay 与 Windows/Linux 原生标题栏都承载。
                 左=我在哪、右=在跑什么 + 等我处理什么。
@@ -617,11 +617,13 @@ function App() {
             onClick={() => setTitleInboxCat(null)}
           />
         )}
-        <div className="flex min-h-0 flex-1">
+        {/* 顶部不留缝：画布直接顶到标题栏下沿（标题栏是功能头部不是留白），
+            右/下/左各 8px 深缝把圆角画布衬成浮层面板 */}
+        <div className="flex min-h-0 flex-1 gap-2 bg-rail pb-2 pr-2">
         {/* 执行态（⌘\）：侧栏整体隐藏，页面 chrome 让位给终端/评审 */}
         {!chromeHidden && (
         <aside
-          className={`ccode-app-rail flex shrink-0 flex-col border-r border-hairline bg-rail transition-[width] duration-150 ${
+          className={`ccode-app-rail flex shrink-0 flex-col bg-rail transition-[width] duration-150 ${
             collapsed ? "w-14" : "w-48"
           }`}
         >

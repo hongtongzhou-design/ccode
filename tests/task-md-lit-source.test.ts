@@ -14,6 +14,7 @@ test("search/空：无「文献来源」段", () => {
 test("zotero/folder：段内容分版本", () => {
   assert.match(litSourceSectionLines("zotero")!.join("\n"), /Zotero 库/);
   assert.match(litSourceSectionLines("folder")!.join("\n"), /本地文件夹/);
+  assert.match(litSourceSectionLines("folder")!.join("\n"), /EndNote/);
 });
 
 test("无段时插入：优先落在「已定方向」之前", () => {

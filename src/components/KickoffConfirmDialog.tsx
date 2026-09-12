@@ -227,7 +227,7 @@ export default function KickoffConfirmDialog({
     () => remembered?.useDefault ?? false,
   );
   const [editingLaunch, setEditingLaunch] = useState(
-    () => !remembered?.useDefault,
+    () => !preferredAgent && !remembered?.useDefault,
   );
 
   useEffect(() => {

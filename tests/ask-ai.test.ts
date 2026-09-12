@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   askAiCanSkip,
+  askAiDirectLaunch,
   buildAskAiPending,
   type AskAiRemembered,
 } from "../src/ask-ai.ts";
@@ -66,4 +67,39 @@ test("问 AI 可覆盖 prompt，项目级新对话不预览、不预填", () => 
   assert.equal(fresh.previewPath, undefined);
   assert.equal(fresh.previewRoot, undefined);
   assert.equal(fresh.title, "AI模型");
+});
+
+test("项目绑了 Agents 就直接启动，不走问 AI 记忆", () => {
+  const remembered: AskAiRemembered = {
+    agentId: "claude-code",
+    profileId: "p-claude",
+    model: "sonnet",
+    useDefault: true,
+  };
+  const profiles = [
+    { id: "p-claude", agent: "claude-code", models: ["sonnet"] },
+    { id: "p-codex", agent: "codex", models: ["gpt-5"] },
+  ];
+  const project = askAiDirectLaunch(
+    { preferredAgent: "codex", preferredProfile: "p-codex" },
+    profiles,
+    remembered,
+  );
+  assert.deepEqual(project, { agentId: "codex", profileId: "p-codex", model: "gpt-5" });
+  assert.equal(
+    askAiDirectLaunch(
+      { preferredAgent: "codex", preferredProfile: "p-codex" },
+      profiles,
+      remembered,
+      true,
+    ),
+    null,
+  );
+  const noRoster = askAiDirectLaunch({}, profiles, remembered);
+  assert.deepEqual(noRoster, {
+    agentId: "claude-code",
+    profileId: "p-claude",
+    model: "sonnet",
+  });
+  assert.equal(askAiDirectLaunch({}, profiles, null), null);
 });

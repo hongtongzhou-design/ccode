@@ -172,6 +172,31 @@
 - **动效口径**：弹层入场 `ccode-pop`（150ms opacity+scale .98→1，已绑在 `.ccode-float-surface` 上，弹层零额外接入）；
   遮罩入场 `ccode-fade`（120ms 透明度）；统一 `--ccode-motion-ease`，UI 反馈都在 200ms 内；`prefers-reduced-motion` 全局关闭。
   focus 环 `outline: 1px solid var(--color-l3)`（field 色太弱，l3 提亮不换色相）。
+  **页面切换与按压反馈（2026-09-13 沉浸感批）**：九个页面容器都是 `.ccode-app-main` 的直接子级，切页入场统一走
+  `ccode-page-in`（160ms 淡入 + 3px 上浮；容器 `hidden`→显示时重播；reduced-motion 一并关闭）——新页面不加自己的入场动画；
+  主/次按钮按下 `scale(0.98)`（`.ccode-action-*` 的 unlayered 规则已把 transform 纳入过渡表，压过 utilities 层）。
+- **粘性页头玻璃化（2026-09-13）**：`.ccode-page-header` 背景透明，磨砂由 `::before`（`z-index:-1`）承载——
+  底色 `color-mix(--ccode-surface-base 74%, transparent)`（自动跟随所在 PageFrame 表面，项目工作面为 rail2）+
+  `blur(16px) saturate(140%)`；内容滚动时从页头下穿过呈磨砂，静止时与画布融为一体（Linear 口径）。
+  模糊放伪元素层、文字/控件留在上层不参与栅格化，与顶部导航胶囊同一 Windows 口径、无需平台分支。
+  给页头换底色必须改这条，**不得在 PageHeader JSX 上再铺 `bg-canvas`**（会在玻璃上盖回实心块）。
+  项目页身份头（`ProjectIdentityHeader`）复用同一类（rail2 基色自动跟随 `data-surface="workspace"`）；
+  全站页面级 sticky 头只此一套玻璃配方，**禁止再各自铺实心底**。
+- **终端标签条与画布同底（2026-09-13）**：标签条不再铺 `bg-strip` 实心带，激活标签 `bg-raised` 胶囊
+  足够区分（Codex/ZCode 口径）；「＋」新建钮为无框 ghost。对话页快筛/建议 chips 与会话行内 meta 丸
+  不铺底色块（hover 才现底、激活筛选 `bg-seg-sel`，禁 CTA 粉填充——筛选不是主操作）；工作台内容卡
+  不带描边、空态不套虚线壳。
+- **曲率三档（2026-09-13 调整）**：`--ccode-radius-panel`（内容卡/面板，`rounded-lg`）9→**12px**——
+  9px 在扁条卡上接近直角；`--ccode-radius-control` 7px（按钮/输入）、`--ccode-radius-tight` 5px
+  （小徽标/行内码）不动。改曲率只动 `App.css` 这三个令牌，禁止在组件上另写 `rounded-[Npx]`。
+- **标题栏不画底线（2026-09-13）**：macOS 自绘标题栏与侧栏同底 `rail`，二者之间不再画 border-b——
+  chrome 融成连续深色 L 形（Codex/Linear 口径），标题栏与主区的分界由 rail→canvas 色阶承担，「沉浸 = 减少边界」。
+- **主区画布 = 圆角浮层面板（2026-09-13）**：`main.ccode-app-main` 自带四角圆角（`--ccode-radius-panel` +
+  `overflow:hidden`），右/下/左与 chrome 之间留 8px 深缝（App 骨架行容器 `gap-2 pb-2 pr-2 bg-rail`；侧栏因此去掉
+  border-r——缝隙即分界，不再画线）。**顶部不留缝**：画布直接顶到标题栏下沿，标题栏是功能头部不算留白
+  （顶部留缝会叠成双倍黑带，用户反馈已收）。九页各自的全出血表面（canvas / 项目 rail2 / 会话双栏）都被统一裁进
+  这块圆角面板；`fixed` 全屏层（沉浸阅读、弹层、抽屉）不受祖先 overflow 裁剪、照常铺满整窗，行为不变。
+  改缝隙宽度只动 App.tsx 行容器，改圆角只动 `--ccode-radius-panel`。
 - **顶部导航胶囊玻璃拟态（2026-08-24）**：`.ccode-top-nav-capsule` 底 = `color-mix(raised 58%)`（浅色主题
   `canvas 55%`）+ `backdrop-filter: blur(26px) saturate(150%)`（浅色 30px/170%）+ 边缘高光与外投影；
   玻璃感依赖背后有内容穿过（滚动时最显），静止于纯色画布上偏弱是固有特性，不要再为提高静止辨识度
@@ -267,6 +292,8 @@
   **文件树与成果面板默认收起**（画布优先）：文件树完全收起、不留窄条（与项目页项目列表同款），
   标签栏左侧 `PanelLeftOpen` 打开；成果面板由标签栏右侧 `PanelRightOpen` 打开。用户显式开关写入
   `ccode.terminal.treeOpen` / `ccode.terminal.rightOpen`；页内点文件或交接请求仍可临时打开右栏。
+  **树根落在主目录时自动收起**（2026-09-13）：主目录树下全是系统文件夹，展开态是纯噪音；
+  只改视图态、不写持久化偏好（手动再展开不拦，离开主目录后守卫复位）。
   分屏对照与查找是标签栏右侧图标，不经布局菜单。聊天/终端显示层是同一位置的单击切换，不再并排两个按钮。
   **分区折叠指示统一 `FoldMark`**：28px 模块用于分区/组头，列表行用紧凑档；禁再手写 ▸/▾ 小字当折叠钮。
   状态点全局统一 `size-2 rounded-full`；端口区分「本应用/系统其他」两段，终止外部进程必须二次确认。
@@ -275,7 +302,18 @@
   目录短名（「将在 … 启动/恢复」，点击选文件夹）+ 启动/恢复 + 「打开普通 Shell 终端」。
   **身份（agent / 配置 / 模型）只活在启动栏，卡上不得再写一遍**。xterm 保持挂载在底层，
   浮层壳 pointer-events-none；运行/shell/脚本标签不显示。
-  **磨砂口径（v3.92）**：卡片可见时启动栏「启动」降级为线框（同一视野不留双主按钮）；卡片主按钮
+- **终端卡（2026-09-13）**：终端画布区（`rounded-t-xl`）与底部状态栏（`rounded-b-xl mx-2 mb-2`）同涂
+  xterm 主题底色（`statusBarColors.background` 经 `termBg` prop 传入 View），上下拼成一张无缝圆角卡——
+  xterm 宿主的 `px-3 py-2.5` 内衬隐入同色不再露灰边，状态栏原 `borderTop` 分隔线随之删除（同色即分区）。
+  View 根与标签条统一 8px 侧距。终端底色只认 `buildXtermTheme` 一处出处，不得在容器上另写色值。
+  **聊天页隐藏状态栏的占位是条件保留（2026-09-13）**：`status_bar_in_chat` 关闭时，已有会话/PTY 的标签
+  仍以 `invisible` 占位（切层不改终端行列数——切回终端会重放 transcript）；**从没启动过的干净标签**
+  直接 `hidden` 不占位，保护对象不存在时白留 40px 空是纯噪音。聊天输入框容器底距统一 `pb-2`。
+  **磨砂口径（v3.92；2026-09-13 收紧）**：卡片可见时启动栏**不再渲染「运行」钮**（原为降级线框，
+  但仍是同视野双主按钮，用户反馈页面不简洁后直接去掉；卡片主按钮是唯一主动作，⌘↵ 不变。
+  shell 面板态没有欢迎卡，保留启动钮）。未启动欢迎态也**不渲染技能/MCP 胶囊**——一键注入的落点
+  （首条指令）此时默认折叠、MCP 提及没有输入框可进，常驻两粒胶囊只添噪音（2026-09-13）；
+  启动后的收缩栏保留，v3.213 口径不变。卡片主按钮
   `h-9 min-w-40` 内置 `⌘↵` kbd（真实快捷键：⌘/Ctrl+Enter 启动，打字中不抢；**终端聚焦时按键被 xterm
   吞掉、到不了 window 监听，必须在 attachCustomKeyEventHandler 里加同款分支**，与 ⌘F 同一处理模式；
   window 监听须门控 `visible && primaryFocus`，否则多标签的保持挂载实例会重复触发）；

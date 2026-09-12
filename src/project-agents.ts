@@ -175,3 +175,23 @@ export function projectBoundProfileId(
   const id = defaultProfiles?.[agentId]?.trim();
   return id || undefined;
 }
+
+/** 项目 Agents 名册 → 新会话启动。有项目默认 Agent 且这家有可用连接才返回；
+ *  绑定已删则回落该 Agent 第一条。未设项目默认返回 null，由调用方去弹层选。 */
+export function projectAgentLaunch(
+  profiles: readonly { id: string; agent: string; models?: readonly string[] }[],
+  defaultAgent?: string | null,
+  defaultProfiles?: Record<string, string> | null,
+): { agentId: string; profileId: string; model: string } | null {
+  const agent = defaultAgent?.trim() ?? "";
+  if (!agent) return null;
+  const forAgent = profiles.filter((p) => p.agent === agent);
+  if (forAgent.length === 0) return null;
+  const bound = defaultProfiles?.[agent]?.trim() ?? "";
+  const profile = (bound && forAgent.find((p) => p.id === bound)) || forAgent[0]!;
+  return {
+    agentId: agent,
+    profileId: profile.id,
+    model: profile.models?.[0] ?? "",
+  };
+}

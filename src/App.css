@@ -513,7 +513,9 @@ body {
 :root {
   --ccode-radius-tight: 5px;
   --ccode-radius-control: 7px;
-  --ccode-radius-panel: 9px;
+  /* 内容卡/浮起面板档：12px。9px 在大卡上可辨、在扁条卡（如工作台「正在进行」行）
+     上接近直角，用户反馈「方正」后提到 12px（Linear 卡片口径）；控件 7px / 紧凑 5px 不动。 */
+  --ccode-radius-panel: 12px;
   --ccode-motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   /* 原生表单控件配色模式：保留全局深色默认值；Windows 浅色主题单独覆盖，
      避免 WebView2 把浅色下拉/复选框画成黑色，同时不改变 macOS/Linux 的原有路径。 */
@@ -569,6 +571,12 @@ body {
    收缩态里再占 ~14px，固定宽按钮的 hover/选中衬底被 overflow-x-hidden 裁掉一截 */
 .ccode-app-main {
   scrollbar-gutter: stable;
+  /* 内容画布 = 圆角浮层面板（Codex/ZCode 式）：与 chrome（标题栏/侧栏，rail 底）之间留 8px 缝
+     （App.tsx 行容器 gap-2 py-2 pr-2），四角随内容卡档圆角；overflow-hidden 把九页各自的
+     全出血表面（canvas / 项目 rail2 / 会话双栏）统一裁进圆角。fixed 全屏层（阅读区/弹层/抽屉）
+     不受祖先 overflow 裁剪，照常铺满整窗。 */
+  border-radius: var(--ccode-radius-panel);
+  overflow: hidden;
 }
 
 .ccode-app-main {
@@ -603,7 +611,22 @@ body {
 }
 
 .ccode-page-header {
-  background: var(--color-canvas);
+  /* 玻璃页头（Linear 式沉浸）：背景透明，由 ::before 承载磨砂——内容滚动时从页头下穿过，
+     静止时与画布融为一体。模糊放在伪元素层，页头文字/控件留在上层不参与栅格化
+     （与顶部导航胶囊同一口径，Windows WebView2 无需平台分支）；
+     底色取所在 PageFrame 的表面基色（项目工作面自动跟随 rail2）。 */
+  background: transparent;
+}
+
+.ccode-page-header::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--ccode-surface-base, var(--color-canvas)) 74%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  backdrop-filter: blur(16px) saturate(140%);
+  pointer-events: none;
 }
 
 /* 工具栏不再包边成盒：与页头共用 hairline 与留白节奏，保持连续工作台观感。 */
@@ -612,6 +635,30 @@ body {
 .ccode-action-secondary {
   transition-duration: 150ms;
   transition-timing-function: var(--ccode-motion-ease);
+  /* 覆盖工具类的属性表，把 transform 纳入过渡（按压反馈用；unlayered 规则压过 utilities 层） */
+  transition-property: filter, opacity, transform, background-color, border-color, color;
+}
+
+/* 按压反馈：主/次按钮按下轻微收缩，给平面按钮一层触感（Linear 式微动效） */
+.ccode-action-primary:active,
+.ccode-action-secondary:active {
+  transform: scale(0.98);
+}
+
+/* 页面切换入场：160ms 淡入 + 3px 上浮（display:none → 显示时重播，与 Linear 同级的切页反馈）。
+   九个页面容器都是 .ccode-app-main 的直接子级，在这里统一接住；reduced-motion 全局关闭 */
+@keyframes ccode-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ccode-app-main > div {
+  animation: ccode-page-in 160ms var(--ccode-motion-ease);
 }
 
 /* 浮层表面统一口径（弹窗/下拉/右键菜单/命令面板）：raised 一档浮起 + 顶部 1px 内高光
@@ -810,7 +857,8 @@ body {
   .ccode-float-surface,
   .ccode-fade,
   .ccode-top-nav-capsule,
-  .ccode-nav-capsule-hint {
+  .ccode-nav-capsule-hint,
+  .ccode-app-main > div {
     animation: none;
   }
 }
