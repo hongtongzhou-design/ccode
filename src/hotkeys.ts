@@ -4,16 +4,13 @@
  * 空串 = 该快捷键禁用。
  */
 
-export const HOTKEY_DISABLED = "";
-
 /** 页切绑定清单单一出处（App.tsx 全局监听与设置页录制 UI 同源）：
- *  顺序与侧栏「工作→能力→管理」一致；combo 为该页默认绑定（settings.hotkeyPages 可按页覆盖） */
+ *  顺序与侧栏一致（工作→资源→用量/设置）；combo 为该页默认绑定（settings.hotkeyPages 可按页覆盖） */
 export const PAGE_HOTKEY_DEFS = [
   { id: "workbench", label: "工作台", combo: "mod+1" },
   { id: "workspaces", label: "项目", combo: "mod+2" },
   { id: "terminal", label: "运行", combo: "mod+3" },
   { id: "sessions", label: "对话", combo: "mod+4" },
-  { id: "schedules", label: "定时任务", combo: HOTKEY_DISABLED },
   { id: "profiles", label: "连接", combo: "mod+5" },
   { id: "skills", label: "技能", combo: "mod+6" },
   { id: "mcp", label: "MCP", combo: "mod+7" },

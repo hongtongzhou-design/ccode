@@ -19,6 +19,34 @@ fn check(name: &str, status: &str, detail: impl Into<String>, blocking: bool) ->
     }
 }
 
+/// Zotero 本地通道判定：HTTP 状态码 → (状态, 白话)。None = 请求失败。
+/// 任何非明确成功/403 的响应都归 unknown，不猜测写入能力（宁缺毋滥）。
+fn zotero_channel(status: Option<u16>) -> (&'static str, &'static str) {
+    match status {
+        Some(code) if (200..300).contains(&code) => (
+            "readable",
+            "本地 API 可访问；未请求写库授权，版本与写入权限仍需逐批核对",
+        ),
+        Some(403) => (
+            "disabled",
+            "Zotero 本机通信未开启；可继续使用已导入题录/PDF，写库未授权",
+        ),
+        Some(_) => (
+            "unknown",
+            "本地服务响应不兼容；不猜测写入能力，使用文件流程",
+        ),
+        None => (
+            "offline",
+            "未连到 Zotero；已导入文件仍可用，不阻塞离线文献工作",
+        ),
+    }
+}
+
+/// Origin 门槛：只做 Windows 实机（Mac 虚拟机方案已否决）；非 Windows 且该技能为步骤必需 = 阻塞开工。
+fn origin_blocking(windows: bool, required: bool) -> bool {
+    !windows && required
+}
+
 #[tauri::command]
 pub async fn research_tool_preflight(
     project_root: String,
@@ -81,31 +109,20 @@ pub async fn research_tool_preflight(
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .map_err(|e| e.to_string())?;
-        let (status, detail) = match client.get("http://127.0.0.1:23119/api/").send().await {
-            Ok(response) if response.status().is_success() => (
-                "readable",
-                "本地 API 可访问；未请求写库授权，版本与写入权限仍需逐批核对",
-            ),
-            Ok(response) if response.status().as_u16() == 403 => (
-                "disabled",
-                "Zotero 本机通信未开启；可继续使用已导入题录/PDF，写库未授权",
-            ),
-            Ok(_) => (
-                "unknown",
-                "本地服务响应不兼容；不猜测写入能力，使用文件流程",
-            ),
-            Err(_) => (
-                "offline",
-                "未连到 Zotero；已导入文件仍可用，不阻塞离线文献工作",
-            ),
-        };
+        let code = client
+            .get("http://127.0.0.1:23119/api/")
+            .send()
+            .await
+            .ok()
+            .map(|response| response.status().as_u16());
+        let (status, detail) = zotero_channel(code);
         out.push(check("Zotero 本地通道", status, detail, false));
     }
     if step.skills.iter().any(|s| s == "origin-plot") {
         let windows = cfg!(windows);
         out.push(check("Origin 执行环境", if windows { "needs-probe" } else { "unsupported" },
             if windows { "Windows 平台符合；运行随包脚本 --probe，再核对 Origin 2021+ 与许可证。此处不会启动 Origin" }
-            else { "Origin 执行要求有授权的 Windows 本机；不能在当前平台悄悄替换为 Python 图" }, !windows && step.required_skills.iter().any(|s| s == "origin-plot")));
+            else { "Origin 执行要求有授权的 Windows 本机；不能在当前平台悄悄替换为 Python 图" }, origin_blocking(windows, step.required_skills.iter().any(|s| s == "origin-plot"))));
     }
     if step.skills.iter().any(|s| s == "blender-research") {
         let probe = crate::mcp_blender::probe_blender_mcp_setup().await?;
@@ -131,4 +148,46 @@ pub async fn research_tool_preflight(
         ));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zotero_channel_maps_status_codes_without_guessing_write() {
+        let (status, _) = zotero_channel(Some(200));
+        assert_eq!(status, "readable");
+        let (status, _) = zotero_channel(Some(204));
+        assert_eq!(status, "readable");
+        // 403 = 服务在但通信未开启：可用已导入文件，不阻塞
+        let (status, _) = zotero_channel(Some(403));
+        assert_eq!(status, "disabled");
+        // 其他响应不猜测写入能力
+        let (status, _) = zotero_channel(Some(500));
+        assert_eq!(status, "unknown");
+        let (status, _) = zotero_channel(None);
+        assert_eq!(status, "offline");
+    }
+
+    #[test]
+    fn origin_blocks_only_off_windows_with_required_skill() {
+        // Windows 实机永不因平台阻塞（后续 probe 才核对版本/许可证）
+        assert!(!origin_blocking(true, true));
+        assert!(!origin_blocking(true, false));
+        // 可选技能在非 Windows 只是提示，不拦开工
+        assert!(!origin_blocking(false, false));
+        // 非 Windows + 步骤必需 = 明确失败，不悄悄换 Python 图
+        assert!(origin_blocking(false, true));
+    }
+
+    #[test]
+    fn tool_check_serializes_camel_case_for_frontend() {
+        let c = check("Origin 执行环境", "unsupported", "需要授权的 Windows 本机", true);
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(json["name"], "Origin 执行环境");
+        assert_eq!(json["status"], "unsupported");
+        assert_eq!(json["detail"], "需要授权的 Windows 本机");
+        assert_eq!(json["blocking"], serde_json::Value::Bool(true));
+    }
 }

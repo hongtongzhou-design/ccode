@@ -254,6 +254,8 @@ pub fn resolve_binary(name: &str) -> Option<std::path::PathBuf> {
 /// Git for Windows 自带的 bash（流水线钩子 / run 脚本）。
 /// 不认 `System32\bash.exe`（那是 WSL 启动器，Win32 路径的 bash 脚本会挂）。
 /// macOS/Linux 上就是 `resolve_binary("bash")`，调用方若已有自己的 bash 解析则不必走这里。
+/// 调用方全在 Windows 门控内（pty.rs script_shell_argv / workspaces.rs shell_cmd）。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn resolve_git_bash() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
@@ -2002,8 +2004,8 @@ fn windows_resume_command_line(
 }
 
 /// 复制用命令行：裸命令名（用户真实交互终端 rc 齐全，且 cc-switch 风格干净）
-// 同上：运行路径仅 unix，Windows 仅测试调用
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
+// 测试便捷包装：生产入口 session_resume_command 直接走 _with（带 extra args）
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn resume_command_line(agent_id: &str, session_id: &str, cwd: &str) -> Result<String, String> {
     let binary = binary_for(agent_id).ok_or_else(|| format!("未知 agent: {agent_id}"))?;
     resume_command_line_with(agent_id, session_id, cwd, binary, &[])

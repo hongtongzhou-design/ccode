@@ -285,11 +285,13 @@ export function groupEntriesByKeyword(
 // ===== 来源展示名 =====
 
 /** 来源 pill 展示名：剥掉末尾出版商括号尾巴（「(Wiley)」「（ACS）」，可多级）省横向空间；
- *  剥完为空视为无尾巴（原文返回）。匹配侧（journal_metrics.rs lookup_in）同口径剥尾，两处同步 */
+ *  剥完为空视为无尾巴（原文返回）。括号必须成对（半角配半角、全角配全角）——
+ *  与匹配侧 journal_metrics.rs strip_trailing_paren 同口径，两处同步 */
 export function sourceDisplayName(source: string): string {
   let s = source.trim();
   for (;;) {
-    const m = /^(.*?)\s*[(（][^()（）]*[)）]\s*$/.exec(s);
+    const m =
+      /^(.*?)\s*\(([^()]*)\)\s*$/.exec(s) ?? /^(.*?)\s*（([^（）]*)）\s*$/.exec(s);
     if (!m || !m[1].trim()) return s;
     s = m[1].trim();
   }

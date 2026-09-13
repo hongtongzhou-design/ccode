@@ -1,7 +1,7 @@
 //! 聊天层 ⇄ 终端层交接纯逻辑（tests/chat-handoff.test.ts）。
 //!
 //! 聊天是同一 PTY 的结构化显示层，不复制九家 TUI 菜单解析器。
-//! 能用已知字符串写进 PTY 的（直切 /model、/effort、y/n/Esc、Ctrl+C）留在聊天；
+//! 能用已知字符串写进 PTY 的（直切 /model、/effort、y/n/Esc、生成中 Esc 暂停）留在聊天；
 //! 方向键选择器、登录、信任目录交给终端画面——默认「窥视」（露出同一 xterm 底部，
 //! 不改行列数），只有启动注入失败等必须粘贴进 TUI 输入框的才整层切走。
 
@@ -178,6 +178,18 @@ export function chatHeaderStatus(input: {
   if (syncState === "watching") return running ? "实时同步" : "已结束 · 可继续";
   if (state === "linked") return running ? "实时同步" : "已结束 · 可继续";
   return running ? "Agent 运行中" : "准备开始";
+}
+
+/** 发送钮变「进行中」暂停：只在正在出字，不是进程还活着。
+ *  停在提示符时要点发送；审批 confirm 时 Esc 归审批卡，不占发送钮。 */
+export function composerShowsInterrupt(input: {
+  running?: boolean;
+  attention?: "done" | "working" | "confirm" | null;
+  pendingReply?: boolean;
+}): boolean {
+  if (!input.running) return false;
+  if (input.attention === "confirm") return false;
+  return input.attention === "working" || Boolean(input.pendingReply);
 }
 
 /** 斜杠发出后要不要露出 TUI：无参 /model、/models、/login 会唤选择器或登录页 */

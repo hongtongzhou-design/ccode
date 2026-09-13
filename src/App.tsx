@@ -108,7 +108,7 @@ async function fireScheduleNotification(
   sendNotification({ title, body, actionTypeId: "ccode.schedule", extra });
 }
 
-/** 页切顺序/逐页绑定/默认值的单一出处在 hotkeys.ts PAGE_HOTKEY_DEFS（与侧栏工作→能力→管理一致） */
+/** 页切顺序/逐页绑定/默认值的单一出处在 hotkeys.ts PAGE_HOTKEY_DEFS（与侧栏顺序一致） */
 
 function App() {
   const page = useAppStore((s) => s.page);
@@ -422,6 +422,9 @@ function App() {
 
   // 跨实例同步：窗口重新聚焦/可见时重拉配置、设置与会话（2s 节流）。
   // 双开场景（worktree 演示）里另一个实例的改动能即时反映过来。
+  // 分级：聚焦只拉轻量（配置/设置/项目/最近目录）；会话列表留给各页面的轮询/操作后
+  // 强刷——一次聚焦全量重扫九个 agent 的会话文件（10s 缓存过期时含 zstd 解压）会
+  // 周期性打满 CPU、把打字卡死（2026-09-13 排查结论）。
   useEffect(() => {
     let last = 0;
     const sync = () => {
@@ -430,7 +433,6 @@ function App() {
       last = now;
       loadAll().catch(() => toast("配置同步失败，可稍后重试", "warning"));
       loadSettings().catch(() => toast("设置同步失败，可稍后重试", "warning"));
-      loadSessions().catch(() => toast("会话同步失败，可稍后重试", "warning"));
       loadProjects().catch(() => toast("项目同步失败，可稍后重试", "warning"));
       loadRecentRepos().catch(() => toast("最近目录同步失败，可稍后重试", "warning"));
     };
@@ -443,7 +445,7 @@ function App() {
       window.removeEventListener("focus", sync);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadAll, loadSessions, loadProjects, loadRecentRepos, loadSettings]);
+  }, [loadAll, loadProjects, loadRecentRepos, loadSettings]);
 
   return (
     <ErrorBoundary>
@@ -632,8 +634,8 @@ function App() {
             type="button"
             onClick={cycleNavState}
             title={collapsed ? "展开侧栏" : "收起为图标"}
-            className={`ccode-brand-bar flex h-11 shrink-0 select-none items-end pb-1.5 text-left ${
-              collapsed ? "justify-center" : "px-3.5"
+            className={`ccode-brand-bar mx-1.5 mt-1 flex h-11 shrink-0 select-none items-end rounded-md pb-1.5 text-left transition-colors hover:bg-hover ${
+              collapsed ? "justify-center" : "px-2"
             }`}
           >
             <span className="ccode-brand-mark">
@@ -669,7 +671,7 @@ function App() {
                       onContextMenu={(e) => void openQuickChatMenu(e)}
                       aria-label="快速开聊"
                       title="快速开聊：不建项目直接开一个终端标签（右键看 scratch 里的随手聊）"
-                      className={`relative mb-0.5 flex h-7 w-full items-center rounded-md text-sm text-l3 transition-colors hover:bg-hover hover:text-l2 ${
+                      className={`relative mb-0.5 flex h-8 w-full items-center rounded-md text-sm text-l3 transition-colors hover:bg-hover hover:text-l2 ${
                         collapsed ? "justify-center" : "px-2.5"
                       }`}
                     >
@@ -729,7 +731,7 @@ function App() {
                   aria-current={page === n.id ? "page" : undefined}
                   aria-label={n.label}
                   title={n.label}
-                  className={`relative mb-0.5 flex h-7 items-center rounded-md text-sm transition-colors ${
+                  className={`relative mb-0.5 flex h-8 items-center rounded-md text-sm transition-colors ${
                     collapsed ? "w-11 justify-center" : "w-full px-2.5"
                   } ${
                     page === n.id

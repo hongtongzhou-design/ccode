@@ -110,7 +110,10 @@ npm run tauri build    # 打包
 docs/                        # 架构方案 + 九 CLI 适配参考（规格）
   conventions/               # 主题化约定细则（改动对应领域前必读，见「关键约定」索引）
 src/                         # 前端 React + TS + Tailwind v4（vite 插件接入）
-  pages/                     # 八页：配置⇄ 项目⛁（workspaces，v3.92 起 UI 页名「项目」） 终端⌨ 对话◔ 技能✦ MCP⌗ 统计◫ 设置⛭
+  pages/                     # 侧栏九页：工作台▣ 项目⛁（workspaces，v3.92 起 UI 页名「项目」） 运行⌨（terminal） 对话◔ 连接⇄（profiles） 技能✦ MCP⌗ 用量◫（stats） 设置⛭
+                             # 定时任务不是侧栏页（2026-09-13 用户移除）：只是项目「定时任务」页签；
+                             #   页切快捷键（hotkeys.ts PAGE_HOTKEY_DEFS）、设置页「启动时进入」与 settings.rs KNOWN_PAGES 同为九页清单，
+                             #   全局 page id schedules 仅作旧值重定向（App.tsx 转项目定时任务页签），SchedulesPage.tsx 已删
   components/                # WorkspaceReviewView、PipelineEditor（含「＋ 从模板追加」）、ProjectGroup/ProjectRail、ArtifactChecklist（文本类产物就地预览层 +
                              # md 笔记「⛶ 沉浸阅读」入口（v3.98：pdf_for_note 配对后发 readerReq 带 notePath 进阅读区）+
                              # ⠿ 拖出手柄经 tauri-plugin-drag 做 OS 级文件拖出——WebView HTML5 拖拽出不了窗口）、TaskCardsSection、FileTree、
@@ -265,6 +268,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 剪贴板图片条目判定/MIME→扩展名/粘贴反馈文案（tests/terminal-input.test.ts）
   terminal-welcome.ts        # 终端未启动空态：isTerminalIdle / 卡上「将在 … 启动」目录文案
                              # （tests/terminal-welcome.test.ts）
+  tab-working.ts             # 终端标签「生成中」虚线圆：PTY 出字才转；会话已落完助手正文
+                             # 立刻停，sticky working 不得续命；动画禁止 CSS rotate
+                             # （tests/tab-working.test.ts）
   terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
   tab-drag.ts                # 标签条拖拽排序纯逻辑：位移钳制 + 目标槽位判定（>= 中线守末槽边界，
                              # tests/tab-drag.test.ts）
@@ -296,6 +302,24 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 软停用（hiddenProfiles）跳过停用项——wishedId 指向停用项同样跳过，全停用时回落含停用项池不拦死
                              # （tests/resume-profile.test.ts）
   combo-field.ts             # 网关库逐模型策略三态（edit/readonly/hidden）纯逻辑（tests/combo-field.test.ts）
+  ask-ai.ts                  # 项目区「问 AI」：选 Agent/配置/模型，可设为默认（tests/ask-ai.test.ts）
+  conversation-tools.ts      # 对话回放：连续工具调用聚合成一条执行记录（tests/conversation-tools.test.ts）
+  dep-check.ts               # 依赖体检前端镜像：DTO 判定与 DOM/Tauri 解耦（tests 同名）
+  gateway-draft.ts           # 网关库槽位纯逻辑：effectiveSlotUrl 主输入跟随/脱离、slotsFollowMaster、firstProbeableSlot
+  goal-review.ts             # 目标验收弹层分组与文案：科研按文献/笔记/数据/论文、工作按文档/表格/幻灯（tests/goal-review.test.ts）
+  history-view.ts            # 历史时间线白话翻译层（✓验收合并/⚙自动保存/◔保存，hash/分支名降为二级）
+  kickoff-inputs.ts          # 开步确认弹层「上一步接到的输入」芯片（纯展示）
+  lit-list.ts                # 无流程科研文献/笔记列表：展示名、编号、状态与过滤纯逻辑
+  model-switch.ts            # 各 CLI 多模型注入能力表 + 启动栏提示纯逻辑（对应 agent_specs.model_switch）
+  nav-capsule.ts             # 侧栏可配置胶囊入口（恢复侧栏始终保留，不在此列）
+  project-context-load.ts    # 启动环境说明拼装：读档案卡和顶层目录，失败仍返回能用的短包
+  research-report.ts         # 研究报告节抽取/相对路径解析（只认显式报告节，不认 TASK 指令或推断结论）
+  research-tools.ts          # 科研工具注入 withResearchTools；旧「文献主来源」设置键写回时剥除——来源只认 lit_source
+  session-filter.ts          # 对话页筛选纯逻辑（tests/session-filter.test.ts）
+  session-search.ts          # 对话搜索纯逻辑：分词、元数据即时过滤、正文命中合并排序
+  session-transfer.ts        # 会话导入向导纯逻辑：状态文案、目标目录预填、可否执行
+  step-decisions.ts          # 决策项：答案落任务书草稿固定小节（decisionGate/orderedAnswers/parseDecisions，tests/step-decisions.test.ts）
+  terminal-resume.ts         # 终端会话恢复的标签复用与配置挑选纯逻辑（2026-09-08 审计修复）
   store.ts                   # zustand 状态
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
@@ -405,9 +429,12 @@ src-tauri/src/
                              #   目标页只读展示最近若干条；task_list 默认不含归档，task_unarchive 恢复）
                              # project-status.json 只是其「最近摘要」投影；目标删除不动账本与摘要）、
                              # 项目移除三档（移除注册 / purge_project_traces 清除 Mesa 痕迹保留文件夹 / delete_project_dir）
+  project_memory.rs          # 项目知识 .ccode/memory.md：结构化块只记人工确认（revision 比对 + active/superseded/revoked 状态机；
+                             # 作废/替代条目不注入，Agent 结论不自动采纳；原文历史保留并留备份）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用；
                              # pty_report_terminal_colors = Windows 底色告知（win32-input-mode 记录逐条投递，
                              #   条间 2ms；ConPTY 双向吞 OSC 的实测结论见 conventions/terminal.md，别改回 OSC）
+  pty_input.rs               # 每个终端独立的有界输入队列：一个不读 stdin 的 CLI 不得占住 PTY 全局锁
   clipboard.rs               # 剪贴板图片落盘（save_clipboard_image）：<config>/ccode/tmp/paste-* 白名单扩展名 +
                              # 50MB 上限 + 每次顺带清理 7 天前残留（机制约定见 conventions/terminal.md「输入侧」）
   sessions.rs                # 会话浏览：九 agent 会话扫描/解析（Codex .zst、OpenCode SQLite/JSON）、session_meta、pin 快照、
@@ -417,6 +444,7 @@ src-tauri/src/
                              # sessions_for_card（融合进任务书的按卡取会话：与列表同一归属口径）；
                              # 无头 AI 按 session id 标 session_meta.internal（雷达解读/定时巡检不进本项目会话，
                              # 禁止把项目路径写入 usage_provenance.internal）
+  session_search.rs          # 会话正文搜索：多关键词按「命中多少 + 落在哪」打分、同分按更新时间；正文不进前端
   session_transfer.rs        # 会话包导出/导入（.ccode-sessions.zip，八家不含 opencode）：原文打包装、导入时改写 cwd 并按 B 机
                              #   目录重建落位；zip-slip/大小/后缀/白名单；同 id 跳过不覆盖；Mesa 元数据写 app.db；
                              #   kimi 新版 wd_<basename>_<sha256[:12]> + session_index.jsonl；grok URL 编码 cwd
@@ -539,6 +567,9 @@ src-tauri/src/
                              # journal_metrics_status（含 downloadedAt：两份 CSV 取较新 mtime）+ check_journal_metrics_update
                              # （GitHub commits API 按数据目录查最近 commit，与本地 mtime 比对出 hasUpdate，前端静默失败）
   research_quality.rs        # 科研复现运行记录与验收决定：独立输出 ~/ccode/reproductions/；验收写 .ccode/research-acceptance.json，不替代 Git 合并
+  research_tools.rs          # 科研外部工具开工 preflight（research_tool_preflight）：Zotero 本地通道 / Origin 平台门槛
+                             #   （只做 Windows 实机，非 Windows 必需技能=阻塞）/ Blender 探测 / EndNote 桥；
+                             #   只探测，不安装、不写个人库、不启动 GUI
   reader.rs                  # 沉浸阅读区后端（v3.96）：ensure_paper_note 建档 notes/<slug>.md（精读八小节对齐 lit-notes 技能口径 + 机管「译段」「我的想法」两节，已存在不覆盖；
                              # 建档前先扫 notes/ 头部「来源行」配对已有精读笔记，命中即复用不另建，空模板 slug 笔记顺带清回收站；
                              # pdf_for_note 笔记→配对 PDF（来源行锚点优先；无锚点回落笔记 stem × type=paper 资源 stem
@@ -558,6 +589,7 @@ src-tauri/src/
                              # pipeline_step/coding_lane/watch（run_needs_task）；
                              # 普通目标开工写评审基线（写失败即开工失败）、收尾触发冻结、
                              # 预览/采纳绑定冻结快照（失败清理只删本次新建目录 cleanup_failed_prepare）
+  runs/goal_storage.rs       # 普通目标副本的显式清理：归档、项目成果与接受账本不在删除范围（两步各需确认）
   task_review.rs             # 普通目标评审证据（规格 conventions/review-freeze.md）：开工基线哈希、
                              # 收尾冻结 payload 副本（拒绝改写）、采纳三向判定（项目现读 vs 基线 vs 冻结内容，
                              # 删除永不写回、>64MB 不自动采纳）；纯文件事实不碰数据库，编排在 runs.rs
@@ -579,8 +611,11 @@ src-tauri/src/
   pdf.rs                     # PDF/docx 字节读取：read_pdf_bytes 白名单 + canonicalize + 上限，base64 传输
   sheet_preview.rs           # Excel/ODS 预览：同一套白名单读字节，calamine 抽指定工作表（200×256）+
                              #   xlsx 合并区（load_merged_regions，裁进窗口）
+  storage.rs                 # 本机文件持久化原语：跨进程读改写锁、私有临时文件（0600）、安全替换
   updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm、Windows winget 渠道：claude/codex/opencode/kimi/grok 五家有官方包）+ 应用自身 Tauri updater；
                              #   run_streaming_pty/run_streaming/emit_done/winget_args 为 pub(crate)，dep_check 复用同一管线
+  watch_review.rs            # 定时巡检产物评审：工作目录可复用，但评审和采纳只读每次执行冻结的副本
+                             #   （基线文件 + 技能产出契约，与 task_review.rs 同构不合并）
   dep_check.rs               # 依赖体检 + 一键安装（git/node，非九 CLI 本身）：check_dependencies（git 三态 ok/missing/
                              #   clt_stub + node + 渠道 brew/winget/xcode/none，启动时前端拉一次进 store）+ install_dependency
                              #   （macOS brew 优先、无 brew 时 git 触发 xcode-select --install 系统弹窗不等待；Windows winget
@@ -724,7 +759,7 @@ src-tauri/src/
 - Grok 的 `api_backend`、`context_window` 不得通过受限 `GROK_CONFIG` 猜测注入；若绑定声明非 `chat_completions`，必须先在 Grok `[model.<id>]` 配置中登记，否则启动和无头调用均 fail-closed。
 - 配置页查询模型能力必须带 `gatewayId`，网关级能力声明优先于公共/内置能力库；写 Grok 逐模型上下文时只使用显式声明值，不使用通用估值。
 
-- **项目页视图（2026-09-06；2026-09-10 加「对话」页）**：项目页顶栏是当前项目身份（名称、工作方式、课题主题、路径），添加项目在左侧列表 +。已注册项目页签顺序为「对话 → 科研任务 / 工作任务 / 编程任务 → 定时任务 → 文件 → Agents」。**对话**只看当前项目的记录（默认铺开列表，点一条才回放；展开后列表不显示 Agent 标签，关闭在右上角，方向键换会话；思考/工具调用默认折成一条过程；可继续/归档、＋新对话），不是侧栏那份全局历史；打开项目默认仍进任务页。＋新对话注入**会话包**（项目是谁、顶层有什么、规则、跟这次说的做），不把目标说明、技能名单、「尚未完成」或「验收后才进项目」塞进对话；勾「验收后写入」才改走目标包。任务页是该工作方式的主面（有流程科研=步骤/工作区，无流程科研=目标，办公=人声明任务，编程=工作树），**不再放右侧对话栏**。文献雷达和定时任务在「定时任务」页签。规则和验收记录收进顶栏 ⋯「项目设置」抽屉。文献/笔记/数据/图像只在「文件」页，任务页不预留空块。文件页：点文件才弹出右侧预览；预览有上下切换，窗口预览时方向键也换文件；顶栏类型图标（空类型不占位）+ 搜索 + 刷新；行悬停图标（问 AI / 显示 / 沉浸阅读），不挤文件名；可切窗口预览。规则面板无说明句。**有研究步骤的科研不展示技能和「写回时跳过」**（技能以步骤挂载为准；写回时跳过是目标验收不覆盖的路径）。无流程科研 / 办公才用技能 + 目标点名，以及写回时跳过；编程用技能、不展示写回时跳过。办公文档筛选与文件页同一套图标。本项目对话未命名显示「对话」。有进行中/待验收目标时雷达默认收起。Agents 页是这个项目的 Agent 名册（点配置名换该项目绑定、＋新对话 / 跟 AI 商量 / 聊想法默认、本项目继续该家会话也用这份绑定、正在负责哪些目标），点目标回任务页；不是连接页的模型配置表单。项目内新会话不沿用上次终端连接。继续会话启动栏必须显示该绑定，不能因 Codex 渠道兼容池静默换回上次的网关；渠道不同时预填绑定、不自动启动，确认后点运行。没有目标时不逐家重复空状态。不自动分派，密钥仍在连接页。编程工作树 ⋯ 可事后分组。侧栏「对话」仍是跨项目全局历史；定时任务在项目「定时任务」页签创建，后台不进正在进行、不进本项目对话。
+- **项目页视图（2026-09-06；2026-09-10 加「对话」页）**：项目页顶栏是当前项目身份（名称、工作方式、课题主题、路径），添加项目在左侧列表 +。已注册项目页签顺序为「对话 → 科研任务 / 工作任务 / 编程任务 → 定时任务 → 文件 → Agents」。**对话**只看当前项目的记录（默认铺开列表，点一条才回放；展开后列表不显示 Agent 标签，关闭在右上角，方向键换会话；思考/工具调用默认折成一条过程；可继续/归档、＋新对话），不是侧栏那份全局历史；打开项目默认仍进任务页。＋新对话注入**会话包**（项目是谁、顶层有什么、规则、跟这次说的做），不把目标说明、技能名单、「尚未完成」或「验收后才进项目」塞进对话；勾「验收后写入」才改走目标包。任务页是该工作方式的主面（有流程科研=步骤/工作区，无流程科研=目标，办公=人声明任务，编程=工作树），**不再放右侧对话栏**。文献雷达和定时任务在「定时任务」页签。规则和验收记录收进顶栏 ⋯「项目设置」抽屉。文献/笔记/数据/图像只在「文件」页，任务页不预留空块。文件页：点文件才弹出右侧预览；预览有上下切换，窗口预览时方向键也换文件；顶栏类型图标（空类型不占位）+ 搜索 + 刷新；行悬停图标（问 AI / 显示 / 沉浸阅读），不挤文件名；可切窗口预览。规则面板无说明句。**有研究步骤的科研不展示技能和「写回时跳过」**（技能以步骤挂载为准；写回时跳过是目标验收不覆盖的路径）。无流程科研 / 办公才用技能 + 目标点名，以及写回时跳过；编程用技能、不展示写回时跳过。办公文档筛选与文件页同一套图标。本项目对话未命名显示「对话」。有进行中/待验收目标时雷达默认收起。Agents 页是这个项目的 Agent 名册（点配置名换该项目绑定、＋新对话 / 跟 AI 商量 / 聊想法默认、本项目继续该家会话也用这份绑定、正在负责哪些目标），点目标回任务页；不是连接页的模型配置表单。项目内新会话不沿用上次终端连接。继续会话启动栏必须显示该绑定，不能因 Codex 渠道兼容池静默换回上次的网关；渠道不同时预填绑定、不自动启动，确认后点运行。没有目标时不逐家重复空状态。不自动分派，密钥仍在连接页。编程工作树 ⋯ 可事后分组。侧栏「对话」仍是跨项目全局历史；定时任务在项目「定时任务」页签创建，后台不进正在进行、不进本项目对话。**侧栏没有定时任务页**（2026-09-13 用户移除）：侧栏九页 = 工作台/项目/运行/对话/连接/技能/MCP/用量/设置，页切快捷键、启动页选项、导航胶囊、settings.rs KNOWN_PAGES 都按这九页对齐；全局 page id `schedules` 只作旧持久化值的重定向（App.tsx 转到项目定时任务页签），不得再把定时任务加回侧栏或九页清单。
 - **绑定与网关命名（2026-09-06）**：Gateway.name 是共享端点/网关名称，Binding.name 是单个 Agent 配置名称，必须分开存储；旧 Binding 缺 name 时展示回退 Gateway.name。修改 profile 名称只更新 Binding.name，不得改共享 Gateway.name 或其他 Binding。相同 Agent + 网关允许不同模型选择，完全相同的模型/协议/附加环境变量仍拒绝重复。
 - **模型越强，产品越管环境和验收（2026-09-07）**：不跟 Codex/Claude 比「我也能执行」。闲聊用＋新对话（项目根直接改）；成稿用新建目标（隔离 + 人验收 + 项目记住）。Agent 弱时科研步骤仍可当护栏；Agent 强时把引导撤掉。禁止靠更强编排/自动拆任务来对抗更强模型。
 - **有流程科研的决定、复现与验收（2026-09-08）**：硬暂停认决定状态，不认非空文字。状态闭集为批准指定范围／仅允许准备／待补证据／不批准，与说明分开写；旧纯文本不自动批准，不用关键词猜授权。批准绑定当时报告指纹，指纹变了要重确认。复现只认脚本约定（`MESA_REPRODUCE` 或 `reproduce` 子命令），输出必须独立于输入项目，落 `~/ccode/reproductions/`，界面只读本次运行输出。科研验收决定（接受／有条件接受／退回）写 `.ccode/research-acceptance.json`，不替代也不禁止 Git 合并。运行结束、计算检查、人工验收三层状态不得合成一个绿灯。不得把报告里的「通过」自动当成质量通过。

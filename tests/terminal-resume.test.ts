@@ -93,7 +93,16 @@ test("resume 兜底：不活的标签不命中", () => {
 test("已有 resume 标签但没在跑：再点继续应重试启动", () => {
   assert.equal(shouldRelaunchResumeTab(undefined), true);
   assert.equal(shouldRelaunchResumeTab(st(false)), true);
-  assert.equal(shouldRelaunchResumeTab(st(true)), false);
+  assert.equal(
+    shouldRelaunchResumeTab({ alive: true, running: true }),
+    false,
+    "Agent 还在跑只切过去",
+  );
+  assert.equal(
+    shouldRelaunchResumeTab({ alive: true, running: false }),
+    true,
+    "回落 shell 也要再拉起，不能只盯着空壳",
+  );
   assert.equal(shouldRelaunchResumeTab({ alive: false, running: true }), false);
 });
 

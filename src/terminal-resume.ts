@@ -23,6 +23,7 @@ export interface HolderTabLike {
 
 export interface HolderStatusLike {
   alive: boolean;
+  running?: boolean;
   runId: string | null;
   sessionId: string | null;
   agentId: string;
@@ -44,12 +45,14 @@ export function findResumeHolderTab<T extends HolderTabLike>(
   });
 }
 
-/** 已有 resume 标签但进程不在：再点「继续」应重试启动，不能只切过去看上次的失败。 */
+/** 已有标签要不要再 launch。
+ *  Agent 还在跑：只切过去。回落 shell / 已退出 / 还没起来：再拉起。
+ *  注意：`alive` 含登录 shell，不能拿它当「已经在聊」——否则继续对话只看到壳、再点就抢 Run 锁。 */
 export function shouldRelaunchResumeTab(st?: {
   alive?: boolean;
   running?: boolean;
 } | null): boolean {
-  return !(st?.alive || st?.running);
+  return !st?.running;
 }
 
 export interface ResumeLaunchRequest {

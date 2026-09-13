@@ -858,7 +858,9 @@ body {
   .ccode-fade,
   .ccode-top-nav-capsule,
   .ccode-nav-capsule-hint,
-  .ccode-app-main > div {
+  .ccode-app-main > div,
+  .ccode-app-shell :where(.animate-spin),
+  .ccode-working-spinner circle {
     animation: none;
   }
 }
@@ -1051,8 +1053,8 @@ body {
     position: absolute;
     inset: 0 auto 0 0;
     z-index: 30;
-    width: min(230px, 88vw);
-    min-width: min(230px, 88vw);
+    width: min(208px, 88vw);
+    min-width: min(208px, 88vw);
     overflow: auto;
     border-right-width: 1px;
     box-shadow: 12px 0 30px rgb(0 0 0 / 0.24);
@@ -1449,6 +1451,22 @@ select:focus-visible {
 }
 .animate-pulse-brief {
   animation: ccode-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) 3;
+}
+
+/* 终端标签「生成中」：虚线沿圆周爬，圆本身不旋转。
+   WKWebView 里 CSS rotate 会让变换原点跟着描边外接框晃。 */
+@keyframes ccode-working-dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+.ccode-working-spinner {
+  display: block;
+  overflow: visible;
+}
+.ccode-working-spinner circle {
+  stroke-dashoffset: 0;
+  animation: ccode-working-dash 0.9s linear infinite;
 }
 
 /* ===== 沉浸式阅读区（批次 B3） ===== */

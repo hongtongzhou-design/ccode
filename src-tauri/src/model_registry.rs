@@ -786,6 +786,7 @@ fn fallback_context_size(model: &str) -> i64 {
 }
 
 /// 模型是否支持思考：逐字段查询链 → 关键词推断兜底
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn model_thinking(model: &str) -> bool {
     model_thinking_for(model, None)
 }
@@ -795,6 +796,7 @@ pub fn model_thinking_for(model: &str, gateway_id: Option<&str>) -> bool {
 }
 
 /// 模型上下文窗口：逐字段查询链 → 保守默认映射
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn model_context_size(model: &str) -> i64 {
     model_context_size_for(model, None)
 }
@@ -809,6 +811,7 @@ pub fn model_context_size_for(model: &str, gateway_id: Option<&str>) -> i64 {
 const DEFAULT_OUTPUT_LIMIT: i64 = 8192;
 
 /// 模型输出上限：逐字段查询链 → 保守默认
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn model_output_limit(model: &str) -> i64 {
     model_output_limit_for(model, None)
 }
@@ -821,6 +824,7 @@ pub fn model_output_limit_for(model: &str, gateway_id: Option<&str>) -> i64 {
 /// input_modalities 就听它的）→ 未声明时回落确知多模态清单（宁缺毋滥——给纯文本
 /// 模型声明图像输入会让用户拖图进去才报错）。
 /// codex catalog 的 input_modalities / kimi capabilities image_in / opencode modalities 用
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn model_supports_vision(model: &str) -> bool {
     model_supports_vision_for(model, None)
 }
@@ -837,6 +841,7 @@ pub fn model_supports_vision_for(model: &str, gateway_id: Option<&str>) -> bool 
         || normalized.starts_with("claude-opus-4")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn model_capability(model: &str) -> ModelCapabilityDto {
     model_capability_for(model, None)
 }

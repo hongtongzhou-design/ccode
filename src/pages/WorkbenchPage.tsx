@@ -601,7 +601,8 @@ function WorkbenchPage({
               {workbenchNowSectionTitle(runningBadge)}
             </h2>
             {runningBadge > 0 && (
-              <span className="rounded-full bg-ok px-2 py-0.5 text-micro text-ok-text">
+              // 运行计数是数字不是状态：行首绿点已表达「在跑」，计数回落灰底芯片（同技能页计数口径）
+              <span className="rounded-full bg-inset px-2 py-0.5 text-micro text-l3">
                 {runningBadge} 个运行中
               </span>
             )}
@@ -717,7 +718,8 @@ function WorkbenchPage({
                     ) : null}
                   </span>
                   {item.runningCount > 1 ? (
-                    <span className="shrink-0 text-micro text-ok-text">
+                    // 运行计数不上语义色：行首状态点已表达「在跑」，文字保持中性（设计系统「命中计数用 text-l4，不用绿字」同口径）
+                    <span className="shrink-0 text-micro text-l3">
                       {item.runningCount} 个运行中
                     </span>
                   ) : item.runs[0]?.taskLabel ? (
@@ -725,7 +727,7 @@ function WorkbenchPage({
                       {item.runs[0].taskLabel}
                     </span>
                   ) : item.runningCount > 0 ? (
-                    <span className="shrink-0 text-micro text-ok-text">
+                    <span className="shrink-0 text-micro text-l3">
                       运行中
                     </span>
                   ) : null}

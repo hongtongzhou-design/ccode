@@ -476,7 +476,7 @@ pub struct McpCommandFix {
 fn relative_resolution_bases(cwd: &str, agent: Option<&str>) -> Vec<PathBuf> {
     let mut bases: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut push = |p: PathBuf, bases: &mut Vec<PathBuf>, seen: &mut HashSet<String>| {
+    let push = |p: PathBuf, bases: &mut Vec<PathBuf>, seen: &mut HashSet<String>| {
         if seen.insert(crate::paths::path_key(&p.to_string_lossy())) {
             bases.push(p);
         }

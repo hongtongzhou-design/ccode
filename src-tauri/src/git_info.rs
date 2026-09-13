@@ -37,12 +37,7 @@ pub struct GitFileDto {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return format!("{}{}", home.to_string_lossy(), &path[1..]);
-        }
-    }
-    path.to_string()
+    crate::paths::expand_tilde(path)
 }
 
 pub(crate) fn run_git(cwd: &str, args: &[&str]) -> Result<Output, String> {

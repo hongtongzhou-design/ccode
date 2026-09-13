@@ -86,15 +86,22 @@ impl PtyManager {
     }
 
     pub(crate) fn has_run(&self, run_id: &str) -> bool {
+        self.pty_id_for_run(run_id).is_some()
+    }
+
+    /// 这条 Run 已经有活 PTY（标签还在或热更新后前端丢了引用）。
+    /// 再 spawn 会抢锁报「此运行已在启动或执行中」——应把现成 PTY 交回去接着用。
+    pub(crate) fn pty_id_for_run(&self, run_id: &str) -> Option<String> {
         let id = run_id.trim();
         if id.is_empty() {
-            return false;
+            return None;
         }
         self.entries
             .lock()
             .unwrap()
-            .values()
-            .any(|entry| entry.run_id.as_deref() == Some(id))
+            .iter()
+            .find(|(_, entry)| entry.run_id.as_deref() == Some(id))
+            .map(|(pty_id, _)| pty_id.clone())
     }
 
     /// 返回指定工作区里仍存活的 agent/run 脚本类型；普通登录 shell 不阻止归档。
@@ -306,12 +313,7 @@ fn write_pty_bytes(manager: &PtyManager, pty_id: &str, bytes: &[u8]) -> Result<(
 }
 
 fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return format!("{}{}", home.to_string_lossy(), &path[1..]);
-        }
-    }
-    path.to_string()
+    crate::paths::expand_tilde(path)
 }
 
 /// pty_spawn 的返回：session_hint 是启动时通过 --session-id 固定的会话 ID，
@@ -630,7 +632,19 @@ pub fn pty_spawn(
     }
     let opened_id = opened.as_ref().map(|r| r.id.clone());
     if let Some(id) = opened_id.as_deref() {
-        crate::runs::claim_interactive_start(id, manager.inner().has_run(id))?;
+        // 这条 Run 的 Codex 还在跑（本机已有 `codex resume <id>`）：把现成 PTY 交回，
+        // 不要再 claim/再拉起——否则报「此运行已在启动或执行中」，快速开聊无法恢复。
+        if let Some(existing_pty) = manager.inner().pty_id_for_run(id) {
+            crate::sessions::invalidate_scan_cache();
+            return Ok(SpawnResult {
+                pty_id: existing_pty,
+                session_hint,
+                prompt_dropped: false,
+                model,
+                run_id: opened_id,
+            });
+        }
+        crate::runs::claim_interactive_start(id, false)?;
     }
     if let (Some(id), Some(sid)) = (opened_id.as_deref(), session_hint.as_deref()) {
         let _ = crate::runs::attach_session_impl(id, sid);
@@ -1482,6 +1496,8 @@ mod tests {
     fn has_run_false_when_empty() {
         assert!(!PtyManager::default().has_run("run-1"));
         assert!(!PtyManager::default().has_run(""));
+        assert_eq!(PtyManager::default().pty_id_for_run("run-1"), None);
+        assert_eq!(PtyManager::default().pty_id_for_run(""), None);
     }
 
     #[cfg(unix)]

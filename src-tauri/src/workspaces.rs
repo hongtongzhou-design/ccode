@@ -300,6 +300,10 @@ pub(crate) struct WorktreeRow {
 }
 
 pub(crate) fn worktree_rows() -> Vec<WorktreeRow> {
+    if cfg!(test) {
+        // 同 project_roots_and_resources：单测不读本机真实注册表（测试用各自 conn fixture）
+        return Vec::new();
+    }
     let Ok(conn) = db() else {
         return Vec::new();
     };
@@ -1062,7 +1066,7 @@ fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, St
     // 只有 active 工作区占用端口段；creating/archived 不下发端口 env
     let Ok(w) = query_workspaces(conn).and_then(|rows| {
         rows.into_iter()
-            .find(|w| w.worktree_path == worktree_path && w.status == "active")
+            .find(|w| crate::paths::same_path(&w.worktree_path, &worktree_path) && w.status == "active")
             .ok_or_else(|| "工作区不存在或未激活".to_string())
     }) else {
         return Vec::new();
@@ -3677,7 +3681,7 @@ fn path_context_impl(conn: &Connection, path: &str) -> Result<PathContextDto, St
                 repo_path: Some(w.repo_path.clone()),
                 siblings: actives
                     .iter()
-                    .filter(|o| o.id != w.id && o.repo_path == w.repo_path)
+                    .filter(|o| o.id != w.id && crate::paths::same_path(&o.repo_path, &w.repo_path))
                     .map(to_target)
                     .collect(),
             });
@@ -3696,7 +3700,7 @@ fn path_context_impl(conn: &Connection, path: &str) -> Result<PathContextDto, St
             repo_path: Some(w.repo_path.clone()),
             siblings: actives
                 .iter()
-                .filter(|o| o.repo_path == w.repo_path)
+                .filter(|o| crate::paths::same_path(&o.repo_path, &w.repo_path))
                 .map(to_target)
                 .collect(),
         });

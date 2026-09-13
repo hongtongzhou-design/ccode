@@ -8,6 +8,7 @@ import {
   chatHeaderStatus,
   chatWaitKind,
   chatWaitText,
+  composerShowsInterrupt,
   confirmHandoffEvent,
   handoffFor,
   hasAssistantText,
@@ -27,6 +28,29 @@ function msg(
 ): ChatMessageDto {
   return { role, blocks, timestamp, usage: null };
 }
+
+test("发送钮变暂停：只在正在出字，停在提示符或审批时仍是发送", () => {
+  assert.equal(
+    composerShowsInterrupt({ running: true, attention: "working" }),
+    true,
+  );
+  assert.equal(
+    composerShowsInterrupt({ running: true, pendingReply: true }),
+    true,
+  );
+  assert.equal(
+    composerShowsInterrupt({ running: true, attention: "done" }),
+    false,
+    "进程活着但停在提示符",
+  );
+  assert.equal(
+    composerShowsInterrupt({ running: true, attention: "confirm" }),
+    false,
+    "审批时 Esc 归审批卡",
+  );
+  assert.equal(composerShowsInterrupt({ running: false, attention: "working" }), false);
+  assert.equal(composerShowsInterrupt({}), false);
+});
 
 test("七家有 hooks，cursor/opencode 没有", () => {
   assert.equal(HOOKS_AGENTS.size, 7);

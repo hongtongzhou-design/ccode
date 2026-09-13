@@ -88,6 +88,8 @@ struct ParsedRemote {
     owner_repo: String,
     display: String,
     host_kind: String,
+    /// 仅测试断言读取：URL 是否带用户信息段（生产展示用 url_stripped）
+    #[cfg_attr(not(test), allow(dead_code))]
     has_userinfo: bool,
     url_stripped: String,
 }

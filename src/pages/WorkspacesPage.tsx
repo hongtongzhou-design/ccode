@@ -2167,7 +2167,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         className={`flex shrink-0 flex-col transition-[width,background-color,border-color] duration-150 ${
           projectRailCollapsed
             ? "w-0 overflow-hidden border-r-0 bg-transparent"
-            : "ccode-workspaces-rail ccode-project-rail-open w-[230px] border-r border-hairline bg-rail2"
+            : "ccode-workspaces-rail ccode-project-rail-open w-[208px] border-r border-hairline bg-rail2"
         }`}
       >
         {!projectRailCollapsed && (
@@ -2236,7 +2236,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                           });
                         }}
                         title={group.repoPath}
-                        className={`mx-1.5 mb-1 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
+                        className={`mx-1.5 mb-0.5 flex w-[calc(100%-12px)] items-start gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors ${
                           selected
                             ? "bg-rail-sel text-l1"
                             : "text-l3 hover:bg-hover hover:text-l2"

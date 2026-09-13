@@ -343,25 +343,35 @@ function Row({
   );
 }
 
-/** 快捷键录制钮：点击进入监听态，按下新组合即保存；Esc 取消，与另一绑定冲突时拒绝并提示。
+/** 快捷键录制钮：点击进入监听态，按下新组合即保存；Esc 或点击别处取消，与另一绑定冲突时拒绝并提示。
  *  macOS WKWebView 点击 button 默认不给键盘焦点，onKeyDown 挂按钮上永远收不到按键；
  *  监听态改挂 window 级 capture 监听（capture 先于 App.tsx 的 bubble 全局快捷键触发，
- *  stopImmediatePropagation 把同节点其余监听一并压过），退出监听态即卸载 */
+ *  stopImmediatePropagation 把同节点其余监听一并压过），退出监听态即卸载。
+ *  监听态由父级 capturing id 受控：全页同时最多一行在录，点击行外即取消
+ *  （否则残留的窗口级监听会一直吞掉全部按键） */
 function HotkeyCapture({
+  id,
   value,
   defaultValue,
   conflictsWith,
   onSave,
+  capturing,
+  setCapturing,
 }: {
+  id: string;
   /** 当前绑定（"" = 已禁用） */
   value: string;
   defaultValue: string;
   /** 其余在用的绑定值，用于防冲突（空串不计） */
   conflictsWith: string[];
   onSave: (combo: string) => void;
+  /** 当前处于监听态的行 id（null = 没有行在录） */
+  capturing: string | null;
+  setCapturing: (id: string | null) => void;
 }) {
-  const [listening, setListening] = useState(false);
+  const listening = capturing === id;
   const [conflict, setConflict] = useState(false);
+  const rootRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     if (!listening) return;
@@ -371,35 +381,54 @@ function HotkeyCapture({
       e.stopImmediatePropagation();
       const d = captureDecision(e, conflictsWith);
       if (d.action === "cancel") {
-        setListening(false);
+        setCapturing(null);
+        setConflict(false);
       } else if (d.action === "conflict") {
         // 留在监听态，可继续按其他组合
         setConflict(true);
       } else if (d.action === "save") {
         onSave(d.combo);
         setConflict(false);
-        setListening(false);
+        setCapturing(null);
       }
       // ignore：纯修饰键/无修饰键，继续等待
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [listening, conflictsWith, onSave]);
+  }, [listening, conflictsWith, onSave, setCapturing]);
+
+  useEffect(() => {
+    if (!listening) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (
+        rootRef.current &&
+        e.target instanceof Node &&
+        !rootRef.current.contains(e.target)
+      ) {
+        setCapturing(null);
+        setConflict(false);
+      }
+    };
+    window.addEventListener("mousedown", onMouseDown, true);
+    return () => window.removeEventListener("mousedown", onMouseDown, true);
+  }, [listening, setCapturing]);
 
   return (
-    <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-xs">
+    <span
+      ref={rootRef}
+      className="flex shrink-0 items-center gap-1 whitespace-nowrap text-xs"
+    >
       <button
         type="button"
-        onClick={() => {
-          setListening(true);
-          setConflict(false);
-        }}
+        onClick={() => setCapturing(id)}
         className={`inline-flex h-7 min-w-14 shrink-0 items-center justify-center rounded-md border px-2 font-mono ${
           listening
             ? "border-cta-bd bg-inset text-cta"
             : conflict
               ? "border-err-text/50 text-err-text"
-              : "border-field bg-inset text-l2"
+              : value === ""
+                ? "border-dashed border-hairline bg-transparent text-l4"
+                : "border-field bg-inset text-l2"
         }`}
       >
         {listening ? "按下新快捷键…" : comboLabel(value)}
@@ -409,7 +438,7 @@ function HotkeyCapture({
         <button
           type="button"
           onClick={() => {
-            setListening(false);
+            setCapturing(null);
             onSave(defaultValue);
           }}
           className={`${ghostActionClass} shrink-0`}
@@ -421,7 +450,7 @@ function HotkeyCapture({
         <button
           type="button"
           onClick={() => {
-            setListening(false);
+            setCapturing(null);
             onSave("");
           }}
           className={`${ghostActionClass} shrink-0`}
@@ -430,6 +459,109 @@ function HotkeyCapture({
         </button>
       )}
     </span>
+  );
+}
+
+/** 快捷键分区内容：页切九行 + 全局两行；录制互斥态 capturing 在此层持有 */
+function HotkeysSection({
+  settings,
+  patch,
+}: {
+  settings: AppSettings | null;
+  patch: (p: Partial<AppSettings>) => void;
+}) {
+  const [capturing, setCapturing] = useState<string | null>(null);
+  const palette = settings?.hotkeyPalette ?? "mod+k";
+  const chrome = settings?.hotkeyHideChrome ?? "mod+\\";
+  const pageSwitchOn = settings?.hotkeyPageSwitch !== false;
+  const pageCombo = (id: string) =>
+    settings?.hotkeyPages?.[id] ??
+    PAGE_HOTKEY_DEFS.find((p) => p.id === id)?.combo ??
+    "";
+  const pageCombos = PAGE_HOTKEY_DEFS.map((p) => pageCombo(p.id));
+
+  return (
+    <>
+      <Row
+        label="页面切换"
+        hint="按侧栏顺序切换页面；关闭后下面九个绑定全部不生效"
+      >
+        <Toggle
+          checked={pageSwitchOn}
+          onChange={(v) => void patch({ hotkeyPageSwitch: v })}
+          label="页面切换"
+        />
+      </Row>
+      <div className="mt-2 rounded-lg ccode-well p-3">
+        {/* 总开关关闭时整组弱化示意（仍可编辑，方便先配好再开） */}
+        <div className={pageSwitchOn ? "" : "opacity-50"}>
+          <div className="mb-2 text-xs font-medium text-l3">页面快捷键</div>
+          <div className="grid grid-cols-3 gap-2">
+            {PAGE_HOTKEY_DEFS.map((p) => (
+              <div
+                key={p.id}
+                className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover"
+              >
+                <span className="min-w-0 truncate text-sm text-l2">{p.label}</span>
+                <HotkeyCapture
+                  id={p.id}
+                  value={pageCombo(p.id)}
+                  defaultValue={p.combo}
+                  conflictsWith={[
+                    palette,
+                    chrome,
+                    ...PAGE_HOTKEY_DEFS.filter((x) => x.id !== p.id).map(
+                      (x) => pageCombo(x.id),
+                    ),
+                  ]}
+                  onSave={(combo) =>
+                    void patch({
+                      hotkeyPages: {
+                        ...(settings?.hotkeyPages ?? {}),
+                        [p.id]: combo,
+                      },
+                    })
+                  }
+                  capturing={capturing}
+                  setCapturing={setCapturing}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="mb-2 mt-3 text-xs font-medium text-l3">全局快捷键</div>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover">
+            <span className="min-w-0 truncate text-sm text-l2" title="页面跳转 / 主题 / 侧栏">
+              命令面板
+            </span>
+            <HotkeyCapture
+              id="palette"
+              value={palette}
+              defaultValue="mod+k"
+              conflictsWith={[chrome, ...pageCombos]}
+              onSave={(combo) => void patch({ hotkeyPalette: combo })}
+              capturing={capturing}
+              setCapturing={setCapturing}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover">
+            <span className="min-w-0 truncate text-sm text-l2" title="界面只剩工作内容">
+              隐藏侧栏
+            </span>
+            <HotkeyCapture
+              id="chrome"
+              value={chrome}
+              defaultValue="mod+\\"
+              conflictsWith={[palette, ...pageCombos]}
+              onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
+              capturing={capturing}
+              setCapturing={setCapturing}
+            />
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1903,87 +2035,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         title="快捷键"
         active={activeSection === "hotkeys"}
       >
-        {/* 全部在用的绑定（命令面板/侧栏/九页切），供各行录制时互判冲突 */}
-        {(() => {
-          const palette = settings?.hotkeyPalette ?? "mod+k";
-          const chrome = settings?.hotkeyHideChrome ?? "mod+\\";
-          const pageCombo = (id: string) =>
-            settings?.hotkeyPages?.[id] ??
-            PAGE_HOTKEY_DEFS.find((p) => p.id === id)?.combo ??
-            "";
-          const pageCombos = PAGE_HOTKEY_DEFS.map((p) => pageCombo(p.id));
-          return (
-            <>
-              <Row
-                label="页面切换"
-                hint="按侧栏顺序切换页面；关闭后下面九个绑定全部不生效"
-              >
-                <Toggle
-                  checked={settings?.hotkeyPageSwitch !== false}
-                  onChange={(v) => void patch({ hotkeyPageSwitch: v })}
-                  label="页面切换"
-                />
-              </Row>
-              <div className="mt-2 rounded-lg ccode-well p-3">
-                <div className="mb-2 text-xs font-medium text-l3">页面快捷键</div>
-                <div className="grid grid-cols-3 gap-2">
-                  {PAGE_HOTKEY_DEFS.map((p) => (
-                    <div
-                      key={p.id}
-                      className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover"
-                    >
-                      <span className="min-w-0 truncate text-sm text-l2">{p.label}</span>
-                      <HotkeyCapture
-                        value={pageCombo(p.id)}
-                        defaultValue={p.combo}
-                        conflictsWith={[
-                          palette,
-                          chrome,
-                          ...PAGE_HOTKEY_DEFS.filter((x) => x.id !== p.id).map(
-                            (x) => pageCombo(x.id),
-                          ),
-                        ]}
-                        onSave={(combo) =>
-                          void patch({
-                            hotkeyPages: {
-                              ...(settings?.hotkeyPages ?? {}),
-                              [p.id]: combo,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="mb-2 mt-3 text-xs font-medium text-l3">全局快捷键</div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover">
-                    <span className="min-w-0 truncate text-sm text-l2" title="页面跳转 / 主题 / 侧栏">
-                      命令面板
-                    </span>
-                    <HotkeyCapture
-                      value={palette}
-                      defaultValue="mod+k"
-                      conflictsWith={[chrome, ...pageCombos]}
-                      onSave={(combo) => void patch({ hotkeyPalette: combo })}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover">
-                    <span className="min-w-0 truncate text-sm text-l2" title="界面只剩工作内容">
-                      隐藏侧栏
-                    </span>
-                    <HotkeyCapture
-                      value={chrome}
-                      defaultValue="mod+\\"
-                      conflictsWith={[palette, ...pageCombos]}
-                      onSave={(combo) => void patch({ hotkeyHideChrome: combo })}
-                    />
-                  </div>
-                </div>
-              </div>
-            </>
-          );
-        })()}
+        {/* 全部在用的绑定（命令面板/侧栏/九页切）在 HotkeysSection 内互判冲突 */}
+        <HotkeysSection settings={settings} patch={patch} />
       </Section>
 
       <Section

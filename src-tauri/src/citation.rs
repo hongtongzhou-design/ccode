@@ -140,15 +140,22 @@ fn check_citation_health_sync(path: &str) -> Result<CitationHealthDto, String> {
             .flat_map(|w| [w.worktree_path, w.repo_path])
             .filter_map(|p| canon(&PathBuf::from(p))),
     );
+    check_citation_health_in(&root, &roots)
+}
+
+/// 核心扫描：白名单根由调用方注入。拆出来是为了让测试注入临时目录——
+/// 单测若经本机真实 app.db 取白名单，会随用户注册的项目读其档案卡；
+/// 档案卡在 iCloud 等慢文件系统上 open() 可能内核级阻塞，整条测试线挂死（2026-09-13 实证）。
+fn check_citation_health_in(root: &Path, roots: &[PathBuf]) -> Result<CitationHealthDto, String> {
     if !roots
         .iter()
-        .any(|r| crate::paths::path_within_path(&root, r))
+        .any(|r| crate::paths::path_within_path(root, r))
     {
         return Err("路径不在项目/工作区范围内，拒绝扫描".into());
     }
 
     let mut md_files = Vec::new();
-    collect_md_files(&root, &mut md_files);
+    collect_md_files(root, &mut md_files);
     let mut cited = BTreeSet::new();
     for f in &md_files {
         if let Ok(text) = fs::read_to_string(f) {
@@ -156,7 +163,7 @@ fn check_citation_health_sync(path: &str) -> Result<CitationHealthDto, String> {
         }
     }
 
-    let bib = find_bib(&root);
+    let bib = find_bib(root);
     let bib_keys = bib
         .as_ref()
         .and_then(|p| fs::read_to_string(p).ok())
@@ -222,13 +229,28 @@ mod tests {
         dir
     }
 
-    /// 白名单外直接拒绝；白名单内的统计逻辑用纯函数级测试覆盖（db 依赖本机配置目录）
+    /// 白名单外直接拒绝。走注入白名单的核心函数，不碰本机真实 app.db——
+    /// 档案卡可能落在 iCloud 等慢文件系统上 open() 阻塞（2026-09-13 挂死实证）。
     #[test]
     fn rejects_path_outside_whitelist() {
         let dir = tmpdir("outside");
         fs::write(dir.join("a.md"), "[@x]").unwrap();
-        let err = check_citation_health_sync(dir.to_str().unwrap()).unwrap_err();
+        let err = check_citation_health_in(&dir, &[]).unwrap_err();
         assert!(err.contains("拒绝扫描"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 白名单内正常统计：注入临时白名单根，覆盖「文中键 vs bib 键」对账主路径
+    #[test]
+    fn scans_within_injected_whitelist() {
+        let dir = tmpdir("inside");
+        fs::write(dir.join("a.md"), "[@doe2020] 与 [@missing1]").unwrap();
+        fs::write(dir.join("references.bib"), "@article{doe2020, title={X}}\n").unwrap();
+        let dto = check_citation_health_in(&dir, std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(dto.total_refs, 2);
+        assert_eq!(dto.resolved, 1);
+        assert_eq!(dto.missing, vec!["missing1".to_string()]);
+        assert!(dto.bib_found);
         let _ = fs::remove_dir_all(&dir);
     }
 

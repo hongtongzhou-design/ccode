@@ -1377,14 +1377,6 @@ fn files_equal(source: &Path, target: &Path) -> Result<bool, String> {
     }
 }
 
-fn copy_project_changes(source: &Path, target: &Path) -> Result<(), String> {
-    let changes = list_output_changes(source, target, &[".".to_string()])?;
-    for change in changes {
-        copy_adopt_file(&source.join(&change.path), &target.join(&change.path))?;
-    }
-    Ok(())
-}
-
 fn task_runs_root() -> Result<PathBuf, String> {
     let root = goal_storage::root()?;
     fs::create_dir_all(&root).map_err(|e| format!("创建任务运行目录失败：{e}"))?;
@@ -3125,9 +3117,7 @@ fn close_at(
     }
     Ok(())
 }
-pub fn close_run_impl(id: &str, session: Option<&str>) -> Result<(), String> {
-    close_run_with_result(id, session, "completed", None, None)
-}
+
 pub fn close_run_with_result(
     id: &str,
     session: Option<&str>,
@@ -4278,32 +4268,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn adopt_all_project_changes_copies_new_and_modified_files() {
-        let root = std::env::temp_dir().join(format!("ccode-task-sync-{}", uuid::Uuid::new_v4()));
-        let source = root.join("run");
-        let target = root.join("project");
-        std::fs::create_dir_all(source.join("notes")).unwrap();
-        std::fs::create_dir_all(target.join("notes")).unwrap();
-        std::fs::write(source.join("notes/changed.md"), "new").unwrap();
-        std::fs::write(target.join("notes/changed.md"), "old").unwrap();
-        std::fs::write(source.join("notes/new.md"), "added").unwrap();
-        std::fs::create_dir_all(source.join(".ccode")).unwrap();
-        std::fs::write(source.join(".ccode/ignored"), "no").unwrap();
-
-        copy_project_changes(&source, &target).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(target.join("notes/changed.md")).unwrap(),
-            "new"
-        );
-        assert_eq!(
-            std::fs::read_to_string(target.join("notes/new.md")).unwrap(),
-            "added"
-        );
-        assert!(!target.join(".ccode").exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn list_output_changes_marks_added_and_modified() {

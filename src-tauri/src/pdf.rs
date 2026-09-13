@@ -84,16 +84,29 @@ pub(crate) fn read_whitelisted_sync(
                 .filter_map(|p| canon(&p)),
         );
     }
-    if !path_allowed(&target, &roots, &resources) {
+    read_whitelisted_in(&target, cap, cap_exceeded, &roots, &resources)
+}
+
+/// 核心读取：白名单由调用方注入。拆出来是为了让测试注入临时根——
+/// 收集真实白名单会经 app.db 读每个注册项目的档案卡，档案卡在 iCloud 等
+/// 慢文件系统上 open() 可能内核级阻塞（2026-09-13 实证），单测不得依赖。
+fn read_whitelisted_in(
+    target: &Path,
+    cap: u64,
+    cap_exceeded: impl Fn(f64) -> String,
+    roots: &[PathBuf],
+    resources: &[PathBuf],
+) -> Result<(Vec<u8>, u64), String> {
+    if !path_allowed(target, roots, resources) {
         return Err("路径不在项目/登记资源/工作区/终端目录范围内，拒绝读取".into());
     }
-    let size = fs::metadata(&target)
+    let size = fs::metadata(target)
         .map_err(|e| format!("读取文件失败: {e}"))?
         .len();
     if size > cap {
         return Err(cap_exceeded(size as f64 / 1024.0 / 1024.0));
     }
-    let bytes = fs::read(&target).map_err(|e| format!("读取文件失败: {e}"))?;
+    let bytes = fs::read(target).map_err(|e| format!("读取文件失败: {e}"))?;
     Ok((bytes, size))
 }
 

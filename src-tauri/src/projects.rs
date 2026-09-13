@@ -580,6 +580,12 @@ pub(crate) fn clear_project_default_profile(profile_id: &str) {
 /// P2a PDF 白名单用（pdf.rs）：全部注册项目根 + 各项目 project.toml 登记资源的绝对路径。
 /// 资源相对路径按项目根解析；读不到配置的项目静默跳过（白名单宁缺勿滥）。
 pub(crate) fn project_roots_and_resources() -> (Vec<PathBuf>, Vec<PathBuf>) {
+    if cfg!(test) {
+        // 单测不读本机真实注册表：注册项目的档案卡可能落在 iCloud 等慢文件系统上，
+        // open() 内核级阻塞会把整条测试线挂死（2026-09-13 实证）；需要白名单的测试
+        // 自行注入临时根（同 model_registry cfg!(test) 不读本机缓存的先例）
+        return (Vec::new(), Vec::new());
+    }
     let Ok(conn) = db() else {
         return (Vec::new(), Vec::new());
     };

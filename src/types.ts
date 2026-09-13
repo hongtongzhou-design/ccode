@@ -1056,13 +1056,6 @@ export const AGENT_PROTOCOLS: Record<string, { options: string[]; default: strin
   kimi: { options: ["kimi", "anthropic", "openai"], default: "kimi" },
 };
 
-export interface ProfileUsageDto {
-  input: number;
-  output: number;
-  costUsd: number | null;
-  costPartial: boolean;
-}
-
 /** 项目注册表条目（§11.4 P1b；app.db projects 表） */
 export interface ProjectDto {
   /** 稳定身份（uuid，存 project.toml 顶层 id 行，跟随文件夹移动）；空串 = 旧项目尚未分配 */

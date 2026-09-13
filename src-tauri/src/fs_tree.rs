@@ -34,12 +34,7 @@ pub struct FilePreviewDto {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return format!("{}{}", home.to_string_lossy(), &path[1..]);
-        }
-    }
-    path.to_string()
+    crate::paths::expand_tilde(path)
 }
 
 /// 家目录直下的系统目录清单（按平台）：只用于置灰降噪，宁缺毋滥。
@@ -1316,11 +1311,9 @@ fn windows_system_dirs() -> Vec<String> {
 }
 
 fn lexical_in_root(path: &str, root: &str) -> bool {
-    let root_norm = norm_sep(&expand_tilde(root))
-        .trim_end_matches('/')
-        .to_string();
-    let path_exp = norm_sep(&expand_tilde(path));
-    path_exp == root_norm || path_exp.starts_with(&format!("{root_norm}/"))
+    // 方言统一（verbatim 前缀/分隔符/Windows 大小写折叠）收敛到 paths::path_within；
+    // 这里只负责先展开 ~（path_within 不认波浪号）
+    crate::paths::path_within(&expand_tilde(path), &expand_tilde(root))
 }
 
 fn create_dir_sync(root: &str, name: &str) -> Result<String, String> {

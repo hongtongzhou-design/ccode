@@ -7,7 +7,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use tauri::{AppHandle, Emitter};
 
 // 会话文件监听独立于文件树 watcher：会话根目录通常位于隐藏目录，不能复用
@@ -176,27 +176,39 @@ fn default_session_source() -> String {
     "cli".into()
 }
 
-/// Grok 等会把用户话包在 `<user_query>` 里；列表和回放只显示里面的话。
-fn unwrap_prompt_tags(text: &str) -> String {
-    const OPEN: &str = "<user_query>";
-    const CLOSE: &str = "</user_query>";
+/// 按开闭标签处理一段：keep_inner 留下标签里的字（user_query）；
+/// false 整段丢掉（turn_aborted 是暂停机读标记，不是助手回复）。
+fn rewrite_tagged_block(text: &str, open: &str, close: &str, keep_inner: bool) -> String {
     let mut s = text.to_string();
     loop {
         let lower = s.to_ascii_lowercase();
-        let Some(start) = lower.find(OPEN) else {
+        let Some(start) = lower.find(open) else {
             break;
         };
-        let inner_at = start + OPEN.len();
-        if let Some(rel) = lower[inner_at..].find(CLOSE) {
+        let inner_at = start + open.len();
+        if let Some(rel) = lower[inner_at..].find(close) {
             let inner = s[inner_at..inner_at + rel].trim().to_string();
-            let after = inner_at + rel + CLOSE.len();
-            s = format!("{}{}{}", &s[..start], inner, &s[after..]);
-        } else {
+            let after = inner_at + rel + close.len();
+            let mid = if keep_inner { inner } else { String::new() };
+            s = format!("{}{}{}", &s[..start], mid, &s[after..]);
+        } else if keep_inner {
             s = format!("{}{}", &s[..start], &s[inner_at..]);
+            break;
+        } else {
+            s.truncate(start);
             break;
         }
     }
-    s.trim().to_string()
+    s
+}
+
+/// Grok 等会把用户话包在 `<user_query>` 里；列表和回放只显示里面的话。
+/// Esc 暂停会写下 `<turn_aborted>…`——那是机读标记，不当成助手气泡。
+fn unwrap_prompt_tags(text: &str) -> String {
+    let s = rewrite_tagged_block(text, "<user_query>", "</user_query>", true);
+    rewrite_tagged_block(&s, "<turn_aborted>", "</turn_aborted>", false)
+        .trim()
+        .to_string()
 }
 
 /// 列表标题：折叠空白后截断到约 60 字符，避免多行 prompt 撑高列表。
@@ -350,13 +362,20 @@ fn redact_session_meta(sessions: &mut [SessionMetaDto]) {
     }
 }
 
-fn redact_conversation(messages: &mut [ChatMessageDto]) {
+fn redact_conversation(messages: &mut Vec<ChatMessageDto>) {
     let secrets = crate::profiles::stored_secrets();
-    for message in messages {
+    for message in messages.iter_mut() {
         for block in &mut message.blocks {
+            if block.kind == "text" {
+                block.text = unwrap_prompt_tags(&block.text);
+            }
             block.text = redact_sensitive_text_with(&block.text, &secrets);
         }
+        message
+            .blocks
+            .retain(|block| block.kind != "text" || !block.text.trim().is_empty());
     }
+    messages.retain(|message| !message.blocks.is_empty());
 }
 
 /// 工具结果尽量并入上一条 assistant（视觉上跟随发起调用的那条）；没有则单发一条 user
@@ -421,13 +440,8 @@ pub(crate) fn now_iso() -> String {
 }
 
 pub(crate) fn expand_tilde(path: &str) -> String {
-    // Windows 上用户常写 ~\（cmd/PowerShell 不展开 ~），与 ~/ 同等处理
-    if path == "~" || path.starts_with("~/") || path.starts_with("~\\") {
-        if let Some(home) = dirs::home_dir() {
-            return format!("{}{}", home.to_string_lossy(), &path[1..]);
-        }
-    }
-    path.to_string()
+    // 统一走方言层（~/ 与 ~\ 同等处理，注释见 paths::expand_tilde）
+    crate::paths::expand_tilde(path)
 }
 
 fn mtime_iso(path: &Path) -> Option<String> {
@@ -444,6 +458,38 @@ fn mtime_fresh(path: &Path, within_secs: u64) -> bool {
         .and_then(|t| t.elapsed().ok())
         .map(|e| e.as_secs() <= within_secs)
         .unwrap_or(false)
+}
+
+/// `updated_at` 与 `iso_from_unix` 同形（`YYYY-MM-DDTHH:MM:SSZ`），字典序即时间序。
+fn iso_within_secs(iso: &str, within_secs: u64) -> bool {
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    iso >= iso_from_unix(now.saturating_sub(within_secs)).as_str()
+}
+
+/// live 是时间派生值：文件指纹缓存不得冻结它。出站现算——过了 60 秒就熄绿点。
+/// Qwen 另认 runtime sidecar（进程还在但 jsonl 可能停更）。
+fn refresh_live_flag(meta: &mut SessionMetaDto) {
+    if !meta.alive {
+        meta.live = false;
+        return;
+    }
+    let mut live = meta
+        .updated_at
+        .as_deref()
+        .is_some_and(|t| iso_within_secs(t, 60));
+    if !live && meta.agent == "qwen" {
+        live = qwen_runtime_sidecar(Path::new(&meta.file_path)).is_some();
+    }
+    meta.live = live;
+}
+
+fn refresh_scan_live(res: &mut ScanResult) {
+    for session in &mut res.sessions {
+        refresh_live_flag(session);
+    }
 }
 
 // ===== 文件读取（含 zstd） =====
@@ -3455,9 +3501,147 @@ pub struct ScanResult {
     pub provenance_paths: HashMap<String, String>,
 }
 
+// ===== 逐文件增量缓存 =====
+//
+// 10s 整表缓存（SCAN_CACHE）过期后，扫描仍按 (路径, mtime, 大小) 指纹跳过未变化文件的
+// 重解析——原来每轮都要对全部会话文件跑 read_head_tail（Codex 的 .zst 还要流式解压），
+// 窗口聚焦触发的同步会周期性打满 CPU。指纹未变 = 内容未变（jsonl 只追加），沿用旧 meta。
+// `live` 除外：它是「距现在 ≤60s」的时间派生值，出站在 cached_scan 现算，禁止随指纹冻结
+// （自动起名会在对话还在写时 invalidate + 重扫，冻住就会让绿点永远亮）。
+// usage.rs 的增量索引是同一思路，但两边用途不同（meta 列表 vs token 事件），不共用存储。
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileSig {
+    len: u64,
+    mtime_ns: i64,
+}
+
+fn file_sig(path: &Path) -> Option<FileSig> {
+    let md = fs::metadata(path).ok()?;
+    let mtime_ns = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    Some(FileSig {
+        len: md.len(),
+        mtime_ns,
+    })
+}
+
+#[derive(Default)]
+struct ScanFileCache {
+    /// 主会话文件：路径 → (指纹, meta)
+    plain: HashMap<String, (FileSig, SessionMetaDto)>,
+    /// codex/grok：meta + 链父 id（merge_codex_chains 的输入）
+    chained: HashMap<String, (FileSig, SessionMetaDto, Option<String>)>,
+    /// kimi：state.json 内容参与解析，值多带一份 state 指纹
+    kimi: HashMap<String, (FileSig, Option<FileSig>, SessionMetaDto)>,
+    /// 快照区（kimi 之外各家 + opencode .json）：解析不依赖外部文件
+    snapshot: HashMap<String, (FileSig, SessionMetaDto)>,
+    /// kimi 快照要先读字节分辨新/旧协议，单独一栏
+    kimi_snapshot: HashMap<String, (FileSig, SessionMetaDto)>,
+    /// opencode 共享 SQLite：db 文件指纹 → 整批行
+    opencode_db: HashMap<String, (FileSig, Vec<SessionMetaDto>)>,
+    /// opencode 旧版扁平 JSON：storage 根路径 → (目录清单指纹, 整批)
+    opencode_legacy: HashMap<String, (u64, Vec<SessionMetaDto>)>,
+}
+
+static SCAN_FILE_CACHE: OnceLock<Mutex<ScanFileCache>> = OnceLock::new();
+
+fn scan_file_cache() -> &'static Mutex<ScanFileCache> {
+    SCAN_FILE_CACHE.get_or_init(|| Mutex::new(ScanFileCache::default()))
+}
+
+fn cache_key(path: &Path) -> String {
+    crate::paths::path_key(&path.to_string_lossy())
+}
+
+/// 逐文件带指纹的解析：未变命中缓存，变了才跑 parse。解析失败（None）不缓存——
+/// 下次仍重试，避免把「文件写到一半」的瞬时状态记成长期缺席。
+fn cached_plain(
+    files: Vec<PathBuf>,
+    cache: &mut HashMap<String, (FileSig, SessionMetaDto)>,
+    mut parse: impl FnMut(&Path) -> Option<SessionMetaDto>,
+) -> Vec<SessionMetaDto> {
+    let mut next: HashMap<String, (FileSig, SessionMetaDto)> = HashMap::with_capacity(files.len());
+    let mut out = Vec::with_capacity(files.len());
+    for f in files {
+        let Some(sig) = file_sig(&f) else { continue };
+        let key = cache_key(&f);
+        let meta = match cache.get(&key) {
+            Some((old_sig, old)) if *old_sig == sig => old.clone(),
+            _ => match parse(&f) {
+                Some(m) => m,
+                None => continue,
+            },
+        };
+        next.insert(key, (sig, meta.clone()));
+        out.push(meta);
+    }
+    *cache = next; // 顺手淘汰已消失文件的条目
+    out
+}
+
+/// codex/grok 同款，多带一个链父 id
+fn cached_chained(
+    files: Vec<PathBuf>,
+    cache: &mut HashMap<String, (FileSig, SessionMetaDto, Option<String>)>,
+    mut parse: impl FnMut(&Path) -> Option<(SessionMetaDto, Option<String>)>,
+) -> Vec<(SessionMetaDto, Option<String>)> {
+    let mut next: HashMap<String, (FileSig, SessionMetaDto, Option<String>)> =
+        HashMap::with_capacity(files.len());
+    let mut out = Vec::with_capacity(files.len());
+    for f in files {
+        let Some(sig) = file_sig(&f) else { continue };
+        let key = cache_key(&f);
+        let pair = match cache.get(&key) {
+            Some((old_sig, m, parent)) if *old_sig == sig => (m.clone(), parent.clone()),
+            _ => match parse(&f) {
+                Some(p) => p,
+                None => continue,
+            },
+        };
+        next.insert(key, (sig, pair.0.clone(), pair.1.clone()));
+        out.push(pair);
+    }
+    *cache = next;
+    out
+}
+
+/// opencode 旧版 storage 目录的清单指纹：逐文件 (路径+长度+mtime) 排序后折叠。
+/// 目录本身 mtime 不反映深层文件改动，必须逐文件看。
+fn dir_listing_sig(files: &[PathBuf]) -> u64 {
+    let mut acc: u64 = 0xcbf29ce484222325;
+    let mut keys: Vec<(String, u64, i64)> = files
+        .iter()
+        .filter_map(|f| file_sig(f).map(|s| (cache_key(f), s.len, s.mtime_ns)))
+        .collect();
+    keys.sort();
+    for (k, len, mt) in keys {
+        for b in k.as_bytes() {
+            acc = (acc ^ (*b as u64)).wrapping_mul(0x100000001b3);
+        }
+        acc = (acc ^ len).wrapping_mul(0x100000001b3);
+        acc = (acc ^ (mt as u64)).wrapping_mul(0x100000001b3);
+    }
+    acc
+}
+
 pub fn scan_sessions() -> ScanResult {
     let mut out = Vec::new();
     let mut chain_members = HashMap::new();
+    let mut cache = scan_file_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let ScanFileCache {
+        plain,
+        chained,
+        kimi,
+        snapshot,
+        kimi_snapshot,
+        opencode_db,
+        opencode_legacy,
+    } = &mut *cache;
     // Gemini 的 slug → 项目路径映射在扫描与快照补全时都要用
     let gemini_map = dirs::home_dir()
         .map(|h| gemini_slug_map(&h.join(".gemini").join("tmp")))
@@ -3465,31 +3649,27 @@ pub fn scan_sessions() -> ScanResult {
     if let Some(home) = dirs::home_dir() {
         let mut claude_files = Vec::new();
         collect_files(&home.join(".claude").join("projects"), 2, &mut claude_files);
-        for f in claude_files {
-            if let Some(m) = claude_file_meta(&f, true) {
-                out.push(m);
-            }
-        }
+        out.extend(cached_plain(claude_files, plain, |f| {
+            claude_file_meta(f, true)
+        }));
         // archived_sessions 里的文件是 alive 的归档，不是「已失效」
-        let mut codex_metas = Vec::new();
         let mut active_files = Vec::new();
         collect_files(&home.join(".codex").join("sessions"), 5, &mut active_files);
-        for f in active_files {
-            if let Some(pair) = codex_file_meta(&f, true, false) {
-                codex_metas.push(pair);
-            }
-        }
         let mut archived_files = Vec::new();
         collect_files(
             &home.join(".codex").join("archived_sessions"),
             5,
             &mut archived_files,
         );
-        for f in archived_files {
-            if let Some(pair) = codex_file_meta(&f, true, true) {
-                codex_metas.push(pair);
-            }
-        }
+        active_files.extend(archived_files);
+        // archived 标记不进缓存值：目录固定（sessions/ vs archived_sessions/），
+        // 按路径直读即可，同一路径不会跨目录漂移
+        let codex_metas = cached_chained(active_files, chained, |f| {
+            let archived = f
+                .components()
+                .any(|c| c.as_os_str() == "archived_sessions");
+            codex_file_meta(f, true, archived)
+        });
         let (reps, members) = merge_codex_chains(codex_metas);
         out.extend(reps);
         chain_members = members;
@@ -3497,28 +3677,25 @@ pub fn scan_sessions() -> ScanResult {
         // 旧版单 JSON .json 文件不匹配 .jsonl 后缀，自然跳过（如需兼容再单开解析器）
         let mut gemini_files = Vec::new();
         collect_files(&home.join(".gemini").join("tmp"), 3, &mut gemini_files);
-        let mut gemini_metas = Vec::new();
-        for f in gemini_files {
-            if let Some(m) = gemini_file_meta(&f, true, &gemini_map) {
-                gemini_metas.push(m);
-            }
-        }
+        let gemini_metas = cached_plain(gemini_files, plain, |f| {
+            gemini_file_meta(f, true, &gemini_map)
+        });
         out.extend(dedupe_gemini_sessions(gemini_metas));
         // Qwen：深度 4 覆盖 chats/archive/；archive 目录下的是归档（alive 但 archived）
         let mut qwen_files = Vec::new();
         collect_files(&home.join(".qwen").join("projects"), 4, &mut qwen_files);
-        for f in qwen_files {
+        out.extend(cached_plain(qwen_files, plain, |f| {
             let archived = f
                 .parent()
                 .and_then(|p| p.file_name())
                 .is_some_and(|n| n == "archive");
-            if let Some(m) = qwen_file_meta(&f, true, archived) {
-                out.push(m);
-            }
-        }
-        // Kimi 新版：session_index.jsonl 是枚举入口（workDir 即项目归属）
+            qwen_file_meta(f, true, archived)
+        }));
+        // Kimi 新版：session_index.jsonl 是枚举入口（workDir 即项目归属）。
+        // sid/wd 参与 meta 但不来自文件本身——键里带上 sid/wd，索引行改写即换键重解析
         let index = home.join(".kimi-code").join("session_index.jsonl");
         if let Ok(text) = fs::read_to_string(&index) {
+            let mut entries = Vec::new();
             for line in to_lines(&text) {
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
@@ -3535,60 +3712,138 @@ pub fn scan_sessions() -> ScanResult {
                 if !wire.exists() {
                     continue;
                 }
-                let state = fs::read_to_string(dir.join("state.json"))
-                    .ok()
-                    .and_then(|t| serde_json::from_str::<Value>(&t).ok());
-                if let Some(m) =
-                    kimi_wire_file_meta(&wire, true, sid, wd.to_string(), state.as_ref())
-                {
-                    out.push(m);
-                }
+                entries.push((wire, sid.to_string(), wd.to_string()));
             }
+            let keyed: Vec<(String, PathBuf, String, String)> = entries
+                .into_iter()
+                .map(|(wire, sid, wd)| {
+                    // 键只用可打印分隔符拼 sid/wd，wire 本身不进键（dir 已含在 sid 维度里）
+                    (format!("wire|{sid}|{wd}"), wire, sid, wd)
+                })
+                .collect();
+            let mut next: HashMap<String, (FileSig, Option<FileSig>, SessionMetaDto)> =
+                HashMap::with_capacity(keyed.len());
+            for (key, wire, sid, wd) in keyed {
+                let Some(sig) = file_sig(&wire) else { continue };
+                let session_dir = wire
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.parent())
+                    .map(|d| d.to_path_buf());
+                let state_sig = session_dir
+                    .as_ref()
+                    .map(|d| d.join("state.json"))
+                    .and_then(|p| file_sig(&p));
+                let meta = match kimi.get(&key) {
+                    Some((old_sig, old_state, old))
+                        if *old_sig == sig && *old_state == state_sig =>
+                    {
+                        old.clone()
+                    }
+                    _ => {
+                        let state = session_dir
+                            .as_ref()
+                            .and_then(|d| fs::read_to_string(d.join("state.json")).ok())
+                            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                        match kimi_wire_file_meta(&wire, true, &sid, wd, state.as_ref()) {
+                            Some(m) => m,
+                            None => continue,
+                        }
+                    }
+                };
+                next.insert(key, (sig, state_sig, meta.clone()));
+                out.push(meta);
+            }
+            *kimi = next;
         }
         // Kimi 旧版：sessions/<md5(workDir)>/<uuid>/context.jsonl
         let buckets = kimi_workdir_buckets(&home.join(".kimi").join("kimi.json"));
         if !buckets.is_empty() {
             let mut kimi_files = Vec::new();
             collect_files(&home.join(".kimi").join("sessions"), 3, &mut kimi_files);
-            for f in kimi_files {
-                let Some(bucket) = f
+            let keyed: Vec<(String, PathBuf, String, String)> = kimi_files
+                .into_iter()
+                .filter_map(|f| {
+                    let bucket = f
+                        .parent()
+                        .and_then(|p| p.parent())
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())?;
+                    let project = buckets.get(&bucket)?.clone();
+                    let sid = f
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    // 键带 sid/project：buckets 表改写（同目录换归属）即换键重解析
+                    Some((format!("legacy|{sid}|{project}"), f, sid, project))
+                })
+                .collect();
+            let mut next: HashMap<String, (FileSig, Option<FileSig>, SessionMetaDto)> =
+                HashMap::with_capacity(keyed.len());
+            for (key, f, sid, project) in keyed {
+                let Some(sig) = file_sig(&f) else { continue };
+                let state_sig = f
                     .parent()
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                else {
-                    continue;
+                    .map(|d| d.join("state.json"))
+                    .and_then(|p| file_sig(&p));
+                let meta = match kimi.get(&key) {
+                    Some((old_sig, old_state, old))
+                        if *old_sig == sig && *old_state == state_sig =>
+                    {
+                        old.clone()
+                    }
+                    _ => {
+                        let state = f
+                            .parent()
+                            .and_then(|d| fs::read_to_string(d.join("state.json")).ok())
+                            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                        match kimi_legacy_file_meta(&f, true, &sid, project, state.as_ref()) {
+                            Some(m) => m,
+                            None => continue,
+                        }
+                    }
                 };
-                let Some(project) = buckets.get(&bucket) else {
-                    continue; // 反查不到项目归属的会话不猜
-                };
-                let sid = f
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let state = fs::read_to_string(f.parent().unwrap_or(&f).join("state.json"))
-                    .ok()
-                    .and_then(|t| serde_json::from_str::<Value>(&t).ok());
-                if let Some(m) =
-                    kimi_legacy_file_meta(&f, true, &sid, project.clone(), state.as_ref())
-                {
-                    out.push(m);
-                }
+                next.insert(key, (sig, state_sig, meta.clone()));
+                out.push(meta);
             }
+            kimi.extend(next); // 新版键与 legacy| 前缀键不冲突，合并存一栏
         }
         // OpenCode：v1.2+ 读共享 SQLite（WAL 只读）；旧版读 storage/ 扁平 JSON
         let mut found_db = false;
         for db in opencode_db_candidates() {
             if db.exists() {
-                out.extend(opencode_scan_db(&db));
+                let sig = file_sig(&db);
+                let rows = match (sig, opencode_db.get(&cache_key(&db))) {
+                    (Some(sig), Some((old_sig, rows))) if *old_sig == sig => rows.clone(),
+                    _ => {
+                        let rows = opencode_scan_db(&db);
+                        if let Some(sig) = sig {
+                            opencode_db.insert(cache_key(&db), (sig, rows.clone()));
+                        }
+                        rows
+                    }
+                };
+                out.extend(rows);
                 found_db = true;
             }
         }
         if !found_db {
+            opencode_db.clear(); // db 消失后清掉，避免下次又命中
             for storage in opencode_legacy_roots() {
                 if storage.exists() {
-                    out.extend(opencode_scan_legacy(&storage));
+                    let mut files = Vec::new();
+                    collect_files(&storage, 4, &mut files);
+                    let sig = dir_listing_sig(&files);
+                    let rows = match opencode_legacy.get(&cache_key(&storage)) {
+                        Some((old_sig, rows)) if *old_sig == sig => rows.clone(),
+                        _ => {
+                            let rows = opencode_scan_legacy(&storage);
+                            opencode_legacy.insert(cache_key(&storage), (sig, rows.clone()));
+                            rows
+                        }
+                    };
+                    out.extend(rows);
                 }
             }
         }
@@ -3599,42 +3854,60 @@ pub fn scan_sessions() -> ScanResult {
             2,
             &mut codebuddy_files,
         );
-        for f in codebuddy_files {
-            if let Some(m) = codebuddy_file_meta(&f, true) {
-                out.push(m);
-            }
-        }
+        out.extend(cached_plain(codebuddy_files, plain, |f| {
+            codebuddy_file_meta(f, true)
+        }));
         // Cursor：projects/<编码cwd>/agent-transcripts/<uuid>/<uuid>.jsonl（深度 4 到文件）；
         // ~/.cursor 与 IDE 共享，只收 agent-transcripts 子树（其他位置的 jsonl 不是会话）
         let mut cursor_files = Vec::new();
         collect_files(&home.join(".cursor").join("projects"), 4, &mut cursor_files);
-        for f in cursor_files {
-            if !f.components().any(|c| c.as_os_str() == "agent-transcripts") {
-                continue;
-            }
-            if let Some(m) = cursor_file_meta(&f, true) {
-                out.push(m);
-            }
-        }
+        cursor_files.retain(|f| f.components().any(|c| c.as_os_str() == "agent-transcripts"));
+        out.extend(cached_plain(cursor_files, plain, |f| {
+            cursor_file_meta(f, true)
+        }));
         // Grok Build：sessions/<encoded-cwd>/<session-id>/updates.jsonl（深度 3 到文件）；
         // 只收文件名恰为 updates.jsonl 的（session_search.sqlite 是 FTS 索引不是会话本体，
         // chat_history.jsonl 是原始请求消息——均自然排除）。
         // compact/继续会 fork 新目录并写 parent_session_id，标题常与父会话相同——并入 Codex 同款链。
+        // meta 优先读同目录 summary.json：指纹须把 summary 的 (len, mtime) 算进来。
         let mut grok_files = Vec::new();
         collect_files(&home.join(".grok").join("sessions"), 3, &mut grok_files);
-        let mut grok_metas = Vec::new();
-        for f in grok_files {
-            if f.file_name()
+        grok_files.retain(|f| {
+            f.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .as_deref()
-                != Some("updates.jsonl")
-            {
-                continue;
-            }
-            if let Some(pair) = grok_file_meta(&f, true) {
-                grok_metas.push(pair);
-            }
+                == Some("updates.jsonl")
+        });
+        let mut grok_metas = Vec::with_capacity(grok_files.len());
+        let mut grok_next: HashMap<String, (FileSig, SessionMetaDto, Option<String>)> =
+            HashMap::with_capacity(grok_files.len());
+        for f in grok_files {
+            let Some(sig) = file_sig(&f) else { continue };
+            // summary.json 参与解析：它与 updates.jsonl 同目录、内容可独立更新
+            let summary_sig = f
+                .parent()
+                .map(|d| d.join("summary.json"))
+                .and_then(|p| file_sig(&p));
+            let combined = FileSig {
+                len: sig.len ^ summary_sig.map(|s| s.len).unwrap_or(0),
+                mtime_ns: sig.mtime_ns ^ summary_sig.map(|s| s.mtime_ns).unwrap_or(0),
+            };
+            let key = format!("grok|{}", f.display());
+            let pair = match chained.get(&key) {
+                Some((old_sig, m, parent)) if *old_sig == combined => {
+                    (m.clone(), parent.clone())
+                }
+                _ => match grok_file_meta(&f, true) {
+                    Some(p) => p,
+                    None => continue,
+                },
+            };
+            grok_next.insert(key, (combined, pair.0.clone(), pair.1.clone()));
+            grok_metas.push(pair);
         }
+        // grok 与 codex 共用 chained 一栏：grok 键带前缀，codex 键是裸路径，互不冲突；
+        // chained 已在 codex 段整体替换过，这里合并而不是覆盖
+        chained.extend(grok_next);
         let (reps, members) = merge_codex_chains(grok_metas);
         out.extend(reps);
         chain_members.extend(members);
@@ -3661,31 +3934,67 @@ pub fn scan_sessions() -> ScanResult {
                 if seen.contains(&(agent.to_string(), stem.clone())) {
                     continue; // 源文件还在，快照不重复列出
                 }
-                let meta = match agent {
-                    "codex" => codex_file_meta(&f, false, false).map(|(m, _)| m),
-                    "gemini" => gemini_file_meta(&f, false, &gemini_map),
-                    "qwen" => qwen_file_meta(&f, false, false),
-                    "opencode" => opencode_snapshot_meta(&f, &stem),
-                    "codebuddy" => codebuddy_file_meta(&f, false),
-                    "cursor" => cursor_file_meta(&f, false),
-                    "grok" => grok_file_meta(&f, false).map(|(m, _)| m),
-                    "kimi" => {
-                        // 快照脱离了原目录结构（无 state.json / bucket），项目归属不可知
-                        let bytes = read_session_bytes(&f);
-                        bytes.and_then(|b| {
-                            let lines = to_lines(&String::from_utf8_lossy(&b));
-                            if kimi_looks_like_wire(&lines) {
-                                kimi_wire_file_meta(&f, false, &stem, String::new(), None)
-                            } else {
-                                kimi_legacy_file_meta(&f, false, &stem, String::new(), None)
-                            }
-                        })
-                    }
-                    _ => claude_file_meta(&f, false),
+                let key = format!("{agent}|{}", f.display());
+                let parse = |f: &Path| {
+                    let meta = match agent {
+                        "codex" => codex_file_meta(f, false, false).map(|(m, _)| m),
+                        "gemini" => gemini_file_meta(f, false, &gemini_map),
+                        "qwen" => qwen_file_meta(f, false, false),
+                        "opencode" => opencode_snapshot_meta(f, &stem),
+                        "codebuddy" => codebuddy_file_meta(f, false),
+                        "cursor" => cursor_file_meta(f, false),
+                        "grok" => grok_file_meta(f, false).map(|(m, _)| m),
+                        _ => claude_file_meta(f, false),
+                    };
+                    meta.map(|mut m| {
+                        m.session_id = stem.clone(); // 快照文件名即 pin 时的 session_id
+                        m.alive = false;
+                        m
+                    })
                 };
-                if let Some(mut m) = meta {
-                    m.session_id = stem; // 快照文件名即 pin 时的 session_id
-                    m.alive = false;
+                let meta = if agent == "kimi" {
+                    // kimi 快照要先读字节分辨新/旧协议，单独一栏
+                    let Some(sig) = file_sig(&f) else { continue };
+                    let m = match kimi_snapshot.get(&key) {
+                        Some((old_sig, old)) if *old_sig == sig => old.clone(),
+                        _ => {
+                            let parsed = read_session_bytes(&f).and_then(|b| {
+                                let lines = to_lines(&String::from_utf8_lossy(&b));
+                                let m = if kimi_looks_like_wire(&lines) {
+                                    kimi_wire_file_meta(&f, false, &stem, String::new(), None)
+                                } else {
+                                    kimi_legacy_file_meta(&f, false, &stem, String::new(), None)
+                                };
+                                m.map(|mut m| {
+                                    m.session_id = stem.clone();
+                                    m.alive = false;
+                                    m
+                                })
+                            });
+                            match parsed {
+                                Some(m) => {
+                                    kimi_snapshot.insert(key.clone(), (sig, m.clone()));
+                                    m
+                                }
+                                None => continue,
+                            }
+                        }
+                    };
+                    Some(m)
+                } else {
+                    let Some(sig) = file_sig(&f) else { continue };
+                    match snapshot.get(&key) {
+                        Some((old_sig, old)) if *old_sig == sig => Some(old.clone()),
+                        _ => match parse(&f) {
+                            Some(m) => {
+                                snapshot.insert(key.clone(), (sig, m.clone()));
+                                Some(m)
+                            }
+                            None => continue,
+                        },
+                    }
+                };
+                if let Some(m) = meta {
                     out.push(m);
                 }
             }
@@ -4449,7 +4758,9 @@ pub(crate) fn cached_scan() -> ScanResult {
     let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, res)) = &*guard {
         if at.elapsed() < std::time::Duration::from_secs(10) {
-            return res.clone();
+            let mut res = res.clone();
+            refresh_scan_live(&mut res);
+            return res;
         }
     }
     let mut res = scan_sessions();
@@ -4461,6 +4772,7 @@ pub(crate) fn cached_scan() -> ScanResult {
             .or_insert_with(|| crate::usage::normalize_provenance_path(&s.project_path));
     }
     res.provenance_paths = provenance_paths;
+    refresh_scan_live(&mut res);
     *guard = Some((Instant::now(), res.clone()));
     res
 }
@@ -4478,6 +4790,14 @@ pub(crate) fn invalidate_scan_cache() {
         if let Ok(mut g) = m.lock() {
             *g = None;
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_scan_caches_for_test() {
+    invalidate_scan_cache();
+    if let Ok(mut g) = scan_file_cache().lock() {
+        *g = ScanFileCache::default();
     }
 }
 
@@ -6421,6 +6741,81 @@ mod tests {
         lines.iter().map(|l| l.to_string()).collect()
     }
 
+    // ===== 增量缓存 =====
+
+    #[test]
+    fn cached_plain_skips_parse_when_sig_unchanged() {
+        let dir = std::env::temp_dir().join(format!("ccode-sig-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.jsonl");
+        fs::write(&f, br#"{"type":"user","cwd":"/tmp/p","sessionId":"s1","message":{"role":"user","content":"hi"}}"#).unwrap();
+
+        let mut cache: HashMap<String, (FileSig, SessionMetaDto)> = HashMap::new();
+        let calls = std::cell::Cell::new(0usize);
+        let first = cached_plain(vec![f.clone()], &mut cache, |p| {
+            calls.set(calls.get() + 1);
+            claude_file_meta(p, true)
+        });
+        assert_eq!(first.len(), 1);
+        assert_eq!(calls.get(), 1);
+
+        // 同一文件未变：不再调 parse
+        let second = cached_plain(vec![f.clone()], &mut cache, |p| {
+            calls.set(calls.get() + 1);
+            claude_file_meta(p, true)
+        });
+        assert_eq!(second.len(), 1);
+        assert_eq!(calls.get(), 1, "指纹未变必须命中缓存");
+        assert_eq!(second[0].session_id, "s1");
+
+        // 内容变了（长度不同）：重解析
+        fs::write(&f, br#"{"type":"user","cwd":"/tmp/p","sessionId":"s2-changed","message":{"role":"user","content":"yo"}}"#).unwrap();
+        let third = cached_plain(vec![f.clone()], &mut cache, |p| {
+            calls.set(calls.get() + 1);
+            claude_file_meta(p, true)
+        });
+        assert_eq!(calls.get(), 2, "指纹变了必须重解析");
+        assert_eq!(third[0].session_id, "s2-changed");
+
+        // 文件消失：条目被淘汰
+        let gone = cached_plain(vec![], &mut cache, |p| claude_file_meta(p, true));
+        assert!(gone.is_empty());
+        assert!(cache.is_empty(), "消失的文件不许留在缓存里");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_chained_keeps_parent_across_hits() {
+        let dir = std::env::temp_dir().join(format!("ccode-chain-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("rollout-2026-09-01-x.jsonl");
+        fs::write(&f, br#"{"type":"session_meta","payload":{"id":"c1","cwd":"/tmp/p","forked_from_id":"root0"}}"#).unwrap();
+
+        let mut cache: HashMap<String, (FileSig, SessionMetaDto, Option<String>)> = HashMap::new();
+        let first = cached_chained(vec![f.clone()], &mut cache, |p| codex_file_meta(p, true, false));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].1.as_deref(), Some("root0"));
+
+        let second = cached_chained(vec![f.clone()], &mut cache, |p| codex_file_meta(p, true, false));
+        assert_eq!(second[0].1.as_deref(), Some("root0"), "链父 id 命中缓存不丢");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_listing_sig_changes_with_content() {
+        let dir = std::env::temp_dir().join(format!("ccode-dlsig-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.jsonl");
+        fs::write(&f, b"one").unwrap();
+        let sig1 = dir_listing_sig(&[f.clone()]);
+        fs::write(&f, b"one-longer").unwrap();
+        let sig2 = dir_listing_sig(&[f.clone()]);
+        assert_ne!(sig1, sig2, "长度变 = 指纹变");
+        let sig3 = dir_listing_sig(&[dir.join("absent.jsonl")]);
+        assert_ne!(sig2, sig3, "清单成员变 = 指纹变");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     // ===== Claude 解析 =====
 
     #[test]
@@ -6861,6 +7256,34 @@ mod tests {
     }
 
     #[test]
+    fn grok_strips_turn_aborted_marker() {
+        assert_eq!(
+            unwrap_prompt_tags(
+                "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"
+            ),
+            ""
+        );
+        assert_eq!(
+            unwrap_prompt_tags("先说一句。<turn_aborted>\naborted\n</turn_aborted>"),
+            "先说一句。"
+        );
+        let history = parse_grok_history(&s(&[
+            r#"{"type":"user","prompt_index":0,"content":"你好"}"#,
+            r#"{"type":"assistant","content":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}"#,
+            r#"{"type":"user","prompt_index":1,"content":"你好"}"#,
+        ]));
+        assert_eq!(history.len(), 2, "纯暂停标记不当成助手回复");
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[1].role, "user");
+        let chunks = parse_grok(&s(&[
+            r#"{"timestamp":1,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"你好"}}}}"#,
+            r#"{"timestamp":2,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"<turn_aborted>\ninterrupted\n</turn_aborted>"}}}}"#,
+        ]));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].role, "user");
+    }
+
+    #[test]
     fn grok_history_page_loads_older_messages_by_message_cursor() {
         let dir = std::env::temp_dir().join(format!("ccode-grok-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -7202,6 +7625,31 @@ mod tests {
         assert!(redacted.contains("Bearer [已隐藏密钥 ···7654],"));
         assert!(redacted.contains("OPENAI_API_KEY=[已隐藏密钥 ···3456]"));
         assert_eq!(redact_sensitive_text_with("sk-short", &[]), "sk-short");
+    }
+
+    #[test]
+    fn conversation_hides_turn_aborted_marker() {
+        let mut messages = vec![
+            ChatMessageDto {
+                role: "user".into(),
+                blocks: vec![text_block("你好".into())],
+                timestamp: None,
+                usage: None,
+            },
+            ChatMessageDto {
+                role: "assistant".into(),
+                blocks: vec![text_block(
+                    "<turn_aborted>\nThe user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed.\n</turn_aborted>"
+                        .into(),
+                )],
+                timestamp: None,
+                usage: None,
+            },
+        ];
+        redact_conversation(&mut messages);
+        assert_eq!(messages.len(), 1, "暂停标记不得当成助手回复");
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].blocks[0].text, "你好");
     }
 
     // ===== Codex 解析 =====
@@ -8191,6 +8639,59 @@ mod tests {
         assert!(
             resolve_worktree_project("C:\\ccode\\workspaces\\myrepo\\feat-xy", &rows).is_none()
         );
+    }
+
+    fn live_meta(agent: &str, updated_at: Option<&str>, live: bool) -> SessionMetaDto {
+        SessionMetaDto {
+            agent: agent.into(),
+            session_id: "s1".into(),
+            project_path: "/p".into(),
+            cwd: Some("/p".into()),
+            title: None,
+            created_at: None,
+            updated_at: updated_at.map(str::to_string),
+            file_path: "/p/s1.jsonl".into(),
+            token_usage: None,
+            cli_version: None,
+            pinned: false,
+            archived: false,
+            custom_title: None,
+            tags: Vec::new(),
+            alive: true,
+            chain_count: 1,
+            workspace: None,
+            step_name: None,
+            summary: None,
+            live,
+            source: default_session_source(),
+            internal: false,
+            handoff_from_agent: None,
+            handoff_from_session: None,
+            task_id: None,
+            task_name: None,
+            provider: None,
+            profile_id: None,
+        }
+    }
+
+    #[test]
+    fn refresh_live_flag_does_not_freeze_stale_cache() {
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut stale = live_meta("codex", Some(&iso_from_unix(now.saturating_sub(3600))), true);
+        refresh_live_flag(&mut stale);
+        assert!(!stale.live, "一小时前的 updated_at 不得继续亮绿点");
+
+        let mut fresh = live_meta("codex", Some(&iso_from_unix(now)), false);
+        refresh_live_flag(&mut fresh);
+        assert!(fresh.live, "60 秒内的 updated_at 应判 live");
+
+        let mut dead = live_meta("codex", Some(&iso_from_unix(now)), true);
+        dead.alive = false;
+        refresh_live_flag(&mut dead);
+        assert!(!dead.live, "源文件已失效即使时间新也不 live");
     }
 
     #[test]

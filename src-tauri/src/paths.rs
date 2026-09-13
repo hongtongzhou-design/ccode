@@ -13,6 +13,18 @@
 
 use std::path::PathBuf;
 
+/// 波浪号展开：`~` / `~/` / `~\`（Windows cmd/PowerShell 不展开 ~，用户常写后者，
+/// 与 `~/` 同等处理）→ 家目录前缀。各入口（会话 cwd、项目根、文件树、git）共用这一份，
+/// 勿再按文件复制本地版本——那正是三份窄一份宽漂移的来源。
+pub(crate) fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") || path.starts_with("~\\") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}{}", home.to_string_lossy(), &path[1..]);
+        }
+    }
+    path.to_string()
+}
+
 /// 剥掉 Windows `canonicalize` 产生的 verbatim 前缀，其余原样返回。
 /// `\\?\UNC\server\share` 还原为 `\\server\share`（UNC 的 verbatim 写法另有一套）。
 /// 非 Windows 平台不会出现这些前缀，本函数是恒等变换。
