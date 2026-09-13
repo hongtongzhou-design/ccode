@@ -5,7 +5,6 @@ import ConversationView from "./ConversationView";
 import ChatComposer from "./ChatComposer";
 import type {
   ChatMessageDto,
-  ComboSurfaceDto,
   DetectResult,
   McpServerDto,
   SessionSyncState,
@@ -18,52 +17,39 @@ import {
   chatHeaderStatus,
   chatWaitKind,
   chatWaitText,
+  composerShowsInterrupt,
   latestToolName,
-  modelSwitchCommand,
   slashHandoff,
 } from "../chat-handoff";
-import { welcomeCwdLine, welcomeCwdShown } from "../terminal-welcome";
+import { welcomeCwdLine } from "../terminal-welcome";
 
 export default function ChatSurface({
   messages,
   state,
   syncState,
-  title,
   loading,
   active = true,
   agentId,
   confirmDetail,
-  agentName,
-  model,
   cwd,
   running,
   canResume,
   attention,
-  forkAvailable,
   readOnly,
   readonlySupported,
   busy,
   skills,
   mcps,
   onSend,
-  onFork,
   onAllowWrite,
   onOpenTerminal,
-  onOpenMcp,
-  onOpenHistory,
   onInterrupt,
   onApprovalKey,
   peek = false,
   onTogglePeek,
   onRequestPeek,
   modelSwitch,
-  effort,
-  profileModels = [],
-  profileId,
-  launchModel,
   hooksEnabled = false,
-  ptyAlive = false,
-  onWriteCommand,
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
@@ -72,43 +58,30 @@ export default function ChatSurface({
   messages: ChatMessageDto[];
   state: "idle" | "detecting" | "linked" | "timeout";
   syncState: SessionSyncState;
-  title: string | null;
   loading: boolean;
   /** 聊天层当前可见（常驻挂载仅隐藏后，用作输入框聚焦信号） */
   active?: boolean;
   agentId?: string | null;
   confirmDetail?: string | null;
-  agentName?: string | null;
-  model?: string | null;
   cwd?: string | null;
   running: boolean;
   canResume: boolean;
   attention: "done" | "working" | "confirm" | null;
-  forkAvailable: boolean;
   readOnly: boolean;
   readonlySupported: boolean;
   busy?: boolean;
   skills: SkillDto[];
   mcps: McpServerDto[];
   onSend: (text: string) => Promise<string | null>;
-  onFork: () => void;
   onAllowWrite: () => void;
   onOpenTerminal: () => void;
-  onOpenMcp: () => void;
-  onOpenHistory?: () => void;
   onInterrupt?: () => void;
   onApprovalKey?: (key: "y" | "n" | "esc") => void;
   peek?: boolean;
   onTogglePeek?: () => void;
   onRequestPeek?: () => void;
   modelSwitch?: DetectResult["modelSwitch"];
-  effort?: DetectResult["effort"];
-  profileModels?: string[];
-  profileId?: string | null;
-  launchModel?: string | null;
   hooksEnabled?: boolean;
-  ptyAlive?: boolean;
-  onWriteCommand?: (cmd: string, opts?: { peek?: boolean }) => void;
   hasOlder?: boolean;
   loadingOlder?: boolean;
   onLoadOlder?: () => void;
@@ -121,11 +94,6 @@ export default function ChatSurface({
   const [hasNew, setHasNew] = useState(false);
   const [stuckWaiting, setStuckWaiting] = useState(false);
   const [seedInsert, setSeedInsert] = useState<string | null>(null);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [effortMenuOpen, setEffortMenuOpen] = useState(false);
-  const [modelOverride, setModelOverride] = useState<string | null>(null);
-  const [combo, setCombo] = useState<ComboSurfaceDto | null>(null);
-  const [comboReady, setComboReady] = useState(false);
   const [homeDir, setHomeDir] = useState("");
   const prevScrollHeightRef = useRef(0);
   const loadingOlderRef = useRef(false);
@@ -197,47 +165,6 @@ export default function ChatSurface({
     };
   }, [active]);
 
-  useEffect(() => {
-    if (!active) return;
-    if (!profileId || !launchModel) {
-      setCombo(null);
-      setComboReady(true);
-      return;
-    }
-    let cancelled = false;
-    setComboReady(false);
-    invoke<ComboSurfaceDto>("combo_surface", {
-      profileId,
-      model: launchModel,
-    })
-      .then((value) => {
-        if (!cancelled) {
-          setCombo(value);
-          setComboReady(true);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCombo(null);
-          setComboReady(true);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [active, profileId, launchModel]);
-
-  const tabKey = `${agentId ?? ""}:${profileId ?? ""}:${cwd ?? ""}`;
-  const lastTabKey = useRef(tabKey);
-  if (lastTabKey.current !== tabKey) {
-    lastTabKey.current = tabKey;
-    setModelOverride(null);
-  }
-  const shownModel = modelOverride ?? model ?? "";
-  const effortLive =
-    comboReady && combo?.showNativeEffort === true ? effort : null;
-  const effortLevels = effortLive?.levels ?? [];
-
   const headerStatus = chatHeaderStatus({
     state,
     syncState,
@@ -245,14 +172,14 @@ export default function ChatSurface({
     canResume,
     messageCount: messages.length,
   });
+  // 未就绪状态注记（原头部第一行文案迁入输入框左下角）：识别中/等待会话文件/可恢复才显示，
+  // linked 稳态（实时同步/已结束·可继续）不显——运行态由底部状态栏状态点覆盖
+  const statusNote =
+    syncState === "waiting" || state === "detecting" || state === "timeout"
+      ? headerStatus
+      : null;
   const canSend = state !== "timeout" || running || canResume;
-  const statusClass =
-    attention === "confirm"
-      ? "bg-warn-text"
-      : running
-        ? "bg-ok-text animate-pulse-brief"
-        : "bg-l4";
-  const cwdShown = cwd ? welcomeCwdShown(cwd, homeDir, IS_WINDOWS) : null;
+
   const toolName = latestToolName(messages);
   const waitKind = chatWaitKind({
     pendingReply: loading,
@@ -271,214 +198,18 @@ export default function ChatSurface({
     return onSend(text);
   }
 
-  function pickModel(next: string) {
-    setModelMenuOpen(false);
-    if (!modelSwitch || !onWriteCommand) return;
-    if (modelSwitch.kind === "direct") {
-      onWriteCommand(modelSwitchCommand(modelSwitch.command, next, agentId));
-      setModelOverride(next);
-      return;
-    }
-    onWriteCommand(modelSwitch.command, { peek: true });
-  }
-
-  function pickEffort(level: string) {
-    setEffortMenuOpen(false);
-    if (!effortLive || !onWriteCommand) return;
-    onWriteCommand(effortLive.command.replace("{level}", level));
-  }
-
   return (
     <div
       ref={rootRef}
       data-chat-drop="1"
       className="flex h-full min-h-0 w-full flex-col bg-canvas"
     >
-      <header className="shrink-0 border-b border-hairline bg-canvas/95 px-3 py-1.5 backdrop-blur-sm">
-        <div className="flex w-full items-center gap-3 px-2">
-          <span className={`size-2 shrink-0 rounded-full ${statusClass}`} />
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <h1 className="truncate text-sm font-medium text-l1">
-                {title || "当前聊天"}
-              </h1>
-              {headerStatus ? (
-                <span className="shrink-0 text-micro text-l4">{headerStatus}</span>
-              ) : null}
-            </div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 truncate text-micro text-l4">
-              {agentName && <span>{agentName}</span>}
-              {shownModel && ptyAlive && modelSwitch && profileModels.length > 0 ? (
-                <>
-                  <span>·</span>
-                  <span className="relative inline-flex">
-                    <button
-                      type="button"
-                      disabled={!ptyAlive}
-                      onClick={() => setModelMenuOpen((v) => !v)}
-                      title={
-                        modelSwitch.kind === "picker"
-                          ? "打开终端里的模型选择器"
-                          : "切换模型（写入当前会话）"
-                      }
-                      className="rounded-sm px-1 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-40"
-                    >
-                      {shownModel} ▾
-                    </button>
-                    {modelMenuOpen && (
-                      <>
-                        <button
-                          type="button"
-                          aria-label="关闭模型菜单"
-                          className="fixed inset-0 z-40 cursor-default"
-                          onClick={() => setModelMenuOpen(false)}
-                        />
-                        <ul className="absolute top-full left-0 z-50 mt-1 max-h-56 w-56 overflow-auto rounded-md border border-field bg-raised p-1">
-                          {profileModels.map((item) => (
-                            <li key={item}>
-                              <button
-                                type="button"
-                                onClick={() => pickModel(item)}
-                                className="flex w-full items-center gap-1 rounded-sm px-2 py-1 text-left font-mono text-micro text-l2 hover:bg-hover hover:text-l1"
-                              >
-                                {item}
-                                {modelSwitch.kind === "picker" && (
-                                  <span className="ml-auto text-l4">
-                                    （打开选择器）
-                                  </span>
-                                )}
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </span>
-                </>
-              ) : shownModel ? (
-                <>
-                  <span>·</span>
-                  <span>{shownModel}</span>
-                </>
-              ) : null}
-              {effortLive && running && effortLevels.length > 0 && (
-                <span className="relative inline-flex">
-                  <button
-                    type="button"
-                    disabled={!ptyAlive}
-                    onClick={() => setEffortMenuOpen((v) => !v)}
-                    title="切换思考档位"
-                    className="rounded-sm px-1 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-40"
-                  >
-                    ◈ 思考 ▾
-                  </button>
-                  {effortMenuOpen && (
-                    <>
-                      <button
-                        type="button"
-                        aria-label="关闭思考档菜单"
-                        className="fixed inset-0 z-40 cursor-default"
-                        onClick={() => setEffortMenuOpen(false)}
-                      />
-                      <ul className="absolute top-full left-0 z-50 mt-1 w-28 overflow-auto rounded-md border border-field bg-raised p-1">
-                        {effortLevels.map((level) => (
-                          <li key={level}>
-                            <button
-                              type="button"
-                              onClick={() => pickEffort(level)}
-                              className="flex w-full rounded-sm px-2 py-1 text-left font-mono text-micro text-l2 hover:bg-hover hover:text-l1"
-                            >
-                              {level}
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
-                </span>
-              )}
-              {cwdShown && messages.length > 0 && (
-                <>
-                  <span>·</span>
-                  <span className="truncate" title={cwd ?? undefined}>
-                    {cwdShown}
-                  </span>
-                </>
-              )}
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            {running && onInterrupt && (
-              <button
-                type="button"
-                onClick={onInterrupt}
-                title="打断当前生成（等效终端里按 Ctrl+C）"
-                className="rounded-md px-2 py-1 text-micro text-warn-text hover:bg-hover"
-              >
-                ⏹ 打断
-              </button>
-            )}
-            {onTogglePeek && (
-              <button
-                type="button"
-                onClick={onTogglePeek}
-                title={
-                  peek
-                    ? "收起聊天下方的终端画面"
-                    : "在聊天下方拉起同一会话的终端画面"
-                }
-                className={`rounded-md px-2 py-1 text-micro hover:bg-hover ${
-                  peek ? "bg-seg-sel text-l1" : "text-l3 hover:text-l1"
-                }`}
-              >
-                {peek ? "收起终端" : "拉起终端"}
-              </button>
-            )}
-            {readOnly && (
-              <span
-                className="rounded-md bg-inset px-2 py-1 text-micro text-warn-text"
-                title={
-                  readonlySupported
-                    ? "该分叉会话启用了 Agent 原生只读/计划模式"
-                    : "该 Agent 没有原生只读参数，仅提供提示约束"
-                }
-              >
-                只读分叉
-              </span>
-            )}
-            {readOnly && (
-              <button
-                type="button"
-                onClick={onAllowWrite}
-                className="rounded-md px-2 py-1 text-micro text-warn-text hover:bg-hover"
-              >
-                允许修改
-              </button>
-            )}
-            {forkAvailable && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={onFork}
-                title="从当前对话摘要新建一个分叉聊天"
-                className="rounded-md px-2 py-1 text-micro text-l3 hover:bg-hover hover:text-l1 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                ＋ 新建
-              </button>
-            )}
-            {onOpenHistory && forkAvailable && (
-              <button
-                type="button"
-                onClick={onOpenHistory}
-                title="打开完整历史回放"
-                className="rounded-md px-2 py-1 text-micro text-l3 hover:bg-hover hover:text-l1"
-              >
-                历史
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
+      {/* 聊天头部整条取消（2026-09-13）：标题归标签条，身份/模型/目录/状态点归底部状态栏
+          （chat 变体）——两行头部与它们完全重复。原头部独有功能就近收编：
+          停止 → 发送钮同体（正在生成变「进行中」符号钮，点击往终端发 Esc 暂停，会话保留）；
+          只读分叉/允许修改与未就绪状态注记 → 输入框左下角 micro 行；
+          ＋ 只插入技能/MCP；分叉和回放在启动行 ⋯。
+          注意力确认横条（下方）保持不变。 */}
 
       {attention === "confirm" && (
         <div className="shrink-0 border-b border-hairline bg-inset px-5 py-2.5">
@@ -640,7 +371,6 @@ export default function ChatSurface({
         skills={skills}
         mcps={mcps}
         onSend={sendFromComposer}
-        onOpenMcp={onOpenMcp}
         focusWhen={active}
         agentId={agentId}
         seedInsert={seedInsert}
@@ -663,6 +393,45 @@ export default function ChatSurface({
             : undefined
         }
         onChooseCwd={onChooseCwd}
+        leftExtras={
+          <>
+            {statusNote ? (
+              <span
+                className="ml-1 shrink-0 text-micro text-l4"
+                title={statusNote === "等待会话文件" ? "会话文件还没出现；Agent 起来后会自动接上" : undefined}
+              >
+                {statusNote}
+              </span>
+            ) : null}
+            {readOnly && (
+              <span
+                className="ml-1 shrink-0 rounded-md bg-inset px-1.5 py-0.5 text-micro text-warn-text"
+                title={
+                  readonlySupported
+                    ? "该分叉会话启用了 Agent 原生只读/计划模式"
+                    : "该 Agent 没有原生只读参数，仅提供提示约束"
+                }
+              >
+                只读分叉
+              </span>
+            )}
+            {readOnly && (
+              <button
+                type="button"
+                onClick={onAllowWrite}
+                className="shrink-0 rounded px-1 text-micro text-warn-text hover:bg-hover"
+              >
+                允许修改
+              </button>
+            )}
+          </>
+        }
+        running={composerShowsInterrupt({
+          running,
+          attention,
+          pendingReply: loading,
+        })}
+        onInterrupt={onInterrupt}
       />
       {peek && (
         <button

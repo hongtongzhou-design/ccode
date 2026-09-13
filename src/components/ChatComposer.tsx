@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Plus } from "lucide-react";
+import { Plus, Square } from "lucide-react";
 import type { McpServerDto, SkillDto } from "../types";
 import { firstImageItem, imageExtFromMime } from "../terminal-input";
 import {
@@ -15,13 +16,11 @@ function InsertMenu({
   mcps,
   disabled,
   onInsert,
-  onOpenMcp,
 }: {
   skills: SkillDto[];
   mcps: McpServerDto[];
   disabled: boolean;
   onInsert: (text: string) => void;
-  onOpenMcp?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const empty = skills.length === 0 && mcps.length === 0;
@@ -49,69 +48,55 @@ function InsertMenu({
             onClick={() => setOpen(false)}
           />
           <div className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-lg border border-field ccode-float-surface">
-            <div className="max-h-64 overflow-auto p-1">
-              {empty ? (
-                <div className="px-2 py-3 text-xs text-l4">
-                  当前 Agent 没有可插入的技能或 MCP
-                </div>
-              ) : (
-                <>
-                  {skills.length > 0 && (
-                    <div className="px-2 py-1.5 text-micro text-l4">技能</div>
-                  )}
-                  {skills.map((skill) => (
-                    <button
-                      key={skill.id}
-                      type="button"
-                      onClick={() => {
-                        setOpen(false);
-                        onInsert(`使用 ${skill.name} 技能：`);
-                      }}
-                      className="flex w-full flex-col gap-0.5 rounded-md px-2 py-2 text-left hover:bg-hover"
-                    >
-                      <span className="text-xs text-l1">{skill.name}</span>
-                      {skill.description && (
-                        <span className="truncate text-micro text-l4">
-                          {skill.description}
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                  {mcps.length > 0 && (
-                    <div className="px-2 py-1.5 text-micro text-l4">MCP</div>
-                  )}
-                  {mcps.map((mcp) => (
-                    <button
-                      key={mcp.id}
-                      type="button"
-                      onClick={() => {
-                        setOpen(false);
-                        onInsert(`使用 ${mcp.name} 这个 MCP server 提供的工具：`);
-                      }}
-                      className="flex w-full flex-col gap-0.5 rounded-md px-2 py-2 text-left hover:bg-hover"
-                    >
-                      <span className="text-xs text-l1">{mcp.name}</span>
-                      <span className="truncate font-mono text-micro text-l4">
-                        {mcp.kind === "stdio"
-                          ? `${mcp.command} ${mcp.args.join(" ")}`
-                          : mcp.url}
+            {empty ? (
+              <div className="px-2 py-3 text-xs text-l4">
+                当前 Agent 没有可插入的技能或 MCP
+              </div>
+            ) : (
+              <div className="max-h-64 overflow-auto p-1">
+                {skills.length > 0 && (
+                  <div className="px-2 py-1.5 text-micro text-l4">技能</div>
+                )}
+                {skills.map((skill) => (
+                  <button
+                    key={skill.id}
+                    type="button"
+                    onClick={() => {
+                      setOpen(false);
+                      onInsert(`使用 ${skill.name} 技能：`);
+                    }}
+                    className="flex w-full flex-col gap-0.5 rounded-md px-2 py-2 text-left hover:bg-hover"
+                  >
+                    <span className="text-xs text-l1">{skill.name}</span>
+                    {skill.description && (
+                      <span className="truncate text-micro text-l4">
+                        {skill.description}
                       </span>
-                    </button>
-                  ))}
-                </>
-              )}
-            </div>
-            {onOpenMcp && (
-              <button
-                type="button"
-                onClick={() => {
-                  setOpen(false);
-                  onOpenMcp();
-                }}
-                className="w-full border-t border-hairline px-3 py-2 text-left text-micro text-l3 hover:bg-hover hover:text-l1"
-              >
-                管理 MCP →
-              </button>
+                    )}
+                  </button>
+                ))}
+                {mcps.length > 0 && (
+                  <div className="px-2 py-1.5 text-micro text-l4">MCP</div>
+                )}
+                {mcps.map((mcp) => (
+                  <button
+                    key={mcp.id}
+                    type="button"
+                    onClick={() => {
+                      setOpen(false);
+                      onInsert(`使用 ${mcp.name} 这个 MCP server 提供的工具：`);
+                    }}
+                    className="flex w-full flex-col gap-0.5 rounded-md px-2 py-2 text-left hover:bg-hover"
+                  >
+                    <span className="text-xs text-l1">{mcp.name}</span>
+                    <span className="truncate font-mono text-micro text-l4">
+                      {mcp.kind === "stdio"
+                        ? `${mcp.command} ${mcp.args.join(" ")}`
+                        : mcp.url}
+                    </span>
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         </>
@@ -127,7 +112,6 @@ export default function ChatComposer({
   skills = [],
   mcps = [],
   onSend,
-  onOpenMcp,
   focusWhen = true,
   agentId,
   seedInsert,
@@ -135,6 +119,9 @@ export default function ChatComposer({
   cwdHint,
   cwdTitle,
   onChooseCwd,
+  leftExtras,
+  running,
+  onInterrupt,
 }: {
   disabled?: boolean;
   busy?: boolean;
@@ -142,7 +129,6 @@ export default function ChatComposer({
   skills?: SkillDto[];
   mcps?: McpServerDto[];
   onSend: (text: string) => Promise<string | null>;
-  onOpenMcp?: () => void;
   /** 聊天层常驻挂载仅隐藏后，可见性翻转时重新聚焦输入框（替代挂载期一次性 autofocus） */
   focusWhen?: boolean;
   /** 当前 agent id：斜杠命令面板按 agent 出命令清单 */
@@ -154,6 +140,13 @@ export default function ChatComposer({
   cwdHint?: string | null;
   cwdTitle?: string;
   onChooseCwd?: () => void;
+  /** 左下角扩展位（原聊天头部功能迁入：状态注记 / 只读分叉） */
+  leftExtras?: ReactNode;
+  /** 正在生成：发送钮本体变成「进行中」停止钮（符号），点击走 onInterrupt。
+   *  进程活着但停在提示符时不要传 true——那时要点发送，Esc 会误伤 TUI。 */
+  running?: boolean;
+  /** 暂停当前生成（往终端写 Esc——不是退出会话；输入文字后仍可用 Enter 发送） */
+  onInterrupt?: () => void;
 }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -429,7 +422,6 @@ export default function ChatComposer({
                 mcps={mcps}
                 disabled={Boolean(disabled || busy)}
                 onInsert={insertResourceText}
-                onOpenMcp={onOpenMcp}
               />
               {cwdHint && !error && !busy ? (
                 onChooseCwd ? (
@@ -455,20 +447,42 @@ export default function ChatComposer({
                   {error ?? "正在发送…"}
                 </span>
               )}
+              {leftExtras}
             </div>
-            <button
-              type="button"
-              disabled={
-                disabled ||
-                busy ||
-                (!value.trim() && attachments.length === 0)
-              }
-              onClick={() => void submit()}
-              title="Enter 发送 · Shift+Enter 换行"
-              className="inline-flex h-8 shrink-0 items-center rounded-md bg-cta px-3 text-xs text-cta-text transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {busy ? "发送中…" : "发送"}
-            </button>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {running && onInterrupt && !busy ? (
+                /* 正在生成：发送钮本体变「进行中」停止钮，点击 = 往终端发 Esc 暂停；
+                   打字中的消息仍可用 Enter 发送（submit 走键盘路径，不经此钮） */
+                <button
+                  type="button"
+                  onClick={onInterrupt}
+                  title="暂停当前生成（往终端发送 Esc；会话保留，可继续输入）"
+                  aria-label="暂停当前生成"
+                  className="inline-flex h-8 w-8 shrink-0 animate-pulse-brief items-center justify-center rounded-md bg-cta text-cta-text transition-opacity hover:opacity-90"
+                >
+                  <Square
+                    size={11}
+                    strokeWidth={0}
+                    fill="currentColor"
+                    aria-hidden="true"
+                  />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={
+                    disabled ||
+                    busy ||
+                    (!value.trim() && attachments.length === 0)
+                  }
+                  onClick={() => void submit()}
+                  title="Enter 发送 · Shift+Enter 换行"
+                  className="inline-flex h-8 shrink-0 items-center rounded-md bg-cta px-3 text-xs text-cta-text transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busy ? "发送中…" : "发送"}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>

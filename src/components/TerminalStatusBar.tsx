@@ -16,6 +16,10 @@ import type { TabStatus } from "../pages/TerminalPage";
  * 中区 = git 连体胶囊（分支/变更 + Commit & Push：AI 生成提交信息→提交并推送→Toast 预览）；
  * 右区 = 运行时长 · 本会话 token（等宽小字）。
  * 切换类控件只写 TUI 命令、不回读 CLI 内部状态——模型名按用户切的选择显示（内存态）。
+ * chat 变体（2026-09-13）：聊天页（非 peek）不再沿用「与 xterm 同底」的终端语言——
+ * 底色改涂 var(--color-canvas) 与聊天画布同源（消除两套深色相接的色差缝），
+ * 内容与输入卡同一条 max-w-4xl 中轴，模型胶囊统一成目录胶囊的灰调（蓝色强调只留给状态点）；
+ * 几何不变（32px 恒定，切层不改终端行列数），终端模式完全不动。
  */
 
 /** 状态栏配色（取自建端主题的 buildXtermTheme 结果，与终端画面同底同色） */
@@ -65,6 +69,7 @@ export default function TerminalStatusBar({
   onCwdChange,
   onTermLog,
   colors,
+  variant = "terminal",
 }: {
   /** null = 终端尚未上报（刚挂载）：显示 cwd + 未启动占位 */
   status: TabStatus | null;
@@ -91,6 +96,8 @@ export default function TerminalStatusBar({
   /** 往终端画面写一行浅灰日志（防黑盒：Commit & Push 流程的每步都回显） */
   onTermLog: (line: string) => void;
   colors: StatusBarColors;
+  /** terminal（默认）= 与 xterm 画布同底无缝卡；chat = 聊天页原生变体（画布同色 + 居中列 + 灰调胶囊） */
+  variant?: "terminal" | "chat";
 }) {
   const agentLabel = status
     ? (AGENTS.find((a) => a.id === status.agentId)?.label ?? status.agentId)
@@ -98,6 +105,9 @@ export default function TerminalStatusBar({
   const fg = colors.foreground;
   const dim = `${fg}99`; // 60% 弱化
   const faint = `${fg}66`; // 40% 最弱
+  const chat = variant === "chat";
+  // 浮层底：终端变体沿用 xterm 底色（与画面同源）；chat 变体走主题 raised 令牌（与聊天浮层同语言）
+  const floatBg = chat ? "var(--color-raised)" : colors.background;
 
   // 模型显示名：用户经状态栏切换后的内存态覆盖（CLI 内部状态 Mesa 不回读）
   const [modelOverride, setModelOverride] = useState<string | null>(null);
@@ -413,12 +423,22 @@ export default function TerminalStatusBar({
 
   return (
     <div
-      className="relative mx-2 mb-2 flex h-8 shrink-0 items-center gap-2.5 overflow-visible rounded-b-xl px-3 text-[11px] whitespace-nowrap select-none"
+      className={`relative mb-2 h-8 shrink-0 overflow-visible rounded-b-xl text-[11px] whitespace-nowrap select-none ${
+        // chat 变体通栏涂画布色（上方 ChatSurface 同为 bg-canvas，接缝消失），
+        // px-4 + 内层 max-w-4xl 与 ChatComposer 同构，内容与输入卡同一左缘；
+        // 终端变体保持 mx-2 成无缝圆角卡的下沿。内容包进内层后终端盒模型不变
+        chat ? "w-full bg-canvas px-4" : "mx-2 px-3"
+      }`}
       style={{
-        background: colors.background,
+        background: chat ? "var(--color-canvas)" : colors.background,
         color: fg,
       }}
     >
+      <div
+        className={`flex h-full min-w-0 items-center gap-2.5 ${
+          chat ? "mx-auto w-full max-w-4xl" : ""
+        }`}
+      >
       {/* 左区：状态圆点 + agent · 配置 · 模型 + 思考滑块 */}
       <span
         className="flex min-w-0 items-center gap-2 font-mono"
@@ -451,8 +471,9 @@ export default function TerminalStatusBar({
                 aria-expanded={modelMenuOpen}
                 className="rounded-full border-0 px-2 py-0.5 font-mono"
                 style={{
-                  color: colors.blue,
-                  background: `${fg}0f`,
+                  // chat 变体去掉蓝色强调：与目录胶囊同一套灰调语法（蓝色只留给状态点）
+                  color: chat ? dim : colors.blue,
+                  background: chat && modelMenuOpen ? `${fg}1a` : `${fg}0f`,
                   opacity: status?.ptyId ? 1 : 0.5,
                   cursor: status?.ptyId ? "pointer" : "default",
                 }}
@@ -468,7 +489,7 @@ export default function TerminalStatusBar({
                   <ul
                     className="absolute bottom-full left-0 z-50 mb-1 max-h-56 w-56 overflow-auto rounded-md border p-1"
                     style={{
-                      background: colors.background,
+                      background: floatBg,
                       borderColor: `${fg}33`,
                     }}
                   >
@@ -609,13 +630,13 @@ export default function TerminalStatusBar({
               className="fixed inset-0 z-40"
               onClick={() => setCwdMenuOpen(false)}
             />
-            <div
-              className="ccode-float-surface absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border p-2"
-              style={{
-                borderColor: `${fg}33`,
-                background: colors.background,
-              }}
-            >
+              <div
+                className="ccode-float-surface absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border p-2"
+                style={{
+                  borderColor: `${fg}33`,
+                  background: floatBg,
+                }}
+              >
               <div className="mb-1" style={{ color: faint }}>
                 工作目录（启动前生效，支持 ~）
               </div>
@@ -816,7 +837,7 @@ export default function TerminalStatusBar({
           <div
             className="absolute right-0 bottom-full z-50 mb-2 w-72 rounded-md border p-2 font-mono text-[11px] whitespace-normal"
             style={{
-              background: colors.background,
+              background: floatBg,
               borderColor: `${fg}33`,
               boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
             }}
@@ -824,7 +845,7 @@ export default function TerminalStatusBar({
             {/* 指向 ▾ 的 caret 小三角：旋转方块，底/右边用菜单边框色 */}
             <span
               className="absolute -bottom-[5px] right-4 block size-2 rotate-45 border-r border-b"
-              style={{ background: colors.background, borderColor: `${fg}33` }}
+              style={{ background: floatBg, borderColor: `${fg}33` }}
             />
             {(
               [
@@ -882,7 +903,7 @@ export default function TerminalStatusBar({
         <div
           className="absolute bottom-full z-50 mb-2 w-84 overflow-hidden rounded-md border p-3 pb-4 font-mono text-[11px]"
           style={{
-            background: colors.background,
+            background: floatBg,
             borderColor: `${fg}33`,
             left: 0,
             boxShadow: `0 4px 16px rgba(0,0,0,0.35), 0 0 8px ${colors.yellow}22`,
@@ -993,6 +1014,8 @@ export default function TerminalStatusBar({
       </span>
 
 
+      </div>
+
       {/* 错误 Toast：红色，4s 自动消失 / 点击关闭 */}
       {errToast && (
         <button
@@ -1000,7 +1023,7 @@ export default function TerminalStatusBar({
           onClick={() => setErrToast(null)}
           className="absolute right-2 bottom-full z-50 mb-1 block max-w-md cursor-pointer rounded-md border px-3 py-2 text-left font-mono text-[11px]"
           style={{
-            background: colors.background,
+            background: floatBg,
             borderColor: `${colors.red}66`,
             color: fg,
             boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
