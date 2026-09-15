@@ -184,7 +184,7 @@ test("用户刚提交或仍在 working 时，尾部 working 维持转圈", () =>
   );
 });
 
-test("PTY 静默：等首字保持转圈，出过字则熄灭", () => {
+test("PTY 静默：armed 回合不熄灭（思考间隙≠回合结束），未 armed 的 working 熄灭", () => {
   assert.deepEqual(
     onPtyWorkingSilence({
       prev: "working",
@@ -193,13 +193,14 @@ test("PTY 静默：等首字保持转圈，出过字则熄灭", () => {
     }),
     { attention: "working", armed: true, clearHadOutput: false },
   );
+  // 已出过字的 armed 回合同样保持：armed 只由会话层收尾/退出/下次提交清理
   assert.deepEqual(
     onPtyWorkingSilence({
       prev: "working",
       armed: true,
       hadPtyWorkingOutput: true,
     }),
-    { attention: null, armed: false, clearHadOutput: true },
+    { attention: "working", armed: true, clearHadOutput: false },
   );
   assert.deepEqual(
     onPtyWorkingSilence({

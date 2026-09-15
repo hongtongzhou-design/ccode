@@ -269,8 +269,47 @@ export default function KickoffConfirmDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId]);
 
+  // 本次思考档（2026-09-15）：开工前设起点。只有该 agent+绑定+模型有启动注入通道
+  // （combo_surface 的 injectEffortAllowed）才显示——不给用户调不了的东西；
+  // 值是「本次覆盖」，不写回绑定（改持久默认去网关库逐模型策略）。
+  // 运行中仍可在底部状态栏调（状态栏是运行层，这里是起点，数据源同是 combo）。
+  const [kickEffort, setKickEffort] = useState("");
+  const [effortInjectable, setEffortInjectable] = useState(false);
+  useEffect(() => {
+    if (!profileId || !model.trim()) {
+      setEffortInjectable(false);
+      return;
+    }
+    let stale = false;
+    invoke<{ injectEffortAllowed?: boolean }>("combo_surface", {
+      profileId,
+      model: model.trim(),
+    })
+      .then((c) => {
+        if (!stale) setEffortInjectable(c.injectEffortAllowed === true);
+      })
+      .catch(() => {
+        if (!stale) setEffortInjectable(false);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [profileId, model]);
+  // 档位来源：agent 规格的 effort 档表（claude/qwen/kimi 实证闭集）；
+  // 只有注入通道、没有原生档表的 agent（codex 配置注入）给通用三档
+  const effortLevels = useMemo(() => {
+    const spec = agents.find((a) => a.id === agentId)?.effort;
+    return spec?.levels?.length ? spec.levels : ["low", "medium", "high"];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId, agents]);
+
   const launch: KickoffLaunch | null = profileId
-    ? { agentId, profileId, model: model.trim() }
+    ? {
+        agentId,
+        profileId,
+        model: model.trim(),
+        effort: kickEffort.trim() || null,
+      }
     : null;
   const launchLine = kickoffLaunchLabel(launch, profiles, (id) =>
     AGENTS.find((a) => a.id === id)?.label ?? id,
@@ -675,6 +714,34 @@ export default function KickoffConfirmDialog({
               label="记住这次选择"
             />
           </div>
+        )}
+
+        {/* 本次思考档 + 运行权限可见性（2026-09-15）：思考档只在有注入通道时出现
+            （见上方 combo 判定）；权限不做成选项——步骤执行必然可写，边界用一句话说清 */}
+        {launch && effortInjectable && (
+          <div className="-mt-1.5 mb-3 flex items-center gap-2 text-micro">
+            <label className="flex min-w-0 items-center gap-1.5 text-l4">
+              本次思考档
+              <select
+                className="h-6 rounded-md border border-field bg-canvas px-1 text-micro text-l2 outline-none focus:border-l4"
+                value={kickEffort}
+                onChange={(e) => setKickEffort(e.target.value)}
+                title="只影响这一次运行，不改绑定的默认策略；运行中还可在底部状态栏调整"
+              >
+                <option value="">不设（用绑定默认）</option>
+                {effortLevels.map((lv) => (
+                  <option key={lv} value={lv}>
+                    {lv}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+        {launch && (
+          <p className="-mt-1 mb-3 text-micro text-l4">
+            运行权限：写步骤工作区 + 主仓 papers/（原始文献）；派生产物经评审合并进主仓
+          </p>
         )}
 
         {/* 主仓改动协同（只提醒不阻断）：想法期实验性改动留在主仓是合法的 */}

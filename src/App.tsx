@@ -256,7 +256,9 @@ function App() {
   }, [paletteOpen, setPage, toggleChromeHidden, settings]);
 
   // 通知动作：注册「去处理」按钮类型；点击后聚焦对应终端标签（通知只有「待确认」一种），
-  // 无 extra（旧通知）→ 回首页收件箱。横幅样式不显按钮（系统设置决定），正文点击走系统默认激活。
+  // 无 extra（旧通知）→ 回首页收件箱。**桌面端这是死代码**：插件桌面实现没有动作命令、
+  // show() 发完即弃——按钮与 onAction 只有移动端生效（2026-09-15 核对插件源码）。
+  // 桌面上点通知（无论正文还是横幅）= 仅激活窗口，跳转由下方「待确认提醒条」补位。
   const setFocusTabReq = useAppStore((s) => s.setFocusTabReq);
   useEffect(() => {
     let unregister: (() => void) | undefined;
@@ -305,6 +307,51 @@ function App() {
       .catch(() => {});
     return () => unregister?.();
   }, [setPage, setFocusTabReq]);
+
+  // 待确认跳转提醒条（2026-09-15）：插件桌面端的通知是 fire-and-forget——没有动作按钮、
+  // 正文点击也没有回调（registerActionTypes/onAction 仅移动端生效，桌面是死代码），
+  // 点通知只会激活窗口。改为在窗口获得焦点瞬间检查全局标签注意力：有待确认就在
+  // 右下角弹一枚可点的提醒条，点「去处理」直达对应终端标签。按待确认集合去重
+  // （全部处理完才重置），避免反复聚焦被同一件事骚扰。
+  const [confirmHint, setConfirmHint] = useState<{
+    tabId: string;
+    count: number;
+  } | null>(null);
+  const shownConfirmSigRef = useRef("");
+  useEffect(() => {
+    if (!terminalRunInputs.some((r) => r.attention === "confirm")) {
+      shownConfirmSigRef.current = "";
+    }
+  }, [terminalRunInputs]);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let timer: number | undefined;
+    void getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (!focused) return;
+        const confirms = useAppStore
+          .getState()
+          .terminalRunInputs.filter((r) => r.attention === "confirm");
+        if (confirms.length === 0) return;
+        const sig = confirms
+          .map((r) => r.tabId)
+          .sort()
+          .join("|");
+        if (sig === shownConfirmSigRef.current) return;
+        shownConfirmSigRef.current = sig;
+        setConfirmHint({ tabId: confirms[0].tabId, count: confirms.length });
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => setConfirmHint(null), 10_000);
+      })
+      .then((fn) => {
+        unlisten = () => fn();
+      })
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+      window.clearTimeout(timer);
+    };
+  }, []);
 
   // 定时雷达运行完成 → OS 通知（scheduler.rs 的 scheduler-run-done；summary 后端已脱敏）。
   // 只负责通知：工作区页 ScheduleSection 自行监听同一事件刷新列表。
@@ -853,6 +900,37 @@ function App() {
         {/* 全局确认框宿主（confirmDialog）：z-[70]，压过一切覆盖层 */}
         <ConfirmDialogHost />
         <ToastHost />
+        {/* 待确认跳转提醒条：通知正文点击无回调（桌面插件限制）的补位——
+            窗口激活时有待确认就出现在右下角，点「去处理」直达终端标签 */}
+        {confirmHint && (
+          <div className="pointer-events-none fixed bottom-5 right-5 z-[100] flex flex-col items-end">
+            <div className="pointer-events-auto flex items-center gap-2.5 rounded-lg border border-field bg-raised px-3.5 py-2.5 shadow-lg">
+              <span className="size-2 shrink-0 animate-pulse rounded-full bg-warn-text" />
+              <button
+                type="button"
+                className="min-w-0 text-left text-sm text-l1 hover:text-cta"
+                onClick={() => {
+                  setPage("terminal");
+                  setFocusTabReq(confirmHint.tabId);
+                  setConfirmHint(null);
+                }}
+              >
+                {confirmHint.count > 1
+                  ? `${confirmHint.count} 个 Agent 在等确认`
+                  : "Agent 在等确认"}
+                <span className="ml-1.5 text-micro text-l4">点此去处理</span>
+              </button>
+              <button
+                type="button"
+                aria-label="关闭提醒"
+                className="ml-1 shrink-0 rounded px-1 text-l4 hover:bg-hover hover:text-l1"
+                onClick={() => setConfirmHint(null)}
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </ErrorBoundary>
   );

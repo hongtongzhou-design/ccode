@@ -213,6 +213,9 @@ export interface PendingTerminal {
   previewRoot?: string;
   /** 对外权限政策：只讨论 / 可改这棵树。缺省 write_tree。 */
   permission?: "discuss" | "write_tree";
+  /** 开工弹层的本次思考档覆盖（2026-09-15）：随标签种子传递，launch 经
+      pty_spawn effortOverride 注入；空 = 绑定逐模型策略/端点默认 */
+  effort?: string | null;
   /** @deprecated 用 permission；true 等同 discuss */
   readonly?: boolean;
   /** 打开后切到聊天层（办公「问 AI」）；缺省沿用标签上次选择 / 默认终端 */

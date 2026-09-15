@@ -201,7 +201,7 @@ function StepperCell({
         >
           {/* 视觉圆 22px，按钮保持 28px 热区 */}
           <span
-            className={`block h-[22px] w-[22px] rounded-full transition-[filter,color,background-color] duration-300 group-hover/circle:brightness-110 ${circleClass} ${
+            className={`block h-[22px] w-[22px] rounded-full transition-[filter,color,background-color,border-color] duration-300 group-hover/circle:brightness-110 ${circleClass} ${
               active || pulsing ? "animate-pulse-brief" : ""
             } ${active ? "ring-2 ring-cta/50" : ""} ${selected ? "ring-2 ring-l1/70" : ""}`}
           />
@@ -274,8 +274,10 @@ const STEP_STATUS_LABEL: Record<StepStatusKey, string> = {
 /** 大圆步进器的圆填色：纯实心无字符，状态只靠颜色区分；进行中/检查中的脉冲用
  *  有界的 animate-pulse-brief（App.css，3 个周期后静止），不用无限 animate-pulse */
 function stepCircleClass(key: StepStatusKey): string {
-  // done 用随主题走的低饱和完成绿（--color-done），与状态 ok 绿解耦（用户反馈亮绿突兀）
-  if (key === "done") return "bg-done";
+  // done = 中性亮灰空心圆环（2026-09-15 用户拍板不要绿色）：系统语言本就是
+  // 「同一族形状，空心 → 实心表达进度」——实心留给当前/进行中，已完成是过去时
+  // 掏空降噪；环与完成段链条块同用 l2 亮灰，done 区整体统一中性，绿色全面退场
+  if (key === "done") return "border-[1.5px] border-l2 bg-transparent";
   // 阻塞用 warn 的「文字/圆点」档而非底色档：底色档在浅色主题是浅黄（#fdf1cd），
   // 铺成 22px 实心圆会在近白 canvas 上消失；且同为实心圆的 done 本就用 -text 档口径
   if (key === "blocked") return "bg-warn-text";
@@ -1797,11 +1799,12 @@ export default function ProjectGroup({
                   }
                 >
                   {/* 实心菱形终点（9px 旋转 45°），与虚线块同轴、同 6px 间隙接上链条；
-                      明暗跟随完成态：未完成与未完成链条同暗（hairline），全部完成点亮 done 绿 */}
+                      明暗跟随完成态：未完成与未完成链条同暗（hairline），全部完成点亮
+                      高对比中性色（l1）——2026-09-15 用户拍板步进器不要绿色 */}
                   <span
                     aria-hidden
                     className={`block size-[9px] rotate-45 rounded-[1px] transition-colors duration-300 ${
-                      allStepsDone ? "bg-done" : "bg-hairline"
+                      allStepsDone ? "bg-l1" : "bg-hairline"
                     }`}
                   />
                 </span>

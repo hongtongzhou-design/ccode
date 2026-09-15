@@ -1074,6 +1074,30 @@ fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, St
     port_env(w.port_base)
 }
 
+/// worktree 路径 → 主仓 papers/ 目录（codex 沙箱预授权用，2026-09-15）：
+/// 口径 C 允许 Agent 把原始文献直写主仓 papers/，但 workspace-write 沙箱只放行
+/// worktree——不预授权的话每写一篇 PDF 都要停下来等提权确认（用户实测「总是让我授权」）。
+/// 只认 active 工作区；查不到（cwd 不是注册工作区，比如讨论会话在项目根本身）返回 None。
+pub(crate) fn papers_dir_for_worktree(worktree: &str) -> Option<String> {
+    let conn = db().ok()?;
+    papers_dir_for_worktree_at(&conn, worktree)
+}
+
+pub(crate) fn papers_dir_for_worktree_at(
+    conn: &Connection,
+    worktree: &str,
+) -> Option<String> {
+    let w = query_workspaces(conn).ok()?.into_iter().find(|w| {
+        w.status == "active" && crate::paths::same_path(&w.worktree_path, worktree)
+    })?;
+    Some(
+        Path::new(&w.repo_path)
+            .join("papers")
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 // ===== 项目级脚本钩子（§6.10 阶段 B；脚本来自仓库自己的 .ccode 配置） =====
 
 #[cfg(windows)]
@@ -5079,6 +5103,17 @@ mod tests {
             repo_cache().lock().unwrap().is_none(),
             "create_workspace 成功后 list_repos 缓存必须失效"
         );
+    }
+
+    #[test]
+    fn papers_dir_for_worktree_maps_active_worktree_to_repo_papers() {
+        let Some(fx) = Fixture::new() else { return };
+        let w = create_impl(&fx.conn, &fx.ws_root, fx.repo.to_str().unwrap(), "lit").unwrap();
+        // macOS /var ↔ /private/var 符号链接：按仓库约定用 ends_with 比路径
+        let got = papers_dir_for_worktree_at(&fx.conn, &w.worktree_path).unwrap();
+        assert!(Path::new(&got).ends_with("myrepo/papers"), "got {got}");
+        // 非工作区路径（如讨论会话在项目根本身）不映射
+        assert_eq!(papers_dir_for_worktree_at(&fx.conn, fx.repo.to_str().unwrap()), None);
     }
 
     #[test]

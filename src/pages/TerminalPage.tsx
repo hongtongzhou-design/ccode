@@ -437,6 +437,7 @@ const TerminalView = memo(function TerminalView({
   initialPrompt: presetPrompt,
   readonly,
   permission,
+  effortOverride,
   submitCsiU = false,
   restored,
   stepClaimName,
@@ -500,6 +501,8 @@ const TerminalView = memo(function TerminalView({
   /** 「聊想法」只读模式：pty_spawn 透传（支持的 CLI 注入只读/计划模式参数） */
   readonly?: boolean;
   permission?: "discuss" | "write_tree";
+  /** 开工弹层的本次思考档覆盖：launch 经 pty_spawn effortOverride 注入（空 = 绑定默认） */
+  effortOverride?: string | null;
   /** 当前 Agent 的提交键是否使用 kitty CSI-u（目前 Kimi） */
   submitCsiU?: boolean;
   /** 应用重启后恢复出的占位标签；用户明确操作前不启动 PTY。 */
@@ -1882,9 +1885,14 @@ const TerminalView = memo(function TerminalView({
     unlistenRef.current = [
       await listen<string>(`pty-output-${ptyId}`, (e) => {
         term.write(e.payload);
-        // PTY 出字才续 working：用户刚提交（armed）或已经在 working。
-        // 敲键回显 / 焦点重绘（交互后 300ms 内）以及回合结束后的 TUI 残帧都不打。
+        // PTY 出字即活动：静默计时器量的是真实输出，与「这帧算不算 working」分开——
+        // 切聊天/点输入框引发的焦点重绘有 300ms 抑制窗，窗内的 TUI 重绘若不计入活动，
+        // 突发渲染间隙 ≥2s 就会在切换瞬间误熄灭 attention，且 armed 已耗尽、
+        // 后续输出再也点不亮（working 只能靠重新提交），表现为「终端还在出字、
+        // 聊天层却不显示运行中」。出字时间与 hadOutput 在 marks 判定之外先记。
         if (kind === "agent") {
+          lastOutputAtRef.current = Date.now();
+          hadPtyWorkingOutputRef.current = true;
           setAttention((prev) => {
             if (
               !ptyOutputMarksWorking({
@@ -1895,8 +1903,6 @@ const TerminalView = memo(function TerminalView({
             ) {
               return prev;
             }
-            lastOutputAtRef.current = Date.now();
-            hadPtyWorkingOutputRef.current = true;
             return "working";
           });
         }
@@ -2533,6 +2539,8 @@ const TerminalView = memo(function TerminalView({
         permission:
           permission ??
           (options?.readonly ?? readonly ? "discuss" : "write_tree"),
+        // 开工弹层的本次思考档覆盖（空 = 绑定逐模型策略）；后端在读绑定策略处用本值优先
+        effortOverride: effortOverride?.trim() || null,
         reuseKey: reuseKey ?? null,
         runId: runId ?? initialRunId ?? null,
         taskId: taskId ?? null,
@@ -3506,6 +3514,9 @@ interface Tab {
   /** 「聊想法」只读模式标签：pty_spawn 注入只读/计划模式参数（不进持久化白名单） */
   readonly?: boolean;
   permission?: "discuss" | "write_tree";
+  /** 开工弹层的本次思考档覆盖（不进持久化白名单）：launch 经 pty_spawn
+      effortOverride 注入；空 = 绑定逐模型策略/端点默认 */
+  effort?: string | null;
   /** 分叉来源，仅用于解除只读时提示原会话是否仍在运行。 */
   forkSource?: { agent: string; sessionId: string };
   /** 应用重启后恢复出的元数据占位标签。 */
@@ -4425,6 +4436,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       /** 「聊想法」只读模式：pty_spawn 透传，支持的 CLI 注入只读/计划模式参数 */
       readonly?: boolean;
       permission?: "discuss" | "write_tree";
+      effort?: string | null;
       forkSource?: { agent: string; sessionId: string };
       /** 复用键（pendingTerminal.reuseKey 透传）：重复入口切标签而不是新开 */
       reuseKey?: string;
@@ -4450,6 +4462,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         initialPrompt: init?.initialPrompt,
         readonly: init?.readonly,
         permission: init?.permission,
+        effort: init?.effort,
         forkSource: init?.forkSource,
         reuseKey: init?.reuseKey,
         stepName: init?.stepName,
@@ -5940,6 +5953,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     ? "write_tree"
                     : t.permission ?? (t.readonly ? "discuss" : "write_tree")
                 }
+                effortOverride={t.effort ?? undefined}
                 submitCsiU={
                   agents.find(
                     (a) => a.id === (statuses[t.id]?.agentId ?? t.initialAgentId),

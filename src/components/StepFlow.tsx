@@ -528,7 +528,9 @@ export default function StepFlow({
   function icon(node: StepFlowNode): { text: string; cls: string } {
     const n = mainOrder.get(node.key);
     const num = n ? "①②③④⑤⑥⑦⑧⑨"[n - 1] ?? String(n) : "○";
-    if (node.done) return { text: "✓", cls: "text-done" };
+    // 完成态用实心圆（done 色圆点，渲染在下方 icon span 分支）——绿 ✓ 在一列圆点里
+    // 是异类字形，且 ok-text 亮绿在暗色主题下发飘（用户实测「不好看」）
+    if (node.done) return { text: "", cls: "is-done" };
     if (node.key === flow.currentKey) return { text: num, cls: "text-cta" };
     return { text: num, cls: "text-l4" };
   }
@@ -696,8 +698,12 @@ export default function StepFlow({
               ? // 当前节点只在左侧立一道竖线，不给整块刷底色：
                 // 「定方向」内容高，整块 bg-hover 会变成一大片色板，把主动作「开始」压下去。
                 // 竖线走绝对定位压在**序号那一列**（left-[7px]，与 StepperChain 的连接线同轴），
-                // 用 border-l 会画在行最左，与序号差 7px 对不上（用户实测「框线没对上」）
-                "relative pl-1.5 before:absolute before:bottom-1 before:left-[7px] before:top-3 before:w-0.5 before:bg-cta before:content-['']"
+                // 用 border-l 会画在行最左，与序号差 7px 对不上（用户实测「框线没对上」）。
+                // 起点 top-[22px] 对齐序号圆心下方：圆圈字形（①②）在 20px 行框里只占中部，
+                // 固定 top-3（12px）会冒到字形顶上方（用户实测「序号上方多出一段」）；
+                // 22px 在紧凑行（无按钮）落在序号正下方、加高行（按钮撑到 28px+）落在圆心附近，
+                // 两种行高都不会越过字形顶
+                "relative pl-1.5 before:absolute before:bottom-1 before:left-[7px] before:top-[22px] before:w-0.5 before:bg-cta before:content-['']"
               : "pl-1.5"
         } ${
           // 还轮不到（after 档且 agent 未产出/未跑完）：整行压暗，不写「等 agent」那种话
@@ -712,13 +718,21 @@ export default function StepFlow({
         <div className="flex items-center gap-2">
           {/* 人工事项行：复选框本身就是状态 + 控件，再画一个 ✓ 是同一件事说两遍
               （用户实测：一行两个勾）。这里只占位保持与主干节点同列对齐 */}
-          <span
-            className={`ccode-well relative z-10 w-4 shrink-0 text-center text-sm ${
-              node.kind === "human" ? "" : ic.cls
-            }`}
-          >
-            {node.kind === "human" ? "" : ic.text}
-          </span>
+          {node.kind !== "human" && ic.cls === "is-done" ? (
+            /* 完成态：中性亮灰空心小圆环——与大圆步进器同语言（实心=进行中、空心=已完成），
+               与完成段链条同款 l2 亮灰；①②③ 也是空心圆族（2026-09-15 用户拍板不要绿色） */
+            <span className="ccode-well relative z-10 flex w-4 shrink-0 items-center justify-center">
+              <span className="block size-3 rounded-full border-[1.5px] border-l2" />
+            </span>
+          ) : (
+            <span
+              className={`ccode-well relative z-10 w-4 shrink-0 text-center text-sm ${
+                node.kind === "human" ? "" : ic.cls
+              }`}
+            >
+              {node.kind === "human" ? "" : ic.text}
+            </span>
+          )}
           {node.kind === "human" ? (
             <Checkbox
               className="shrink-0"

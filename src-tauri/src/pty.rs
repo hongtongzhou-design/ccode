@@ -17,7 +17,10 @@ const BACKLOG_CAP: usize = 1024 * 1024;
 /// 可见时合帧缓冲上限（256 KB）：超限无视帧周期立即 flush。
 /// 从 4 MB 收紧：高速输出下更早 flush，pending 不会在大块场景里堆到 MB 级
 const PENDING_CAP: usize = 256 * 1024;
-const TRUNC_MARK: &str = "[…输出过多已截断]\n";
+/// backlog 截断标记：措辞必须写明是「后台期间的画面回放」被截断——
+/// 用户实测把「输出过多已截断」误读成「我的输入被截断」（2026-09-15）。
+/// 会话正文与聊天层始终有完整记录，截的只是隐藏标签的终端画面缓冲。
+const TRUNC_MARK: &str = "[…后台期间输出过多，较早画面未保留；完整内容见会话记录]\n";
 /// 子进程开启 bracketed paste 模式（DECSET 2004）时输出的序列
 const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
 
@@ -518,11 +521,22 @@ pub fn pty_spawn(
     run_id: Option<String>,
     // 对外政策名；缺省时回落 readonly 布尔（旧启动入口）。
     permission: Option<String>,
+    // 开工弹层的本次思考档覆盖（2026-09-15）：非空时盖过绑定逐模型策略，
+    // 只影响本次进程、不写回绑定；后续 launch_plan 照常按 policy 注入
+    effort_override: Option<String>,
     // 已由任务入口创建的 Run 所属 Task。
     task_id: Option<String>,
 ) -> Result<SpawnResult, String> {
     let selected = model.filter(|m| !m.trim().is_empty());
     let mut profile = store.get_with_model(&profile_id, selected.as_deref())?;
+    if let Some(effort) = effort_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        // 本次覆盖优先于绑定逐模型策略（弹层是一次性决策点；改持久默认去网关库）
+        profile.request_policy.reasoning_effort = Some(effort.to_string());
+    }
     if profile.agent != agent_id {
         return Err("profile 与所选 agent 不匹配".into());
     }
@@ -544,7 +558,20 @@ pub fn pty_spawn(
         Some(_) => None,
         None => initial_prompt.as_deref(),
     };
-    let plan = agents::launch_plan_with_prompt(&profile, key, model.as_deref(), prompt);
+    let mut plan = agents::launch_plan_with_prompt(&profile, key, model.as_deref(), prompt);
+    // 口径 C：原始文献（PDF/导入）允许直写主仓 papers/——从步骤工作区启动的 codex
+    // 把该目录预授权进 workspace-write 沙箱（sandbox_workspace_write.writable_roots），
+    // 免得每写一篇 PDF 都停下来等提权确认（2026-09-15 用户实测「总是让我授权」）。
+    // 只加 papers/ 子目录：派生产物仍必须走工作区 + 评审合并，不开放整个主仓；
+    // TOML 基本字符串里 Windows 反斜杠要转义
+    if agent_id == "codex" {
+        if let Some(papers) = crate::workspaces::papers_dir_for_worktree(&cwd) {
+            let escaped = papers.replace('\\', "\\\\");
+            plan.args.push("-c".into());
+            plan.args
+                .push(format!(r#"sandbox_workspace_write.writable_roots=["{escaped}"]"#));
+        }
+    }
     // 恢复模式：hint = 被恢复的会话；普通模式：claude/qwen 生成新 id 固定文件名
     let session_hint = match &resume_session_id {
         Some(sid) => Some(sid.clone()),

@@ -9,6 +9,9 @@ export interface KickoffLaunch {
   agentId: string;
   profileId: string;
   model: string;
+  /** 本次思考档覆盖（2026-09-15）：空 = 用绑定逐模型策略/端点默认；
+   *  非空经 pty_spawn 的 effortOverride 注入，不写回绑定 */
+  effort?: string | null;
 }
 
 export function pickKickoffLaunch(

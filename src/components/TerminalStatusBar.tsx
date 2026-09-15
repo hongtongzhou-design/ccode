@@ -405,9 +405,13 @@ export default function TerminalStatusBar({
             : "已退出";
 
   const hasGit = !!(git?.isRepo && (git.files.length > 0 || git.ahead > 0));
-  const canCommitPush = !!git?.isRepo && git.files.length > 0;
+  // Agent 还在本标签干活时禁用提交段（与改动面板 running === null 门控同口径）：
+  // 中途提交会把半成品存进历史，还可能与 Agent 自己的收尾提交相撞；
+  // 此前只看「有没有改动」，Agent 工作中按钮照常亮着（用户实测误以为「可提交」）
+  const agentBusy = status?.running === true;
+  const hasCommittable = !!git?.isRepo && git.files.length > 0;
   // 无未提交改动但有未推送提交时，右段退化为纯推送（同改动面板「保存并推送」的推送半段）
-  const canPushOnly = !canCommitPush && !!git?.isRepo && git.ahead > 0;
+  const canPushOnly = !hasCommittable && !!git?.isRepo && git.ahead > 0;
   const cwdRaw = status?.cwd ?? fallbackCwd;
   const cwdBase =
     cwdRaw.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? cwdRaw;
@@ -730,9 +734,10 @@ export default function TerminalStatusBar({
               </span>
             )}
           </button>
-          {canCommitPush && (
+          {hasCommittable && (
             <>
-              {/* 分割按钮主区：随状态机换文案/配色；generating 时点击 = 取消（同 Esc） */}
+              {/* 分割按钮主区：随状态机换文案/配色；generating 时点击 = 取消（同 Esc）；
+                  Agent 还在干活时禁用——中途提交会存下半成品（见上方 agentBusy 注释） */}
               <button
                 type="button"
                 onClick={() =>
@@ -740,15 +745,17 @@ export default function TerminalStatusBar({
                     ? reset()
                     : void startGenerate()
                 }
-                disabled={phase === "pushing"}
+                disabled={phase === "pushing" || agentBusy}
                 title={
-                  phase === "idle"
-                    ? "AI 生成提交信息 → 预览倒计时 → 自动提交推送（Esc 随时取消）"
-                    : phase === "generating"
-                      ? "生成中…点击或 Esc 取消"
-                      : phase === "review"
-                        ? "点击停止自动提交（信息留在预览里）"
-                        : undefined
+                  agentBusy
+                    ? "Agent 还在工作；完成后再来保存——中途提交会把半成品存进历史"
+                    : phase === "idle"
+                      ? "AI 生成提交信息 → 预览倒计时 → 自动提交推送（Esc 随时取消）"
+                      : phase === "generating"
+                        ? "生成中…点击或 Esc 取消"
+                        : phase === "review"
+                          ? "点击停止自动提交（信息留在预览里）"
+                          : undefined
                 }
                 className="flex min-w-0 cursor-pointer items-center gap-1 border-0 px-2.5 py-1 font-mono font-medium disabled:cursor-wait"
                 style={{
@@ -809,7 +816,7 @@ export default function TerminalStatusBar({
               <button
                 type="button"
                 onClick={() => setSplitOpen((v) => !v)}
-                disabled={phase !== "idle"}
+                disabled={phase !== "idle" || agentBusy}
                 title="Commit & Push 设置"
                 aria-expanded={splitOpen}
                 className="flex cursor-pointer items-center border-0 px-1.5 font-mono disabled:opacity-50"

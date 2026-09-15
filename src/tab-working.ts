@@ -71,8 +71,11 @@ export function applyTailAttention(input: {
   return { attention: null, armed: input.armed };
 }
 
-/** 生成中静默：还在等首个输出则保持；已经出过字则熄灭，防止会话文件 working 把圆点回来。
- *  启动注入的首轮（pendingReply）TUI 开屏也算出字，但不能据此熄灭——模型还在想。 */
+/** 生成中静默：armed 回合不因静默熄灭——静默 ≠ 回合结束，推理模型的思考间隙普遍
+ *  超过数秒；此前 2s 静默即熄灭且 armed 一并耗尽，后续输出再也点不亮 working
+ *  （终端还在出字、标签与聊天层却全程无运行态，2026-09-15 实测）。armed 只由
+ *  会话层收尾清（settled/confirm）、退出或下一次提交重置；未 armed 的 working
+ *  保持 2s 静默熄灭（无回合语义的兜底）。 */
 export function onPtyWorkingSilence(input: {
   prev: TabAttention;
   armed: boolean;
@@ -86,7 +89,7 @@ export function onPtyWorkingSilence(input: {
       clearHadOutput: false,
     };
   }
-  if (input.armed && (!input.hadPtyWorkingOutput || input.pendingReply)) {
+  if (input.armed) {
     return { attention: "working", armed: true, clearHadOutput: false };
   }
   return { attention: null, armed: false, clearHadOutput: true };

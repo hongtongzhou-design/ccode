@@ -243,6 +243,9 @@ export async function buildWorkspaceTerminalRequest(
     agentId: resume?.agentId ?? opts?.launch?.agentId ?? last.agentId,
     profileId: resume ? undefined : (opts?.launch?.profileId ?? last.profileId),
     model: resume ? undefined : (opts?.launch?.model ?? last.model),
+    // 开工弹层的本次思考档覆盖（空 = 绑定默认）：随标签种子传递，launch 时经
+    // pty_spawn effortOverride 注入，不写回绑定
+    effort: opts?.launch?.effort ?? undefined,
     resume: resume ?? undefined,
     initialPrompt,
     autoStart: Boolean(opts?.autoStart && (opts.launch?.profileId || last.profileId)),
