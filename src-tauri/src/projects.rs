@@ -743,7 +743,8 @@ fn cleanup_project_db_traces(
 
 /// 目录已不在磁盘上时的降级清理：摘注册记录 + 清工作区行（只清库不动磁盘）+
 /// 人工事项/卡片勾选痕迹。定时任务由 remove_project_at 顺带清。
-/// 目录都没了，worktree/分支没有可操作对象，只能清库——磁盘上没有 Mesa 文件可删。
+/// 只在 fs::canonicalize 报 NotFound 时才进这条路——目录都没了，worktree/分支没有可操作
+/// 对象，只能清库。权限/IO 错误由调用方报错，不误判成「目录不在」（磁盘上可能还有文件）。
 fn cleanup_records_for_missing_dir(conn: &Connection, path: &Path) -> Result<String, String> {
     // 工作区行按 repo_path 匹配删除。workspaces_of_repo 对缺失目录用原样路径比对，
     // 与落库时的 canonical_key 口径一致（canonicalize 失败才回落原样）。
@@ -774,7 +775,11 @@ fn cleanup_records_for_missing_dir(conn: &Connection, path: &Path) -> Result<Str
 fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, String> {
     let dir = match fs::canonicalize(path) {
         Ok(d) => d,
-        Err(_) => return cleanup_records_for_missing_dir(conn, path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return cleanup_records_for_missing_dir(conn, path);
+        }
+        // 权限不足/IO 错误时磁盘上可能仍有文件，按「目录不在」降级会留孤儿数据
+        Err(e) => return Err(format!("无法访问项目目录（未做清理）: {e}")),
     };
     if !dir.is_dir() {
         return Err("目标不是目录，拒绝删除".to_string());
@@ -815,7 +820,11 @@ fn delete_project_dir_impl(conn: &Connection, path: &Path) -> Result<String, Str
 fn purge_project_traces_impl(conn: &Connection, path: &Path) -> Result<String, String> {
     let dir = match fs::canonicalize(path) {
         Ok(d) => d,
-        Err(_) => return cleanup_records_for_missing_dir(conn, path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return cleanup_records_for_missing_dir(conn, path);
+        }
+        // 权限不足/IO 错误时磁盘上可能仍有痕迹，按「目录不在」降级会留孤儿数据
+        Err(e) => return Err(format!("无法访问项目目录（未做清理）: {e}")),
     };
     if !dir.is_dir() {
         return Err("目标不是目录，拒绝操作".to_string());
@@ -3375,7 +3384,9 @@ pub async fn write_task_draft(
 // ===== 示例课题（首启引导最小版落地，§11.4 backlog） =====
 // 在「文档/Ccode 示例课题」生成带演示数据的完整项目：目录骨架、程序生成的一页示例 PDF、
 // references.bib、README、英文综述五步流水线档案卡，然后 git 初始化并注册。
-// 幂等：已注册直接返回现有 project；目录已存在但未注册时只注册，磁盘内容一律不动。
+// 幂等：已注册直接返回现有 project（进行中不覆盖）。
+// 目录还在但未注册（删除项目目录后废纸篓/iCloud 还原、或只摘了注册）：
+// 档案卡按当前英文综述模板重写，缺的演示文件才补，已有笔记/PDF/README 不动。
 
 const DEMO_DIR_NAME: &str = "Ccode 示例课题";
 const DEMO_PROJECT_NAME: &str = "示例课题（演示）";
@@ -3580,8 +3591,37 @@ const DEMO_STEP_DRAFT: &str = "结论：先精读演示里这一篇 LEADER 试�
 - 下一步大圆是「综述大纲」。\n\n\
 —— 这是 Mesa 预置的示范草稿。你自己的草稿由「评审沉淀 / ◈ 提炼接力」追加到这里（.ccode/drafts/）。";
 
+fn write_if_missing(path: &Path, contents: &str) -> Result<(), String> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
+    }
+    crate::profiles::atomic_write(path, contents)
+}
+
+/// 档案卡始终写成当前英文综述模板；演示 PDF/清单/笔记仅在缺失时补，不覆盖已有文件。
+fn refresh_demo_content(dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir.join("papers")).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
+    fs::create_dir_all(dir.join("notes")).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
+    let pdf = dir.join(DEMO_PDF_REL);
+    if !pdf.exists() {
+        fs::write(&pdf, build_demo_pdf()).map_err(|e| format!("写入示例 PDF 失败: {e}"))?;
+    }
+    write_if_missing(&dir.join("papers/included.md"), DEMO_INCLUDED)?;
+    write_if_missing(&dir.join("papers/included.json"), DEMO_INCLUDED_JSON)?;
+    write_if_missing(&dir.join("papers/screening.md"), DEMO_SCREENING)?;
+    write_if_missing(&dir.join("papers/to-fetch.md"), DEMO_TO_FETCH)?;
+    write_if_missing(&dir.join("papers/to-fetch.ris"), DEMO_TO_FETCH_RIS)?;
+    write_if_missing(&dir.join("references.bib"), DEMO_BIB)?;
+    write_if_missing(&dir.join("README.md"), DEMO_README)?;
+    write_config_at(dir, &demo_project_config())?;
+    Ok(())
+}
+
 /// 预置演示任务卡 + 第一步示范任务书草稿（best-effort：播种失败不阻断示例课题创建；
-/// 幂等由 create_demo_at 顶部的早退保证——已注册直接返回、已存在目录只注册不补建）。
+/// 已注册早退；未注册重建时若已有卡片则不重复播种）。
 fn seed_demo_task_card(root: &Path) -> Result<(), String> {
     create_task_card_at(root, "示例：开读这一篇", Some("文献精读与笔记"), None)?;
     append_step_draft_at(
@@ -3625,29 +3665,25 @@ fn create_demo_at(base: &Path, conn: &Connection) -> Result<ProjectDto, String> 
     if dir.is_dir() {
         let key = canonical_key(&dir);
         if let Some(existing) = demo_registered(conn, &key)? {
-            return Ok(existing); // 幂等：重复点不重复建
+            return Ok(existing); // 幂等：进行中的演示不覆盖
         }
-        // 目录在但未注册：只注册，目录里可能已有用户改过的内容，一律不动
-        return register_at(conn, &dir, DEMO_PROJECT_NAME, &crate::sessions::now_iso());
+        // 未注册但目录还在：按当前模板重写档案卡（删除后再创建要拿到新流程）。
+        refresh_demo_content(&dir)?;
+        ensure_git_at(&dir)?;
+        let _ = commit_bootstrap_at(&dir);
+        let _ = commit_demo_seed_at(&dir);
+        let project = register_at(conn, &dir, DEMO_PROJECT_NAME, &crate::sessions::now_iso())?;
+        if task_cards_at(&dir).is_empty() {
+            let _ = seed_demo_task_card(&dir);
+        }
+        return Ok(project);
     }
-    fs::create_dir_all(dir.join("papers")).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
-    fs::create_dir_all(dir.join("notes")).map_err(|e| format!("创建示例课题目录失败: {e}"))?;
-    fs::write(dir.join(DEMO_PDF_REL), build_demo_pdf())
-        .map_err(|e| format!("写入示例 PDF 失败: {e}"))?;
-    crate::profiles::atomic_write(&dir.join("papers/included.md"), DEMO_INCLUDED)?;
-    crate::profiles::atomic_write(&dir.join("papers/included.json"), DEMO_INCLUDED_JSON)?;
-    crate::profiles::atomic_write(&dir.join("papers/screening.md"), DEMO_SCREENING)?;
-    crate::profiles::atomic_write(&dir.join("papers/to-fetch.md"), DEMO_TO_FETCH)?;
-    crate::profiles::atomic_write(&dir.join("papers/to-fetch.ris"), DEMO_TO_FETCH_RIS)?;
-    crate::profiles::atomic_write(&dir.join("references.bib"), DEMO_BIB)?;
-    crate::profiles::atomic_write(&dir.join("README.md"), DEMO_README)?;
-    write_config_at(&dir, &demo_project_config())?;
+    refresh_demo_content(&dir)?;
     ensure_git_at(&dir)?;
     // best-effort：自动提交失败不阻断演示课题创建（档案卡未提交只影响后续评审合并提示）
     let _ = commit_bootstrap_at(&dir);
     let _ = commit_demo_seed_at(&dir);
     let project = register_at(conn, &dir, DEMO_PROJECT_NAME, &crate::sessions::now_iso())?;
-    // 演示任务卡 + 示范定稿简报（best-effort：播种失败不阻断创建）
     let _ = seed_demo_task_card(&dir);
     Ok(project)
 }
@@ -6434,19 +6470,33 @@ resources = ["ghost.pdf"]
             "幂等路径不得重复播种演示卡片"
         );
 
-        // 目录已存在但未注册：只注册，不补建任何文件
+        // 目录已存在但未注册：档案卡跟当前模板，缺的演示文件才补，已有 README 不动
         remove_project_at(&conn, &root).unwrap();
         fs::remove_file(root.join("references.bib")).unwrap();
+        write(
+            &config_path(&root),
+            "topic = \"旧演示\"\n[[steps]]\nname = \"旧步骤\"\nworkspace_name = \"old\"\nbrief = \"过期简报\"\n",
+        );
         let p3 = create_demo_at(&base, &conn).unwrap();
         assert_eq!(p3.path, p.path);
         assert!(
-            !root.join("references.bib").exists(),
-            "已存在目录只注册，不回补文件"
+            root.join("references.bib").exists(),
+            "缺的演示文件应补回"
         );
+        assert_eq!(
+            fs::read_to_string(root.join("README.md")).unwrap(),
+            "user edit",
+            "已有 README 不得覆盖"
+        );
+        let text = fs::read_to_string(config_path(&root)).unwrap();
+        let (config, _) = parse_config(&text);
+        assert_eq!(config.steps.len(), canon.steps.len());
+        assert_eq!(config.steps[0].brief, canon.steps[0].brief);
+        assert!(config.steps[0].seed_complete);
         assert_eq!(
             task_cards_at(&root).len(),
             1,
-            "只注册路径不得重播种演示卡片"
+            "已有演示卡片不得重复播种"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

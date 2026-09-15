@@ -249,6 +249,14 @@ pub async fn fetch_models(
                     crate::model_registry::record_relay_models(&body, resolved_gateway.as_deref());
                 let fetched_at = chrono::Local::now().to_rfc3339();
                 let models = parse_model_ids(&body);
+                if models.is_empty() {
+                    // HTTP 200 包着错误体（智谱 api/v1 风格）：当失败处理、带出真实原因，
+                    // 继续试下一个候选地址；真返回空列表的网关不受影响（无错误标记）
+                    if let Some(msg) = gateway_error_envelope(&body) {
+                        last_err = redact_fetch_error(&format!("{url}：{msg}"), key.as_deref());
+                        continue;
+                    }
+                }
                 model_list_cache_put(
                     &cache_key,
                     ModelListCacheEntry {
@@ -301,6 +309,31 @@ fn body_preview(text: &str) -> String {
     } else {
         redacted
     }
+}
+
+/// 智谱 api/v1 等网关把业务错误包成 HTTP 200（{"code":1001,"msg":"…","success":false}
+/// 或 {"error":{"code":"1001","message":"…"}}）：这不是模型列表。解析结果为空时按错误
+/// 处理并把原因带给前端，避免「成功但 0 个模型」误导排查方向（2026-09-15 实证）。
+fn gateway_error_envelope(v: &serde_json::Value) -> Option<String> {
+    let scalar = |val: Option<&serde_json::Value>| match val {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    };
+    if v.get("success").and_then(|s| s.as_bool()) == Some(false) {
+        let code = scalar(v.get("code")).unwrap_or_default();
+        let msg = scalar(v.get("msg")).unwrap_or_default();
+        return Some(format!("网关返回错误 {code}：{msg}"));
+    }
+    // OpenAI 风格错误对象：仅当响应里没有 data/models 列表字段时判定（正常列表不带顶层 error）
+    if !v.is_array() && v.get("data").is_none() && v.get("models").is_none() {
+        if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+            let code = scalar(err.get("code")).unwrap_or_default();
+            let msg = scalar(err.get("message")).unwrap_or_default();
+            return Some(format!("网关返回错误 {code}：{msg}"));
+        }
+    }
+    None
 }
 
 fn push_unique(out: &mut Vec<String>, s: &str) {
@@ -466,6 +499,40 @@ mod tests {
         assert_eq!(
             body_preview("<html>\n  <body>oops</body>\n</html>"),
             "<html> <body>oops</body> </html>"
+        );
+    }
+
+    #[test]
+    fn detects_zhipu_style_200_error_envelopes() {
+        // api/v1 风格：HTTP 200 包 success:false + code/msg（无 key 探针实测形状）
+        let v = json!({"code": 1001, "msg": "Header中未收到Authorization参数", "success": false});
+        assert_eq!(
+            gateway_error_envelope(&v).as_deref(),
+            Some("网关返回错误 1001：Header中未收到Authorization参数")
+        );
+        // error 对象风格（code 允许字符串）
+        let v = json!({"error": {"code": "500", "message": "404 NOT_FOUND"}});
+        assert_eq!(
+            gateway_error_envelope(&v).as_deref(),
+            Some("网关返回错误 500：404 NOT_FOUND")
+        );
+    }
+
+    #[test]
+    fn normal_list_responses_are_not_error_envelopes() {
+        assert_eq!(
+            gateway_error_envelope(&json!({"object": "list", "data": []})),
+            None
+        );
+        assert_eq!(
+            gateway_error_envelope(&json!({"data": [{"id": "glm-4.7"}], "error": null})),
+            None
+        );
+        assert_eq!(gateway_error_envelope(&json!(["glm-4.7"])), None);
+        // success:true 是正常业务响应，不是错误
+        assert_eq!(
+            gateway_error_envelope(&json!({"code": 200, "msg": "ok", "success": true})),
+            None
         );
     }
 

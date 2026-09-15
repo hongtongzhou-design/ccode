@@ -5,11 +5,13 @@
 //! - 只写用户级配置（项目级在 claude/qwen/cursor/codebuddy 有审批闸，gemini/qwen 未信任目录忽略）；
 //! - 目标文件多是混合状态文件，一律读-改-写一个键/段 + 写前备份 + 原子写，绝不整文件覆盖；
 //! - 密钥不落明文：清单里 env/header 值允许 `$VAR`/`${VAR}` 引用形式，映射时转各家的间接引用字段；
+//!   引用的值可存 mcp-keys.json（0600），启动与体检时注入，清单不落明文；
 //! - 企业管理层存在即拒写（claude managed-mcp.json / opencode managed 目录）。
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 // ===== 统一清单模型 =====
 
@@ -19,6 +21,15 @@ pub struct McpEnvPair {
     pub key: String,
     /// 字面值，或 `$VAR` / `${VAR}` 引用环境变量（分发时按各家语法转写，不落明文密钥）
     pub value: String,
+}
+
+/// 已存 MCP 密钥的展示用尾号（`list_mcp_env_secrets`）；不含密钥本体
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpEnvSecretHintDto {
+    pub name: String,
+    /// 如 `···Y41`
+    pub hint: String,
 }
 
 /// 最近一次连通性体检的沉淀（随清单落盘；DTO 直出前端，error 文案同 check_mcp_server 口径）
@@ -131,6 +142,205 @@ fn atomic_write_0600(path: &Path, text: &str) -> Result<(), String> {
             .map_err(|e| format!("设置权限失败: {e}"))?;
     }
     std::fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+}
+
+// ===== MCP 密钥（mcp-keys.json）：表单填写，清单只留 ${VAR}，启动/体检时注入 =====
+
+static MCP_KEYS_MUTEX: Mutex<()> = Mutex::new(());
+
+struct McpKeysGuard {
+    _process: std::sync::MutexGuard<'static, ()>,
+    _file: Option<std::fs::File>,
+}
+
+fn mcp_keys_path() -> Result<PathBuf, String> {
+    Ok(store_path()?.with_file_name("mcp-keys.json"))
+}
+
+fn mcp_keys_guard() -> Result<McpKeysGuard, String> {
+    let process = MCP_KEYS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(test)]
+    if TEST_STORE.with(|c| c.borrow().is_some()) {
+        return Ok(McpKeysGuard {
+            _process: process,
+            _file: None,
+        });
+    }
+    let file = crate::storage::config_lock("mcp-keys")?;
+    Ok(McpKeysGuard {
+        _process: process,
+        _file: Some(file),
+    })
+}
+
+fn read_mcp_keys_unlocked() -> Result<HashMap<String, String>, String> {
+    #[cfg(test)]
+    if TEST_STORE.with(|c| c.borrow().is_none()) {
+        return Ok(HashMap::new());
+    }
+    let path = mcp_keys_path()?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(format!("读取 MCP 密钥失败: {e}")),
+    };
+    serde_json::from_str(&text).map_err(|e| {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = path.with_file_name(format!("mcp-keys.json.corrupt-{ts}"));
+        match crate::storage::atomic_write(&backup, text.as_bytes(), true) {
+            Ok(()) => format!(
+                "mcp-keys.json 已损坏，原件已保留并备份为 {}: {e}",
+                backup.display()
+            ),
+            Err(error) => format!("mcp-keys.json 已损坏，原件已保留；备份失败：{error}: {e}"),
+        }
+    })
+}
+
+fn write_mcp_keys_unlocked(keys: &HashMap<String, String>) -> Result<(), String> {
+    #[cfg(test)]
+    if TEST_STORE.with(|c| c.borrow().is_none()) {
+        return Err("测试写入 mcp-keys 必须先设 TEST_STORE".into());
+    }
+    let path = mcp_keys_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    }
+    let text = serde_json::to_string_pretty(keys).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write(&path, text.as_bytes(), true)
+}
+
+fn read_mcp_keys() -> Result<HashMap<String, String>, String> {
+    let _g = mcp_keys_guard()?;
+    read_mcp_keys_unlocked()
+}
+
+fn merge_mcp_keys(updates: HashMap<String, String>) -> Result<(), String> {
+    let _g = mcp_keys_guard()?;
+    let mut keys = read_mcp_keys_unlocked()?;
+    for (name, value) in updates {
+        validate_mcp_secret_name(&name)?;
+        if value.is_empty() {
+            continue;
+        }
+        keys.insert(name, value);
+    }
+    write_mcp_keys_unlocked(&keys)
+}
+
+fn valid_posix_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// 把密钥本体当成了变量名（用户把 ak_… 填进 `${}`）
+fn env_name_looks_like_secret(name: &str) -> bool {
+    if crate::sessions::common_secret_token(name).is_some() {
+        return true;
+    }
+    let n = name.trim();
+    n.len() >= 16
+        && n.starts_with("ak_")
+        && n[3..].chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn validate_mcp_secret_name(name: &str) -> Result<(), String> {
+    if !valid_posix_env_name(name) {
+        return Err(format!(
+            "环境变量名不合法：{name}（只接受字母/数字/下划线，且不能以数字开头）"
+        ));
+    }
+    if env_name_looks_like_secret(name) {
+        return Err(
+            "变量名看起来是密钥本身。请把密钥填到密钥栏，引用写成 ${VAR} 这种名字（不要把密钥写进变量名）"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn secret_hint(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() < 4 {
+        return "已保存".into();
+    }
+    format!(
+        "···{}",
+        chars[chars.len() - 4..].iter().collect::<String>()
+    )
+}
+
+/// 引用里误把密钥当变量名：Consensus 的 Authorization Bearer 自动改回
+/// `${CONSENSUS_API_KEY}` 并把密钥收进 mcp-keys；其他条目明确报错。
+fn rewrite_pasted_secret_refs(
+    server: &mut McpServerDto,
+    captured: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    for pair in server.env.iter_mut().chain(server.headers.iter_mut()) {
+        let refs = extract_env_refs(&pair.value);
+        for name in refs {
+            if !env_name_looks_like_secret(&name) {
+                continue;
+            }
+            let is_consensus = server.name.eq_ignore_ascii_case("consensus");
+            let is_auth = pair.key.eq_ignore_ascii_case("authorization");
+            let is_bearer = pair
+                .value
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("bearer ");
+            if is_consensus && is_auth && is_bearer {
+                captured
+                    .entry("CONSENSUS_API_KEY".into())
+                    .or_insert(name.clone());
+                pair.value = "Bearer ${CONSENSUS_API_KEY}".into();
+                continue;
+            }
+            return Err(format!(
+                "「{}」把密钥当成了环境变量名。请把密钥填到密钥栏，引用写成 ${{VAR}}（变量名不是密钥本身）",
+                pair.key
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 解析 MCP 引用：先查 mcp-keys.json，再查进程环境。空值算未设置。
+fn resolve_env_value(name: &str) -> Option<String> {
+    if let Ok(keys) = read_mcp_keys() {
+        if let Some(v) = keys.get(name) {
+            if !v.is_empty() {
+                return Some(v.clone());
+            }
+        }
+    }
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// Agent 启动注入：把 mcp-keys.json 写进子进程环境，供各家 `${VAR}` / bearer_token_env_var 展开。
+/// 读失败返回空表，不阻断启动。
+pub fn spawn_env_secrets() -> HashMap<String, String> {
+    read_mcp_keys()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect()
+}
+
+/// 脱敏用：mcp-keys 里长度 ≥8 的值。失败当空，不在展示路径改名密钥文件。
+pub(crate) fn stored_mcp_secrets() -> Vec<String> {
+    read_mcp_keys()
+        .unwrap_or_default()
+        .into_values()
+        .filter(|v| v.chars().count() >= 8)
+        .collect()
 }
 
 /// server 名校验：各家交集 [A-Za-z0-9-]（gemini 下划线会让 policy 引擎静默失效）
@@ -344,11 +554,11 @@ fn expand_host_value(value: &str) -> Result<String, Vec<String>> {
     let mut missing: Vec<String> = Vec::new();
     let mut resolved: HashMap<String, String> = HashMap::new();
     for (_, name) in &spans {
-        match std::env::var(name) {
-            Ok(v) if !v.is_empty() => {
+        match resolve_env_value(name) {
+            Some(v) => {
                 resolved.insert(name.clone(), v);
             }
-            _ => {
+            None => {
                 if !missing.contains(name) {
                     missing.push(name.clone());
                 }
@@ -775,6 +985,12 @@ fn entry_toml(server: &McpServerDto) -> Result<toml_edit::Table, String> {
         }
         if !env_headers.is_empty() {
             t["env_http_headers"] = toml_edit::Item::Table(env_headers);
+        }
+        // 远程 HTTP 不要默认写长 startup_timeout_sec：Codex 启动/恢复会等满超时才画 TUI。
+        // Consensus 握手常挂死，20s×两台学术 MCP 就是恢复时黑屏半分钟。只在用户显式声明时写入。
+        if let Some(ms) = server.startup_timeout_ms {
+            let secs = ((ms / 1000) as i64).clamp(8, 30);
+            t["startup_timeout_sec"] = toml_edit::value(secs);
         }
     }
     Ok(t)
@@ -1430,13 +1646,25 @@ pub async fn list_mcp_servers() -> Result<Vec<McpServerDto>, String> {
 pub async fn save_mcp_server(
     server: McpServerDto,
     allow_plaintext: bool,
+    env_secrets: Option<HashMap<String, String>>,
 ) -> Result<Vec<McpServerDto>, String> {
-    tauri::async_runtime::spawn_blocking(move || save_impl(server, allow_plaintext))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        save_impl_with_secrets(server, allow_plaintext, env_secrets)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-fn save_impl(mut server: McpServerDto, allow_plaintext: bool) -> Result<Vec<McpServerDto>, String> {
+#[cfg(test)]
+fn save_impl(server: McpServerDto, allow_plaintext: bool) -> Result<Vec<McpServerDto>, String> {
+    save_impl_with_secrets(server, allow_plaintext, None)
+}
+
+fn save_impl_with_secrets(
+    mut server: McpServerDto,
+    allow_plaintext: bool,
+    env_secrets: Option<HashMap<String, String>>,
+) -> Result<Vec<McpServerDto>, String> {
     // allow_plaintext 已废弃（审计收口 2026-09-08）：明文密钥不再允许「仍要保存」放行，
     // 参数保留仅为兼容旧前端的调用形
     let _ = allow_plaintext;
@@ -1444,6 +1672,21 @@ fn save_impl(mut server: McpServerDto, allow_plaintext: bool) -> Result<Vec<McpS
     validate_server_name(&server.name)?;
     if server.kind != "stdio" && server.kind != "remote" {
         return Err("类型必须是 stdio 或 remote".into());
+    }
+    let mut captured = HashMap::new();
+    rewrite_pasted_secret_refs(&mut server, &mut captured)?;
+    let mut to_store = captured;
+    if let Some(extra) = env_secrets {
+        for (k, v) in extra {
+            let v = v.trim().to_string();
+            if v.is_empty() {
+                continue;
+            }
+            to_store.insert(k, v);
+        }
+    }
+    if !to_store.is_empty() {
+        merge_mcp_keys(to_store)?;
     }
     // 明文密钥一律拒存：清单与各 agent 配置都不落明文（分发侧由 apply_to_agent 同闸拦）。
     // 兼容既有数据：清单里的历史明文条目不删不崩、照常列出，但再次编辑会被本闸拦住并
@@ -2072,6 +2315,7 @@ mod tests {
         let rt = entry_toml(&remote_server()).unwrap();
         assert_eq!(rt["bearer_token_env_var"].as_str(), Some("MCP_TOKEN"));
         assert!(rt.get("http_headers").is_none());
+        assert!(rt.get("startup_timeout_sec").is_none());
     }
 
     #[test]
@@ -2731,7 +2975,7 @@ done
                 value: "Bearer ${CCODE_TEST_DEFINITELY_MISSING_VAR}".into(),
             }, // 内嵌同样检出，去重后仍是一条
         ];
-        let missing = missing_env_refs_impl(&pairs);
+        let missing = missing_env_refs_impl(&pairs, None);
         assert_eq!(
             missing,
             vec!["CCODE_TEST_DEFINITELY_MISSING_VAR"],
@@ -2739,10 +2983,13 @@ done
         );
         // 空值算未设置（edition 2021，set_var 安全；用独立变量名不与并行测试互踩）
         std::env::set_var("CCODE_TEST_EMPTY_VAR", "");
-        let missing = missing_env_refs_impl(&[McpEnvPair {
-            key: "K".into(),
-            value: "${CCODE_TEST_EMPTY_VAR}".into(),
-        }]);
+        let missing = missing_env_refs_impl(
+            &[McpEnvPair {
+                key: "K".into(),
+                value: "${CCODE_TEST_EMPTY_VAR}".into(),
+            }],
+            None,
+        );
         assert_eq!(missing, vec!["CCODE_TEST_EMPTY_VAR"]);
         std::env::remove_var("CCODE_TEST_EMPTY_VAR");
     }
@@ -3189,6 +3436,116 @@ done
         inject_pair(&mut envs, &mut missing, "X-Plain", "literal-value");
         assert_eq!(envs[0].1, "literal-value");
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn mcp_keys_expand_and_pending_fill_missing_refs() {
+        let _fx = Fixture::new();
+        merge_mcp_keys(HashMap::from([(
+            "CCODE_TEST_MCP_KEY".into(),
+            "secret-from-file".into(),
+        )]))
+        .unwrap();
+        let mut envs = vec![];
+        let mut missing = vec![];
+        inject_pair(
+            &mut envs,
+            &mut missing,
+            "Authorization",
+            "Bearer ${CCODE_TEST_MCP_KEY}",
+        );
+        assert_eq!(envs[0].1, "Bearer secret-from-file");
+        assert!(missing.is_empty());
+        let miss = missing_env_refs_impl(
+            &[McpEnvPair {
+                key: "Authorization".into(),
+                value: "Bearer ${CCODE_TEST_MCP_KEY}".into(),
+            }],
+            None,
+        );
+        assert!(miss.is_empty(), "{miss:?}");
+        let miss2 = missing_env_refs_impl(
+            &[McpEnvPair {
+                key: "A".into(),
+                value: "${CCODE_TEST_MCP_ABSENT}".into(),
+            }],
+            None,
+        );
+        assert_eq!(miss2, vec!["CCODE_TEST_MCP_ABSENT"]);
+        let pending = HashMap::from([("CCODE_TEST_MCP_ABSENT".into(), "typed".into())]);
+        let miss3 = missing_env_refs_impl(
+            &[McpEnvPair {
+                key: "A".into(),
+                value: "${CCODE_TEST_MCP_ABSENT}".into(),
+            }],
+            Some(&pending),
+        );
+        assert!(miss3.is_empty());
+        let spawned = spawn_env_secrets();
+        assert_eq!(
+            spawned.get("CCODE_TEST_MCP_KEY").map(String::as_str),
+            Some("secret-from-file")
+        );
+    }
+
+    #[test]
+    fn consensus_rewrites_key_used_as_var_name() {
+        let mut s = remote_server();
+        s.name = "consensus".into();
+        s.headers = vec![McpEnvPair {
+            key: "Authorization".into(),
+            value: "Bearer ${ak_TESTKEYNOTREAL1234567890}".into(),
+        }];
+        let mut captured = HashMap::new();
+        rewrite_pasted_secret_refs(&mut s, &mut captured).unwrap();
+        assert_eq!(s.headers[0].value, "Bearer ${CONSENSUS_API_KEY}");
+        assert_eq!(
+            captured.get("CONSENSUS_API_KEY").map(String::as_str),
+            Some("ak_TESTKEYNOTREAL1234567890")
+        );
+    }
+
+    #[test]
+    fn generic_secret_var_name_rejected() {
+        let mut s = remote_server();
+        s.headers[0].value = "Bearer ${ak_TESTKEYNOTREAL1234567890}".into();
+        let mut captured = HashMap::new();
+        let err = rewrite_pasted_secret_refs(&mut s, &mut captured).unwrap_err();
+        assert!(err.contains("密钥当成了环境变量名"), "{err}");
+        assert!(captured.is_empty());
+    }
+
+    #[test]
+    fn remote_auth_error_distinguishes_oauth_from_missing_key() {
+        assert!(
+            remote_auth_error(
+                "HTTP 401 Unauthorized",
+                r#"Bearer error="invalid_token", resource_metadata="https://mcp.undermind.ai/.well-known/oauth-protected-resource/mcp""#,
+            )
+            .contains("OAuth")
+        );
+        assert!(
+            remote_auth_error("HTTP 401 Unauthorized", "")
+                .contains("密钥未设置")
+        );
+    }
+
+    #[test]
+    fn secret_hint_is_suffix_only() {
+        assert_eq!(secret_hint("ak_TESTKEYNOTREAL1234567890"), "···7890");
+        assert!(!secret_hint("ak_TESTKEYNOTREAL1234567890").contains("ak_"));
+        assert_eq!(secret_hint("abc"), "已保存");
+    }
+
+    #[test]
+    fn merge_mcp_keys_rejects_secret_as_name() {
+        let _fx = Fixture::new();
+        let err = merge_mcp_keys(HashMap::from([(
+            "ak_TESTKEYNOTREAL1234567890".into(),
+            "nope".into(),
+        )]))
+        .unwrap_err();
+        assert!(err.contains("密钥本身") || err.contains("变量名"), "{err}");
     }
 
     /// 本地一次性 HTTP 假 server：读掉请求后回指定状态行（体检状态分类用，无墙钟断言）
@@ -3648,6 +4005,19 @@ fn check_stdio_attempt(
     }
 }
 
+/// 401/403 文案：带 RFC 9728 `resource_metadata` 的是 OAuth 保护资源（Undermind），
+/// 不是「少填了 API key」。Mesa 探测不带 CLI 的 OAuth 令牌，不能当成配坏了。
+fn remote_auth_error(detail: &str, www_authenticate: &str) -> String {
+    let www = www_authenticate.to_ascii_lowercase();
+    if www.contains("resource_metadata") || www.contains("oauth") {
+        format!(
+            "需要 OAuth 登录（{detail}）：在对应 CLI 执行 mcp login（Codex：codex mcp login <名>）。Mesa 体检不会代登，登录后请新开会话"
+        )
+    } else {
+        format!("认证失败（{detail}）：密钥未设置、未注入或被服务端拒绝")
+    }
+}
+
 /// remote 检测：POST initialize（MCP streamable HTTP 口径，Accept 双类型）。
 /// 状态细分（McpHealthDto.status）：2xx = 握手成功；401/403 = 认证失败、404 = 路径错误
 ///（这两种按「连通正常」报是假阳性，必须判失败并点名原因）；3xx 与其他 4xx =
@@ -3684,12 +4054,14 @@ async fn check_remote(server: &McpServerDto) -> McpHealthDto {
             if status.is_success() {
                 health_ok(started, Some(detail), "handshake")
             } else if code == 401 || code == 403 {
+                let www = resp
+                    .headers()
+                    .get(reqwest::header::WWW_AUTHENTICATE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
                 health_fail(
                     started,
-                    append_missing_hint(
-                        format!("认证失败（{detail}）：密钥未设置、未注入或被服务端拒绝"),
-                        &missing,
-                    ),
+                    append_missing_hint(remote_auth_error(&detail, www), &missing),
                     "auth",
                 )
             } else if code == 404 {
@@ -3817,25 +4189,57 @@ pub async fn check_all_mcp_servers() -> Result<HashMap<String, McpHealthDto>, St
 /// 查宿主环境返回未设置（空值算未设置）的变量名清单，去重排序。
 /// 前端在保存/拨开分发开关前调用，缺失时给非阻断警告（GUI 应用读不到 shell rc 的 export）
 #[tauri::command]
-pub async fn mcp_missing_env_refs(pairs: Vec<McpEnvPair>) -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(move || missing_env_refs_impl(&pairs))
-        .await
-        .unwrap_or_default()
+pub async fn mcp_missing_env_refs(
+    pairs: Vec<McpEnvPair>,
+    pending_secrets: Option<HashMap<String, String>>,
+) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        missing_env_refs_impl(&pairs, pending_secrets.as_ref())
+    })
+    .await
+    .unwrap_or_default()
 }
 
-fn missing_env_refs_impl(pairs: &[McpEnvPair]) -> Vec<String> {
+fn missing_env_refs_impl(
+    pairs: &[McpEnvPair],
+    pending: Option<&HashMap<String, String>>,
+) -> Vec<String> {
+    let stored = read_mcp_keys().unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     for p in pairs {
         // 与探测注入同一套引用口径（extract_env_refs）：整值与 "Bearer ${X}" 内嵌都算
         for var in extract_env_refs(&p.value) {
-            let set = std::env::var(&var).map(|v| !v.is_empty()).unwrap_or(false);
-            if !set && !out.iter().any(|x| x == &var) {
+            let pending_set = pending
+                .and_then(|m| m.get(&var))
+                .is_some_and(|v| !v.trim().is_empty());
+            let stored_set = stored.get(&var).is_some_and(|v| !v.is_empty());
+            let env_set = resolve_env_value(&var).is_some();
+            if !pending_set && !stored_set && !env_set && !out.iter().any(|x| x == &var) {
                 out.push(var);
             }
         }
     }
     out.sort();
     out
+}
+
+#[tauri::command]
+pub async fn list_mcp_env_secrets() -> Result<Vec<McpEnvSecretHintDto>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let keys = read_mcp_keys()?;
+        let mut out: Vec<McpEnvSecretHintDto> = keys
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(name, value)| McpEnvSecretHintDto {
+                name,
+                hint: secret_hint(&value),
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ===== 命令路径健康探测与一键修复（只读探测 + 相对路径解析，2026-09-03） =====

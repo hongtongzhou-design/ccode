@@ -62,6 +62,14 @@ export function dropHitsRect(
 /** kimi TUI 开了 kitty 键盘协议后只认的 CSI-u 序列（xterm.js 不支持该协议，由宿主改写） */
 export const KIMI_CSI_U_ENTER = "\x1b[13u";
 export const KIMI_CSI_U_CTRL_V = "\x1b[118;5u";
+/** Codex composer 默认 shift-enter = 换行。xterm.js 对 Shift+Enter 仍发 `\r`，会被当成发送。
+ *  kitty CSI-u：键 13（Enter）+ 修饰位 2（Shift）。Codex 0.154 含 KeyboardEnhancement。 */
+export const CODEX_CSI_U_SHIFT_ENTER = "\x1b[13;2u";
+
+/** Shift+Enter 要改写成非 `\r` 的序列时返回载荷；不需要改写返回 null（让 xterm 原样穿透）。 */
+export function ptyShiftEnterRewrite(agentId: string): string | null {
+  return agentId === "codex" ? CODEX_CSI_U_SHIFT_ENTER : null;
+}
 
 /** 剪贴板条目里挑出第一张图片（image/*），无图片返回 null（不干预默认文本粘贴） */
 export function firstImageItem(

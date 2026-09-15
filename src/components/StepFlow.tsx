@@ -6,7 +6,16 @@ import { renderMathInto } from "../md-math";
 import { useAppStore } from "../store";
 import { confirmDialog } from "./ConfirmDialog";
 import { Checkbox, FoldMark } from "./PageFrame";
-import { buildStepFlow, type StepFlowNode } from "../step-flow";
+import {
+  buildStepFlow,
+  discussChatLabel,
+  type StepFlowNode,
+} from "../step-flow";
+import {
+  RESEARCH_TOOL_FIELDS,
+  type ResearchToolField,
+  type ResearchTools,
+} from "../research-tools";
 import {
   DECISION_STATUS,
   DECISION_STATUS_ASK,
@@ -23,6 +32,11 @@ import {
 } from "../step-decisions";
 import { useHumanTasks, RegisterOfferRow } from "./HumanTasksList";
 import { buildWorkspaceTerminalRequest } from "../pipeline-start";
+import {
+  ACADEMIC_MCP_PRESETS,
+  academicMcpLoginPrompt,
+  isAcademicMcpTaskTitle,
+} from "../academic-mcp";
 import type { ProjectStepDto, WorkspaceDto } from "../types";
 import type { StepRunStatus } from "../step-flow";
 
@@ -92,11 +106,17 @@ export default function StepFlow({
   onDraftChanged,
   onSeedDraft,
   onLoadTaskMd,
+  discussed = false,
+  discussResume = null,
   discussContent,
   litSource,
   onOpenResources,
   onSetLitSource,
   litBusy = false,
+  tools,
+  toolAskFields = [],
+  onSetResearchTool,
+  toolBusy = false,
   bare = false,
   agentAttention = null,
   runId = null,
@@ -131,6 +151,15 @@ export default function StepFlow({
   /** 「预览/编辑 TASK.md」的统一加载（v3.90）：返回展示内容——已有编辑内容读文件全文，
    *  否则给模板拼装（只读展示不落盘，保存才落地）。由卡片区实现（它有 cfg 与拼装出处） */
   onLoadTaskMd?: () => Promise<{ text: string; revision: string | null }>;
+  /** 本步已经开过「跟 AI 商量」会话：按钮改「继续讨论」，不另占一格 */
+  discussed?: boolean;
+  /** 继续讨论要接回的上次会话；没有就仍开新会话，按钮也不叫继续 */
+  discussResume?: {
+    agentId: string;
+    sessionId: string;
+    provider?: string | null;
+    cwd?: string | null;
+  } | null;
   /** discuss 节点内嵌内容（想法区）：讨论的事全归这个节点，不在流程线外另立并列区块 */
   discussContent?: React.ReactNode;
   /** 项目的文献来源（project.toml lit_source）：zotero/folder 时，落点在 papers/ 的人工事项
@@ -143,6 +172,10 @@ export default function StepFlow({
    *  与决策项分属两类——决策项写草稿、纯记录；这里写 config.lit_source 且带动作 */
   onSetLitSource?: (value: string) => void | Promise<void>;
   litBusy?: boolean;
+  tools?: ResearchTools;
+  toolAskFields?: readonly ResearchToolField[];
+  onSetResearchTool?: (key: ResearchToolField["key"], value: string) => void | Promise<void>;
+  toolBusy?: boolean;
   /** 嵌在「当前步骤卡」里时去掉自带的底色与内边距，由外层卡片统一承载（v3.85 三段式） */
   bare?: boolean;
   /** agent 节点内嵌内容（如「预览 TASK.md」——TASK.md 是 agent 的合同，属于这个节点） */
@@ -178,6 +211,7 @@ export default function StepFlow({
   );
   const setPage = useAppStore((s) => s.setPage);
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
+  const setPendingMcpPreset = useAppStore((s) => s.setPendingMcpPreset);
 
   /** 已经有文献库的项目：落点在 papers/ 的事项不该再劝人把 PDF 往项目里塞——
    *  文献的唯一出处是那个库，往 papers/ 另放一份之后两边各自漂移。
@@ -202,6 +236,11 @@ export default function StepFlow({
       仅含「已定方向」答案的不算——那只是点选记录，不是编辑过的 TASK.md */
   const draftHasBody =
     !!draft?.text?.trim() && !isDecisionsOnly(draft.text ?? "");
+  const taskMdBtnClass = `shrink-0 rounded-sm px-1 py-0.5 text-micro disabled:opacity-50 ${
+    draftHasBody
+      ? "text-cta-pill-text hover:bg-hover"
+      : "text-l4 hover:bg-hover hover:text-l2"
+  }`;
   const pendingDecisions = unansweredDecisions(decisions, answered);
   const decisionGaps = decisionGate(step, draft?.text ?? "").missing;
   const [decisionBusy, setDecisionBusy] = useState(false);
@@ -269,22 +308,37 @@ export default function StepFlow({
     // （pendingTerminal.stepName → TerminalView launch 时 invoke claim_next_session_for_step）。
     // 它跑在项目根（只改 TASK.md，不落步骤工作区），不登记的话 stepName 为空，
     // 项目「对话」页按步骤筛会漏掉它。
+    // 已经商量过：接回那条会话（resume），不要再注入「先通读一遍」开场——那会另开一轮。
+    const resume = discussResume;
     setPendingTerminal({
-      cwd: projectPath,
+      cwd: resume?.cwd?.trim() || projectPath,
       extraEnv: {},
       title: `${step.name} · 任务书`,
       stepName: step.name,
-      initialPrompt:
-        `我们一起敲定「${step.name}」这一步的任务书（${draft.relPath}）。` +
-        `它现在的内容就是 TASK.md 的默认拼装（步骤简报、预期产物等都在里面），定稿后会原样落成工作区的 TASK.md。` +
-        `先通读一遍，把拿不准的点（范围、口径、标准等）逐个问我，按我的回答直接修改这份文件。` +
-        `只允许新建/修改这一个文件，其他文件一律不要动。` +
-        `讨论中没定下来的问题，记到这份任务书的「## 待拍板」小节。` +
-        (seeds.length > 0 ? `可以先从这几个问题聊起：${seeds.join("；")}` : ""),
-      ...(projectLaunch ?? {}),
-      autoStart: Boolean(projectLaunch?.profileId),
+      ...(resume
+        ? {
+            agentId: resume.agentId,
+            resume: {
+              agentId: resume.agentId,
+              sessionId: resume.sessionId,
+              provider: resume.provider,
+            },
+            autoLaunchProfileId: projectLaunch?.profileId,
+            autoStart: true,
+          }
+        : {
+            initialPrompt:
+              `我们一起敲定「${step.name}」这一步的任务书（${draft.relPath}）。` +
+              `它现在的内容就是 TASK.md 的默认拼装（步骤简报、预期产物等都在里面），定稿后会原样落成工作区的 TASK.md。` +
+              `先通读一遍，把拿不准的点（范围、口径、标准等）逐个问我，按我的回答直接修改这份文件。` +
+              `只允许新建/修改这一个文件，其他文件一律不要动。` +
+              `讨论中没定下来的问题，记到这份任务书的「## 待拍板」小节。` +
+              (seeds.length > 0 ? `可以先从这几个问题聊起：${seeds.join("；")}` : ""),
+            ...(projectLaunch ?? {}),
+            autoStart: Boolean(projectLaunch?.profileId),
+          }),
       surface: "terminal",
-      // 同一步骤的任务书讨论是同一个对话：再点「跟 AI 商量一下」切回已有标签
+      // 同一步骤的任务书讨论是同一个对话：再点切回已有标签；没有标签才按上面 resume / 新开会话
       reuseKey: `discuss:${projectPath}:${draft.relPath}`,
     });
     setPage("terminal");
@@ -432,6 +486,7 @@ export default function StepFlow({
     runStatus,
     litSource,
     pendingDecisions: decisionGaps.length,
+    toolAsks: toolAskFields.map((field) => ({ key: field.key, label: field.label })),
   });
   const seeds = step.discussionSeeds ?? [];
 
@@ -466,7 +521,7 @@ export default function StepFlow({
    *  流程感来自「① → ② → ③」的顺序本身，光靠 ○/● 看不出先后（用户反馈） */
   const mainOrder = new Map(
     flow.nodes
-      .filter((n) => n.section === "main" && n.kind !== "human")
+      .filter((n) => n.section === "main" && n.kind !== "human" && !(n.skipCurrent && n.key !== "tool:manuscript"))
       .map((n, i) => [n.key, i + 1] as const),
   );
 
@@ -630,7 +685,11 @@ export default function StepFlow({
             ? node.human.title
             : undefined
         }
-        className={`rounded-sm py-1.5 pr-1.5 transition-colors duration-300 ${
+        className={`rounded-sm pr-1.5 transition-colors duration-300 ${
+          node.kind === "input"
+            ? "pt-1.5 pb-0"
+            : "py-1.5"
+        } ${
           node.kind === "human" && dropHover === node.human?.title
             ? "bg-cta/10 outline outline-1 outline-cta-bd pl-1.5"
             : isCurrent
@@ -701,6 +760,7 @@ export default function StepFlow({
               可选
             </span>
           )}
+
           {/* 落点命中计数（v3.97）：存在性检测的进度感——见到几个文件、清单共几篇。
               显式取消后检测命中也照显示：进度感不随勾态消失（与 HumanTasksList 同文案） */}
           {node.kind === "human" && node.human!.hitCount != null && (
@@ -722,9 +782,33 @@ export default function StepFlow({
         {!dense && (isCurrent || node.kind === "review") && node.hint && (
           <p className="mt-1 pl-9 text-micro text-l4">{node.hint}</p>
         )}
-        {node.kind === "input" && onSetLitSource && (
+        {node.kind === "input" && node.key.startsWith("tool:") && onSetResearchTool && tools && (
+          <div className="ml-9 mt-2.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              {(RESEARCH_TOOL_FIELDS.find((field) => `tool:${field.key}` === node.key)?.options ?? []).map(([key, label]) => {
+                const on = tools[node.key.slice(5) as ResearchToolField["key"]] === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    disabled={toolBusy}
+                    onClick={() => void onSetResearchTool(node.key.slice(5) as ResearchToolField["key"], key)}
+                    className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
+                      on
+                        ? "border border-cta-bd bg-cta-pill text-cta-pill-text"
+                        : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {node.kind === "input" && node.key === "input" && onSetLitSource && (
           // pl-9 与其余内容区（hint/agentContent）对齐到步骤名左缘，不顶到序号
-          <div className="ml-9 mt-1.5">
+          <div className="ml-9 mt-2.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               {LIT_SOURCES.map((o) => {
                 const on = (litSource || "search") === o.id;
@@ -977,8 +1061,12 @@ export default function StepFlow({
                     type="button"
                     disabled={!draft}
                     onClick={() => void openDraftInline()}
-                    title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
-                    className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                    title={
+                      draftHasBody
+                        ? "这一步的 TASK.md 已改过，点此查看或再改"
+                        : "查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
+                    }
+                    className={taskMdBtnClass}
                   >
                     TASK.md
                   </button>
@@ -989,9 +1077,14 @@ export default function StepFlow({
                       type="button"
                       disabled={!draft || chatBusy}
                       onClick={() => void chatDraft()}
+                      title={
+                        discussed
+                          ? "接回上次商量的会话，接着改这一步的 TASK.md"
+                          : "开终端跟 AI 一起过一遍任务书：它读稿提问、你拍板、它直接改稿——改的就是最终落盘的 TASK.md"
+                      }
                       className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
                     >
-                      {chatBusy ? "准备 TASK.md…" : "跟 AI 商量一下"}
+                      {chatBusy ? "准备 TASK.md…" : discussChatLabel(discussed)}
                     </button>
                   </div>
                 )}
@@ -1003,17 +1096,25 @@ export default function StepFlow({
                   type="button"
                   disabled={!draft || chatBusy}
                   onClick={() => void chatDraft()}
-                  title="开终端跟 AI 一起过一遍任务书：它读稿提问、你拍板、它直接改稿——改的就是最终落盘的 TASK.md"
+                  title={
+                    discussed
+                      ? "接回上次商量的会话，接着改这一步的 TASK.md"
+                      : "开终端跟 AI 一起过一遍任务书：它读稿提问、你拍板、它直接改稿——改的就是最终落盘的 TASK.md"
+                  }
                   className="rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
                 >
-                  {chatBusy ? "准备 TASK.md…" : "跟 AI 商量一下"}
+                  {chatBusy ? "准备 TASK.md…" : discussChatLabel(discussed)}
                 </button>
                 <button
                   type="button"
                   disabled={!draft}
                   onClick={() => void openDraftInline()}
-                  title="查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
-                  className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                  title={
+                    draftHasBody
+                      ? "这一步的 TASK.md 已改过，点此查看或再改"
+                      : "查看/编辑这一步的 TASK.md（没改过时是模板默认拼装，可直接改）"
+                  }
+                  className={taskMdBtnClass}
                 >
                   TASK.md
                 </button>
@@ -1056,10 +1157,58 @@ export default function StepFlow({
             非当前节点的说明挂在行的 title 上（悬停可见），信息不丢。
             例外（v3.97）：可选的 after 档事项被设计成不抢「当前节点」，若死守 isCurrent，
             「下载付费墙文献全文」的导入说明就只剩悬停可见（用户实测「没说清怎么导入」）——
-            就绪（afterReady）且未完成时就地展示摘要；长 guidance 的完整做法收进「怎么做」详情。 */}
+            就绪（afterReady）且未完成时就地展示摘要；长 guidance 的完整做法收进「怎么做」详情。
+            学术检索 MCP 同款：沉在可选区永远不是当前节点，必须就地给预设入口。 */}
+        {node.kind === "human" &&
+          isAcademicMcpTaskTitle(node.human!.title) &&
+          !node.done &&
+          !dense && (
+            <div className="mt-1 flex flex-wrap items-center gap-2 pl-9">
+              {ACADEMIC_MCP_PRESETS.map((preset) => (
+                <button
+                  key={preset.name}
+                  type="button"
+                  onClick={() => {
+                    setPendingMcpPreset(preset.name);
+                    setPage("mcp");
+                  }}
+                  title={
+                    preset.auth === "oauth"
+                      ? `${preset.what}。分发后先在终端登录，Mesa 体检未连通也正常`
+                      : `${preset.what}。在 MCP 页填 API 密钥，Mesa 注入 ${preset.envVar}`
+                  }
+                  className="shrink-0 rounded-sm px-1 py-0.5 text-xs text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
+                >
+                  {preset.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingTerminal({
+                    cwd: projectPath,
+                    extraEnv: {},
+                    title: "MCP 登录",
+                    initialPrompt: academicMcpLoginPrompt(projectLaunch?.agentId),
+                    ...(projectLaunch ?? {}),
+                    autoStart: Boolean(projectLaunch?.profileId),
+                    permission: "discuss",
+                    surface: "terminal",
+                    reuseKey: `mcp-login:${projectPath}`,
+                  });
+                  setPage("terminal");
+                }}
+                title="开讨论会话并带上 mcp login 指令；登录成功后请新开「开始」，不要在这个会话检索"
+                className="shrink-0 rounded-sm px-1 py-0.5 text-xs text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
+              >
+                去终端登录
+              </button>
+            </div>
+          )}
         {!dense &&
           node.kind === "human" &&
           guidance &&
+          !isAcademicMcpTaskTitle(node.human!.title) &&
           (isCurrent ||
             (!node.done &&
               node.human!.timing === "after" &&

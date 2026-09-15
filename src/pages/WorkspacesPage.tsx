@@ -2465,8 +2465,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             }
             onDismissGitGuide={() => setFreshProjectPath(null)}
             onRefresh={refresh}
-            onOpenTerminal={(ws, initialPrompt) =>
-              void openInTerminal(ws, initialPrompt)
+            onOpenTerminal={(ws, initialPrompt, opts) =>
+              void openInTerminal(ws, initialPrompt, opts)
             }
             onError={setError}
             chromeReq={identityChrome}

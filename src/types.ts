@@ -1375,6 +1375,13 @@ export interface McpEnvPair {
   value: string;
 }
 
+/** MCP 密钥栏尾号（list_mcp_env_secrets）；不含密钥本体 */
+export interface McpEnvSecretHintDto {
+  name: string;
+  /** 如 ···Y41 */
+  hint: string;
+}
+
 export interface McpServerDto {
   id: string;
   /** [A-Za-z0-9-]（下划线禁：gemini policy 引擎按下划线切分） */

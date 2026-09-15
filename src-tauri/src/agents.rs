@@ -1436,8 +1436,10 @@ pub(crate) fn resume_args(agent_id: &str, session_id: &str) -> (bool, Vec<String
 /// `web_search` 默认开，catalog 的 `supports_search_tool` 挡不住请求（cc-switch 同结论）；
 /// DeepSeek 等会拒服务端搜索（有的中转转成 Anthropic `web_search_20250305`）。
 /// `service_tier=priority` 是订阅档，中转模型不声明，CLI 警告后省略——改 `auto` 不再带 priority。
-/// `features.apps=false` 关掉内置 codex_apps MCP（ChatGPT apps 连接器，只认 ChatGPT OAuth，
-/// 网关会话用不上；本机留有失效登录态时启动必刷 401 token_revoked，0.153.0 实证该键可关）。
+/// 中转不盖掉 `features.apps`：0.154 上 `features.apps=false` 会把用户 HTTP MCP
+/// （Consensus / Undermind）收成 `mcp__<名>` 占位，调用即 `unsupported call`，
+/// 即使 CONSENSUS_API_KEY 已注入、端点可达。内置 ChatGPT `codex_apps` 改关插件，
+/// 避免失效登录态 401 token_revoked（`mcp_servers.codex_apps.enabled=false` 报 invalid transport）。
 fn codex_relay_compat_args() -> Vec<String> {
     vec![
         "-c".into(),
@@ -1445,7 +1447,7 @@ fn codex_relay_compat_args() -> Vec<String> {
         "-c".into(),
         r#"service_tier="auto""#.into(),
         "-c".into(),
-        "features.apps=false".into(),
+        r#"plugins.codex-app-tools@openai-bundled.enabled=false"#.into(),
     ]
 }
 
@@ -3658,7 +3660,8 @@ api_backend = "responses"
         assert!(joined.contains("-m gpt-5-codex"));
         assert!(joined.contains(r#"web_search="disabled""#));
         assert!(joined.contains(r#"service_tier="auto""#));
-        assert!(joined.contains("features.apps=false"));
+        assert!(!joined.contains("features.apps=false"));
+        assert!(joined.contains("plugins.codex-app-tools@openai-bundled.enabled=false"));
         assert!(joined.contains("model_context_window=131072"));
         assert!(joined.contains("model_auto_compact_token_limit=124518"));
         // 会话内自省：模型显示名随启动注入（配置名 · 模型），agent 可查
@@ -3812,6 +3815,7 @@ api_backend = "responses"
         assert!(!joined.contains(r#"service_tier="auto""#));
         // 官方账号保留内置 codex_apps（ChatGPT 订阅的 apps 功能可用），不跟着网关关
         assert!(!joined.contains("features.apps=false"));
+        assert!(!joined.contains("enable_mcp_apps"));
         assert!(joined.contains("-m gpt-5-codex"));
         // 默认沙箱与认证方式无关，官方账号同样生效；沙箱内联网同步放开
         assert!(joined.contains("-s workspace-write"));
@@ -4698,7 +4702,8 @@ api_backend = "responses"
         assert!(cmd.contains(r#"-c 'model_provider="ccode"'"#));
         assert!(cmd.contains(r#"-c 'web_search="disabled"'"#));
         assert!(cmd.contains(r#"-c 'service_tier="auto"'"#));
-        assert!(cmd.contains("-c 'features.apps=false'"));
+        assert!(!cmd.contains("features.apps=false"));
+        assert!(cmd.contains("plugins.codex-app-tools@openai-bundled.enabled=false"));
         assert!(cmd.starts_with("cd /tmp/proj && codex resume abc"));
         // 非 codex / 无 base_url：不追加任何定义（env 注入型 agent 裸 resume 即可）
         assert!(resume_extra_args("claude-code", Some("https://x"), None).is_empty());

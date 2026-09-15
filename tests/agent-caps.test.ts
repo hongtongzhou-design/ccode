@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { headlessWriteBlocked, headlessWriteCaution, headlessWriteNote } from "../src/agent-caps.ts";
+import {
+  escInterruptSafe,
+  headlessWriteBlocked,
+  headlessWriteCaution,
+  headlessWriteNote,
+} from "../src/agent-caps.ts";
 
 test("headlessWriteBlocked：不支持才禁选", () => {
   assert.equal(headlessWriteBlocked(undefined), null);
@@ -26,4 +31,13 @@ test("headlessWriteNote：支持时仍可附注无沙箱", () => {
     headlessWriteCaution({ supported: true, reason: "权限未实测" }),
     "权限未实测",
   );
+});
+
+test("escInterruptSafe：Grok 非 prompt 态 Esc 退整进程，不进白名单", () => {
+  assert.equal(escInterruptSafe("grok"), false);
+  assert.equal(escInterruptSafe("codex"), true);
+  assert.equal(escInterruptSafe("claude-code"), true);
+  assert.equal(escInterruptSafe(null), false);
+  assert.equal(escInterruptSafe(undefined), false);
+  assert.equal(escInterruptSafe(""), false);
 });

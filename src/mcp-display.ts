@@ -1,7 +1,7 @@
 /** MCP 页展示纯逻辑：协议徽章固定识别色 + 命令/路径智能缩略 + 分发状态徽标（mcpDistBadge）
  *  + 命令路径告警徽标（mcpCmdPathBadge）+ 收编/导入的相对路径解析附注（mcpPathResolveNote）
  *  + 体检行文案（mcpHealthText/mcpCheckAtLabel）+ $VAR 预检提示（missingEnvSignature/
- *  missingEnvWarnText）。
+ *  missingEnvWarnText）+ 密钥栏（mcpEnvRefNames / mcpSecretFieldLabel / mcpSecretPlaceholder）。
  *  色相固定 hex（同 file-icons / agent-colors 先例：识别色不随主题换色相），
  *  底色走 color-mix 10% 混合，深浅主题自动跟随；
  *  文字色向主题主文本色 var(--color-l1) 混 30%——浅色主题压深、深色主题提亮，
@@ -181,6 +181,14 @@ export type McpHealthView = Pick<
  *  检测中 / 正常（握手成功；reachable 细分只说「地址可达」）/ 失败原因；
  *  checkedAt 有值 = 展示的是沉淀的上次结果，加「上次检测」前缀与实时结果区分；
  *  未检测过返回 null（无状态不渲染状态点） */
+/** Mesa 探测不带各 CLI 的 OAuth 令牌。带 resource_metadata 的 401 是「要登录」，不是断网。 */
+export function mcpHealthNeedsLogin(
+  health: McpHealthView | "checking" | undefined,
+): boolean {
+  if (!health || health === "checking" || health.ok) return false;
+  return /OAuth|mcp login/i.test(health.error ?? "");
+}
+
 export function mcpHealthText(
   health: McpHealthView | "checking" | undefined,
   checkedAt?: string | null,
@@ -192,7 +200,9 @@ export function mcpHealthText(
     ? health.status === "reachable"
       ? `地址可达，握手未确认${health.detail ? ` · ${health.detail}` : ""} · ${health.latencyMs}ms`
       : `连通正常${health.detail ? ` · ${health.detail}` : ""} · ${health.latencyMs}ms`
-    : (health.error ?? "检测失败");
+    : mcpHealthNeedsLogin(health)
+      ? `${health.error ?? "需要 OAuth 登录"}。Mesa 不会代登，在对应 CLI 登录后新开会话即可用`
+      : (health.error ?? "检测失败");
   return `${prefix}${body}\n点击重新检测`;
 }
 
@@ -206,5 +216,30 @@ export function missingEnvWarnText(
   missing: string[],
   action: "保存" | "分发",
 ): string {
-  return `以下环境变量当前环境未设置：${missing.join("、")}。分发后该 MCP 可能无法启动（GUI 应用读不到 .zshrc 里 export 的变量）。仍要${action}吗？`;
+  return `以下密钥还没填：${missing.join("、")}。请在表单密钥栏粘贴（由 Mesa 注入），不必自己设系统环境变量。仍要${action}吗？`;
+}
+
+/** env/header 值里的 $VAR / ${VAR} 引用名，去重保序（与后端 scan_env_refs 同口径的常用子集） */
+export function mcpEnvRefNames(pairs: ReadonlyArray<{ value: string }>): string[] {
+  const out: string[] = [];
+  const re = /\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+  for (const pair of pairs) {
+    const value = pair.value ?? "";
+    re.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(value))) {
+      const name = (match[1] || match[2] || "").trim();
+      if (name && !out.includes(name)) out.push(name);
+    }
+  }
+  return out;
+}
+
+export function mcpSecretFieldLabel(name: string): string {
+  if (name === "CONSENSUS_API_KEY") return "Consensus API 密钥";
+  return name;
+}
+
+export function mcpSecretPlaceholder(hint?: string): string {
+  return hint ? `已保存 ${hint}，留空保持不变` : "粘贴密钥，由 Mesa 注入";
 }

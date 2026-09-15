@@ -88,7 +88,7 @@ function mcpLitSearchTask(): HumanTaskDto {
   return {
     title: "配置学术检索 MCP",
     guidance:
-      "到 MCP 页用预设导入 Consensus / Undermind（密钥走环境变量引用，不落明文）。不配也能跑：OpenAlex / Semantic Scholar / arXiv / Crossref 免 key。",
+      "Consensus 在 MCP 页填 API 密钥即可，不必自己设环境变量。Undermind 要先在终端登录，授权后新开检索会话；点「开始」会直接检索。不配也能用 OpenAlex / Semantic Scholar。",
     target: "",
     timing: "before",
     optional: true,

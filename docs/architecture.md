@@ -208,9 +208,9 @@ struct ChatMessage {
 
 ### 6.2 密钥存储
 
-- 密钥本体存 `<平台配置目录>/ccode/keys.json`，文件权限 0600（与 Codex `auth.json`、Claude Code 在 Linux 的 `.credentials.json` 同一威胁模型）；`profiles.json` 里只存尾号提示（`key_hint`）。
+- 密钥本体存 `<平台配置目录>/ccode/keys.json`，文件权限 0600（与 Codex `auth.json`、Claude Code 在 Linux 的 `.credentials.json` 同一威胁模型）；`profiles.json` 里只存尾号提示（`key_hint`）。MCP 引用变量的值另存同目录 `mcp-keys.json`（0600，键是环境变量名如 `CONSENSUS_API_KEY`），不与网关 id 混表。
 - **不用系统钥匙串**（v0.1 曾用，已废弃）：macOS 钥匙串 ACL 与代码签名绑定，未签名的开发构建每次热重编译产生新 cdhash，旧条目即失配读不到，表现为「密钥消失」；Linux 的 Secret Service 在无桌面环境下也不可用。读取时保留从钥匙串的一次性迁移，兼容旧版本数据。
-- 注入时从 `keys.json` 读出，只存在于子进程环境变量中，不进日志、不前端回显（UI 只显示尾号掩码）。
+- 注入时从 `keys.json` 读出，只存在于子进程环境变量中，不进日志、不前端回显（UI 只显示尾号掩码）。MCP 引用变量同时注入 `mcp-keys.json`。
 
 ### 6.3 内嵌终端
 
@@ -405,7 +405,7 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 
 要点：
 
-- **统一模型**：name（各家交集 `[A-Za-z0-9-]`，下划线禁——gemini policy 引擎按下划线切分）+ kind（stdio/remote）+ command/args/cwd/env + url/headers；env 与 header 的值允许 `$VAR`/`${VAR}` 引用形式。
+- **统一模型**：name（各家交集 `[A-Za-z0-9-]`，下划线禁——gemini policy 引擎按下划线切分）+ kind（stdio/remote）+ command/args/cwd/env + url/headers；env 与 header 的值允许 `$VAR`/`${VAR}` 引用形式。引用变量可在 MCP 表单密钥栏填写，存 `mcp-keys.json`，启动与体检时注入。
 - **映射层**：codex 走 TOML `[mcp_servers.<name>]`（toml_edit 保格式；引用转 `env_vars`/`env_http_headers`/`bearer_token_env_var`，内联 bearer 会被 codex 显式拒绝）；opencode 顶层键是 `mcp` 且 command 为数组、env 叫 `environment`、引用语法 `{env:VAR}`；gemini/qwen 的 remote 写 `httpUrl`（url=SSE 已 legacy）；kimi 无插值（header 的 Bearer 引用转 `bearerTokenEnvVar`，env 引用直接拒写报错）；claude/codex/gemini/qwen 的目标文件是混合状态文件，只读-改-写一个键/段。
 - **分发纪律**：只写用户级（项目级在 claude/qwen/cursor/codebuddy 有审批闸）；写前备份 + 原子写 + 读回校验；JSONC 容错读（注释/尾逗号 stripper 自实现）；claude 的 managed-mcp.json 存在即拒写；cursor 配置与 IDE 共享（UI 明示）。
 - **不用 CLI 自带 mcp 命令分发**：各家语义不一（gemini 默认 project scope、codebuddy 默认 local、codex add 命中 OAuth server 会弹浏览器登录、kimi/cursor 没有可脚本化命令），直写文件八家统一且可批量。
@@ -457,9 +457,17 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 
 ## 10. 决策记录
 
+- **启动注入切聊天要立刻「进行中」（2026-09-14）**：带首条指令的新会话启动同时拉起聊天 `pendingReply`。从终端切到聊天，会话文件还没落盘也要显示正在回复、发送钮变进行中；TUI 开屏不算这一轮已经说完。纯逻辑 `tab-working.ts` `onPtyWorkingSilence`。
+- **Codex Shift+Enter 换行（2026-09-15）**：内嵌 xterm 对 Shift+Enter 仍发 `\r`，Codex composer 当成发送。键盘层改写为 kitty CSI-u `\x1b[13;2u`。细则 `conventions/terminal.md`。
+- **Codex 网关不要关 `features.apps`（2026-09-15）**：0.154 上 `-c features.apps=false` 会把用户 HTTP MCP（Consensus / Undermind）收成 `mcp__<名>` 占位，调用即 `unsupported call`（密钥已注入、端点可达也一样）。网关只关内置插件 `plugins.codex-app-tools@openai-bundled.enabled=false`，仍注 `web_search=disabled` / `service_tier=auto`。禁止 `enable_mcp_apps`。远程 MCP 不要默认写长 `startup_timeout_sec`（恢复会话会等满超时才画 TUI）。细则 `conventions/safety.md`。
+- **MCP 密钥栏由 Mesa 注入（2026-09-15）**：引用 `$VAR`/`${VAR}` 的 MCP 在表单给出密钥栏，值存 `<config>/ccode/mcp-keys.json`（0600），清单与各 CLI 配置仍只留引用。体检 `expand_host_value` 与 Agent 启动（PTY / 无头）注入该表；系统环境是回落。Consensus 把密钥误填进 `${ak_…}` 变量名时，保存自动改回 `Bearer ${CONSENSUS_API_KEY}` 并收进密钥表。细则 `conventions/safety.md`。
+- **检索步学术 MCP 只留入口（2026-09-15）**：可选事项「配置学术检索 MCP」不写就地小字（候选库怎么并进本步、认证状态）。只留 Consensus / Undermind 预设入口和「去终端登录」。悬停 title 仍说密钥/OAuth。不配也能用 OpenAlex/Semantic Scholar。MCP 仍是 Agent 用户级分发。细则 `conventions/pipeline.md`。
+- **检索步学术 MCP 就地给做法（2026-09-14）**：可选事项「配置学术检索 MCP」不再只剩勾选。认证做法：Consensus 在 MCP 页填 API 密钥（不必设系统环境变量）；Undermind 登录在 CLI 里，Mesa 体检 401 也正常，须先「去终端登录」（空会话、不注入检索）——点「开始」会直接干活。预设入口打开 MCP 页表单。流程线小字已撤，见上条。
+- **商量过写在按钮文案上（2026-09-14）**：流程线「跟 AI 商量一下」在能接回本步上次认领会话时改「继续讨论」（同款线框，不用强调色），点下去 resume 那条会话（不注入开场、不另开一轮）；接不回仍是「跟 AI 商量一下」。TASK.md 有正文时只用强调色字、不加框。细则 `conventions/step-panel.md` / `pipeline.md`。
+- **创建设定屏交付字段分级（2026-09-14）**：选完模板后的设定屏只填项目全局设定。稿件载体问在会换正式稿的步骤（期刊格式适配 / 返修），不在综述/论文写作步问——那些步仍出 Markdown。文献库交付问在精读（无精读才在投稿适配）；Origin、Blender 问在用得上的那一步且不挡主动作（结果分析 / 实验设计或研究方法；综述不问 Blender）。答案仍是项目级 `科研工具/*`。文献从哪来仍只在检索步。流程编辑器仍可改。细则 `conventions/pipeline.md` / `step-panel.md`。
 - **「跟 AI 商量一下」直接进终端（2026-09-12）**：检索等步骤点入口后自动启动，用项目 Agents 页的默认 Agent 和绑定，不是上次终端连接。没设项目默认才停在启动栏。不再带开右栏 TASK.md 预览。看任务书用流程线「预览/编辑 TASK.md」。撤回 v3.77「开聊自动带开草稿预览」在这条入口上的行为。细则 `conventions/pipeline.md`。未做 Mesa Dev 实机界面验收。
 - **项目内新会话走 Agents 名册（2026-09-12）**：＋新对话、跟 AI 商量、聊想法、问 AI（带了项目默认时）解析 `projectAgentLaunch`：有项目默认 Agent 且这家有连接则直接启动该绑定（绑定已删回落该家第一条）。未设项目默认才回落问 AI 勾过的「设为默认」，再否则弹层选。⌘/Ctrl 点仍强制重选。编程进入工作树同一口径。不沿用 `ccode.lastLaunch`。未做 Mesa Dev 实机界面验收。
-- **文献来源单一触点收回流程线（2026-09-12）**：添加项目不再问「文献主来源」。文献从哪来只在检索步「确定文献来源」写 `lit_source`（search / zotero / folder）；选 Zotero 才给检索/精读步补 `zotero-sync`。稿件载体、Origin、Blender、文献库交付仍是项目工具合同，问在选完模板后的设定屏或「编辑研究流程」。旧 `科研工具/literature` 写回时剥掉。EndNote 导出走 folder（放入 `papers/imports/`）。细则 `conventions/pipeline.md`。未做 Mesa Dev 实机界面验收。
+- **文献来源单一触点收回流程线（2026-09-12）**：添加项目不再问「文献主来源」。文献从哪来只在检索步「确定文献来源」写 `lit_source`（search / zotero / folder）；选 Zotero 才给检索/精读步补 `zotero-sync`。稿件载体、Origin、Blender、文献库交付仍是项目工具合同；问在用得上的那一步或「编辑研究流程」，不在创建设定屏。旧 `科研工具/literature` 写回时剥掉。EndNote 导出走 folder（放入 `papers/imports/`）。细则 `conventions/pipeline.md`。未做 Mesa Dev 实机界面验收。
 - **普通目标副本两步清理（2026-09-11）**：工作副本与历史冻结版本分两次、各需确认；清理后保留任务与接受账本，禁止从已删副本续跑，只能从当前项目重新开始。中途失败保留恢复单与「继续清理」。不得删除仍被其他项目或运行引用的目录；中断后待删目录被外部修改或替换则拒绝继续删除。归档确认须写明归档不等于清理、副本仍占磁盘；待验收可归档（主列表不再提醒），未完成接受或未完成清理不得归档/恢复。细则见 `conventions/review-freeze.md`。未做 Mesa Dev 实机界面验收。
 - **普通目标卡摘要与详情分层（2026-09-11）**：卡面标题限两行原文，副行合并状态、Agent 与数量型写回摘要；已采纳文件和声明输出范围分别计数。点「详情」展开为任务卡：要求 / 成果 / 历程分栏，底栏归档与释放副本；同一段原文只出现一次。已完成目标的返修降为辅助操作，待验收/继续/开始的优先级不变。只改展示，不生成 AI 标题、不覆盖存储目标、不改变传给 Agent 的指令或接受契约。细则见 `conventions/design-system.md`。
 - **普通目标验收弹层稳定性（2026-09-11）**：首次清单、保护路径和工作环境合并呈现，外框受视口约束、正文独立滚动。打开期间固定所审版本；目标列表轮询不得因 Run 对象重建而重载评审、替换勾选或切换预览。关闭重开读取当前版本，采纳仍携带原 `expectSeq` 并由后端判定版本漂移；读取失败不伪装空成果。细则见 `conventions/review-freeze.md`。

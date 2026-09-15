@@ -12,6 +12,7 @@ import {
   xtermOscColorReport,
   KIMI_CSI_U_ENTER,
   KIMI_CSI_U_CTRL_V,
+  ptyShiftEnterRewrite,
 } from "../src/terminal-input.ts";
 
 test("escapeShellPath 安全字符路径原样返回", () => {
@@ -67,6 +68,12 @@ test("dropHitsRect 物理像素与 CSS 像素都算命中", () => {
 test("kimi CSI-u 序列是 kitty 键盘协议的 Enter 与 Ctrl+V", () => {
   assert.equal(KIMI_CSI_U_ENTER, "\x1b[13u");
   assert.equal(KIMI_CSI_U_CTRL_V, "\x1b[118;5u");
+});
+
+test("Codex Shift+Enter 改写成 CSI-u 换行，其它 agent 不改", () => {
+  assert.equal(ptyShiftEnterRewrite("codex"), "\x1b[13;2u");
+  assert.equal(ptyShiftEnterRewrite("kimi"), null);
+  assert.equal(ptyShiftEnterRewrite("claude-code"), null);
 });
 
 test("firstImageItem 挑出第一个 image/* 条目", () => {

@@ -487,6 +487,9 @@ interface AppState {
   /** 待消费的终端启动请求；终端页可见时消费并清空 */
   pendingTerminal: PendingTerminal | null;
   setPendingTerminal: (p: PendingTerminal | null) => void;
+  /** 流程线「配置学术检索 MCP」跳过来：MCP 页打开对应预设表单后清空 */
+  pendingMcpPreset: string | null;
+  setPendingMcpPreset: (name: string | null) => void;
   /** 项目区「问 AI」选 Agent/配置弹层；确认后写成 pendingTerminal */
   askAiReq: AskAiFile | null;
   setAskAiReq: (r: AskAiFile | null) => void;
@@ -655,9 +658,10 @@ interface AppState {
   removeProfile: (id: string) => Promise<void>;
   duplicateProfile: (id: string) => Promise<void>;
   loadGateways: () => Promise<void>;
-  saveGateway: (id: string | null, input: GatewayInput) => Promise<void>;
+  /** 保存网关，返回保存后的网关（含 id），供「保存后立即绑定」链路使用 */
+  saveGateway: (id: string | null, input: GatewayInput) => Promise<Gateway>;
   removeGateway: (id: string) => Promise<void>;
-  bindGateway: (input: BindingInput) => Promise<void>;
+  bindGateway: (input: BindingInput) => Promise<Profile>;
 }
 
 export const useAppStore = create<AppState>((set, get) => {
@@ -735,6 +739,8 @@ export const useAppStore = create<AppState>((set, get) => {
     }),
   pendingTerminal: null,
   setPendingTerminal: (p) => set({ pendingTerminal: p }),
+  pendingMcpPreset: null,
+  setPendingMcpPreset: (name) => set({ pendingMcpPreset: name }),
   askAiReq: null,
   setAskAiReq: (r) => set({ askAiReq: r }),
   workspaceReviewRequest: null,
@@ -989,13 +995,14 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ gateways });
   },
   saveGateway: async (id, input) => {
-    await invoke("save_gateway", { id, input });
+    const saved = await invoke<Gateway>("save_gateway", { id, input });
     const [gateways, profiles] = await Promise.all([
       invoke<Gateway[]>("list_gateways"),
       invoke<Profile[]>("list_profiles"),
     ]);
     set({ gateways, profiles });
     invoke("rebuild_tray").catch(() => {});
+    return saved;
   },
   removeGateway: async (id) => {
     await invoke("delete_gateway", { id });
@@ -1004,13 +1011,14 @@ export const useAppStore = create<AppState>((set, get) => {
     invoke("rebuild_tray").catch(() => {});
   },
   bindGateway: async (input) => {
-    await invoke("bind_gateway", { input });
+    const bound = await invoke<Profile>("bind_gateway", { input });
     const [gateways, profiles] = await Promise.all([
       invoke<Gateway[]>("list_gateways"),
       invoke<Profile[]>("list_profiles"),
     ]);
     set({ gateways, profiles });
     invoke("rebuild_tray").catch(() => {});
+    return bound;
   },
   };
 });

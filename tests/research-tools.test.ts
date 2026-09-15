@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PIPELINE_TEMPLATES, pipelineStepsForTemplate } from "../src/pipeline-presets.ts";
-import { DEFAULT_RESEARCH_TOOLS, researchToolFieldsForSteps, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../src/research-tools.ts";
+import { DEFAULT_RESEARCH_TOOLS, researchToolAskFieldsForStep, researchToolFieldsForSteps, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../src/research-tools.ts";
 import { conflictingTemplateSteps, renameConflictingSteps } from "../src/pipeline-append.ts";
 import { parseReproductionContract } from "../src/research-report.ts";
 
@@ -41,9 +41,12 @@ test("Blender 只挂研究设计/结构示意，不替代统计图；EndNote 交
   const steps = template("research-paper").steps.map((s) => withResearchTools(s, tools));
   assert.ok(steps.find((s) => s.name === "实验设计")!.skills.includes("blender-research"));
   assert.ok(!steps.find((s) => s.name === "结果分析")!.skills.includes("blender-research"));
+  assert.ok(!withResearchTools(template("review").steps.find((s) => s.workspaceName === "outline")!, tools).skills.includes("blender-research"));
   assert.ok(!steps[0].skills.includes("endnote-bridge"));
-  assert.ok(steps.at(-1)!.skills.includes("endnote-bridge"));
-  assert.ok(steps.at(-1)!.expectedArtifacts.includes("papers/endnote-import.xml"));
+  const notes = steps.find((s) => s.skills.includes("lit-notes"))!;
+  assert.ok(notes.skills.includes("endnote-bridge"));
+  assert.ok(notes.expectedArtifacts.includes("papers/endnote-import.xml"));
+  assert.ok(!steps.at(-1)!.skills.includes("endnote-bridge"));
 });
 
 test("Zotero 同步技能跟 lit_source，不跟已废除的 literature 设置", () => {
@@ -62,9 +65,24 @@ test("选定模板后只出示相关工具字段", () => {
   const dataKeys = researchToolFieldsForSteps(template("data-processing").steps).map((f) => f.key);
   assert.deepEqual(dataKeys, ["plotting"]);
   const reviewKeys = researchToolFieldsForSteps(template("review").steps).map((f) => f.key);
-  assert.ok(reviewKeys.includes("illustration"));
+  assert.ok(!reviewKeys.includes("illustration"));
   assert.ok(reviewKeys.includes("manuscript"));
   assert.ok(!reviewKeys.includes("plotting"));
+});
+
+test("工具问在用得上的那一步；综述不问稿件载体", () => {
+  const review = template("review").steps;
+  assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "outline")!, review).map((f) => f.key), []);
+  assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "lit-notes")!, review).map((f) => f.key), ["libraryExport"]);
+  assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "polish")!, review).map((f) => f.key), []);
+  assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "draft")!, review).map((f) => f.key), []);
+  const paper = template("research-paper").steps;
+  assert.deepEqual(researchToolAskFieldsForStep(paper.find((s) => s.name === "结果分析")!, paper).map((f) => f.key), ["plotting"]);
+  assert.ok(!paper.some((s) => researchToolAskFieldsForStep(s, paper).some((f) => f.key === "manuscript")));
+  const sub = template("submission-rebuttal").steps;
+  assert.deepEqual(researchToolAskFieldsForStep(sub[0]!, sub).map((f) => f.key), ["libraryExport", "manuscript"]);
+  const data = template("data-processing").steps;
+  assert.deepEqual(researchToolAskFieldsForStep(data.find((s) => s.skills.includes("data-eda"))!, data).map((f) => f.key), ["plotting"]);
 });
 
 test("科研论文与毕业论文双向追加不再误复用不同稿件的同名步骤", () => {

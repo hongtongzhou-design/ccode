@@ -373,6 +373,9 @@ pub(crate) fn ai_prompt_impl(
     for k in &plan.env_remove {
         cmd.env_remove(k);
     }
+    for (k, v) in crate::mcp::spawn_env_secrets() {
+        cmd.env(k, v);
+    }
     // 隔离的临时 cwd：防止 agent 把当前项目环境（AGENTS.md 等）混进生成结果
     let cwd = std::env::temp_dir().join(format!("ccode-ai-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&cwd).map_err(|e| format!("创建临时目录失败: {e}"))?;
@@ -530,6 +533,9 @@ pub(crate) fn run_agent_task(
     }
     for k in &plan.env_remove {
         cmd.env_remove(k);
+    }
+    for (k, v) in crate::mcp::spawn_env_secrets() {
+        cmd.env(k, v);
     }
     cmd.current_dir(cwd);
     let host = endpoint_host(profile.base_url.as_deref());

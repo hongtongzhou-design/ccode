@@ -1,10 +1,10 @@
 import type { SkillDto } from "./types";
 
-/** 技能产物路径冲突检测（v3.79）：技能本质是 markdown 指导文件，内容级「职责重叠」无法自动判定；
- *  但 frontmatter outputs 声明的产物路径相撞（相同或互为前缀，如 papers/ 与 papers/inbox.md）
- *  意味着同一步骤的两个技能会往同一位置写、可能互相覆盖——这类冲突可以纯逻辑检出。
- *  数据源 = SkillDto.outputs（SKILL.md frontmatter，后端 list 时现算）；
- *  未声明 outputs 的技能（用户自建/外部导入）不参与检测。 */
+/** 技能产物路径冲突检测（v3.79；2026-09-14 收口）：技能本质是 markdown 指导文件，内容级
+ *  「职责重叠」无法自动判定。真冲突 = 同一路径，或两个目录互含。
+ *  目录与其中一份具体文件不算覆盖（lit-search 的 papers/ 与 zotero-sync 的
+ *  papers/zotero-sync.md；写作技能的 manuscript/ 与 bib-check 的 citation-check.md）。
+ *  数据源 = SkillDto.outputs；未声明 outputs 的技能不参与。 */
 
 export interface SkillOutputConflict {
   a: string;
@@ -20,15 +20,14 @@ function normalizeOutput(raw: string): string {
   return p;
 }
 
-/** 两条产物路径是否相交：完全相同，或一方落在另一方（按目录前缀含斜杠判定，papers/ 不误伤 papers2/） */
-function outputsIntersect(x: string, y: string): boolean {
+/** 会互相覆盖的产物：同一路径，或两个目录互含。目录 vs 其中一份文件不算。 */
+function outputsClash(x: string, y: string): boolean {
   const a = normalizeOutput(x);
   const b = normalizeOutput(y);
   if (!a || !b) return false;
   if (a === b) return true;
-  const dirA = a.endsWith("/") ? a : `${a}/`;
-  const dirB = b.endsWith("/") ? b : `${b}/`;
-  return b.startsWith(dirA) || a.startsWith(dirB);
+  if (!a.endsWith("/") || !b.endsWith("/")) return false;
+  return b.startsWith(a) || a.startsWith(b);
 }
 
 /** 两两比对该步骤已挂载技能的 outputs，返回产物路径相交的技能对。
@@ -46,7 +45,7 @@ export function skillOutputConflicts(
       const outsB = outputsOf.get(stepSkillNames[j]);
       if (!outsB?.length) continue;
       const hit = outsA.find((oa) =>
-        outsB.some((ob) => outputsIntersect(oa, ob)),
+        outsB.some((ob) => outputsClash(oa, ob)),
       );
       if (hit) {
         out.push({
@@ -72,7 +71,7 @@ export interface SkillChainWarning {
   inferred: boolean;
 }
 
-/** 供给路径是否覆盖需求路径：相等/目录前缀互含（同 outputsIntersect 口径）；
+/** 供给路径是否覆盖需求路径：相等/目录前缀互含；
  *  任一侧含 * 通配（如 notes/*.md）时：需求侧退化为 * 前静态前缀，
  *  供给侧要求落在静态前缀目录内（需求是目录时不强制扩展名后缀） */
 function pathCovered(need: string, supply: string): boolean {
@@ -124,11 +123,16 @@ export function skillChainWarnings(
       }
     }
     if (expectedArtifacts.length > 0) {
-      for (const output of skill.outputs ?? []) {
-        const covered = expectedArtifacts.some(
+      const outputs = skill.outputs ?? [];
+      const covered = outputs.filter((output) =>
+        expectedArtifacts.some(
           (a) => pathCovered(output, a) || pathCovered(a, output),
-        );
-        if (!covered) {
+        ),
+      );
+      // 多阶段技能（综述写作含大纲+稿件）挂在其中一步时，对上了本步产物即可，
+      // 其余是别的阶段的产出，不拿「建议补进步骤定义」挡内置模板。
+      if (covered.length === 0) {
+        for (const output of outputs) {
           out.push({
             skill: name,
             kind: "output",

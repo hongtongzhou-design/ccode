@@ -601,6 +601,10 @@ pub fn pty_spawn(
     for k in &plan.env_remove {
         cmd.env_remove(k);
     }
+    // MCP 密钥（mcp-keys.json）：清单只留 ${VAR}，启动时注入给各家 MCP 客户端展开
+    for (k, v) in crate::mcp::spawn_env_secrets() {
+        cmd.env(k, v);
+    }
     if let Some(extra) = &extra_env {
         for (k, v) in extra {
             cmd.env(k, v);

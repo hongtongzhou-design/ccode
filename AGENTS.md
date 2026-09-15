@@ -79,6 +79,7 @@ npm run tauri build    # 打包
 - **macOS 的 `/usr/bin/git` 是 CLT stub**：没装 Xcode 命令行工具时 which 也能命中它，直接跑会弹系统安装窗、
   还会被版本探测的 5s 超时杀掉——判定必须先用 `xcode-select -p`（background_command）探 CLT 在不在，
   stub 场景禁跑 `git --version`（dep_check.rs 的 clt_stub 三态就是这么来的，别退回直接探测）。
+- **Xcode 许可未同意会让热更新窗口消失**：`xcode-select -p` 指向 `/Applications/Xcode.app` 时，未 `sudo xcodebuild -license` 则 `xcrun --sdk macosx --show-sdk-path` 失败、Rust 链接退出 69，`tauri:dev` 只剩 Vite 占 17575、Mesa Dev 窗口没了。本机已装 CLT 时开发编译改 `DEVELOPER_DIR=/Library/Developer/CommandLineTools`，不要改端口、不要另起配置外实例。用户同意 Xcode 许可后可去掉该变量。
 - **Windows npm 系 CLI 是 .cmd 批处理 shim**：CreateProcess/ConPTY 直接起报 os error 193；同目录还有同名无扩展名
   shell 脚本，`find_in_dirs` 必须 exe/cmd 优先于裸名（裸名只兜底）。且 ConPTY 里 npm 会发 DSR 光标位置查询
   （ESC[6n）并读 stdin 等回答，无人应答永久挂起——`run_streaming_pty` 的 reader 代答 ESC[24;120R。
@@ -161,7 +162,12 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # goalRunTerminalFields 出终端请求公共字段；页面只补 model/预览等自有字段
   workspace-resume.ts        # 「去终端」resume 挑选纯逻辑（workspace 名 + 仓库路径匹配，排除归档/内部/live，
                              # tests/workspace-resume.test.ts）
-  presets.ts                 # Base URL 供应商预设表（加供应商 = 加一行）
+  presets.ts                 # 端点预设表（provider 级一份多槽：PROVIDER_PRESETS 各协议槽端点 + 推荐模型 ≤3 + 适用 Agent；
+                             #   presetsForAgent 按 Agent 协议槽派生下拉；加供应商 = 加一条；仍只收官方/公开端点）
+  preset-flow.ts             # 一键接入纯逻辑：推荐模型与目录求交（intersectCatalog，不整目录预填）、「同时绑到」
+                             #   协议兼容目标推导（extraBindTargets，复用 apiKindOf；多协议 Agent 优先 openai）、
+                             #   多 Agent 槽位拼装（gatewayDraftSlots：主槽=表单地址，预设分槽值优先于同址回落）
+                             #   （tests/preset-flow.test.ts；约定见 conventions/profiles.md「一键接入」）
   mcp-presets.ts             # MCP 内置预设表（加预设 = 加一条；密钥一律 ${VAR} 引用；
                              #   remote 填 url/headers，stdio 填 command/args，`{home}` 打开表单时展开为家目录；
                              #   需本机安装的用 setup 步骤引导，不代装）
@@ -268,9 +274,10 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 剪贴板图片条目判定/MIME→扩展名/粘贴反馈文案（tests/terminal-input.test.ts）
   terminal-welcome.ts        # 终端未启动空态：isTerminalIdle / 卡上「将在 … 启动」目录文案
                              # （tests/terminal-welcome.test.ts）
-  tab-working.ts             # 终端标签「生成中」虚线圆：PTY 出字才转；会话已落完助手正文
-                             # 立刻停，sticky working 不得续命；动画禁止 CSS rotate
-                             # （tests/tab-working.test.ts）
+  tab-working.ts             # 终端标签「生成中」虚线圆：PTY 出字才转；启动注入等回复期间 TUI 开屏不熄灭；会话已落完助手正文
+                             # 立刻停，sticky working 不得续命；动画禁 CSS rotate（WKWebView 转轴圆心晃）、也禁 dashoffset
+                             # 关键帧（主线程重绘，xterm 出字满载时一卡一卡）——8 段虚线按相位差闪 opacity（合成器线程，
+                             # 2026-09-15 实测重做）（tests/tab-working.test.ts）
   terminal-tab-persistence.ts # 终端标签重启恢复白名单（不含 PTY/密钥/env）
   tab-drag.ts                # 标签条拖拽排序纯逻辑：位移钳制 + 目标槽位判定（>= 中线守末槽边界，
                              # tests/tab-drag.test.ts）
@@ -315,6 +322,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   project-context-load.ts    # 启动环境说明拼装：读档案卡和顶层目录，失败仍返回能用的短包
   research-report.ts         # 研究报告节抽取/相对路径解析（只认显式报告节，不认 TASK 指令或推断结论）
   research-tools.ts          # 科研工具注入 withResearchTools；旧「文献主来源」设置键写回时剥除——来源只认 lit_source
+  academic-mcp.ts            # 检索步「配置学术检索 MCP」：预设名、登录注入（tests/academic-mcp.test.ts）
   session-filter.ts          # 对话页筛选纯逻辑（tests/session-filter.test.ts）
   session-search.ts          # 对话搜索纯逻辑：分词、元数据即时过滤、正文命中合并排序
   session-transfer.ts        # 会话导入向导纯逻辑：状态文案、目标目录预填、可否执行
@@ -323,7 +331,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   store.ts                   # zustand 状态
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
-                             #   model_switch 运行中切模型（claude/gemini 直切、codex/kimi/opencode 唤选择器）与
+                             #   model_switch 运行中切模型（claude/gemini/kimi/grok 带参直切；codex/opencode 唤选择器——两家 CLI 无带参直切：
+                             #   codex /model 无内联参数（源码 supports_inline_args 不含 Model）、opencode /models run 无参，2026-09-15 实证；
+                             #   状态栏 picker 档点芯片即唤选择器、不摆模型假菜单）与
                              #   effort_levels 思考档槽位（claude /effort 五档、kimi on/off、qwen 0.22.0
                              #   /effort 五档实证；codex 待实机）；
                              #   能力表三字段 fail-loud（原因即用户可见文案，后端报错与前端置灰同源）：
@@ -343,9 +353,10 @@ src-tauri/src/
                              #   新会话 provider 名 ccode-<网关短id>；旧 rollout 仍记 model_provider="ccode"，外部恢复缺 -c 定义报 provider not found；定义只含
                              #   base_url/env_key 引用不含密钥）；
                              #   网关启动另加 -c web_search="disabled" 与 service_tier="auto"（盖 ChatGPT
-                             #   登录默认；官方账号不注；不写 config.toml）+ features.apps=false（关掉内置 codex_apps
-                             #   MCP——只认 ChatGPT OAuth，网关会话用不上，本机有失效登录态时启动必刷 401 token_revoked；
-                             #   0.153.0 实证可关，mcp_servers.codex_apps.enabled=false 报 invalid transport 不可用）；
+                             #   登录默认；官方账号不注；不写 config.toml）；不注 features.apps=false（0.154 会把
+                             #   Consensus/Undermind 收成 mcp__<名> 占位，unsupported call）；内置 codex_apps 改关
+                             #   plugins.codex-app-tools@openai-bundled.enabled=false（mcp_servers.codex_apps.enabled=false
+                             #   报 invalid transport）；禁止 enable_mcp_apps；
                              # grok GROK_CONFIG overlay 单一出处 grok_config_overlay：白名单（grok-build OVERLAY_ALLOW_PATHS，
                              #   fail-closed）只放行 [models] 全局块——allowed_models 收敛 + 请求策略五项全局默认（headers 走
                              #   $VAR 引用不落密文）；[model.<id>] 不在白名单，api_backend/context_window 由中转 /models 目录
@@ -472,14 +483,14 @@ src-tauri/src/
                              #   （tests/skill-delete.test.ts）
   mcp_blender.rs             # Blender 官方 MCP 本机安装探测（只读：Blender 版本/插件文件/uv/仓库/TCP 9876）
   mcp.rs                     # MCP 清单与分发（§6.15，规格 matrix §10）：统一模型→八家映射（grok 只读）、读-改-写一个键/段 + 备份 +
-                             # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文）、stdio 裸命令名 resolve_binary
+                             # 原子写 + 读回校验、JSONC 容错读、密钥引用转写（不落明文；引用值可存 mcp-keys.json，启动/体检注入）、stdio 裸命令名 resolve_binary
                              #   绝对化 + node shim 深化、相对路径命令拒写（跨 agent 必挂，报错引导改绝对路径）；
                              #   全局启用开关（enabled 字段：停用=移除各 agent 条目但保留 apps 映射，重开按原样重投；
                              #   停用期间编辑/拨开单 agent 开关只更新清单记意图，不动 agent 配置）+
                              #   连通性检测 check_mcp_server（stdio 拉起 initialize 握手 / remote POST 探活，每次尝试 8s 上限；
                              #   stdio 帧格式自适应：先发规范的 NDJSON 换行帧，server 秒退/首帧非法/超时再换
                              #   Content-Length 头帧重试一次，回包读取器两种帧都认；
-                             #   env/header 的 $VAR 引用检测时按宿主环境展开（scan_env_refs 整值+内嵌同口径）；
+                             #   env/header 的 $VAR 引用检测时先查 mcp-keys.json 再查宿主环境（scan_env_refs 整值+内嵌同口径）；
                              #   结果带 status 细分闭集 handshake/reachable/auth/not_found/error——401/403/404 判失败）；
                              #   明文密钥安全闸（审计收口 2026-09-08）：保存/粘贴导入/分发一律拒绝，只接受 $VAR 引用，
                              #   历史明文条目不删不崩但编辑/分发被拦至改成引用，移除方向不拦；
@@ -737,7 +748,7 @@ src-tauri/src/
   均已落地；后续只保留文档/回归走查与发布动作，不把历史批次重复列为功能未完成。
   批次顺序为用户拍板：E 先行，批次 C（实验数据分析）/D（表征分析）转待办；场景 4（agent 辅助做图）不做独立产品能力，改由按需挂载的 origin-plot 技能承接、
   已移出独立路线（「只做场景必需、不做扩展性功能」原则，见架构 v3.97）
-- **科研工具交付合同（2026-09-11；2026-09-12 收口来源）**：六套模板不另扩编排；库交付、Origin 数值图、Blender 示意和稿件载体由人选择，统一补进现有步骤技能/产物/人工事项。**文献从哪来只在检索步 `lit_source`**，不在创建弹层或 `科研工具/literature` 再问一遍；选 Zotero 才挂 `zotero-sync`。种子 v5 加 `blender-research` 及随包脚本；已有技能只经差异预览确认升级。模板同名但交付不同不可跳过。Zotero 只读在线内存快照、增量独立候选、来源+资源一起保存；外部 PDF 仅精确登记只读路径可配对阅读。复现合同与面板统一；上游验收引用不自动批准本步。细则见 `docs/conventions/pipeline.md` 末节。
+- **科研工具交付合同（2026-09-11；2026-09-12 收口来源）**：六套模板不另扩编排；库交付、Origin 数值图、Blender 示意和稿件载体由人选择，统一补进现有步骤技能/产物/人工事项。**文献从哪来只在检索步 `lit_source`**，不在创建弹层或 `科研工具/literature` 再问一遍；选 Zotero 才挂 `zotero-sync`。设定屏只填全局设定。稿件载体问在会换正式稿的步骤；库交付问在精读（无精读才在投稿适配）；Origin/Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。种子 v5 加 `blender-research` 及随包脚本；已有技能只经差异预览确认升级。模板同名但交付不同不可跳过。Zotero 只读在线内存快照、增量独立候选、来源+资源一起保存；外部 PDF 仅精确登记只读路径可配对阅读。复现合同与面板统一；上游验收引用不自动批准本步。细则见 `docs/conventions/pipeline.md` 末节。
 - **科研外部工具三线（2026-09-05 已融入）**：`origin-plot` / `zotero-sync` / `endnote-bridge` 已注册为内置技能并随种子版本 4 播种；仅 `zotero-sync` 默认挂到英文综述、科研论文、毕业论文的文献检索步骤。Origin 仍只作 Windows + Origin 2021+ 的可选外部工具驱动，EndNote 仍只作 XML/RIS 格式桥接，二者不默认进入模板，也不做 CWYW 无人值守自动化。Zotero 通道需按实机版本/授权探测，失败时回落 RIS/BibTeX 文件流程，不阻塞检索。
   Origin 只做 Windows 实机（Mac 虚拟机方案否决）、EndNote 只走格式桥接（CWYW 无人值守否决）、Zotero 写库只走技能且必须有用户意图；场景 4 以 origin-plot 技能形态重新纳入。
 - **定时任务与研究流程结合（核心路径已落地，细目见架构 §11.4 历史记录）**：边界已定——不给每步配定时任务，
@@ -757,6 +768,7 @@ src-tauri/src/
 - Anthropic 兼容槽只接受基础 URL；保存时拒绝以 `/messages` 结尾的完整资源地址。
 - CodeBuddy 的 `reasoning_effort` 通过当前 CLI 的 `--effort` 启动参数注入；Grok 的模型/思考档通过 `-m`/`--reasoning-effort` 注入。
 - Grok 的 `api_backend`、`context_window` 不得通过受限 `GROK_CONFIG` 猜测注入；若绑定声明非 `chat_completions`，必须先在 Grok `[model.<id>]` 配置中登记，否则启动和无头调用均 fail-closed。
+- Codex 网关端点必须实现 `/responses`（CLI 已移除 `wire_api="chat"`）：智谱专用端点是 `https://open.bigmodel.cn/api/v1`，`/api/paas/v4` 只有 `chat/completions`，Codex 打过去 404；且 api/v1 **不提供 `/models` 目录**（智谱把错误包成 HTTP 200），目录只有 `paas/v4/models` 有——网关库正确填法 = Base URL/OpenAI 槽 `paas/v4` + Responses 槽 `api/v1` 分槽填（预设与网关库告警已对齐；fetch_models 用 `gateway_error_envelope` 识别 200 包错误体，不误报「0 个模型」；qwen/kimi/opencode/grok 走 openai 槽用 `paas/v4` 不受影响；2026-09-15 实证）。
 - 配置页查询模型能力必须带 `gatewayId`，网关级能力声明优先于公共/内置能力库；写 Grok 逐模型上下文时只使用显式声明值，不使用通用估值。
 
 - **项目页视图（2026-09-06；2026-09-10 加「对话」页）**：项目页顶栏是当前项目身份（名称、工作方式、课题主题、路径），添加项目在左侧列表 +。已注册项目页签顺序为「对话 → 科研任务 / 工作任务 / 编程任务 → 定时任务 → 文件 → Agents」。**对话**只看当前项目的记录（默认铺开列表，点一条才回放；展开后列表不显示 Agent 标签，关闭在右上角，方向键换会话；思考/工具调用默认折成一条过程；可继续/归档、＋新对话），不是侧栏那份全局历史；打开项目默认仍进任务页。＋新对话注入**会话包**（项目是谁、顶层有什么、规则、跟这次说的做），不把目标说明、技能名单、「尚未完成」或「验收后才进项目」塞进对话；勾「验收后写入」才改走目标包。任务页是该工作方式的主面（有流程科研=步骤/工作区，无流程科研=目标，办公=人声明任务，编程=工作树），**不再放右侧对话栏**。文献雷达和定时任务在「定时任务」页签。规则和验收记录收进顶栏 ⋯「项目设置」抽屉。文献/笔记/数据/图像只在「文件」页，任务页不预留空块。文件页：点文件才弹出右侧预览；预览有上下切换，窗口预览时方向键也换文件；顶栏类型图标（空类型不占位）+ 搜索 + 刷新；行悬停图标（问 AI / 显示 / 沉浸阅读），不挤文件名；可切窗口预览。规则面板无说明句。**有研究步骤的科研不展示技能和「写回时跳过」**（技能以步骤挂载为准；写回时跳过是目标验收不覆盖的路径）。无流程科研 / 办公才用技能 + 目标点名，以及写回时跳过；编程用技能、不展示写回时跳过。办公文档筛选与文件页同一套图标。本项目对话未命名显示「对话」。有进行中/待验收目标时雷达默认收起。Agents 页是这个项目的 Agent 名册（点配置名换该项目绑定、＋新对话 / 跟 AI 商量 / 聊想法默认、本项目继续该家会话也用这份绑定、正在负责哪些目标），点目标回任务页；不是连接页的模型配置表单。项目内新会话不沿用上次终端连接。继续会话启动栏必须显示该绑定，不能因 Codex 渠道兼容池静默换回上次的网关；渠道不同时预填绑定、不自动启动，确认后点运行。没有目标时不逐家重复空状态。不自动分派，密钥仍在连接页。编程工作树 ⋯ 可事后分组。侧栏「对话」仍是跨项目全局历史；定时任务在项目「定时任务」页签创建，后台不进正在进行、不进本项目对话。**侧栏没有定时任务页**（2026-09-13 用户移除）：侧栏九页 = 工作台/项目/运行/对话/连接/技能/MCP/用量/设置，页切快捷键、启动页选项、导航胶囊、settings.rs KNOWN_PAGES 都按这九页对齐；全局 page id `schedules` 只作旧持久化值的重定向（App.tsx 转到项目定时任务页签），不得再把定时任务加回侧栏或九页清单。

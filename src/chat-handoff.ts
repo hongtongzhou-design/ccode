@@ -180,8 +180,9 @@ export function chatHeaderStatus(input: {
   return running ? "Agent 运行中" : "准备开始";
 }
 
-/** 发送钮变「进行中」暂停：只在正在出字，不是进程还活着。
- *  停在提示符时要点发送；审批 confirm 时 Esc 归审批卡，不占发送钮。 */
+/** 发送钮变「进行中」暂停：只在正在出字，或刚发出还在等首个助手字
+ * （pendingReply 窗口里输入框已清、上一轮正文已落——发送钮没有发送对象）。
+ * 停在提示符时要点发送；审批 confirm 时 Esc 归审批卡，不占发送钮。 */
 export function composerShowsInterrupt(input: {
   running?: boolean;
   attention?: "done" | "working" | "confirm" | null;

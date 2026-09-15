@@ -30,3 +30,23 @@ export function headlessWriteCaution(
 ): string | null {
   return headlessWriteNote(cap);
 }
+
+/**
+ * 聊天「停止钮」按 Esc 是否安全：Grok Build 在非 prompt 态收到 ESC 会走整进程
+ * 退出确认链（调研录 matrix §9），「停下这一轮、会话保留」对它不成立——
+ * 停止钮对该家隐藏，要停请切终端自行确认。
+ */
+export const ESC_INTERRUPT_AGENTS: ReadonlySet<string> = new Set([
+  "claude-code",
+  "codex",
+  "gemini",
+  "qwen",
+  "kimi",
+  "opencode",
+  "codebuddy",
+  "cursor",
+]);
+
+export function escInterruptSafe(agentId: string | null | undefined): boolean {
+  return !!agentId && ESC_INTERRUPT_AGENTS.has(agentId);
+}

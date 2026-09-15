@@ -1,4 +1,4 @@
-import { researchToolsFromSettings, withResearchTools } from "../research-tools";
+import { researchToolsFromSettings, settingsWithResearchTools, withResearchTools, type ResearchTools } from "../research-tools";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -912,6 +912,7 @@ export default function ProjectGroup({
   const [zoteroDir, setZoteroDir] = useState<string | null>(null);
   const [zoteroMsg, setZoteroMsg] = useState<string | null>(null);
   const [litBusy, setLitBusy] = useState(false);
+  const [toolBusy, setToolBusy] = useState(false);
 
   /** 切换文献来源：改 project.toml 的 lit_source + 就地同步各步骤已编辑的 TASK.md 内容文件。
    *  v3.86 起改为**显式三值**（search / zotero / folder）——原先是两档开关，
@@ -937,6 +938,28 @@ export default function ProjectGroup({
       onError(String(reason));
     } finally {
       setLitBusy(false);
+    }
+  }
+
+  async function setResearchTool(key: keyof ResearchTools, value: string) {
+    if (!cfg || toolBusy) return;
+    const current = researchToolsFromSettings(cfg.settings);
+    if (current[key] === value) return;
+    const tools = { ...current, [key]: value } as ResearchTools;
+    setToolBusy(true);
+    try {
+      const steps = cfg.steps.map((s) =>
+        withResearchTools(s, tools, cfg.artifactDir, cfg.litSource),
+      );
+      await saveConfig({
+        ...cfg,
+        settings: settingsWithResearchTools(cfg.settings ?? [], tools),
+        steps,
+      });
+    } catch (reason) {
+      onError(String(reason));
+    } finally {
+      setToolBusy(false);
     }
   }
 
@@ -1865,6 +1888,8 @@ export default function ProjectGroup({
           // 不必再进抽屉找。Zotero 选择器本就是根级弹层，任何地方都能拉起
           onSetLitSource={setLitSource}
           litBusy={litBusy}
+          onSetResearchTool={setResearchTool}
+          toolBusy={toolBusy}
           reviewConflict={focusDesc?.st.key === "blocked"}
           onRestoreWorkspace={
             focusArchivedWs ? () => void restoreWs(focusArchivedWs) : undefined

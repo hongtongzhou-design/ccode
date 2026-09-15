@@ -210,3 +210,15 @@ test("PTY 静默：等首字保持转圈，出过字则熄灭", () => {
     { attention: null, armed: false, clearHadOutput: true },
   );
 });
+
+test("启动注入等回复时，TUI 开屏算出字也不能熄灭转圈", () => {
+  assert.deepEqual(
+    onPtyWorkingSilence({
+      prev: "working",
+      armed: true,
+      hadPtyWorkingOutput: true,
+      pendingReply: true,
+    }),
+    { attention: "working", armed: true, clearHadOutput: false },
+  );
+});

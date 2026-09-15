@@ -176,17 +176,33 @@ fn default_session_source() -> String {
     "cli".into()
 }
 
+/// ASCII 标签的大小写不敏感查找：只把 ASCII 字母折叠成小写比较，
+/// 多字节字符（İ/ß 等 to_ascii_lowercase 后长度会变）不参与转换，
+/// 返回的始终是原串的字节下标，可安全切片。
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| {
+        h[i..i + n.len()]
+            .iter()
+            .zip(n.iter())
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+    })
+}
+
 /// 按开闭标签处理一段：keep_inner 留下标签里的字（user_query）；
 /// false 整段丢掉（turn_aborted 是暂停机读标记，不是助手回复）。
 fn rewrite_tagged_block(text: &str, open: &str, close: &str, keep_inner: bool) -> String {
     let mut s = text.to_string();
     loop {
-        let lower = s.to_ascii_lowercase();
-        let Some(start) = lower.find(open) else {
+        let Some(start) = find_ascii_ci(&s, open) else {
             break;
         };
         let inner_at = start + open.len();
-        if let Some(rel) = lower[inner_at..].find(close) {
+        if let Some(rel) = find_ascii_ci(&s[inner_at..], close) {
             let inner = s[inner_at..inner_at + rel].trim().to_string();
             let after = inner_at + rel + close.len();
             let mid = if keep_inner { inner } else { String::new() };
@@ -3546,6 +3562,9 @@ struct ScanFileCache {
     opencode_db: HashMap<String, (FileSig, Vec<SessionMetaDto>)>,
     /// opencode 旧版扁平 JSON：storage 根路径 → (目录清单指纹, 整批)
     opencode_legacy: HashMap<String, (u64, Vec<SessionMetaDto>)>,
+    /// grok 会话的 summary.json 指纹侧栏：与 chained 里 updates.jsonl 指纹分开比较，
+    /// 不做 XOR 折叠（同长改动会抵消成缓存假命中）
+    grok_summary: HashMap<String, Option<FileSig>>,
 }
 
 static SCAN_FILE_CACHE: OnceLock<Mutex<ScanFileCache>> = OnceLock::new();
@@ -3641,6 +3660,7 @@ pub fn scan_sessions() -> ScanResult {
         kimi_snapshot,
         opencode_db,
         opencode_legacy,
+        grok_summary,
     } = &mut *cache;
     // Gemini 的 slug → 项目路径映射在扫描与快照补全时都要用
     let gemini_map = dirs::home_dir()
@@ -3811,25 +3831,26 @@ pub fn scan_sessions() -> ScanResult {
         }
         // OpenCode：v1.2+ 读共享 SQLite（WAL 只读）；旧版读 storage/ 扁平 JSON
         let mut found_db = false;
+        let mut opencode_db_next: HashMap<String, (FileSig, Vec<SessionMetaDto>)> =
+            HashMap::with_capacity(opencode_db.len());
         for db in opencode_db_candidates() {
             if db.exists() {
                 let sig = file_sig(&db);
-                let rows = match (sig, opencode_db.get(&cache_key(&db))) {
+                let key = cache_key(&db);
+                let rows = match (sig, opencode_db.get(&key)) {
                     (Some(sig), Some((old_sig, rows))) if *old_sig == sig => rows.clone(),
-                    _ => {
-                        let rows = opencode_scan_db(&db);
-                        if let Some(sig) = sig {
-                            opencode_db.insert(cache_key(&db), (sig, rows.clone()));
-                        }
-                        rows
-                    }
+                    _ => opencode_scan_db(&db),
                 };
+                if let Some(sig) = sig {
+                    opencode_db_next.insert(key, (sig, rows.clone()));
+                }
                 out.extend(rows);
                 found_db = true;
             }
         }
+        // 候选清单外的旧条目按本轮清单淘汰（配置/默认目录漂移后不留无界残留）
+        *opencode_db = opencode_db_next;
         if !found_db {
-            opencode_db.clear(); // db 消失后清掉，避免下次又命中
             for storage in opencode_legacy_roots() {
                 if storage.exists() {
                     let mut files = Vec::new();
@@ -3846,6 +3867,13 @@ pub fn scan_sessions() -> ScanResult {
                     out.extend(rows);
                 }
             }
+            // 同上：按本轮 storage 清单淘汰
+            let legacy_keys: HashSet<String> = opencode_legacy_roots()
+                .into_iter()
+                .filter(|r| r.exists())
+                .map(|r| cache_key(&r))
+                .collect();
+            opencode_legacy.retain(|k, _| legacy_keys.contains(k));
         }
         // CodeBuddy：projects/<slug>/<uuid>.jsonl（深度 2 恰好到文件）
         let mut codebuddy_files = Vec::new();
@@ -3869,7 +3897,9 @@ pub fn scan_sessions() -> ScanResult {
         // 只收文件名恰为 updates.jsonl 的（session_search.sqlite 是 FTS 索引不是会话本体，
         // chat_history.jsonl 是原始请求消息——均自然排除）。
         // compact/继续会 fork 新目录并写 parent_session_id，标题常与父会话相同——并入 Codex 同款链。
-        // meta 优先读同目录 summary.json：指纹须把 summary 的 (len, mtime) 算进来。
+        // meta 优先读同目录 summary.json：它与 updates.jsonl 内容可独立更新，
+        // 指纹须逐文件携带（updates 指纹 → summary 指纹），不折叠成单值——
+        // 折叠（如 XOR）在同长改动下会抵消成假命中。
         let mut grok_files = Vec::new();
         collect_files(&home.join(".grok").join("sessions"), 3, &mut grok_files);
         grok_files.retain(|f| {
@@ -3881,6 +3911,8 @@ pub fn scan_sessions() -> ScanResult {
         let mut grok_metas = Vec::with_capacity(grok_files.len());
         let mut grok_next: HashMap<String, (FileSig, SessionMetaDto, Option<String>)> =
             HashMap::with_capacity(grok_files.len());
+        let mut grok_summary_next: HashMap<String, Option<FileSig>> =
+            HashMap::with_capacity(grok_files.len());
         for f in grok_files {
             let Some(sig) = file_sig(&f) else { continue };
             // summary.json 参与解析：它与 updates.jsonl 同目录、内容可独立更新
@@ -3888,26 +3920,26 @@ pub fn scan_sessions() -> ScanResult {
                 .parent()
                 .map(|d| d.join("summary.json"))
                 .and_then(|p| file_sig(&p));
-            let combined = FileSig {
-                len: sig.len ^ summary_sig.map(|s| s.len).unwrap_or(0),
-                mtime_ns: sig.mtime_ns ^ summary_sig.map(|s| s.mtime_ns).unwrap_or(0),
-            };
             let key = format!("grok|{}", f.display());
-            let pair = match chained.get(&key) {
-                Some((old_sig, m, parent)) if *old_sig == combined => {
-                    (m.clone(), parent.clone())
-                }
-                _ => match grok_file_meta(&f, true) {
+            let hit = chained.get(&key).is_some_and(|(old_sig, _, _)| *old_sig == sig)
+                && grok_summary.get(&key).is_some_and(|old| *old == summary_sig);
+            let pair = if hit {
+                let (m, parent) = chained.get(&key).map(|(_, m, p)| (m, p)).unwrap();
+                (m.clone(), parent.clone())
+            } else {
+                match grok_file_meta(&f, true) {
                     Some(p) => p,
                     None => continue,
-                },
+                }
             };
-            grok_next.insert(key, (combined, pair.0.clone(), pair.1.clone()));
+            grok_next.insert(key.clone(), (sig, pair.0.clone(), pair.1.clone()));
+            grok_summary_next.insert(key, summary_sig);
             grok_metas.push(pair);
         }
         // grok 与 codex 共用 chained 一栏：grok 键带前缀，codex 键是裸路径，互不冲突；
         // chained 已在 codex 段整体替换过，这里合并而不是覆盖
         chained.extend(grok_next);
+        *grok_summary = grok_summary_next;
         let (reps, members) = merge_codex_chains(grok_metas);
         out.extend(reps);
         chain_members.extend(members);
@@ -3918,6 +3950,11 @@ pub fn scan_sessions() -> ScanResult {
         .map(|m| (m.agent.clone(), m.session_id.clone()))
         .collect();
     if let Some(dir) = snapshots_root() {
+        // 快照区两栏缓存也按本轮清单重建：已删除的快照文件不留缓存残留
+        let mut snapshot_next: HashMap<String, (FileSig, SessionMetaDto)> =
+            HashMap::with_capacity(snapshot.len());
+        let mut kimi_snapshot_next: HashMap<String, (FileSig, SessionMetaDto)> =
+            HashMap::with_capacity(kimi_snapshot.len());
         for agent in [
             "claude-code",
             "codex",
@@ -3972,33 +4009,32 @@ pub fn scan_sessions() -> ScanResult {
                                 })
                             });
                             match parsed {
-                                Some(m) => {
-                                    kimi_snapshot.insert(key.clone(), (sig, m.clone()));
-                                    m
-                                }
+                                Some(m) => m,
                                 None => continue,
                             }
                         }
                     };
+                    kimi_snapshot_next.insert(key, (sig, m.clone()));
                     Some(m)
                 } else {
                     let Some(sig) = file_sig(&f) else { continue };
-                    match snapshot.get(&key) {
-                        Some((old_sig, old)) if *old_sig == sig => Some(old.clone()),
+                    let m = match snapshot.get(&key) {
+                        Some((old_sig, old)) if *old_sig == sig => old.clone(),
                         _ => match parse(&f) {
-                            Some(m) => {
-                                snapshot.insert(key.clone(), (sig, m.clone()));
-                                Some(m)
-                            }
+                            Some(m) => m,
                             None => continue,
                         },
-                    }
+                    };
+                    snapshot_next.insert(key, (sig, m.clone()));
+                    Some(m)
                 };
                 if let Some(m) = meta {
                     out.push(m);
                 }
             }
         }
+        *snapshot = snapshot_next;
+        *kimi_snapshot = kimi_snapshot_next;
     }
     // 工作区 worktree 里的会话归并回「真实仓库 + 工作区名」（§6.10 ProjectAggregator 咬合点）
     let wt_rows = crate::workspaces::worktree_rows();
@@ -7281,6 +7317,17 @@ mod tests {
         ]));
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].role, "user");
+    }
+
+    #[test]
+    fn tagged_block_ascii_ci_match_never_panics_on_width_changing_chars() {
+        // İ/ß 这类字符 to_ascii_lowercase 后长度会变：旧实现用小写串下标切原串必 panic，
+        // ASCII 逐字节比较返回的原串下标在任何多字节文本旁都安全。
+        assert_eq!(unwrap_prompt_tags("İ<USER_QUERY>ß好</USER_QUERY>"), "İß好");
+        assert_eq!(
+            unwrap_prompt_tags("ẞ<turn_aborted>x</TURN_ABORTED>ß"),
+            "ẞß"
+        );
     }
 
     #[test]

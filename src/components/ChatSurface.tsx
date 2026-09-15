@@ -22,6 +22,7 @@ import {
   slashHandoff,
 } from "../chat-handoff";
 import { welcomeCwdLine } from "../terminal-welcome";
+import { escInterruptSafe } from "../agent-caps";
 
 export default function ChatSurface({
   messages,
@@ -190,6 +191,8 @@ export default function ChatSurface({
     toolName,
   });
   const waitText = chatWaitText(waitKind, toolName);
+  const generating =
+    loading || (running && attention === "working");
   const extraHint = approvalExtraHint(agentId, hooksEnabled);
 
   async function sendFromComposer(text: string): Promise<string | null> {
@@ -223,6 +226,8 @@ export default function ChatSurface({
             {extraHint && (
               <div className="mt-1 text-micro text-l4">{extraHint}</div>
             )}
+            {/* Grok 无 Esc 键：非 prompt 态 Esc 会触发整进程退出确认（escInterruptSafe），
+                审批/菜单态同理——「Esc 取消」对该家隐藏，去终端里自行处理 */}
             <div className="mt-1.5 flex items-center gap-1.5">
               <button
                 type="button"
@@ -240,14 +245,16 @@ export default function ChatSurface({
               >
                 ✗ 拒绝
               </button>
-              <button
-                type="button"
-                onClick={() => onApprovalKey?.("esc")}
-                title="往终端按 Esc（取消当前提示）"
-                className="rounded-md px-2.5 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
-              >
-                Esc 取消
-              </button>
+              {escInterruptSafe(agentId) && (
+                <button
+                  type="button"
+                  onClick={() => onApprovalKey?.("esc")}
+                  title="往终端按 Esc（取消当前提示）"
+                  className="rounded-md px-2.5 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
+                >
+                  Esc 取消
+                </button>
+              )}
               <span className="mx-1 h-3.5 w-px bg-hairline" />
               <button
                 type="button"
@@ -340,7 +347,7 @@ export default function ChatSurface({
           ) : (
             <ConversationView messages={messages} cwd={cwd} />
           )}
-          {loading && (
+          {generating && (
             <div
               className="mb-2 flex items-center gap-2 text-micro text-l4"
               aria-live="polite"
@@ -350,7 +357,7 @@ export default function ChatSurface({
                 <span className="size-1.5 rounded-full bg-l4 animate-pulse [animation-delay:120ms]" />
                 <span className="size-1.5 rounded-full bg-l4 animate-pulse [animation-delay:240ms]" />
               </span>
-              <span>{waitText || "已送出"}</span>
+              <span>{waitText || "正在回复"}</span>
             </div>
           )}
           {hasNew && (

@@ -71,11 +71,13 @@ export function applyTailAttention(input: {
   return { attention: null, armed: input.armed };
 }
 
-/** 生成中静默：还在等首个输出则保持；已经出过字则熄灭，防止会话文件 working 把圆点回来。 */
+/** 生成中静默：还在等首个输出则保持；已经出过字则熄灭，防止会话文件 working 把圆点回来。
+ *  启动注入的首轮（pendingReply）TUI 开屏也算出字，但不能据此熄灭——模型还在想。 */
 export function onPtyWorkingSilence(input: {
   prev: TabAttention;
   armed: boolean;
   hadPtyWorkingOutput: boolean;
+  pendingReply?: boolean;
 }): { attention: TabAttention; armed: boolean; clearHadOutput: boolean } {
   if (input.prev !== "working") {
     return {
@@ -84,7 +86,7 @@ export function onPtyWorkingSilence(input: {
       clearHadOutput: false,
     };
   }
-  if (input.armed && !input.hadPtyWorkingOutput) {
+  if (input.armed && (!input.hadPtyWorkingOutput || input.pendingReply)) {
     return { attention: "working", armed: true, clearHadOutput: false };
   }
   return { attention: null, armed: false, clearHadOutput: true };

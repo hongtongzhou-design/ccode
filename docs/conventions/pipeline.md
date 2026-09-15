@@ -58,7 +58,7 @@
 - 两套实证的设计/运行、数据清洗/EDA、三套研究初稿采用现有 `hard_pause`，要求关键前置依据；执行中新增关键未决项依任务书暂停受影响工作。开工软门/普通合并继续保留现有语义，不把科研结论状态硬编码进引擎。
 - `machine:same-ids:reference.json::delivered.json` 比较两份非空记录集合的全部唯一字符串 id；参考可继承，交付文件必须本轮新生成。接受数组或 `items`/`records`/`rows` 数组；拒绝缺/多/重复/空/非字符串 id、损坏 JSON、超 4 MiB/5000 条、过期交付及根外路径/symlink。它用于「待评审」产物检查，不是科学质量证明，也不是新的合并禁令。
 - 三套文献链：`papers/included.json` → `notes/index.json`，含 pending 与全文/复核状态；两套实验链：`experiments/matrix.json` → `results/matrix.json` 与运行 manifest；清洗：`data/fields.json` → `cleaning/fields.json`，删除字段仍留记录，派生字段另列。证据集合空时如实说明，不塞假记录只为机器检查通过。
-- 示例课题同步生成演示 `included.json`，标记 `demo-only`；演示 PDF 不是全文证据。已有演示目录仍不回补、不覆盖。
+- 示例课题同步生成演示 `included.json`，标记 `demo-only`；演示 PDF 不是全文证据。已注册的演示不覆盖；未注册再创建会按当前模板重写档案卡，缺文件才补。
 - **已有项目不静默升级**：模板是应用时的快照；更新内置模板不会覆盖项目步骤/任务书草稿。旧项目由人备份后在流程编辑器逐步采纳，补真实 ID/证据而非伪造新格式；同名步骤追加会跳过，不能用追加代替升级。内置技能通过已有「有新版/更新」路径提示，更新前备份；不直接覆盖本机用户技能。
 
 ## 科研证据与来源版本（2026-09-11）
@@ -204,8 +204,12 @@
   expectedArtifacts 精确化；技能挂载按 18 个内置技能核对（research-paper 检索步 +lit-search、精读步 +lit-notes、结果分析/毕业论文
   实验步 +stats-check、毕业论文初稿/定稿 +quarto-render、data-eda 步 +stats-check；submission-rebuttal 摘除
   不存在的假技能 pre-submission-reviewer，投稿前自查口径内联进简报）；lit-search 链路步骤新增 before 人工事项
-  「（可选）配置学术检索 MCP」（MCP 页预设导入 Consensus/Undermind，key 走环境变量引用；不配也能跑——
-  OpenAlex/Semantic Scholar 免 key 兜底），付费墙文献全程有人工事项接应（落点 `papers/*.pdf`）。
+  「（可选）配置学术检索 MCP」（流程线只留 Consensus/Undermind 预设入口 + 「去终端登录」，不写就地小字：
+  Consensus 在 MCP 页密钥栏填 API key，Mesa 注入 CONSENSUS_API_KEY，不必设系统环境变量；Undermind 登录在 CLI 里
+  （「去终端登录」会带上 `codex mcp login undermind` / `claude mcp login undermind`），
+  Mesa 体检 401 也正常，授权后必须新开会话——点「开始」会注入检索、来不及登录。
+  分发后**新开的检索会话**才能用；不配也能跑——OpenAlex/Semantic Scholar 免 key 兜底），
+  付费墙文献全程有人工事项接应（落点 `papers/*.pdf`）。
   **接壤路径约定**：六套模板共享同一条科研流水线的产物约定，能衔接的相邻段，产物路径固定对齐——综述末步产 `manuscript/review-final.md`、
   科研论文末步产 `manuscript/paper-final.md`、毕业论文末步产 `manuscript/thesis-final.md`，投稿与返修首步
   `any_of_inputs` 指向这三者 + `references.bib`；返修第 1 轮优先读 `submission/formatted.md`。综述的
@@ -496,6 +500,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   「## 待拍板」小节；种子点击仍建卡归档（对话归置不变）。**「跟 AI 商量一下」直接进终端**（2026-09-12）：
   用项目 Agents 页的默认 Agent 和绑定自动启动（没设才停在启动栏），不打开右栏预览；看任务书用流程线「预览/编辑 TASK.md」。
   discuss 节点完成口径 = 已有正文（hasDraft，纯文件口径）。
+  商量过之后流程线就地改按钮：能挑到本步上次认领会话 →「继续讨论」（同款线框，不用强调色），点下去 **resume 那条会话**（不注入开场指令、不另开一轮）；没有可接回的会话仍显示「跟 AI 商量一下」。TASK.md 文案仍是 ghost「TASK.md」，有正文时字色走强调色、不加框。
   **「跟 AI 商量一下」开聊先播种（v3.90，用户拍板）**：文件为空或仅含「已定方向」（isDecisionsOnly）时，
   先把当前模板拼装（`buildTaskMdPreview`，与开工落盘同一出处）整份写入作为讨论起点，指令改为
   「读稿 → 提问拿不准的点 → 按回答直接改稿」——商量的产出就是最终 TASK.md，从零起草会把简报/预期产物/
@@ -769,7 +774,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 
 - **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
   论文」概念。
-- **示例课题（15 分钟精读环）**：`projects::create_demo_project` 在「文档/Mesa 示例课题」幂等生成演示项目。步骤**就是**内置「英文综述」模板（`PIPELINE_TEMPLATES` id=review → `src-tauri/resources/pipeline-review.json`，改 `REVIEW_STEPS` 后跑 `scripts/export-review-template.ts`；`tests/pipeline-review-sync.test.ts` 守同步）。演示只叠加：课题主题、示例 PDF/清单、检索步 `seed_complete = true`。打开后当前步是「文献精读与笔记」，主按钮「开读这一篇」。已注册直接返回现有 project，目录已存在但未注册时**只注册、不补建不覆盖**。**「开读这一篇」不得挂到普通模板**：判定单一出处 `demoReadPaperResource`（检索步 `seedComplete` + 当前步挂 `lit-notes` + 已有 PDF）；英文综述/科研论文/毕业论文等流程线只显示「开始」。有 PDF 不是充分条件——真实课题导入文献后几乎都会中招。
+- **示例课题（15 分钟精读环）**：`projects::create_demo_project` 在「文档/Mesa 示例课题」幂等生成演示项目。步骤**就是**内置「英文综述」模板（`PIPELINE_TEMPLATES` id=review → `src-tauri/resources/pipeline-review.json`，改 `REVIEW_STEPS` 后跑 `scripts/export-review-template.ts`；`tests/pipeline-review-sync.test.ts` 守同步）。演示只叠加：课题主题、示例 PDF/清单、检索步 `seed_complete = true`。打开后当前步是「文献精读与笔记」，主按钮「开读这一篇」。已注册直接返回现有 project。目录还在但未注册（删除后再点「创建示例课题」、或废纸篓/iCloud 还原）时**档案卡按当前英文综述模板重写**，缺的演示文件才补，已有笔记/PDF/README 不动。用「添加项目」选中旧目录只读盘上的档案卡，不会刷新步骤——要同步流程请用「创建示例课题」。**「开读这一篇」不得挂到普通模板**：判定单一出处 `demoReadPaperResource`（检索步 `seedComplete` + 当前步挂 `lit-notes` + 已有 PDF）；英文综述/科研论文/毕业论文等流程线只显示「开始」。有 PDF 不是充分条件——真实课题导入文献后几乎都会中招。
 - **开步确认后自动拉起 Agent**：`startPipelineStep` 经 `buildWorkspaceTerminalRequest(..., { autoStart, launch })` 带 `autoStart`。确认弹层三行（本步要交 / 接到的输入芯片 / 将用哪个 Agent）+ 连接选择；无连接时主按钮「先加连接」跳连接页。TASK.md 默认折叠。
 - **合并后自动提货**：`merge_workspace` 在拷回 `papers/` 等 gitignored 产物之后，按本步 `expected_artifacts` 扫项目根，未跟踪文件自动 `register_artifact`；已 git 跟踪的跳过。开步弹层芯片来自 `inspect_step_inputs`（扫磁盘，不依赖人填 yaml）。
 - **雷达收件箱按篇开读**：`lit:` 条目主文案是论文标题；点了先加入精读清单，有已下载 PDF 则 `setReaderReq` 进沉浸阅读，否则落雷达并展开那一条。
@@ -780,7 +785,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 
 ## 科研外部工具与交付合同（2026-09-11）
 
-- 保留六套模板/原阶段数；工具是项目选择，不增设独立编排系统，不自动路由或自动并行。选择保存在 settings 的闭集 `科研工具/<key>：<value>`（`libraryExport` / `plotting` / `illustration` / `manuscript`），由 `research-tools.ts` 在应用/编辑步骤时补全技能、必需子集、交付、人工事项。**文献从哪来只认 `config.lit_source`**（流程线「确定文献来源」），不再写 `科研工具/literature`；切换来源时重应用合同，选 Zotero 才给检索/精读步挂 `zotero-sync`。外部库**交付**仍走 `libraryExport`，与来源分开；只认一份主 references.bib。创建项目时工具问在选完模板后的设定屏，不挡在模板列表前面。
+- 保留六套模板/原阶段数；工具是项目选择，不增设独立编排系统，不自动路由或自动并行。选择保存在 settings 的闭集 `科研工具/<key>：<value>`（`libraryExport` / `plotting` / `illustration` / `manuscript`），由 `research-tools.ts` 在应用/编辑步骤时补全技能、必需子集、交付、人工事项。**文献从哪来只认 `config.lit_source`**（流程线「确定文献来源」），不再写 `科研工具/literature`；切换来源时重应用合同，选 Zotero 才给检索/精读步挂 `zotero-sync`。外部库**交付**仍走 `libraryExport`，与来源分开；只认一份主 references.bib。交付问在精读（纳入清单 + `references.bib` 齐了）；没有精读步才问在期刊格式适配。创建项目时设定屏只填全局设定。稿件载体问在会换正式稿的步骤（期刊格式适配 / 返修 / 投稿材料）；文献库交付、Origin、Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。答案仍是项目级 `科研工具/*`，所有匹配步骤（含以后追加）一起补。不挡在模板列表前面。
 - 自动补入项以简报中的 `mesa-research-tools` 记录，反复应用幂等；撤销只移除本机制加入项。原生稿件替换字段若被手改，拒绝静默覆盖。更新旧步骤必须逐项预览、载入编辑草稿；不改旧 TASK.md 或产物。
 - Zotero 用只读 SQLite 在线备份到内存取得一致快照；不再顺序复制主库/WAL，不产生明文临时数据库。首次 bib、增量唯一候选、条目映射与 PDF 资源可追溯；来源与资源同次配置写回，不得前端回写旧 cfg。链接附件基目录须由人显式选择；读库绝不写个人库。
 - Zotero 导出的新键来自 library/item 稳定身份；已有主库键必须通过 DOI/条目差异人工保留，不自动换键。题录候选按 reference 资源登记；已登记只读外部 PDF 精确放行阅读/建笔记，不放行目录、不复制改名附件。

@@ -1,4 +1,133 @@
-/** 内置端点预设：只收录官方与公开的 OpenAI 兼容端点，不收录第三方商业中转 */
+/**
+ * 内置端点预设（provider 级）：只收录官方与公开端点，不收录第三方商业中转。
+ * 一份预设描述一个供应商在各协议槽的端点与推荐模型——网关本来就是一份多槽对象，
+ * 预设跟着网关走：网关库新建表单直接用整表，「添加连接」按 Agent 所需槽位派生
+ * （presetsForAgent）。加供应商 = 加一条。
+ */
+import { AGENT_PROTOCOLS } from "./types.ts";
+import { slotForAgent, type GatewaySlotName } from "./gateway-slot.ts";
+
+export interface ProviderPreset {
+  /** 显示名，也作网关/连接的默认名 */
+  name: string;
+  /** 各协议槽端点；未列出的槽不填（该槽的 Agent 看不到这条预设） */
+  slots: Partial<Record<GatewaySlotName, string>>;
+  /** 适用 Agent；缺省 = 除 gemini/cursor 外全部 */
+  agents?: string[];
+  /** 个别 Agent 的协议覆盖（如 kimi 对 Moonshot 走官方 kimi 协议） */
+  protocolByAgent?: Record<string, string>;
+  /** 一键接入推荐模型（精选 ≤3）；「验证并获取」后与实际目录求交，不在目录的不选 */
+  models?: string[];
+  noAuth?: boolean;
+  note?: string;
+  /** 某个槽的特别说明（如智谱 Responses 专用端点） */
+  slotNotes?: Partial<Record<GatewaySlotName, string>>;
+  confidence?: "official" | "verified-compatible" | "address-only";
+}
+
+export const PROVIDER_PRESETS: ProviderPreset[] = [
+  {
+    name: "Anthropic 官方",
+    agents: ["claude-code"],
+    slots: { anthropic: "https://api.anthropic.com" },
+    confidence: "official",
+  },
+  {
+    name: "腾讯 CodeBuddy 国际站",
+    agents: ["codebuddy"],
+    slots: { anthropic: "https://www.codebuddy.ai" },
+  },
+  {
+    name: "腾讯 CodeBuddy 中国站",
+    agents: ["codebuddy"],
+    slots: { anthropic: "https://copilot.tencent.com" },
+  },
+  {
+    name: "DeepSeek",
+    slots: {
+      anthropic: "https://api.deepseek.com/anthropic",
+      openai: "https://api.deepseek.com/v1",
+      responses: "https://api.deepseek.com/v1",
+    },
+    models: ["deepseek-v4-flash", "deepseek-v4-pro"],
+    slotNotes: {
+      anthropic: "Anthropic 兼容端点；Claude 用 ANTHROPIC_AUTH_TOKEN、CodeBuddy 用 CODEBUDDY_API_KEY 鉴权",
+    },
+    confidence: "official",
+  },
+  {
+    name: "智谱 GLM",
+    slots: {
+      anthropic: "https://open.bigmodel.cn/api/anthropic",
+      openai: "https://open.bigmodel.cn/api/paas/v4",
+      responses: "https://open.bigmodel.cn/api/v1",
+    },
+    models: ["glm-5.3", "glm-5.3-flash"],
+    slotNotes: {
+      responses: "Codex 专用 Responses 端点；paas/v4 会 404",
+      anthropic:
+        "Anthropic 兼容端点；Claude 用 ANTHROPIC_AUTH_TOKEN、CodeBuddy 用 CODEBUDDY_API_KEY 鉴权",
+    },
+    confidence: "official",
+  },
+  {
+    name: "Moonshot 月之暗面",
+    slots: {
+      openai: "https://api.moonshot.cn/v1",
+      responses: "https://api.moonshot.cn/v1",
+    },
+    protocolByAgent: { kimi: "kimi" },
+    models: ["kimi-k3", "kimi-k2.5"],
+    confidence: "official",
+  },
+  {
+    name: "阿里云百炼（兼容模式）",
+    slots: {
+      openai: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      responses: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    },
+    models: ["qwen3-coder-plus", "qwen3.7-plus"],
+    confidence: "official",
+  },
+  {
+    name: "OpenAI 官方",
+    agents: ["codex"],
+    slots: {
+      responses: "https://api.openai.com/v1",
+      openai: "https://api.openai.com/v1",
+    },
+    models: ["gpt-5.6-sol"],
+    confidence: "official",
+  },
+  {
+    name: "OpenRouter",
+    slots: {
+      openai: "https://openrouter.ai/api/v1",
+      responses: "https://openrouter.ai/api/v1",
+    },
+    note: "聚合多家，模型以实际目录为准",
+  },
+  {
+    name: "xAI 官方",
+    agents: ["grok"],
+    slots: { openai: "https://api.x.ai/v1" },
+    confidence: "official",
+  },
+  {
+    name: "Ollama 本地",
+    slots: {
+      openai: "http://localhost:11434/v1",
+      responses: "http://localhost:11434/v1",
+    },
+    noAuth: true,
+    note: "无需密钥；模型取决于本机已拉取",
+  },
+];
+
+/** 没有（也不该有）任何预设的 Agent；缺省适用面里排除它们 */
+const PRESET_EXEMPT_AGENTS = new Set(["gemini", "cursor"]);
+
+/** 派生视图：沿用旧 per-agent 预设的字段，弹层下拉消费 */
 export interface Preset {
   name: string;
   agent: string;
@@ -6,125 +135,66 @@ export interface Preset {
   note?: string;
   /** 多协议 agent（qwen/kimi）的预设隐含协议，填充时一并写入表单 */
   protocol?: string;
-  /** 鉴权/线路提示，仅用于启动前解释，不会写入密钥。 */
-  auth?: "bearer" | "x-api-key" | "gemini-key" | "none";
-  wireApi?: "chat-completions" | "responses" | "anthropic-messages" | "gemini" | "cursor";
+  wireApi?:
+    | "chat-completions"
+    | "responses"
+    | "anthropic-messages"
+    | "gemini"
+    | "cursor";
   confidence?: "official" | "verified-compatible" | "address-only";
+  /** 所属 provider 预设（一键接入需要完整槽位与推荐模型） */
+  provider: ProviderPreset;
 }
 
-export const PRESETS: Preset[] = [
-  // Claude Code 需要 Anthropic 协议，只列官方与官方支持的 Anthropic 兼容端点（2026-08 核实）
-  { name: "Anthropic 官方", agent: "claude-code", baseUrl: "https://api.anthropic.com" },
-  {
-    name: "智谱 GLM（Anthropic 兼容）",
-    agent: "claude-code",
-    baseUrl: "https://open.bigmodel.cn/api/anthropic",
-    note: "ANTHROPIC_AUTH_TOKEN 鉴权",
-  },
-  {
-    name: "DeepSeek（Anthropic 兼容）",
-    agent: "claude-code",
-    baseUrl: "https://api.deepseek.com/anthropic",
-    note: "ANTHROPIC_AUTH_TOKEN 鉴权",
-  },
-  // Codex 走 OpenAI Responses API，以下均为公开兼容端点
-  { name: "OpenAI 官方", agent: "codex", baseUrl: "https://api.openai.com/v1", auth: "bearer", wireApi: "responses", confidence: "official" },
-  { name: "OpenRouter", agent: "codex", baseUrl: "https://openrouter.ai/api/v1", note: "聚合多家" },
-  { name: "DeepSeek", agent: "codex", baseUrl: "https://api.deepseek.com/v1" },
-  { name: "Moonshot 月之暗面", agent: "codex", baseUrl: "https://api.moonshot.cn/v1" },
-  { name: "智谱 GLM", agent: "codex", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
-  {
-    name: "阿里云百炼（兼容模式）",
-    agent: "codex",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  },
-  { name: "Ollama 本地", agent: "codex", baseUrl: "http://localhost:11434/v1", note: "无需密钥" },
-  // Qwen Code 多协议，预设均为 openai 兼容端点（gemini/vertex-ai 协议暂不支持）
-  {
-    name: "阿里云百炼（兼容模式）",
-    agent: "qwen",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    protocol: "openai",
-  },
-  {
-    name: "OpenRouter",
-    agent: "qwen",
-    baseUrl: "https://openrouter.ai/api/v1",
-    note: "聚合多家",
-    protocol: "openai",
-  },
-  { name: "Moonshot 月之暗面", agent: "qwen", baseUrl: "https://api.moonshot.cn/v1", protocol: "openai" },
-  { name: "DeepSeek", agent: "qwen", baseUrl: "https://api.deepseek.com/v1", protocol: "openai" },
-  { name: "智谱 GLM", agent: "qwen", baseUrl: "https://open.bigmodel.cn/api/paas/v4", protocol: "openai" },
-  // Kimi Code：Moonshot 官方端点，协议 kimi；兼容端点走 openai 协议（KIMI_MODEL_PROVIDER_TYPE=openai）
-  {
-    name: "Moonshot 官方",
-    agent: "kimi",
-    baseUrl: "https://api.moonshot.cn/v1",
-    protocol: "kimi",
-  },
-  {
-    name: "阿里云百炼（兼容模式）",
-    agent: "kimi",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    protocol: "openai",
-  },
-  { name: "DeepSeek", agent: "kimi", baseUrl: "https://api.deepseek.com/v1", protocol: "openai" },
-  { name: "智谱 GLM", agent: "kimi", baseUrl: "https://open.bigmodel.cn/api/paas/v4", protocol: "openai" },
-  // OpenCode 走 @ai-sdk/openai-compatible，任意 OpenAI 兼容端点均可
-  {
-    name: "OpenRouter",
-    agent: "opencode",
-    baseUrl: "https://openrouter.ai/api/v1",
-    note: "聚合多家",
-  },
-  { name: "Moonshot 月之暗面", agent: "opencode", baseUrl: "https://api.moonshot.cn/v1" },
-  { name: "DeepSeek", agent: "opencode", baseUrl: "https://api.deepseek.com/v1" },
-  { name: "智谱 GLM", agent: "opencode", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
-  {
-    name: "阿里云百炼（兼容模式）",
-    agent: "opencode",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  },
-  // Gemini CLI 用 Google 官方时 Base URL 留空即可，不设预设
-  // CodeBuddy 是 Anthropic 兼容协议（CODEBUDDY_API_KEY 鉴权），官方分国际站/中国站
-  { name: "腾讯 CodeBuddy 国际站", agent: "codebuddy", baseUrl: "https://www.codebuddy.ai" },
-  { name: "腾讯 CodeBuddy 中国站", agent: "codebuddy", baseUrl: "https://copilot.tencent.com" },
-  {
-    name: "DeepSeek（Anthropic 兼容）",
-    agent: "codebuddy",
-    baseUrl: "https://api.deepseek.com/anthropic",
-    note: "CODEBUDDY_API_KEY 鉴权",
-  },
-  {
-    name: "智谱 GLM（Anthropic 兼容）",
-    agent: "codebuddy",
-    baseUrl: "https://open.bigmodel.cn/api/anthropic",
-    note: "CODEBUDDY_API_KEY 鉴权",
-  },
-  // Cursor 不设预设：端点是 Cursor 专有协议（CURSOR_API_ENDPOINT），非 OpenAI/Anthropic 兼容，
-  // 第三方供应商端点接上也不通，列出来只会误导
-  // Grok Build 是 OpenAI 兼容协议（XAI_API_KEY 鉴权），官方端点公开
-  { name: "xAI 官方", agent: "grok", baseUrl: "https://api.x.ai/v1", auth: "bearer", wireApi: "chat-completions", confidence: "official" },
-  // grok 归 OpenAI 兼容族，第三方兼容端点同样可用
-  { name: "OpenRouter", agent: "grok", baseUrl: "https://openrouter.ai/api/v1", note: "聚合多家" },
-  { name: "Moonshot 月之暗面", agent: "grok", baseUrl: "https://api.moonshot.cn/v1" },
-  { name: "阿里云百炼（兼容模式）", agent: "grok", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
-  { name: "DeepSeek", agent: "grok", baseUrl: "https://api.deepseek.com/v1" },
-  {
-    name: "智谱 GLM",
-    agent: "grok",
-    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-  },
-];
+const WIRE_BY_SLOT: Record<GatewaySlotName, NonNullable<Preset["wireApi"]>> = {
+  anthropic: "anthropic-messages",
+  openai: "chat-completions",
+  responses: "responses",
+  gemini: "gemini",
+  cursor: "cursor",
+};
+
+/**
+ * 某 Agent 视角的预设列表：按 Agent 协议槽过滤出可用端点。
+ * 协议推导——protocolByAgent 优先；qwen/kimi 按 provider 提供的槽反推
+ * （有 openai 槽 → openai 协议，只有 anthropic 槽 → anthropic）。
+ */
+export function presetsForAgent(agent: string): Preset[] {
+  const out: Preset[] = [];
+  const spec = AGENT_PROTOCOLS[agent];
+  for (const provider of PROVIDER_PRESETS) {
+    const applies = provider.agents
+      ? provider.agents.includes(agent)
+      : !PRESET_EXEMPT_AGENTS.has(agent);
+    if (!applies) continue;
+    let protocol: string | null = provider.protocolByAgent?.[agent] ?? null;
+    if (!protocol && spec) {
+      if (provider.slots.openai) protocol = "openai";
+      else if (provider.slots.anthropic) protocol = "anthropic";
+    }
+    const slot = slotForAgent(agent, protocol);
+    const baseUrl = provider.slots[slot];
+    if (!baseUrl) continue;
+    out.push({
+      name: provider.name,
+      agent,
+      baseUrl,
+      protocol: spec ? (protocol ?? spec.default) : undefined,
+      note: provider.slotNotes?.[slot] ?? provider.note,
+      wireApi: WIRE_BY_SLOT[slot],
+      confidence: provider.confidence,
+      provider,
+    });
+  }
+  return out;
+}
 
 /**
  * 没有预设的 agent 及其原因（v3.88）。
  * 空下拉看起来像功能坏了——两家「本来就不该有预设」必须说清楚，而不是给个空选择器。
  */
 export const NO_PRESET_REASON: Record<string, string> = {
-  gemini:
-    "用 Google 官方账号/API 时 Base URL 留空即可，不需要填端点。",
+  gemini: "用 Google 官方账号/API 时 Base URL 留空即可，不需要填端点。",
   cursor:
     "Cursor 的端点是它自家协议（非 OpenAI/Anthropic 兼容），第三方供应商端点接上也不通，所以不设预设。",
 };

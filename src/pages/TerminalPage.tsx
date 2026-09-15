@@ -40,6 +40,7 @@ import {
   KIMI_CSI_U_CTRL_V,
   KIMI_CSI_U_ENTER,
   pasteImageFeedback,
+  ptyShiftEnterRewrite,
   shouldReportTerminalColors,
   xtermOscColorReport,
 } from "../terminal-input";
@@ -255,7 +256,8 @@ export interface TabStatus {
   /** 当前 PTY id（可见性门控用；无存活 PTY 时为 null） */
   ptyId: string | null;
   /** 会话尾部状态（P3c 注意力标记）；无联动/shell/已退出/未知时为 null */
-  attention: "done" | "working" | "confirm" | null;  /** shell 模式下存在可恢复的会话（空态「恢复任务」可用性） */
+  attention: "done" | "working" | "confirm" | null;
+  /** shell 模式下存在可恢复的会话（空态「恢复任务」可用性） */
   canResume: boolean;
   /** 当前或最近一次关联的会话 id；只用于标签恢复元数据，不含会话文件内容。 */
   sessionId: string | null;
@@ -1293,6 +1295,7 @@ const TerminalView = memo(function TerminalView({
         prev: "working",
         armed: ptyWorkingArmedRef.current,
         hadPtyWorkingOutput: hadPtyWorkingOutputRef.current,
+        pendingReply: pendingReplyRef.current,
       });
       ptyWorkingArmedRef.current = next.armed;
       if (next.clearHadOutput) hadPtyWorkingOutputRef.current = false;
@@ -1450,6 +1453,9 @@ const TerminalView = memo(function TerminalView({
     fitRef.current = fit;
     searchRef.current = search;
 
+    // Codex Shift+Enter 改写后，xterm 仍可能再发 `\r`（keydown 返回 false 未 cancel）。
+    // 空输入时 Codex 不提交，看起来像换行；有内容时这记 `\r` 会直接发送。
+    let swallowShiftEnterCrUntil = 0;
     // Cmd/Ctrl+F 在终端聚焦时也呼出搜索条（拦在 xterm 之前，避免 Ctrl+F 字符进 PTY）
     term.attachCustomKeyEventHandler((e) => {
       // kimi 的 TUI 开了 kitty 键盘协议（\x1b[>7u）后只认 CSI-u 形式的 Enter，
@@ -1470,6 +1476,30 @@ const TerminalView = memo(function TerminalView({
           invoke("pty_write", { ptyId: id, data: KIMI_CSI_U_ENTER }).catch((e) => setError(String(e)));
         }
         return false;
+      }
+      // Codex composer：Shift+Enter 换行。xterm 仍发 \r，会被当成发送。
+      if (
+        e.key === "Enter" &&
+        (e.shiftKey || e.getModifierState("Shift")) &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        const rewrite = ptyShiftEnterRewrite(agentIdRef.current);
+        if (rewrite) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.type === "keydown") {
+            swallowShiftEnterCrUntil = performance.now() + 80;
+            const id = ptyIdRef.current;
+            if (id) {
+              invoke("pty_write", { ptyId: id, data: rewrite }).catch((err) =>
+                setError(String(err)),
+              );
+            }
+          }
+          return false;
+        }
       }
       if (
         e.type === "keydown" &&
@@ -1607,6 +1637,14 @@ const TerminalView = memo(function TerminalView({
     let pendingResize: { cols: number; rows: number } | null = null;
     const subs = [
       term.onData((data) => {
+        if (
+          data === "\r" &&
+          swallowShiftEnterCrUntil !== 0 &&
+          performance.now() < swallowShiftEnterCrUntil
+        ) {
+          swallowShiftEnterCrUntil = 0;
+          return;
+        }
         markInteraction();
         if (ptyInputLooksLikeSubmit(data, KIMI_CSI_U_ENTER)) armPtyWorking();
         const id = ptyIdRef.current;
@@ -1800,7 +1838,15 @@ const TerminalView = memo(function TerminalView({
     const timer = window.setTimeout(() => {
       if (autoLaunchedRef.current) return;
       autoLaunchedRef.current = true;
-      void (restored && !customRuntimeId ? restoreTask() : launch());
+      // launch 内部 try 只包住 pty_spawn 起的后半段；前置段（目录检查/清理/官方账号
+      // 确认）抛错时 void 吞掉就是「自动启动没反应」。落到错误面并展开启动栏，
+      // 让用户（和我们）看得到失败原因。Promise.resolve 兜 launch 返回 null 的分支。
+      Promise.resolve(restored && !customRuntimeId ? restoreTask() : launch()).catch(
+        (e) => {
+          setError(`自动启动失败：${String(e)}`);
+          setBarExpanded(true);
+        },
+      );
     }, 0);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2543,12 +2589,12 @@ const TerminalView = memo(function TerminalView({
       // lockLink 会切回较宽松的兜底轮询，正常刷新由 session watcher 驱动。
       startLinkPolling(500);
       await attach(res.ptyId, "agent", { reset: true });
-      if (
-        shouldArmWorkingOnLaunch({
-          prompt: options?.prompt ?? promptText,
-          isResume: Boolean(resumeId ?? resumeSessionId),
-        })
-      ) {
+      const launchedPrompt = (options?.prompt ?? promptText).trim();
+      const armWorking = shouldArmWorkingOnLaunch({
+        prompt: launchedPrompt,
+        isResume: Boolean(resumeId ?? resumeSessionId),
+      });
+      if (armWorking) {
         armPtyWorking();
       }
       setExited(false);
@@ -2557,6 +2603,7 @@ const TerminalView = memo(function TerminalView({
       setStartedAt(Date.now());
       if (res.promptDropped) {
         disarmPtyWorking();
+        setPendingReply(false);
         // 该 CLI 无交互注入参数（目前仅 kimi）：保留启动栏展开与指令文本，
         // 并自动复制到剪贴板（运行中输入框 disabled 不可选中），用户在终端里粘贴发送
         setAdvancedLaunchOpen(true);
@@ -2565,6 +2612,9 @@ const TerminalView = memo(function TerminalView({
           .catch(() => {});
         setError("该 CLI 不支持启动注入：指令已复制，请在终端里粘贴发送");
       } else {
+        // 注入首轮也走「等回复」：切到聊天要立刻有进行中/正在回复，
+        // 不能等会话文件落盘或用户再发一条才亮。
+        if (armWorking) setPendingReply(true);
         // 一次性：注入成功（或未携带指令）即清除，之后「启动」不再重复发送
         setPromptText("");
         setShowPrompt(false);
@@ -4313,7 +4363,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   }
 
   /** 聊天层暂停当前生成：往 PTY 写 Esc（不是 Ctrl+C 硬中断——不退出会话，
-      各家 CLI 生成中按 Esc 都是停下当前回合、回到可继续输入的提示符） */
+      Codex/Claude 等生成中按 Esc 是停下当前回合、回到可继续输入的提示符。
+      Grok Build 走不到这里：非 prompt 态 Esc 会触发整进程退出确认，
+      ChatComposer 按 escInterruptSafe 对 grok 不渲染停止钮） */
   function chatInterrupt() {
     tabActionsRef.current.get(focusedId)?.writePty("\x1b");
   }
@@ -4548,8 +4600,21 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       blue: t.blue,
     };
   })();
+  // StrictMode 首挂载会同步双跑本 effect：第二次闭包里的 pendingTerminal 仍是同一份旧值
+  // （setPendingTerminal(null) 的重渲染还没发生），直接跑会开出两个同 reuseKey 的标签——
+  // 「开工首跳终端」恰好在终端页首挂载时到达（visited 门控 + setPage 同拍），开发窗口必现。
+  // 按对象身份记消费标记：双跑只消费一次，新 pendingTerminal（不同对象）不受影响。
+  const consumedPendingRef = useRef<unknown>(null);
   useEffect(() => {
-    if (visible && pendingTerminal) {
+    if (
+      !visible ||
+      !pendingTerminal ||
+      consumedPendingRef.current === pendingTerminal
+    ) {
+      return;
+    }
+    consumedPendingRef.current = pendingTerminal;
+    {
       setPendingTerminal(null);
       // 显式打开另一任务的终端时，不让上一次任务审阅继续盖住新标签。
       setReviewPath(null);
@@ -4613,7 +4678,17 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           setTabs((prev) =>
             prev.map((t) =>
               t.id === existing.id
-                ? { ...t, resumeKick: (t.resumeKick ?? 0) + 1 }
+                ? {
+                    ...t,
+                    resumeKick: (t.resumeKick ?? 0) + 1,
+                    ...(pt.resume
+                      ? {
+                          resumeSessionId: pt.resume.sessionId,
+                          resumeProvider: pt.resume.provider ?? undefined,
+                          initialAgentId: pt.resume.agentId,
+                        }
+                      : {}),
+                  }
                 : t,
             ),
           );
@@ -5617,8 +5692,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     : "border-transparent text-l3 hover:bg-hover hover:text-l1"
                 } ${isDragSource ? "bg-raised" : ""}`}
               >
-                {/* 「正在生成回答」：只认 working。虚线沿圆周爬（dashoffset），
-                    圆几何不动；禁止 CSS rotate——WKWebView 会让圆心晃。 */}
+                {/* 「正在生成回答」：只认 working。8 段虚线按相位差闪 opacity
+                    （合成器驱动，终端出字满载也不掉帧）；既不用 CSS rotate——
+                    WKWebView 会让圆心晃，也不用 dashoffset 动画——主线程重绘，
+                    xterm 渲染挤占时一卡一卡（2026-09-15 实测）。 */}
                 {s?.attention === "working" && (
                   <span
                     className="inline-flex size-3 shrink-0 items-center justify-center"
@@ -5629,19 +5706,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       height="12"
                       viewBox="0 0 24 24"
                       fill="none"
-                      className="ccode-working-spinner text-l3"
+                      className="ccode-working-spinner text-l2"
                       aria-label="生成中"
                     >
-                      <circle
-                        cx="12"
-                        cy="12"
-                        r="9"
-                        pathLength="24"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="butt"
-                        strokeDasharray="1 2"
-                      />
+                      {Array.from({ length: 8 }, (_, i) => (
+                        <circle
+                          key={i}
+                          cx="12"
+                          cy="12"
+                          r="9"
+                          pathLength="8"
+                          stroke="currentColor"
+                          strokeWidth="3"
+                          strokeLinecap="butt"
+                          strokeDasharray="1.5 6.5"
+                          strokeDashoffset={-i}
+                        />
+                      ))}
                     </svg>
                   </span>
                 )}

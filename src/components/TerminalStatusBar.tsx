@@ -175,17 +175,13 @@ export default function TerminalStatusBar({
 
   function pickModel(m: string) {
     setModelMenuOpen(false);
-    if (!modelSwitch) return;
-    if (modelSwitch.kind === "direct") {
-      // kimi 的 /model 参数是 config.toml 的 [models.*] 别名（非法字符清洗为 _，
-      // 与 global_config.rs 的 kimi_model_alias 同规则）；别家直接吃模型 id
-      const arg =
-        status?.agentId === "kimi" ? m.replace(/[^A-Za-z0-9_-]/g, "_") : m;
-      writeCmd(modelSwitch.command.replace("{model}", arg));
-      setModelOverride(m);
-    } else {
-      writeCmd(modelSwitch.command); // 唤出 TUI 选择器，用户在终端里完成选择
-    }
+    if (!modelSwitch || modelSwitch.kind !== "direct") return;
+    // kimi 的 /model 参数是 config.toml 的 [models.*] 别名（非法字符清洗为 _，
+    // 与 global_config.rs 的 kimi_model_alias 同规则）；别家直接吃模型 id
+    const arg =
+      status?.agentId === "kimi" ? m.replace(/[^A-Za-z0-9_-]/g, "_") : m;
+    writeCmd(modelSwitch.command.replace("{model}", arg));
+    setModelOverride(m);
   }
 
   const [combo, setCombo] = useState<ComboSurfaceDto | null>(null);
@@ -458,68 +454,89 @@ export default function TerminalStatusBar({
         )}
         {!idle && shownModel &&
           (modelSwitch && profileModels.length > 0 ? (
-            <span className="relative">
+            modelSwitch.kind === "picker" ? (
+              /* picker 档（codex /model、opencode /models）不摆模型菜单：
+                 两家 CLI 的切换命令都不吃参数（codex 源码 supports_inline_args
+                 不含 Model；opencode run 无参），点哪个模型都只是唤选择器——
+                 菜单长得像直选却是假的。点芯片直接唤，少一跳也不误导 */
               <button
                 type="button"
-                onClick={() => setModelMenuOpen((v) => !v)}
+                onClick={() => writeCmd(modelSwitch.command)}
                 disabled={!status?.ptyId}
                 title={
                   status?.ptyId
-                    ? "切换模型（写入终端执行；picker 型会在终端里打开选择器）"
+                    ? "在终端打开模型选择器（这家 CLI 不支持带参直切，模型去选择器里选）"
                     : "启动终端后可切换模型"
                 }
-                aria-expanded={modelMenuOpen}
                 className="rounded-full border-0 px-2 py-0.5 font-mono"
                 style={{
-                  // chat 变体去掉蓝色强调：与目录胶囊同一套灰调语法（蓝色只留给状态点）
                   color: chat ? dim : colors.blue,
-                  background: chat && modelMenuOpen ? `${fg}1a` : `${fg}0f`,
+                  background: `${fg}0f`,
                   opacity: status?.ptyId ? 1 : 0.5,
                   cursor: status?.ptyId ? "pointer" : "default",
                 }}
               >
-                {shownModel} ▾
+                {shownModel}
               </button>
-              {modelMenuOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-40"
-                    onClick={() => setModelMenuOpen(false)}
-                  />
-                  <ul
-                    className="absolute bottom-full left-0 z-50 mb-1 max-h-56 w-56 overflow-auto rounded-md border p-1"
-                    style={{
-                      background: floatBg,
-                      borderColor: `${fg}33`,
-                    }}
-                  >
-                    {profileModels.map((m) => (
-                      <li key={m}>
-                        <button
-                          type="button"
-                          onClick={() => pickModel(m)}
-                          className="flex w-full items-center gap-1 rounded-sm px-2 py-1 text-left font-mono text-[11px]"
-                          style={{ color: m === shownModel ? fg : dim }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.background = `${fg}1a`;
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.background = "transparent";
-                          }}
-                        >
-                          {m}
-                          {modelSwitch.kind === "picker" && (
-                            <span className="ml-auto" style={{ color: faint }}>
-                              （打开选择器）
-                            </span>
-                          )}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </span>
+            ) : (
+              <span className="relative">
+                <button
+                  type="button"
+                  onClick={() => setModelMenuOpen((v) => !v)}
+                  disabled={!status?.ptyId}
+                  title={
+                    status?.ptyId
+                      ? "切换模型（写入终端执行）"
+                      : "启动终端后可切换模型"
+                  }
+                  aria-expanded={modelMenuOpen}
+                  className="rounded-full border-0 px-2 py-0.5 font-mono"
+                  style={{
+                    // chat 变体去掉蓝色强调：与目录胶囊同一套灰调语法（蓝色只留给状态点）
+                    color: chat ? dim : colors.blue,
+                    background: chat && modelMenuOpen ? `${fg}1a` : `${fg}0f`,
+                    opacity: status?.ptyId ? 1 : 0.5,
+                    cursor: status?.ptyId ? "pointer" : "default",
+                  }}
+                >
+                  {shownModel} ▾
+                </button>
+                {modelMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setModelMenuOpen(false)}
+                    />
+                    <ul
+                      className="absolute bottom-full left-0 z-50 mb-1 max-h-56 w-56 overflow-auto rounded-md border p-1"
+                      style={{
+                        background: floatBg,
+                        borderColor: `${fg}33`,
+                      }}
+                    >
+                      {profileModels.map((m) => (
+                        <li key={m}>
+                          <button
+                            type="button"
+                            onClick={() => pickModel(m)}
+                            className="flex w-full items-center gap-1 rounded-sm px-2 py-1 text-left font-mono text-[11px]"
+                            style={{ color: m === shownModel ? fg : dim }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.background = `${fg}1a`;
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.background = "transparent";
+                            }}
+                          >
+                            {m}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </span>
+            )
           ) : (
             <span className="truncate">· {shownModel}</span>
           ))}

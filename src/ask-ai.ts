@@ -79,12 +79,12 @@ export function askAiDirectLaunch(
   if (forcePick) return null;
   const agent = file.preferredAgent?.trim() ?? "";
   if (agent) {
+    // 空绑定不传空串占位——「没绑」与「绑了空串」语义不同，后者依赖被调方容忍
+    const bound = file.preferredProfile?.trim();
     return projectAgentLaunch(
       profiles,
       agent,
-      file.preferredProfile?.trim()
-        ? { [agent]: file.preferredProfile.trim() }
-        : {},
+      bound ? { [agent]: bound } : {},
     );
   }
   if (!askAiCanSkip(remembered, profiles) || !remembered) return null;

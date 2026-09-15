@@ -269,6 +269,7 @@ pub fn run() {
             mcp::check_mcp_server,
             mcp::check_all_mcp_servers,
             mcp::mcp_missing_env_refs,
+            mcp::list_mcp_env_secrets,
             mcp::mcp_agent_status,
             mcp::discover_mcp_servers,
             mcp::import_mcp_from_agent,

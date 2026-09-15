@@ -42,6 +42,7 @@ outputs: [papers/]
 ### 3. 检索候选文献
 
 - 按学科选择来源，常用库清单：arXiv（预印本，可用官方 API 按日期排序）、OpenAlex 与 Semantic Scholar（覆盖广、可程序化检索）、Crossref（DOI 元数据核对）、PubMed（生物医学）、DBLP（CS 会议/期刊索引，免费 API）、CNKI/知网（中文文献，手动导出题录）；
+- **本会话若已挂 Consensus / Undermind MCP**：当作额外检索库直接调用（Consensus = 按问题搜同行评议论文；Undermind = 语义补漏）。命中并进候选池，检索日志「库」写 Consensus / Undermind，去重与纳排与其他库同一套；**不替代** OpenAlex / Semantic Scholar，也不另写一份清单。MCP 不可用则跳过并在覆盖缺口声明，不中断检索；
 - 检索日志用固定六字段表头，逐库一行记入 `papers/screening.md`：**日期 / 库 / 完整检索式 / 命中数 / 去重后数 / 筛后保留数**，保证检索过程可复现；
 - 各库结果合并去重后，同一篇（DOI 或标题归一判定）被 ≥2 个库命中的，在记录上标「**多源命中**」——这是优先阅读的提示，不是纳入标准；
 - 每篇记录：标题、作者、年份、来源、链接或 DOI。字段未知一律标「待补」，不得留空或猜测。

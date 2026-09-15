@@ -58,12 +58,12 @@ export function codingTerminalLaunch(
   model: string;
   autoStart: boolean;
 } | null {
+  const agent = preferredAgent?.trim() ?? "";
+  const bound = preferredProfile?.trim() ?? "";
   const project = projectAgentLaunch(
     profiles,
-    preferredAgent,
-    preferredAgent
-      ? { [preferredAgent]: preferredProfile?.trim() ?? "" }
-      : null,
+    agent,
+    agent && bound ? { [agent]: bound } : null,
   );
   const launch =
     project ??

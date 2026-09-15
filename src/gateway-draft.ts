@@ -21,6 +21,25 @@ export function effectiveSlotUrl(
   return own || masterUrl.trim();
 }
 
+/** Codex 走 Responses 协议，端点必须实现 /responses。
+ * 智谱 /api/paas/v4 只有 chat/completions（带 key 打 /responses 实测 404），
+ * Codex 专用端点是 https://open.bigmodel.cn/api/v1（官方 coding-plan 文档），
+ * 且该端点不提供 /models 模型目录（200 包错误体）——目录走 paas/v4/models。
+ * 只对 open.bigmodel.cn 的 paas/v4 路径报警，避免误伤其他网关。 */
+export function responsesSlotUrlWarning(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.hostname !== "open.bigmodel.cn") return null;
+  if (!parsed.pathname.includes("/api/paas/v4")) return null;
+  return "智谱 /api/paas/v4 只有 chat/completions，Codex 打 /responses 会 404。正确填法：Base URL 保持 /api/paas/v4（「获取模型」走它拉目录），展开「协议槽」把 Responses 单独填 https://open.bigmodel.cn/api/v1（该端点不出模型目录）";
+}
+
 /** 五个槽都空、或都等于主输入（含主输入同步进槽的同址情况）。 */
 export function slotsFollowMaster(
   slots: Partial<Record<GatewaySlotName, string | null | undefined>> | ProtocolSlots,

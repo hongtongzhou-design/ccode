@@ -13,6 +13,7 @@ import {
   parseHeaderEnv,
   primaryProbeSlot,
   probeDtoToSummary,
+  responsesSlotUrlWarning,
   slotsFollowMaster,
 } from "../src/gateway-draft.ts";
 import { agentForSlot } from "../src/gateway-slot.ts";
@@ -160,4 +161,19 @@ test("catalogCapabilityNote：纯 id 目录说明去公共库", () => {
   assert.match(catalogCapabilityNote(10, 3) ?? "", /3 个带网关能力字段/);
   assert.match(catalogFetchNotice(423, 0, "anthropic"), /anthropic/);
   assert.match(catalogFetchNotice(423, 0), /下载模型能力库/);
+});
+
+test("responsesSlotUrlWarning：智谱 paas/v4 无 /responses 才报警", () => {
+  const warn = responsesSlotUrlWarning("https://open.bigmodel.cn/api/paas/v4");
+  assert.match(warn ?? "", /api\/v1/);
+  // 尾斜杠、槽自填同址都命中
+  assert.match(
+    responsesSlotUrlWarning("https://open.bigmodel.cn/api/paas/v4/") ?? "",
+    /404/,
+  );
+  // 专用端点、其他网关同路径、空值与非法 URL 都不报警
+  assert.equal(responsesSlotUrlWarning("https://open.bigmodel.cn/api/v1"), null);
+  assert.equal(responsesSlotUrlWarning("https://relay.example.com/api/paas/v4"), null);
+  assert.equal(responsesSlotUrlWarning(""), null);
+  assert.equal(responsesSlotUrlWarning("not-a-url"), null);
 });

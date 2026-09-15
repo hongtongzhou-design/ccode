@@ -13,6 +13,9 @@ import {
 } from "../task-cards";
 import { buildTaskMdPreview } from "../pipeline-start";
 import { isDecisionsOnly } from "../step-decisions";
+import { filterProjectSessions } from "../project-status";
+import { pickDiscussResume } from "../step-flow";
+import { IS_WINDOWS } from "../hotkeys";
 import { AGENTS } from "../types";
 import { projectAgentLaunch } from "../project-agents";
 import type {
@@ -24,6 +27,7 @@ import type {
   TaskDraftDto,
   WorkspaceDto,
 } from "../types";
+import { researchToolAskFieldsForStep, researchToolsFromSettings } from "../research-tools";
 import { statusBadgeTitle } from "../git-status-groups";
 import {
   historySaveBlockedReason,
@@ -79,6 +83,8 @@ export default function TaskCardsSection({
   onOpenResources,
   onSetLitSource,
   litBusy,
+  onSetResearchTool,
+  toolBusy,
   onMainDirtyRefresh,
   preferredAgent,
   preferredProfile,
@@ -125,19 +131,37 @@ export default function TaskCardsSection({
   /** 输入准备（v3.86）：透传给流程线「定方向」节点的文献来源选择与就地导入 */
   onSetLitSource?: (value: string) => void | Promise<void>;
   litBusy?: boolean;
+  onSetResearchTool?: (key: "libraryExport" | "plotting" | "illustration" | "manuscript", value: string) => void | Promise<void>;
+  toolBusy?: boolean;
   /** 项目 Agents 页的默认 Agent / 绑定；新会话和「跟 AI 商量一下」用这份。 */
   preferredAgent?: string | null;
   preferredProfile?: string | null;
 }) {
   const profiles = useAppStore((s) => s.profiles);
+  const preferredAgentTrimmed = preferredAgent?.trim() ?? "";
+  const preferredProfileTrimmed = preferredProfile?.trim() ?? "";
   const projectLaunch = projectAgentLaunch(
     profiles,
-    preferredAgent,
-    preferredAgent
-      ? { [preferredAgent]: preferredProfile?.trim() ?? "" }
+    preferredAgentTrimmed,
+    preferredAgentTrimmed && preferredProfileTrimmed
+      ? { [preferredAgentTrimmed]: preferredProfileTrimmed }
       : null,
   );
   const cards = useAppStore((s) => s.taskCards[projectPath]);
+  const sessions = useAppStore((s) => s.sessions);
+  const discussResumeSession = pickDiscussResume(
+    filterProjectSessions(sessions, projectPath, [], { isWindows: IS_WINDOWS }),
+    focusStep ?? "",
+  );
+  const discussed = discussResumeSession != null;
+  const discussResume = discussResumeSession
+    ? {
+        agentId: discussResumeSession.agent,
+        sessionId: discussResumeSession.sessionId,
+        provider: discussResumeSession.provider,
+        cwd: discussResumeSession.cwd ?? discussResumeSession.projectPath,
+      }
+    : null;
   const loadTaskCards = useAppStore((s) => s.loadTaskCards);
   const createCard = useAppStore((s) => s.createCard);
   const renameCard = useAppStore((s) => s.renameCard);
@@ -887,10 +911,16 @@ export default function TaskCardsSection({
             onDraftChanged={onDraftChanged}
             onSeedDraft={seedDraftForChat}
             onLoadTaskMd={loadTaskMdForStep}
+            discussed={discussed}
+            discussResume={discussResume}
             litSource={cfg.litSource}
             onOpenResources={onOpenResources}
             onSetLitSource={onSetLitSource}
             litBusy={litBusy}
+            tools={researchToolsFromSettings(cfg.settings)}
+            toolAskFields={researchToolAskFieldsForStep(focusStepDto, steps)}
+            onSetResearchTool={onSetResearchTool}
+            toolBusy={toolBusy}
             ws={workspaces.find(
               (w) =>
                 w.name === focusStepDto.workspaceName && w.status === "active",

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
+import { PROVIDER_PRESETS, type ProviderPreset } from "../presets";
 import { mergeGatewayCatalog } from "../gateway-catalog";
 import { Checkbox, fieldClass, FoldMark, primaryActionClass, searchFieldClass, secondaryActionClass } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
@@ -18,6 +19,7 @@ import {
   primaryProbeSlot,
   parseHeaderEnv,
   probeDtoToSummary,
+  responsesSlotUrlWarning,
   slotsFollowMaster,
 } from "../gateway-draft";
 import { gatewayPickerRows } from "../gateway-option";
@@ -288,6 +290,8 @@ export default function GatewayLibrary({
     setEditing(g);
     setName(g.name);
     setNoAuth(g.noAuth);
+    // 还没有任何绑定的网关直接展开 Agent 配置区——打开就是为了接着绑，不必再找折叠项
+    setShowBind(profiles.filter((p) => p.gatewayId === g.id).length === 0);
     const next = {
       anthropic: g.slots.anthropic ?? "",
       openai: g.slots.openai ?? "",
@@ -406,14 +410,64 @@ export default function GatewayLibrary({
     };
     const id = editing === "new" || editing === null ? null : editing.id;
     try {
-      await saveGateway(id, input);
-      const list = useAppStore.getState().gateways;
-      const saved = id ? list.find((g) => g.id === id) : list[list.length - 1];
-      if (saved) setEditing(saved);
+      const saved = await saveGateway(id, input);
+      // store 刷新后的列表元素带 slotProbes，比 command 返回值更完整；id 以返回值为准不猜末位
+      const fresh = useAppStore
+        .getState()
+        .gateways.find((g) => g.id === saved.id);
+      if (fresh) setEditing(fresh);
+      // 新建即绑：保存后直接展开 Agent 配置区（此时 editing 已切到保存后的网关），
+      // 消除「保存 → 重新找入口 → 展开折叠 → 选 Agent」的往返
+      if (!id) {
+        setShowBind(true);
+        setNotice(
+          `网关「${saved.name}」已保存。接着在下方 Agent 配置里选要用的 Agent 和模型。`,
+        );
+      }
     } catch (e) {
       setError(String(e));
     } finally {
       setSaving(false);
+    }
+  }
+
+  /** 端点预设一键填充（新建表单）：同址只填 Base URL 主输入、槽位跟随；
+      分槽供应商（智谱）各槽直填并展开槽位区；推荐模型只在目录为空时播种，不动手填内容 */
+  function applyProviderPreset(preset: ProviderPreset) {
+    setName((cur) => cur.trim() || preset.name);
+    setNoAuth(preset.noAuth ?? false);
+    const entries = Object.entries(preset.slots) as [
+      keyof ProtocolSlots,
+      string,
+    ][];
+    const urls = entries.map(([, v]) => v);
+    if (urls.length > 0 && urls.every((v) => v === urls[0])) {
+      setMasterUrl(urls[0]);
+      setSlots(emptySlots());
+      setShowSlots(false);
+    } else {
+      const next = emptySlots();
+      for (const [k, v] of entries) next[k] = v;
+      setSlots(next);
+      setMasterUrl("");
+      setShowSlots(true);
+    }
+    if (preset.models?.length) {
+      setModels((cur) =>
+        cur.length
+          ? cur
+          : preset.models!.map((id) => ({
+              id,
+              source: "user",
+              status: "available",
+              lastSeenAt: null,
+              catalogSlot: null,
+              temperature: null,
+              topP: null,
+              maxOutputTokens: null,
+              reasoningEffort: null,
+            })),
+      );
     }
   }
 
@@ -668,6 +722,10 @@ export default function GatewayLibrary({
   );
   const primaryProbe = primarySlot ? slotSum(primarySlot) : undefined;
   const slotsTogether = slotsFollowMaster(slots, masterUrl);
+  // Codex（responses 槽）端点告警：跟随主输入或槽自填的最终生效地址都看
+  const responsesUrlWarn = responsesSlotUrlWarning(
+    effectiveSlotUrl(slots, "responses", masterUrl),
+  );
 
   function usageLine(g: Gateway): string | null {
     const row = monthUsage.find((r) => r.bucket === "gateway" && r.gatewayId === g.id);
@@ -706,6 +764,32 @@ export default function GatewayLibrary({
         {notice && <p className="mb-2 text-sm text-ok-text">{notice}</p>}
         {editing ? (
           <div className="space-y-2">
+            {editing === "new" && (
+              <label className="block text-sm text-l2">
+                端点预设
+                <select
+                  className={`${fieldClass} mt-1 w-full`}
+                  value=""
+                  onChange={(e) => {
+                    const preset = PROVIDER_PRESETS.find(
+                      (p) => p.name === e.target.value,
+                    );
+                    if (preset) applyProviderPreset(preset);
+                  }}
+                >
+                  <option value="" disabled>
+                    选一家供应商，自动填地址、槽位和推荐模型…
+                  </option>
+                  {PROVIDER_PRESETS.map((p) => (
+                    <option key={p.name} value={p.name}>
+                      {p.name}
+                      {p.models?.length ? " · 含推荐模型" : ""}
+                      {p.confidence === "official" ? " · 官方" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label className="block text-sm text-l2">
               名称
               <input className={`${fieldClass} mt-1 w-full`} value={name} onChange={(e) => setName(e.target.value)} />
@@ -731,6 +815,9 @@ export default function GatewayLibrary({
                 onChange={(e) => onMasterChange(e.target.value)}
               />
             </label>
+            {responsesUrlWarn && (
+              <p className="text-[11px] text-warn-text">{responsesUrlWarn}</p>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"

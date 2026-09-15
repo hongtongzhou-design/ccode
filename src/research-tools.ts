@@ -34,18 +34,29 @@ export function settingsWithResearchTools(settings: readonly string[], tools: Re
 function stepTakesReading(step: Pick<ProjectStepDto, "skills">): boolean {
   return step.skills.some((s) => s === "lit-search" || s === "lit-notes");
 }
-function stepTakesLibraryExport(step: Pick<ProjectStepDto, "expectedArtifacts" | "workspaceName">): boolean {
-  return step.expectedArtifacts.some((p) => /citation|final-check/.test(p)) || step.workspaceName === "submission-materials";
+function stepTakesLibraryExport(step: Pick<ProjectStepDto, "skills" | "workspaceName">): boolean {
+  // 精读才有完整 references.bib；检索只有清单、润色只是核对引用。
+  // 没有精读的流程（投稿与返修）才问在格式适配 / 投稿材料。
+  if (step.skills.includes("lit-notes")) return true;
+  return step.workspaceName === "submission-materials"
+    || step.workspaceName === "journal-format"
+    || /^rebuttal-r\d+$/.test(step.workspaceName ?? "");
 }
 function stepTakesPlotting(step: Pick<ProjectStepDto, "skills">): boolean {
   return step.skills.some((s) => s === "figure-forge" || s === "data-eda");
 }
-function stepTakesIllustration(step: Pick<ProjectStepDto, "workspaceName" | "skills">): boolean {
-  return step.workspaceName === "methodology" || step.workspaceName === "exp-design" || step.skills.includes("review-framework");
+function stepTakesIllustration(step: Pick<ProjectStepDto, "workspaceName">): boolean {
+  return step.workspaceName === "methodology" || step.workspaceName === "exp-design";
 }
 function stepTakesManuscript(step: Pick<ProjectStepDto, "name" | "workspaceName">): boolean {
   return /论文|初稿|定稿|格式|投稿|回复/.test(step.name)
     || step.workspaceName === "journal-format"
+    || step.workspaceName === "submission-materials"
+    || /^rebuttal-r\d+$/.test(step.workspaceName ?? "");
+}
+/** 真正换正式稿输入/产物的步骤；综述/论文写作步只加说明，不在这里问载体。 */
+function stepAsksManuscript(step: Pick<ProjectStepDto, "workspaceName">): boolean {
+  return step.workspaceName === "journal-format"
     || step.workspaceName === "submission-materials"
     || /^rebuttal-r\d+$/.test(step.workspaceName ?? "");
 }
@@ -57,6 +68,23 @@ export function researchToolFieldsForSteps(steps: readonly ProjectStepDto[]): Re
     if (field.key === "illustration") return stepTakesIllustration(step);
     return stepTakesManuscript(step);
   }));
+}
+function stepMatchesAsk(field: ResearchToolField, step: Pick<ProjectStepDto, "name" | "workspaceName" | "skills" | "expectedArtifacts">): boolean {
+  if (field.key === "libraryExport") return stepTakesLibraryExport(step);
+  if (field.key === "plotting") return stepTakesPlotting(step);
+  if (field.key === "illustration") return stepTakesIllustration(step);
+  return stepAsksManuscript(step);
+}
+/** 流程线上问这一项的那一步：整条流程里第一个用得上的步骤。稿件载体只问会换正式稿的步骤。 */
+export function researchToolAskFieldsForStep(
+  step: Pick<ProjectStepDto, "name" | "workspaceName" | "skills" | "expectedArtifacts">,
+  steps: readonly ProjectStepDto[],
+): ResearchToolField[] {
+  return RESEARCH_TOOL_FIELDS.filter((field) => {
+    if (!stepMatchesAsk(field, step)) return false;
+    const first = steps.find((s) => stepMatchesAsk(field, s));
+    return first?.name === step.name;
+  });
 }
 const START = "<!-- mesa-research-tools ";
 const END = "<!-- /mesa-research-tools -->";

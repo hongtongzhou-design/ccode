@@ -3,10 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AGENTS } from "../types";
 import { IS_WINDOWS } from "../hotkeys";
+import { useAppStore } from "../store";
 import type {
   AgentCapabilitiesDto,
   McpCommandFixCandidate,
   McpEnvPair,
+  McpEnvSecretHintDto,
   McpHealthDto,
   McpServerDto,
 } from "../types";
@@ -21,11 +23,15 @@ import {
   mcpCmdPathBadge,
   mcpDeleteImpact,
   mcpDistBadge,
+  mcpHealthNeedsLogin,
   mcpHealthText,
   mcpOriginLabel,
   mcpPathResolveNote,
   missingEnvSignature,
   missingEnvWarnText,
+  mcpEnvRefNames,
+  mcpSecretFieldLabel,
+  mcpSecretPlaceholder,
 } from "../mcp-display";
 import {
   EmptyState,
@@ -74,6 +80,7 @@ function HealthDot({
   if (!health || !text) return null;
   const checking = health === "checking";
   const ok = !checking && health.ok;
+  const needsLogin = !checking && mcpHealthNeedsLogin(health);
   return (
     <button
       ref={ref}
@@ -84,7 +91,9 @@ function HealthDot({
       }}
       onMouseEnter={show}
       onMouseLeave={hide}
-      aria-label={checking ? "正在检测" : ok ? "连通正常" : "未连通"}
+      aria-label={
+        checking ? "正在检测" : ok ? "连通正常" : needsLogin ? "需 OAuth 登录" : "未连通"
+      }
       className="flex h-7 w-4 shrink-0 items-center justify-center"
     >
       <span
@@ -93,7 +102,9 @@ function HealthDot({
             ? "animate-pulse bg-l4"
             : ok
               ? "bg-ok-text"
-              : "bg-err-text"
+              : needsLogin
+                ? "bg-warn-text"
+                : "bg-err-text"
         }`}
       />
       <HoverTip tip={tip} text={text} />
@@ -220,6 +231,46 @@ function PairEditor({
   );
 }
 
+function McpSecretFields({
+  names,
+  drafts,
+  hints,
+  onChange,
+}: {
+  names: string[];
+  drafts: Record<string, string>;
+  hints: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  if (names.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      {names.map((name) => (
+        <label key={name} className="block">
+          <span className="mb-1 block text-xs text-l3">
+            {mcpSecretFieldLabel(name)}
+          </span>
+          <input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            className={`${fieldClass} font-mono`}
+            placeholder={mcpSecretPlaceholder(hints[name])}
+            value={drafts[name] ?? ""}
+            onChange={(e) => onChange({ ...drafts, [name]: e.target.value })}
+          />
+          {name === "CONSENSUS_API_KEY" && (
+            <p className="mt-1 text-micro text-l4">
+              在 Consensus 账号复制 API key（ak_ 开头）贴到这里。Mesa
+              保存后注入给 Agent，不必自己设环境变量。
+            </p>
+          )}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 export default function McpPage({ visible }: { visible: boolean }) {
   const [servers, setServers] = useState<McpServerDto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -234,7 +285,10 @@ export default function McpPage({ visible }: { visible: boolean }) {
     setupChecking?: boolean;
     /** 从「预设 ▾」打开：新建保存时自动分发到能写 MCP 的 Agent */
     fromPreset?: boolean;
+    /** 密钥栏草稿：空 = 不改已存值 */
+    secretDrafts?: Record<string, string>;
   } | null>(null);
+  const [secretHints, setSecretHints] = useState<Record<string, string>>({});
   const [homeDir, setHomeDir] = useState("");
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
@@ -326,6 +380,13 @@ export default function McpPage({ visible }: { visible: boolean }) {
     } finally {
       setLoading(false);
     }
+    invoke<McpEnvSecretHintDto[]>("list_mcp_env_secrets")
+      .then((list) => {
+        const next: Record<string, string> = {};
+        for (const item of list) next[item.name] = item.hint;
+        setSecretHints(next);
+      })
+      .catch(() => setSecretHints({}));
     // 命令路径健康探测（只读）：失败必须可见，避免把“检查失败”误认为路径正常
     invoke<Record<string, string>>("mcp_command_path_status")
       .then(setCmdPathStatus)
@@ -411,14 +472,27 @@ export default function McpPage({ visible }: { visible: boolean }) {
     if (needsProbe) void refreshBlenderProbe();
   }
 
+  const pendingMcpPreset = useAppStore((s) => s.pendingMcpPreset);
+  const setPendingMcpPreset = useAppStore((s) => s.setPendingMcpPreset);
+  useEffect(() => {
+    if (!visible || !pendingMcpPreset) return;
+    const preset = MCP_PRESETS.find((item) => item.name === pendingMcpPreset);
+    setPendingMcpPreset(null);
+    if (preset) void openPreset(preset);
+  }, [visible, pendingMcpPreset, setPendingMcpPreset]);
+
   // $VAR 引用分发预检（只读 command，非阻断警告）：同一组缺失变量同一会话只提示一次，
   // 只在用户确认后记签名——拒绝=动作没发生，下次照旧问
   const envWarnedRef = useRef<Set<string>>(new Set());
   async function confirmMissingEnv(
     pairs: McpEnvPair[],
     action: "保存" | "分发",
+    pendingSecrets?: Record<string, string>,
   ): Promise<boolean> {
-    const missing = await invoke<string[]>("mcp_missing_env_refs", { pairs }).catch(
+    const missing = await invoke<string[]>("mcp_missing_env_refs", {
+      pairs,
+      pendingSecrets: pendingSecrets ?? {},
+    }).catch(
       () => [] as string[], // 预检失败不阻断主动作（宁可少提示）
     );
     if (missing.length === 0) return true;
@@ -457,9 +531,18 @@ export default function McpPage({ visible }: { visible: boolean }) {
             ? Math.round(timeoutSecs * 1000)
             : null,
       };
+      const envSecrets: Record<string, string> = {};
+      for (const [name, value] of Object.entries(modal.secretDrafts ?? {})) {
+        const trimmed = value.trim();
+        if (trimmed) envSecrets[name] = trimmed;
+      }
       // $VAR 引用预检：保存前先问（分发后 MCP 可能起不来），非阻断
       if (
-        !(await confirmMissingEnv([...server.env, ...server.headers], "保存"))
+        !(await confirmMissingEnv(
+          [...server.env, ...server.headers],
+          "保存",
+          envSecrets,
+        ))
       ) {
         setSaving(false);
         return;
@@ -468,6 +551,7 @@ export default function McpPage({ visible }: { visible: boolean }) {
         server,
         // 参数已废弃（后端对明文密钥一律拒绝，不再确认放行），保留仅为兼容命令签名
         allowPlaintext: false,
+        envSecrets,
       });
       const isNewPreset = !modal.id && modal.fromPreset;
       const saved = list.find((s) => s.name === server.name);
@@ -508,6 +592,13 @@ export default function McpPage({ visible }: { visible: boolean }) {
       }
       setServers(list);
       setModal(null);
+      invoke<McpEnvSecretHintDto[]>("list_mcp_env_secrets")
+        .then((items) => {
+          const next: Record<string, string> = {};
+          for (const item of items) next[item.name] = item.hint;
+          setSecretHints(next);
+        })
+        .catch(() => {});
     } catch (e) {
       // 明文密钥已由后端一律拒绝（报文里含改引用引导），直接展示
       setError(String(e));
@@ -1228,6 +1319,17 @@ export default function McpPage({ visible }: { visible: boolean }) {
                           请求头：{s.headers.map((p) => `${p.key}=${p.value}`).join("  ")}
                         </div>
                       )}
+                      {mcpEnvRefNames([...s.env, ...s.headers]).map((name) =>
+                        secretHints[name] ? (
+                          <div key={name} className="mt-1 text-micro text-l3">
+                            {mcpSecretFieldLabel(name)}已填 {secretHints[name]}
+                          </div>
+                        ) : (
+                          <div key={name} className="mt-1 text-micro text-warn-text">
+                            {mcpSecretFieldLabel(name)}未填
+                          </div>
+                        ),
+                      )}
                       <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
                         {AGENTS.map((agent) => {
                           const on = !!s.apps[agent.id];
@@ -1532,6 +1634,12 @@ export default function McpPage({ visible }: { visible: boolean }) {
                   />
                 </>
               )}
+              <McpSecretFields
+                names={mcpEnvRefNames([...modal.form.env, ...modal.form.headers])}
+                drafts={modal.secretDrafts ?? {}}
+                hints={secretHints}
+                onChange={(secretDrafts) => setModal({ ...modal, secretDrafts })}
+              />
               <div className="flex justify-end gap-2 pt-1">
                 <button
                   className={ghostActionClass}

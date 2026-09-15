@@ -5,7 +5,13 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { SquareArrowOutUpRight, SquareTerminal } from "lucide-react";
 import { useAppStore } from "../store";
 import { AGENTS, AGENT_PROTOCOLS } from "../types";
-import { PRESETS } from "../presets";
+import { presetsForAgent, NO_PRESET_REASON, type ProviderPreset } from "../presets";
+import {
+  extraBindTargets,
+  gatewayDraftSlots,
+  intersectCatalog,
+  sameModelList,
+} from "../preset-flow";
 import { upstreamNoteText, upstreamCommand } from "../upstream-note";
 import { copyTargets } from "../profile-copy";
 import { channelLabel } from "../combo-field";
@@ -34,6 +40,7 @@ import {
   PageHeader,
   PageToolbar,
   SegTabs,
+  Checkbox,
   fieldClass,
   FoldMark,
   ghostActionClass,
@@ -83,8 +90,13 @@ function ProfileModal({
 }) {
   const saveProfile = useAppStore((s) => s.saveProfile);
   const bindGateway = useAppStore((s) => s.bindGateway);
+  const saveGateway = useAppStore((s) => s.saveGateway);
   const gateways = useAppStore((s) => s.gateways);
   const loadGateways = useAppStore((s) => s.loadGateways);
+  // 一键接入：选中的 provider 预设（含完整槽位与推荐模型）；null = 手填
+  const [appliedPreset, setAppliedPreset] = useState<ProviderPreset | null>(null);
+  // 「同时绑到」勾选的额外 Agent：保存时用同一份网关一次建多条绑定
+  const [extraAgents, setExtraAgents] = useState<string[]>([]);
   const [bindMode, setBindMode] = useState<"new" | "existing">(
     initial ? "new" : "new",
   );
@@ -127,7 +139,6 @@ function ProfileModal({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerFilter, setPickerFilter] = useState("");
   const [openVendors, setOpenVendors] = useState<ReadonlySet<string>>(new Set());
-  const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
     text: string;
@@ -304,11 +315,14 @@ function ProfileModal({
     setForm({ ...form, models: next });
   }
 
-  /** 验证端点+密钥连通性，显示延迟与模型数；连通测试必须走真实网络（force 跳过缓存） */
-  async function testConnection() {
-    setTesting(true);
-    setTestResult(null);
+  /** 「验证并获取」：真实请求验证端点+密钥（force 跳过缓存），成功即拉到模型目录并：
+      ① 预设推荐模型未被手改 → 与目录求交后替换（不在目录的不选，不整目录预填）；
+      ② 名单仍为空 → 默认选目录第一个，避免空名单「完全不注入」的静默陷阱。 */
+  async function verifyAndFetch() {
+    setFetching(true);
+    setFetchError(null);
     const started = Date.now();
+    let autoNote = "";
     try {
       const res = await invoke<FetchModelsResultDto>("fetch_models", {
         baseUrl: form.baseUrl.trim(),
@@ -318,35 +332,28 @@ function ProfileModal({
         protocol: form.protocol,
         force: true,
       });
-      setTestResult({
-        ok: true,
-        text: `✓ 连通 · ${res.models.length} 个模型 · ${Date.now() - started}ms`,
-      });
-    } catch (e) {
-      setTestResult({ ok: false, text: `✗ ${String(e)}` });
-    } finally {
-      setTesting(false);
-    }
-  }
-
-  /** 从 Base URL 拉取模型列表；密钥用表单新填的，编辑时留空则用钥匙串已存的。
-      默认走后端磁盘缓存（大网关全量列表 10s 级），force=true 强制刷新 */
-  async function fetchModels(force = false) {
-    setFetching(true);
-    setFetchError(null);
-    try {
-      const res = await invoke<FetchModelsResultDto>("fetch_models", {
-        baseUrl: form.baseUrl.trim(),
-        apiKey: form.apiKey || null,
-        profileId: initial?.id ?? null,
-        agentId: form.agent,
-        protocol: form.protocol,
-        force,
-      });
       setFetchedModels(res.models);
       setFetchedAt(res.fetchedAt);
       setFetchedCapabilityCount(res.capabilityMetadataCount);
+      const rec = appliedPreset?.models;
+      if (rec?.length && sameModelList(form.models, rec)) {
+        const hit = intersectCatalog(rec, res.models);
+        if (hit.length) {
+          setForm((f) => ({ ...f, models: hit }));
+          autoNote = ` · 已选中 ${hit.length} 个推荐模型`;
+        }
+      }
+      if (!form.models.some((m) => m.trim()) && res.models.length > 0) {
+        setForm((f) => ({ ...f, models: [res.models[0]] }));
+        setPickerOpen(true);
+        if (!autoNote) autoNote = " · 已默认选中第一个模型，可再调整";
+      }
+      setTestResult({
+        ok: true,
+        text: `✓ 连通 · ${res.models.length} 个模型 · ${Date.now() - started}ms${autoNote}`,
+      });
     } catch (e) {
+      setTestResult({ ok: false, text: `✗ ${String(e)}` });
       setFetchError(String(e));
       setFetchedModels(null);
       setFetchedAt(null);
@@ -421,6 +428,71 @@ function ProfileModal({
         onClose();
         return;
       }
+      // 「同时绑到」：先建网关（拿到 id、按预设/同族槽位补齐其他协议槽），再逐家绑定。
+      // 走 saveGateway 而非 saveProfile——后者一次只建一条绑定且只填一个槽。
+      if (
+        !initial &&
+        bindMode !== "existing" &&
+        input.accountType === "api" &&
+        extraAgents.length > 0
+      ) {
+        const targets = extraBindTargets(input.agent, input.protocol, extraAgents).filter(
+          (t) => t.ok,
+        );
+        const gw = await saveGateway(null, {
+          name: input.name,
+          noAuth: input.noAuth,
+          slots: gatewayDraftSlots(
+            { agent: input.agent, protocol: input.protocol, baseUrl: input.baseUrl ?? "" },
+            targets,
+            appliedPreset,
+          ),
+          headerEnv: parseHeaderEnvLines(headerEnvText),
+          models: input.models.map((id) => ({
+            id,
+            source: "user",
+            status: "available",
+            lastSeenAt: null,
+            catalogSlot: null,
+            temperature: input.requestPolicy?.temperature ?? null,
+            topP: input.requestPolicy?.topP ?? null,
+            maxOutputTokens: input.requestPolicy?.maxOutputTokens ?? null,
+            reasoningEffort: input.requestPolicy?.reasoningEffort ?? null,
+          })),
+          apiKey: input.apiKey,
+        });
+        try {
+          await bindGateway({
+            agent: input.agent,
+            name: input.name,
+            gatewayId: gw.id,
+            kind: "api",
+            protocol: input.protocol,
+            apiBackend: input.apiBackend,
+            models: input.models,
+            extraEnv: input.extraEnv,
+          });
+          for (const t of targets) {
+            await bindGateway({
+              agent: t.agent,
+              gatewayId: gw.id,
+              kind: "api",
+              protocol: t.protocol,
+              models: input.models,
+              extraEnv: {},
+            });
+          }
+        } catch (err) {
+          // 网关已保存：绑定失败不回滚网关，指路网关库补绑，避免重试再建一个重复网关
+          setError(
+            `部分绑定失败：${String(err)}。网关已保存，失败的 Agent 可在网关库里补绑。`,
+          );
+          return;
+        }
+        onSaved?.(input.agent, input.name);
+        onClose();
+        return;
+      }
       await saveProfile(initial?.id ?? null, input);
       onSaved?.(input.agent, input.name);
       onClose();
@@ -455,6 +527,8 @@ function ProfileModal({
               onChange={(id) => {
                 setBindMode(id);
                 setPickerOpen(false);
+                setExtraAgents([]);
+                setAppliedPreset(null);
                 if (id === "existing") {
                   setForm((f) => ({ ...f, accountType: "api", noAuth: false }));
                 }
@@ -527,6 +601,9 @@ function ProfileModal({
               setTestResult(null);
               setFetchError(null);
               setFetchedModels(null);
+              // 换 Agent = 换协议语境：预设与「同时绑到」的勾选都要重选
+              setAppliedPreset(null);
+              setExtraAgents([]);
             }}
           >
             {AGENTS.map((a) => (
@@ -573,50 +650,58 @@ function ProfileModal({
                 { id: "official", label: "官方账号" },
               ]}
               value={form.accountType}
-              onChange={(id) =>
-                setForm({
-                  ...form,
-                  accountType: id,
-                  noAuth: false,
-                })
-              }
+              onChange={(id) => {
+                setForm((f) => ({ ...f, accountType: id, noAuth: false }));
+                // 切到官方账号 = 不建网关，「同时绑到」勾选随之失效
+                setExtraAgents([]);
+              }}
             />
           </div>
         )}
         {showGatewayFields && (
           <>
-        {!initial && PRESETS.some((p) => p.agent === form.agent) && (
+        {(() => {
+          const agentPresets = presetsForAgent(form.agent);
+          if (initial) return null;
+          if (agentPresets.length === 0) {
+            const reason = NO_PRESET_REASON[form.agent];
+            return reason ? (
+              <p className="mb-3 text-xs text-l4">{reason}</p>
+            ) : null;
+          }
+          return (
           <label className="mb-3 block text-sm">
             <span className="mb-1 block text-xs text-l3">端点预设</span>
             <select
               className={fieldClass}
               value=""
               onChange={(e) => {
-                const preset = PRESETS.find(
-                  (p) => p.agent === form.agent && p.name === e.target.value,
-                );
+                const preset = agentPresets.find((p) => p.name === e.target.value);
                 if (preset) {
+                  setAppliedPreset(preset.provider);
                   setForm({
                     ...form,
                     baseUrl: preset.baseUrl,
                     name: form.name || preset.name,
                     protocol: preset.protocol ?? form.protocol,
-                    models: [],
-                    noAuth: false,
+                    // 预设推荐模型直接预填（精选清单，非整份目录）；「验证并获取」后与实际目录求交
+                    models: preset.provider.models ? [...preset.provider.models] : [],
+                    noAuth: preset.provider.noAuth ?? false,
                   });
                   setTestResult(null);
                   setFetchError(null);
                   setFetchedModels(null);
+                  if (preset.provider.models?.length) setPickerOpen(false);
                 }
               }}
             >
               <option value="" disabled>
-                选一个填入地址…
+                选一家供应商，自动填地址和推荐模型…
               </option>
-              {PRESETS.filter((p) => p.agent === form.agent).map((p) => (
+              {agentPresets.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.name}
-                  {p.note ? `（${p.note}）` : ""}
+                  {p.provider.models?.length ? " · 含推荐模型" : ""}
                   {p.confidence === "official"
                     ? " · 官方"
                     : p.confidence === "verified-compatible"
@@ -624,32 +709,28 @@ function ProfileModal({
                       : p.confidence === "address-only"
                         ? " · 仅填地址"
                         : ""}
+                  {p.note ? `（${p.note}）` : ""}
                 </option>
               ))}
             </select>
           </label>
-        )}
+          );
+        })()}
         <label className="mb-3 block text-sm">
           <span className="mb-1 block text-xs text-l3">Base URL</span>
-          <div className="flex gap-2">
-            <input
-              className={fieldClass}
-              placeholder="https://api.example.com"
-              value={form.baseUrl}
-              onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
-            />
-            <button
-              type="button"
-              onClick={testConnection}
-              disabled={testing || !form.baseUrl.trim()}
-              title={
-                form.baseUrl.trim() ? "验证端点与密钥" : "先填写 Base URL"
-              }
-              className={`${rowActionClass} w-20 shrink-0`}
-            >
-              {testing ? "测试中…" : "测试"}
-            </button>
-          </div>
+          <input
+            className={fieldClass}
+            placeholder="https://api.example.com"
+            value={form.baseUrl}
+            onChange={(e) => {
+              setForm({ ...form, baseUrl: e.target.value });
+              // 手改地址即脱离预设推荐语境，避免「验证并获取」再按旧预设改写名单
+              if (appliedPreset) setAppliedPreset(null);
+            }}
+          />
+          <span className="mt-1 block text-[10px] text-l4">
+            填好后到下方「验证并获取」一次完成连通验证和模型目录拉取
+          </span>
         </label>
         {(form.agent === "claude-code" || form.agent === "codebuddy" || form.protocol === "anthropic") &&
           form.baseUrl.trim().replace(/\/+$/, "").endsWith("/v1") && (
@@ -699,19 +780,19 @@ function ProfileModal({
           })()}
           {showGatewayFields && (
             <>
-          <div className="mb-2 flex items-center gap-2">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => fetchModels()}
+              onClick={() => void verifyAndFetch()}
               disabled={fetching || !form.baseUrl.trim()}
               title={
                 form.baseUrl.trim()
-                  ? "从 Base URL 拉取可用模型"
+                  ? "真实请求验证端点与密钥，并拉取模型目录；预设推荐模型会自动选中"
                   : "先填写 Base URL"
               }
               className={`${rowActionClass} shrink-0 whitespace-nowrap`}
             >
-              {fetching ? "获取中…" : "获取模型"}
+              {fetching ? "验证中…" : "验证并获取"}
             </button>
             {fetchedModels && fetchedModels.length > 0 && (
               <button
@@ -732,23 +813,9 @@ function ProfileModal({
                 <span className="text-l4">{pickerOpen ? "▴" : "▾"}</span>
               </button>
             )}
-            {/* 缓存命中时给出刷新口 + 拉取时间，大网关全量列表 10s 级，没必要每次现拉 */}
+            {/* 每次点都真实请求（不读缓存），连通性与目录一次拿齐；缓存提示不再需要 */}
             {fetchedModels && fetchedModels.length > 0 && (
               <>
-                <button
-                  type="button"
-                  onClick={() => fetchModels(true)}
-                  disabled={fetching || !form.baseUrl.trim()}
-                  title="重新拉取（不用缓存）"
-                  className={`${rowActionClass} shrink-0`}
-                >
-                  ↻
-                </button>
-                {fetchedAt && (
-                  <span className="shrink-0 whitespace-nowrap text-xs text-l4">
-                    缓存 · {fmtFetchedAt(fetchedAt)}
-                  </span>
-                )}
                 {fetchedCapabilityCount === 0 && (
                   <span
                     className="max-w-[16rem] text-xs text-warn-text"
@@ -998,6 +1065,41 @@ function ProfileModal({
             );
           })()}
         </div>
+        {/* 同时绑到：换 Agent 不必重走一遍「添加连接 → 选网关 → 挑模型」——
+            同一份网关和模型名单一次建多条绑定；协议按各家默认推导，保存后可单独调整 */}
+        {showGatewayFields && form.accountType === "api" && (
+          <div className="mb-4">
+            <span className="mb-1 block text-xs text-l3">
+              同时绑到（可选，省去逐家重配）
+            </span>
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              {extraBindTargets(
+                form.agent,
+                form.protocol,
+                AGENTS.map((a) => a.id),
+              ).map((t) => (
+                <Checkbox
+                  key={t.agent}
+                  className="text-xs"
+                  disabled={!t.ok}
+                  title={t.reason}
+                  checked={extraAgents.includes(t.agent)}
+                  onChange={(checked) =>
+                    setExtraAgents((cur) =>
+                      checked
+                        ? [...cur, t.agent]
+                        : cur.filter((x) => x !== t.agent),
+                    )
+                  }
+                  label={AGENTS.find((a) => a.id === t.agent)?.label ?? t.agent}
+                />
+              ))}
+            </div>
+            <p className="mt-1 text-[10px] text-l4">
+              保存时用同一份网关和模型名单给勾选的 Agent 各建一条绑定，协议自动按各家适配。
+            </p>
+          </div>
+        )}
         <details className="mb-4 border-t border-hairline pt-3">
           <summary className="cursor-pointer select-none text-xs font-medium text-l2">
             高级设置
@@ -1219,15 +1321,6 @@ const OFFICIAL_LOGOUT_HINT: Record<string, string> = {
   kimi: "TUI 内 /logout",
   qwen: "TUI 内 /auth",
 };
-
-/** 缓存拉取时间显示：当天只显示 HH:MM，跨天带 M/D */
-function fmtFetchedAt(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  if (d.toDateString() === new Date().toDateString()) return hm;
-  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
-}
 
 const displayHost = endpointHost;
 

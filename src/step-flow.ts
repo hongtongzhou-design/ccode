@@ -27,6 +27,8 @@ export interface StepFlowNode {
   /** 引导小字（落点说明/时机说明） */
   hint?: string;
   done: boolean;
+  /** 显示在主干但不抢当前节点（默认即有效答案：稿件载体 Markdown、Blender 不需要） */
+  skipCurrent?: boolean;
   /** human 节点对应的人工事项（勾选/提交产物回传用） */
   human?: HumanTaskStateDto;
 }
@@ -75,6 +77,8 @@ export function buildStepFlow(args: {
    *  只要还有没答的，本节点就不算完事——只写了一条答案草稿就存在了，
    *  拿 hasDraft 当完成口径会在还剩几题没答时就打勾 */
   pendingDecisions?: number;
+  /** 本步要问的科研工具。稿件载体是开工前提，排在 agent 前；其余不挡主动作，沉到可选区。 */
+  toolAsks?: Array<{ key: string; label: string }>;
 }): StepFlow {
   const { step, states, hasDraft, runStatus } = args;
   const pendingDecisions = args.pendingDecisions ?? 0;
@@ -93,6 +97,18 @@ export function buildStepFlow(args: {
       hint: undefined,
       // 已声明来源（非默认 search）或已有登记资源 = 这一步交代清楚了
       done: (args.litSource ?? "").trim() !== "" && args.litSource !== "search",
+    });
+  }
+  // 0.6 稿件载体会换本步正式稿，是开工前提，排在 agent 前（与「确定文献来源」同形）。
+  //     Origin / Blender / 库交付不是这一步的主工作，不插在步骤前面。
+  for (const ask of (args.toolAsks ?? []).filter((item) => item.key === "manuscript")) {
+    nodes.push({
+      key: `tool:${ask.key}`,
+      kind: "input",
+      section: "main",
+      label: ask.label,
+      done: false,
+      skipCurrent: true,
     });
   }
   // 1. 「先定几件事」：**有东西要定才出现**（v3.89 修，用户反馈「有点空」）。
@@ -180,6 +196,16 @@ export function buildStepFlow(args: {
           : undefined,
     done: runStatus === "done",
   });
+  for (const ask of (args.toolAsks ?? []).filter((item) => item.key !== "manuscript")) {
+    nodes.push({
+      key: `tool:${ask.key}`,
+      kind: "input",
+      section: "optional",
+      label: ask.label,
+      done: false,
+      skipCurrent: true,
+    });
+  }
 
   // 当前节点只在主干里找，且跳过可选项：可选人工事项不做也能跑完这一步，
   // 让它当「当前」会把指示卡死在那儿，后面的节点永远轮不到
@@ -187,7 +213,57 @@ export function buildStepFlow(args: {
     (n) =>
       n.section === "main" &&
       !n.done &&
+      !n.skipCurrent &&
       !(n.kind === "human" && n.human?.optional),
   );
   return { nodes, currentKey: current?.key ?? null };
+}
+
+/** 能接回本步上次商量会话时改「继续讨论」，否则「跟 AI 商量一下」。 */
+export function discussChatLabel(discussed: boolean): string {
+  return discussed ? "继续讨论" : "跟 AI 商量一下";
+}
+
+/** 本步上次商量会话：活着的优先，否则最近一条。归档 / 无头不计。 */
+export function pickDiscussResume<
+  T extends {
+    stepName?: string | null;
+    archived?: boolean;
+    internal?: boolean;
+    live?: boolean;
+    updatedAt?: string | null;
+    agent: string;
+    sessionId: string;
+  },
+>(sessions: readonly T[], stepName: string): T | null {
+  const name = stepName.trim();
+  if (!name) return null;
+  const hits = sessions.filter(
+    (session) =>
+      !session.archived &&
+      !session.internal &&
+      session.stepName === name,
+  );
+  if (hits.length === 0) return null;
+  const live = hits.find((session) => session.live);
+  if (live) return live;
+  return [...hits].sort((a, b) =>
+    (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+  )[0] ?? null;
+}
+
+/** 本步是否已经商量过：认 session_meta.stepName（「跟 AI 商量」认领后固化）。 */
+export function stepHasDiscussSession(
+  sessions: readonly {
+    stepName?: string | null;
+    archived?: boolean;
+    internal?: boolean;
+    live?: boolean;
+    updatedAt?: string | null;
+    agent: string;
+    sessionId: string;
+  }[],
+  stepName: string,
+): boolean {
+  return pickDiscussResume(sessions, stepName) != null;
 }

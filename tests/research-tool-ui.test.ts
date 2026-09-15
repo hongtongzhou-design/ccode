@@ -8,8 +8,9 @@ import { PIPELINE_TEMPLATES } from "../src/pipeline-presets.ts";
 async function harness(contents: string) {
   const result = await build({ stdin: { contents: `export {createElement,act} from 'react'; export {createRoot} from 'react-dom/client'; ${contents}`, resolveDir: process.cwd(), loader: "tsx" }, bundle: true, write: false, format: "cjs", platform: "node", jsx: "automatic", external: ["react", "react-dom/client", "react/jsx-runtime"] });
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
+  const raf = (cb: FrameRequestCallback) => Number(setTimeout(() => cb(Date.now()), 0));
   const saved: Array<[string, PropertyDescriptor | undefined]> = [];
-  for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator, HTMLElement: dom.window.HTMLElement, localStorage: dom.window.localStorage, IS_REACT_ACT_ENVIRONMENT: true })) {
+  for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator, HTMLElement: dom.window.HTMLElement, localStorage: dom.window.localStorage, IS_REACT_ACT_ENVIRONMENT: true, requestAnimationFrame: raf, cancelAnimationFrame: clearTimeout })) {
     saved.push([key, Object.getOwnPropertyDescriptor(globalThis, key)]); Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });
   }
   const mod = { exports: {} as Record<string, any> };
@@ -53,5 +54,23 @@ test("工具预检先阻止未就绪开工，刷新后根据真实返回释放�
     available=true;await ui.act(async () => (ui.host.querySelector("button") as HTMLButtonElement).click());
     assert.equal(blocked.at(-1),false);assert.match(ui.host.textContent!,/已启用/);
     assert.deepEqual(invokes,["research_tool_preflight","research_tool_preflight"]);
+  } finally { await ui.close(); }
+});
+
+test("英文综述设定屏只填全局设定，不问稿件载体或 Blender", async () => {
+  const ui = await harness("export {default as Pick} from './src/components/TemplatePickModal';");
+  Object.assign(ui.dom.window, { __TAURI_INTERNALS__: { invoke: async () => ({ config: { settings: [], topic: "", steps: [] } }) } });
+  try {
+    await ui.act(async () => ui.root.render(ui.createElement(ui.Pick, {
+      projectPath: "/fixture", projectName: "综述", onClose() {}, onOptOut() {}, onApplied() {},
+    })));
+    const review = [...ui.host.querySelectorAll("button")].find((b: { textContent: string }) => b.textContent.includes("英文综述")) as HTMLButtonElement;
+    await ui.act(async () => review.click());
+    const text = ui.host.textContent ?? "";
+    assert.match(text, /综述角度/);
+    assert.doesNotMatch(text, /稿件载体/);
+    assert.doesNotMatch(text, /按需补齐交付/);
+    assert.doesNotMatch(text, /结构 \/ 装置示意/);
+    assert.doesNotMatch(text, /文献库交付/);
   } finally { await ui.close(); }
 });

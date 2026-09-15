@@ -3,6 +3,9 @@ import test from "node:test";
 import {
   buildStepFlow,
   demoReadPaperResource,
+  discussChatLabel,
+  pickDiscussResume,
+  stepHasDiscussSession,
   stripOptionalTitlePrefix,
 } from "../src/step-flow.ts";
 import type { HumanTaskStateDto, ProjectStepDto } from "../src/types.ts";
@@ -74,6 +77,29 @@ test("无决策项/种子的步骤：不生成 discuss 节点（v3.89）", () =>
     ["human", "agent", "review"],
   );
   assert.equal(flow.currentKey, "agent", "before 事项已完成、agent 进行中 → 当前是 agent 节点");
+});
+
+test("Blender/库交付沉到可选区，不挡在步骤工作前面", () => {
+  const extra = buildStepFlow({
+    step: step({}),
+    states: [],
+    hasDraft: false,
+    runStatus: "pending",
+    toolAsks: [{ key: "illustration", label: "结构 / 装置示意" }, { key: "libraryExport", label: "文献库交付" }],
+  });
+  assert.equal(extra.nodes[0]?.kind, "agent");
+  assert.deepEqual(extra.nodes.filter((n) => n.section === "optional").map((n) => n.key), ["tool:illustration", "tool:libraryExport"]);
+  assert.equal(extra.currentKey, "agent");
+  const carrier = buildStepFlow({
+    step: step({}),
+    states: [],
+    hasDraft: false,
+    runStatus: "pending",
+    toolAsks: [{ key: "manuscript", label: "稿件载体" }],
+  });
+  assert.equal(carrier.nodes[0]?.key, "tool:manuscript");
+  assert.equal(carrier.nodes[0]?.section, "main");
+  assert.equal(carrier.currentKey, "agent");
 });
 
 test("runStatus 映射：review/done 都算 agent 节点完成；评审节点只在 done 完成", () => {
@@ -271,4 +297,32 @@ test("开读这一篇：示例课题只在精读步且已有 PDF 时才出", () 
     }),
     paper,
   );
+});
+
+test("商量入口：能接回上次会话才叫继续讨论", () => {
+  assert.equal(discussChatLabel(false), "跟 AI 商量一下");
+  assert.equal(discussChatLabel(true), "继续讨论");
+  const old = {
+    agent: "codex",
+    sessionId: "s-old",
+    stepName: "文献检索与筛选",
+    archived: false,
+    internal: false,
+    live: false,
+    updatedAt: "2026-09-01T00:00:00Z",
+  };
+  const newer = {
+    ...old,
+    sessionId: "s-new",
+    updatedAt: "2026-09-14T00:00:00Z",
+  };
+  assert.equal(pickDiscussResume([old, newer], "文献检索与筛选")?.sessionId, "s-new");
+  assert.equal(
+    pickDiscussResume([{ ...newer, live: true }, old], "文献检索与筛选")?.sessionId,
+    "s-new",
+  );
+  assert.equal(pickDiscussResume([{ ...newer, archived: true }], "文献检索与筛选"), null);
+  assert.equal(pickDiscussResume([{ ...newer, internal: true }], "文献检索与筛选"), null);
+  assert.equal(stepHasDiscussSession([newer], "文献检索与筛选"), true);
+  assert.equal(stepHasDiscussSession([newer], "文献精读与笔记"), false);
 });

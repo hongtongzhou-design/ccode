@@ -10,6 +10,7 @@ import {
   slashQueryOf,
 } from "../slash-commands";
 import { imeBlocksEnter } from "../ime-guard";
+import { escInterruptSafe } from "../agent-caps";
 
 function InsertMenu({
   skills,
@@ -143,7 +144,8 @@ export default function ChatComposer({
   /** 左下角扩展位（原聊天头部功能迁入：状态注记 / 只读分叉） */
   leftExtras?: ReactNode;
   /** 正在生成：发送钮本体变成「进行中」停止钮（符号），点击走 onInterrupt。
-   *  进程活着但停在提示符时不要传 true——那时要点发送，Esc 会误伤 TUI。 */
+   *  进程活着但停在提示符时不要传 true——那时要点发送，Esc 会误伤 TUI。
+   *  Grok Build 不适用（非 prompt 态 Esc 会退出整进程），调用方按 agent 过滤。 */
   running?: boolean;
   /** 暂停当前生成（往终端写 Esc——不是退出会话；输入文字后仍可用 Enter 发送） */
   onInterrupt?: () => void;
@@ -450,15 +452,23 @@ export default function ChatComposer({
               {leftExtras}
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
-              {running && onInterrupt && !busy ? (
+              {running &&
+              onInterrupt &&
+              !busy &&
+              (agentId == null || escInterruptSafe(agentId)) ? (
                 /* 正在生成：发送钮本体变「进行中」停止钮，点击 = 往终端发 Esc 暂停；
-                   打字中的消息仍可用 Enter 发送（submit 走键盘路径，不经此钮） */
+                   打字中的消息仍可用 Enter 发送（submit 走键盘路径，不经此钮）。
+                   Grok 无此钮：非 prompt 态 Esc 会退出整进程。 */
                 <button
                   type="button"
-                  onClick={onInterrupt}
+                  onClick={() => {
+                    onInterrupt();
+                    // 停止后焦点回输入框：「这一轮停下、可以接着打下一句」
+                    ref.current?.focus();
+                  }}
                   title="暂停当前生成（往终端发送 Esc；会话保留，可继续输入）"
                   aria-label="暂停当前生成"
-                  className="inline-flex h-8 w-8 shrink-0 animate-pulse-brief items-center justify-center rounded-md bg-cta text-cta-text transition-opacity hover:opacity-90"
+                  className="inline-flex h-8 w-8 shrink-0 animate-pulse items-center justify-center rounded-md bg-cta text-cta-text transition-opacity hover:opacity-90"
                 >
                   <Square
                     size={11}

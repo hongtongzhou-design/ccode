@@ -29,7 +29,7 @@ function msg(
   return { role, blocks, timestamp, usage: null };
 }
 
-test("发送钮变暂停：只在正在出字，停在提示符或审批时仍是发送", () => {
+test("发送钮变暂停：正在出字或等首个回复；停在提示符或审批时仍是发送", () => {
   assert.equal(
     composerShowsInterrupt({ running: true, attention: "working" }),
     true,

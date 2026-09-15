@@ -6,12 +6,16 @@ import {
   mcpCmdPathBadge,
   mcpDeleteImpact,
   mcpDistBadge,
+  mcpHealthNeedsLogin,
   mcpHealthText,
   mcpKindBadgeStyle,
   mcpOriginLabel,
   mcpPathResolveNote,
   missingEnvSignature,
   missingEnvWarnText,
+  mcpEnvRefNames,
+  mcpSecretFieldLabel,
+  mcpSecretPlaceholder,
   shortenCommand,
   shortenPathToken,
 } from "../src/mcp-display.ts";
@@ -164,6 +168,35 @@ test("体检行文案：检测中 / 正常带耗时与 detail / 失败给原因 
     status: "auth",
   });
   assert.match(auth ?? "", /认证失败/);
+  const oauth = mcpHealthText({
+    ok: false,
+    latencyMs: 40,
+    error:
+      "需要 OAuth 登录（HTTP 401 Unauthorized）：在对应 CLI 执行 mcp login（Codex：codex mcp login <名>）",
+    detail: null,
+    status: "auth",
+  });
+  assert.equal(
+    mcpHealthNeedsLogin({
+      ok: false,
+      latencyMs: 40,
+      error: "需要 OAuth 登录（HTTP 401 Unauthorized）",
+      detail: null,
+      status: "auth",
+    }),
+    true,
+  );
+  assert.match(oauth ?? "", /不会代登/);
+  assert.equal(
+    mcpHealthNeedsLogin({
+      ok: false,
+      latencyMs: 30,
+      error: "认证失败（HTTP 401）：密钥未设置、未注入或被服务端拒绝",
+      detail: null,
+      status: "auth",
+    }),
+    false,
+  );
   const fail = mcpHealthText({
     ok: false,
     latencyMs: 8123,
@@ -195,7 +228,7 @@ test("缺失变量签名：去重 + 排序，同组变量任意顺序同签名",
 test("缺失变量警告文案：列变量、讲原因、给选择，保存/分发两动作", () => {
   const save = missingEnvWarnText(["CONSENSUS_API_KEY"], "保存");
   assert.match(save, /CONSENSUS_API_KEY/);
-  assert.match(save, /可能无法启动/);
+  assert.match(save, /密钥栏/);
   assert.match(save, /仍要保存吗？/);
   const dist = missingEnvWarnText(["A", "B"], "分发");
   assert.match(dist, /A、B/);
@@ -231,4 +264,20 @@ test("收编/导入解析附注：解析数与未解析数自由组合，全零�
   const both = mcpPathResolveNote(1, 1);
   assert.match(both ?? "", /已解析为绝对路径/);
   assert.match(both ?? "", /未能解析/);
+});
+
+test("MCP 引用名：Bearer 内嵌与整值，去重保序", () => {
+  assert.deepEqual(
+    mcpEnvRefNames([
+      { value: "Bearer ${CONSENSUS_API_KEY}" },
+      { value: "$FOO" },
+      { value: "Bearer ${CONSENSUS_API_KEY}" },
+    ]),
+    ["CONSENSUS_API_KEY", "FOO"],
+  );
+  assert.deepEqual(mcpEnvRefNames([{ value: "plain" }]), []);
+  assert.equal(mcpSecretFieldLabel("CONSENSUS_API_KEY"), "Consensus API 密钥");
+  assert.equal(mcpSecretFieldLabel("MY_TOKEN"), "MY_TOKEN");
+  assert.match(mcpSecretPlaceholder("···Y41"), /已保存 ···Y41/);
+  assert.match(mcpSecretPlaceholder(), /粘贴密钥/);
 });

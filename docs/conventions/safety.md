@@ -209,8 +209,17 @@
   handshake = initialize 握手成功 / reachable = 地址可达但握手未确认（remote 3xx·其他 4xx）/ auth = 认证失败
   （401/403）/ not_found = 路径错误（404）/ error = 其余失败——401/403/404 按「连通正常」报是假阳性，必须判失败）。
   **$VAR 引用预检**（`mcp_missing_env_refs`，只读）：与探测注入同一套引用口径（`scan_env_refs`，整值与
-  `Bearer ${X}` 内嵌都算）查宿主环境（空值算未设置），前端在保存/拨开分发开关前给非阻断警告，同会话同一变量签名
-  只提示一次；探测注入时按宿主环境展开全部引用，任一未设置则整条不注入并在失败文案附提示。
+  `Bearer ${X}` 内嵌都算）先查 `mcp-keys.json`、再查宿主环境（空值算未设置），表单密钥栏未保存的草稿经
+  `pending_secrets` 视为已填；前端在保存/拨开分发开关前给非阻断警告，同会话同一变量签名只提示一次。
+  探测注入与 Agent 启动（`spawn_env_secrets`）按同一张表展开；任一未设置则整条不注入并在失败文案附提示。
+  remote 401 若带 RFC 9728 `WWW-Authenticate: resource_metadata`（Undermind OAuth），文案改为「需要 OAuth 登录」，
+  不与缺 API key 混为一谈；Mesa 探测不携带各 CLI 的 OAuth 令牌。
+  **Codex 网关启动**：不要 `-c features.apps=false`（0.154 会把用户 HTTP MCP 收成 `mcp__<名>` 占位）。
+  内置 ChatGPT apps 改 `-c plugins.codex-app-tools@openai-bundled.enabled=false`。禁止 `enable_mcp_apps`。
+  远程 HTTP MCP 不要默认写长 `startup_timeout_sec`（Codex 恢复会等满超时才出画面；Consensus 握手挂死会黑屏数十秒）。
+  **MCP 密钥栏**（`mcp-keys.json`，0600，键=POSIX 环境变量名）：表单粘贴明文只进此文件，清单与各 CLI 仍只留
+  `${VAR}`。变量名看起来是密钥本身（`ak_` 长串 / 常见密钥前缀）拒存；Consensus 的
+  `Authorization: Bearer ${ak_…}` 保存时改写为 `Bearer ${CONSENSUS_API_KEY}` 并把密钥收进此表。
 - **技能同名导入不得静默跳过**：导入返回 added/updated/skipped/conflicts；覆盖前备份、另存为校验单段安全名称，ZIP 先
   staging，元数据保存失败回滚。GitHub 来源保存 repo/ref/subdir/revision；**一键应用更新**（`apply_skill_update`）按记录的
   repo/ref/subdir 重下并只覆盖同名技能（`import_zip_impl` 的 `only` 过滤，同仓库其他技能不新增不覆盖，走同一覆盖+备份
@@ -228,7 +237,7 @@
   `create_skill` 写入，更早的自建与本地导入同记 local 无法区分）/ local / zip / github / discovered；
   fail-safe 与 MCP 同向——旧 local 与未知值前端一律按「非自建」提示来源（`src/skill-delete.ts`，
   宁可多提示也不错删警告）。
-- **技能接口声明（inputs/outputs）与产物冲突/链路检测**：技能 SKILL.md frontmatter 可声明 `outputs`（产物路径）与 `inputs`（读取路径）字段（YAML 列表，行内 `[a, b]` 与多行 `- a` 两种写法解析都容忍，缺字段 = 空数组；目录带尾斜杠、文件写全路径，只声明主要读写产物），`parse_skill_md` 解析进 `SkillDto.outputs/inputs`（list 时现算，不入库文件）。`compose_skill_md`/`update_content_impl` 支持写接口声明，普通编辑（interface=None）保留库中已声明的 inputs/outputs 不静默丢弃。外部技能未声明时由 `infer_interface_from_body` 从正文推断兜底（逐行找路径 token、按行内动词分类读入/产出、双侧动词不猜、每侧上限 8 条；推断只进 DTO 并打 `interface_inferred` 标，不回写 SKILL.md）。分发随目录走不受影响，CLI 端对未知 frontmatter 字段一律忽略。检测为纯逻辑（`src/skill-conflicts.ts`）：① `skillOutputConflicts`——同一步骤挂载技能的 outputs 两两比对，路径相同或互为目录前缀即报冲突；② `skillChainWarnings`——技能 inputs 对「上游步骤产物 + 本步骤声明输入 + 项目资源」（调用方汇总成 supply）逐条找供给，outputs 对本步骤 expectedArtifacts 对账（含 `*` 通配与目录/文件互含判定），缺供给/未进预期产物即报；推断接口照检但文案标「推断」。StepSkillsChips 警告行逐条提示——只提醒不拦截。
+- **技能接口声明（inputs/outputs）与产物冲突/链路检测**：技能 SKILL.md frontmatter 可声明 `outputs`（产物路径）与 `inputs`（读取路径）字段（YAML 列表，行内 `[a, b]` 与多行 `- a` 两种写法解析都容忍，缺字段 = 空数组；目录带尾斜杠、文件写全路径，只声明主要读写产物），`parse_skill_md` 解析进 `SkillDto.outputs/inputs`（list 时现算，不入库文件）。`compose_skill_md`/`update_content_impl` 支持写接口声明，普通编辑（interface=None）保留库中已声明的 inputs/outputs 不静默丢弃。外部技能未声明时由 `infer_interface_from_body` 从正文推断兜底（逐行找路径 token、按行内动词分类读入/产出、双侧动词不猜、每侧上限 8 条；推断只进 DTO 并打 `interface_inferred` 标，不回写 SKILL.md）。分发随目录走不受影响，CLI 端对未知 frontmatter 字段一律忽略。检测为纯逻辑（`src/skill-conflicts.ts`）：① `skillOutputConflicts`——同一步骤挂载技能的 outputs 两两比对，同一路径或两个目录互含才报冲突（目录与其中一份报告文件不算，避免 lit-search/zotero-sync、写作/bib-check 误报）；② `skillChainWarnings`——技能 inputs 对「上游步骤产物 + 本步骤声明输入 + 项目资源」（调用方汇总成 supply）逐条找供给，outputs 对本步骤 expectedArtifacts 对账（含 `*` 通配与目录/文件互含判定）；多阶段技能只要有一条产出对上本步产物，其余阶段产出不报；缺供给/本步完全对不上才报；推断接口照检但文案标「推断」。StepSkillsChips 警告行逐条提示——只提醒不拦截。
 - **技能分类批量回填**：`backfill_skill_categories` 只给「GitHub 来源 + 无分类」的技能补仓库名分类（自动分类 #15 之前的存量导入），已有分类一律不动、幂等；入口在技能页顶部 ⋯。
 
 - **科研工具读取边界（2026-09-11）**：Zotero SQLite 仅只读连接+在线备份到内存；取得一致快照失败不可退回裸复制。项目资源/文献来源写回与模板应用持项目配置进程锁+OS 锁；前端不得用导入前配置覆盖后端新增资源。阅读区对外部 PDF 只放行精确登记且 readonly 的 paper 资源，笔记仍只写项目 notes。Origin/Blender 执行不声称受工作树 OS 沙箱保护，默认新输出目录、显式执行、不碰个人已打开工程。

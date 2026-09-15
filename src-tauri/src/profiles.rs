@@ -1472,7 +1472,9 @@ pub(crate) fn stored_secrets() -> Vec<String> {
             .filter(|v| v.chars().count() >= 8)
             .collect();
     }
-    last.clone()
+    let mut out = last.clone();
+    out.extend(crate::mcp::stored_mcp_secrets());
+    out
 }
 
 /// has_key 的锁内版本：调用方须已持 store_lock

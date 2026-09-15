@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { skillChainWarnings, skillOutputConflicts } from "../skill-conflicts";
-import { useAppStore } from "../store";
 import type { SkillDto } from "../types";
 
 /**
  * 步骤「推荐技能」chip 区（v3.67）：步骤级 TASK.md 预览弹层（只读）与开工确认弹层（可编辑）共用。
  * 只读：chip 点击展开/收起一句话描述；可编辑（给了 onChange）：chip 带 × 移除 + 尾部「＋ 添加技能」下拉。
  * 增删的持久化由调用方负责（update_step_skills 写回 project.toml steps[].skills）。
- * mcpRecommended 命中的技能 chip 旁加「推荐 MCP」小标记，点击跳 MCP 页配置。
+ * mcpRecommended 命中的技能在 chips 下方出一行暗色提示（2026-09-15 两轮收口：先是 chip 旁独立
+ * 「推荐 MCP」钮——夹在技能中间像第三个条目、单击还把确认弹层甩去 MCP 页；再是并进 chip 的
+ * 「· MCP」后缀——看着像技能名的一部分。最终形态＝chips 行下独立提示行，与产物冲突 ⚠ 行
+ * 同一范式、点名技能、纯文本不导航；配置入口留给步骤面板的人工事项预设按钮（带预填）与 MCP 页）。
  * 给了 skillLib 时检测挂载技能的产物路径冲突（outputs 相交），chips 下方逐行 ⚠ 提示（v3.79）。
  * 给了 requiredSkills/onRequiredChange 时，编辑器可在技能 chip 上切换必需/可选；未提供时保持只读兼容。
  */
@@ -49,7 +51,6 @@ export default function StepSkillsChips({
 }) {
   // 只读模式下点击 chip 展开描述（按技能名记忆展开态）
   const [expanded, setExpanded] = useState<string | null>(null);
-  const setPage = useAppStore((s) => s.setPage);
   const editable = !!onChange;
   const canEditRequired = editable && !!onRequiredChange;
   const required = new Set(requiredSkills ?? skills);
@@ -144,16 +145,6 @@ export default function StepSkillsChips({
                     {label}
                   </button>
                 )}
-                {mcpRecommended?.includes(name) && (
-                  <button
-                    type="button"
-                    onClick={() => setPage("mcp")}
-                    title="该技能推荐使用 MCP 工具，到 MCP 页配置"
-                    className="rounded-sm bg-strip px-1 py-0.5 text-micro text-l4 hover:bg-hover hover:text-l1"
-                  >
-                    推荐 MCP
-                  </button>
-                )}
               </span>
               {open && desc && (
                 <span className="max-w-72 px-1.5 py-0.5 text-micro text-l4">
@@ -182,6 +173,14 @@ export default function StepSkillsChips({
           </select>
         )}
       </div>
+      {skills
+        .filter((name) => mcpRecommended?.includes(name))
+        .map((name) => (
+          <p key={`mcp-${name}`} className="mt-1 text-micro text-l4">
+            · 技能「{name}」说明里推荐配合 MCP 工具（可选，不配也能跑）——配置在左侧
+            MCP 页
+          </p>
+        ))}
       {outputConflicts.map((c) => (
         <p key={`${c.a}|${c.b}`} className="mt-1 text-micro text-warn-text">
           ! 技能「{c.a}」与「{c.b}」的产物都指向 {c.output}

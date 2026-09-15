@@ -1,5 +1,4 @@
-import ResearchToolFields from "./ResearchToolFields";
-import { DEFAULT_RESEARCH_TOOLS, researchToolFieldsForSteps, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../research-tools";
+import { DEFAULT_RESEARCH_TOOLS, researchToolsFromSettings, settingsWithResearchTools, withResearchTools } from "../research-tools";
 import { confirmDialog } from "./ConfirmDialog";
 import { conflictingTemplateSteps, renameConflictingSteps } from "../pipeline-append";
 import { useEffect, useState } from "react";
@@ -27,6 +26,7 @@ import { Modal } from "./Modal";
  * 选中模板先进入填写屏——注册当下正是人最有耐心的时刻，只预填空答案等人
  * 自己去项目设置抽屉里发现，等于没引导（用户实测反馈）。全部可留空跳过，
  * 跳过则不写空表格，之后在项目规则里补。
+ * 2026-09-14：设定屏只填全局设定。稿件载体问在会换正式稿的步骤；库交付/Origin/Blender 问在用得上的那一步。
  */
 export default function TemplatePickModal({
   projectPath,
@@ -287,27 +287,13 @@ export default function TemplatePickModal({
             </div>
           </>
         ) : settingsTpl ? (
-          /* 第二屏：选完模板再问交付工具 + 全局设定。文献来源不在这里，
-             留给检索步流程线「确定文献来源」（单一触点）。 */
+          /* 第二屏只填全局设定。文献来源在检索步；稿件载体/库交付/Origin/Blender
+             在用得上的那一步问，不挡在创建屏。 */
           <>
             <p className="mb-4 text-xs text-l3">
-              这些设定会贯穿后续研究流程，并在每次开工时写入 TASK.md。暂时不确定的项目可以留空，之后仍可在项目设置中补充。文献从哪来请在检索步骤的「确定文献来源」里选。
+              这些设定会贯穿后续研究流程，并在每次开工时写入 TASK.md。暂时不确定的可以留空，之后在项目设置中补充。
             </p>
-            <ResearchToolFields
-              value={tools}
-              onChange={setTools}
-              disabled={busy !== null}
-              collapsible={false}
-              fields={researchToolFieldsForSteps(
-                settingsTpl.id === "submission-rebuttal"
-                  ? pipelineStepsForTemplate(settingsTpl, submissionMode, Math.max(1, Math.floor(submissionRound)))
-                  : settingsTpl.steps,
-              )}
-            />
-            <div className="mt-3 space-y-2.5">
-              {settingsTpl.projectSettings!.length > 0 && (
-                <p className="text-xs font-medium text-l2">项目全局设定</p>
-              )}
+            <div className="space-y-2.5">
               {settingsTpl.projectSettings!.map((line, i) => {
                 const { q, hint } = splitSetting(line);
                 const depth = q === "综述深度";
