@@ -139,6 +139,10 @@ export interface AppSettings {
   outboundProxy?: string | null;
   /** NO_PROXY；出网代理有值且此项空时默认 localhost,127.0.0.1,::1 */
   outboundNoProxy?: string | null;
+  /** 机构访问前缀（EZproxy/OpenAthens 式）；空 = 未配置。会话 Cookie 另存后端 0600 文件 */
+  institutionalPrefix?: string | null;
+  /** 机构登录窗上次打开的地址（图书馆/CARSI 入口），便于一键重开 */
+  institutionalLoginUrl?: string | null;
 }
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；

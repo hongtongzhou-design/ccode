@@ -20,6 +20,18 @@ mod git_info;
 mod global_config;
 mod handoff;
 mod hooks;
+
+/// 浏览器桥 helper（bin/mesa_helper.rs）的入库公共接口：同一套落盘口径
+/// （注册项目根校验 + papers/ + 资源登记）。hint 用文献标题（回落 DOI）
+pub fn helper_ingest(project_root: &str, hint: &str, bytes: &[u8]) -> Result<String, String> {
+    let root = projects::ensure_task_project_root(std::path::Path::new(project_root))?;
+    let dto = lit_watch::save_paper_bytes(&root, hint, bytes)?;
+    Ok(dto.name)
+}
+
+mod browser_bridge;
+mod download_inbox;
+mod inst_access;
 mod journal_metrics;
 mod lit_watch;
 mod logbuf;
@@ -93,6 +105,8 @@ pub fn run() {
             }
             // 定时雷达：60s tick 调度，启动首 tick 自动补跑关闭期间漏掉的任务
             scheduler::start_scheduler(app.handle().clone());
+            // 收货监听：启动即恢复（盘上登记在重启前留下的也要有人接）
+            download_inbox::ensure_watcher_at_startup(app.handle());
             if let Err(e) = tray::setup(app.handle()) {
                 logbuf::record("warn", "tray", &format!("托盘初始化失败: {e}"));
             }
@@ -377,6 +391,7 @@ pub fn run() {
             zotero::zotero_inspect,
             zotero::zotero_items,
             zotero::zotero_import,
+            zotero::zotero_attach_fulltexts,
             projects::pdf_owner_project,
             projects::append_workspace_inbox,
             projects::list_pipeline_templates,
@@ -438,6 +453,7 @@ pub fn run() {
             usage::session_usage,
             usage::usage_by_gateway,
             settings::get_settings,
+            settings::detect_outbound_proxy,
             settings::app_storage_usage,
             mcp::mcp_distribution_status,
             settings::update_settings,
@@ -479,6 +495,16 @@ pub fn run() {
             lit_watch::remove_included_entry,
             lit_watch::download_paper_pdf,
             lit_watch::attach_paper_pdf,
+            lit_watch::fetch_paper_fulltext,
+            lit_watch::to_fetch_progress,
+            inst_access::inst_session_status,
+            browser_bridge::install_browser_bridge,
+            download_inbox::inst_browser_open,
+            inst_access::inst_open_login,
+            inst_access::inst_open_url,
+            inst_access::inst_save_relayed_pdf,
+            inst_access::inst_capture_session,
+            inst_access::inst_clear_session,
             journal_metrics::journal_metrics_status,
             journal_metrics::download_journal_metrics,
             journal_metrics::check_journal_metrics_update,

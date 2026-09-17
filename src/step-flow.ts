@@ -224,6 +224,73 @@ export function discussChatLabel(discussed: boolean): string {
   return discussed ? "继续讨论" : "跟 AI 商量一下";
 }
 
+/** 付费墙补充任务（检索步 after 事项）：就地挂「待获取清单」展开入口。
+ *  判定与 isAcademicMcpTaskTitle 同款按标题关键词——模板任务名「下载付费墙文献全文」。 */
+export function isPaywallTaskTitle(title: string): boolean {
+  return title.includes("付费");
+}
+
+/** to-fetch.md 的条目计数——与 parseToFetchItems 同一口径（单一出处）：
+ *  编号/列表行无链接也算，裸行须带「 — DOI/链接」尾巴。2026-09-16 修正：
+ *  旧实现只数带符号的行，老项目裸行清单显示「缺 0 篇」而面板里条目明明在。 */
+export function countToFetchEntries(text: string): number {
+  return parseToFetchItems(text).length;
+}
+
+/** to-fetch.md 单条待获取条目（lit-search 技能口径：`N. [✓ ] 标题 — DOI`） */
+export interface ToFetchItem {
+  /** 行号（1 起，条目身份键） */
+  line: number;
+  title: string;
+  /** 末段的 DOI/链接（能逐篇「获取全文」的条目才有值） */
+  url: string;
+  /** 已补齐（编号后有 ✓） */
+  done: boolean;
+}
+
+/** 解析 to-fetch.md 的条目行，兼容三代格式（2026-09-16 放宽：老项目清单是裸行，
+ *  只认编号会让旧格式解析出 0 条、回落纯文本预览，按钮整个不出现）：
+ *  - 新（2026-09-15 规范）：`N. [✓ ] 标题 — DOI` 连续编号；
+ *  - 旧列表符号：`- 标题 — DOI`；
+ *  - 旧裸行：`标题 — DOI`（无编号无符号——必须带「 — DOI/链接」尾巴才认，挡住说明文字）。
+ *  ✓ 记 done；末段不像 DOI/http 链接则 url 留空（获取钮不摆）。
+ *  全空时调用方回落原文预览 */
+export function parseToFetchItems(text: string): ToFetchItem[] {
+  const out: ToFetchItem[] = [];
+  text.split("\n").forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) return;
+    let body = line;
+    let done = false;
+    const numbered = /^(\d+)[.、)]\s+(✓\s*)?(.+)$/.exec(line);
+    const bulleted = /^[-*+]\s+(✓\s*)?(.+)$/.exec(line);
+    if (numbered) {
+      done = Boolean(numbered[2]);
+      body = numbered[3] ?? "";
+    } else if (bulleted) {
+      done = Boolean(bulleted[1]);
+      body = bulleted[2] ?? "";
+    }
+    body = body.trim();
+    if (!body) return;
+    const segs = body.split(/\s+—\s+|\s+--\s+/);
+    const last = (segs[segs.length - 1] ?? "").trim();
+    const looksLink =
+      /^(?:doi:\s*)?10\.\d{4,9}\/\S+$/i.test(last) ||
+      /^https?:\/\/\S+$/i.test(last);
+    if (segs.length < 2 || !looksLink) {
+      // 编号/列表行没链接也保留（url 空占位）；裸行必须带链接尾巴才算条目
+      if (!numbered && !bulleted) return;
+      out.push({ line: i + 1, title: body, url: "", done });
+      return;
+    }
+    // 标题 = 最后一段之外的全部（标题内含「 — 」不丢字）
+    const title = segs.slice(0, -1).join(" — ").trim();
+    out.push({ line: i + 1, title, url: last, done });
+  });
+  return out;
+}
+
 /** 本步上次商量会话：活着的优先，否则最近一条。归档 / 无头不计。 */
 export function pickDiscussResume<
   T extends {

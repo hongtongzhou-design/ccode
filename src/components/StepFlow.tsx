@@ -1,6 +1,8 @@
 import { sanitizeDocumentHtml } from "../document-html";
 import { useRef, useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { marked } from "marked";
 import { renderMathInto } from "../md-math";
 import { useAppStore } from "../store";
@@ -37,6 +39,18 @@ import {
   academicMcpLoginPrompt,
   isAcademicMcpTaskTitle,
 } from "../academic-mcp";
+import {
+  countToFetchEntries,
+  isPaywallTaskTitle,
+  parseToFetchItems,
+  type ToFetchItem,
+} from "../step-flow";
+import {
+  canAttemptFulltext,
+  fulltextViaLabel,
+  instOpenTarget,
+  type FetchedFulltextDto,
+} from "../inst-access";
 import type { ProjectStepDto, WorkspaceDto } from "../types";
 import type { StepRunStatus } from "../step-flow";
 
@@ -45,6 +59,11 @@ import type { StepRunStatus } from "../step-flow";
  *  回答三个问题：这一步谁先谁后（节点顺序）、现在轮到谁（当前节点）、轮到我时在哪操作（节点行就地）。 */
 /** 文献来源选项（值与后端 lit_source 对应）：zotero 与 folder 都属「我已有文献库」，
  *  区别只在进料方式，故并列三项而不是嵌套两层 */
+/** 付费墙任务的现行三步口径（2026-09-16 精简）：旧项目档案里存的是当年模板的老
+ *  guidance，就地替换显示，不动数据；新模板 guidance 同步收敛到同一版 */
+const PAYWALL_SUMMARY =
+  "清单里逐条处理：点「获取全文」自动取（先查开放副本，再走机构通道）；取不到的（Wiley 等有反爬墙）点「窗口打开」，在窗口里点「⤓ 保存 PDF 到 Mesa」直接落进项目根 papers/。不想补的跳过即可——下一步 agent 会按摘要写笔记并标注「仅摘要」。";
+
 const LIT_SOURCES: {
   id: string;
   label: string;
@@ -292,6 +311,229 @@ export default function StepFlow({
    *  商量改的就是最终落盘的 TASK.md，从零起草会把简报/预期产物/提货单全丢掉 */
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  // 付费墙任务的待获取清单就地展开（papers/to-fetch.md，只读预览）：
+  // 首次点开才读文件，收起不清缓存（agent 不会在展示期间改它）。
+  // 位置口径：agent 的产出落在步骤工作区，评审合并后才进项目根——先读工作区再回落项目根
+  const [paywallListOpen, setPaywallListOpen] = useState(false);
+  const [paywallList, setPaywallList] = useState<{
+    text: string | null;
+    error: string | null;
+    from: string | null;
+  }>({ text: null, error: null, from: null });
+  // 同一份 RIS（与 to-fetch.md 同目录同源）：「同步到 Zotero」建条目时带全题录
+  const [paywallRis, setPaywallRis] = useState<string | null>(null);
+  // 待获取清单的逐篇「获取全文」：机构通道可用态 + 行内进行/结果（key = 行号）
+  const [toFetchInstActive, setToFetchInstActive] = useState(false);
+  // 「同步到 Zotero」：papers/ 已拿到的全文按 DOI 挂附件（免 agent 会话，直连本地 API）
+  const [zoteroSyncing, setZoteroSyncing] = useState(false);
+  const [zoteroSyncResult, setZoteroSyncResult] = useState<string | null>(null);
+  const [toFetchBusy, setToFetchBusy] = useState<
+    Record<number, { status: "busy" | "ok" | "error"; note?: string }>
+  >({});
+  const toFetchItems = useMemo(
+    () => (paywallList.text ? parseToFetchItems(paywallList.text) : []),
+    [paywallList.text],
+  );
+  // 清单逐篇「已存 papers」状态（to_fetch_progress 对照 papers/ 现算）：
+  // 「哪些下载了」不再靠人记；机构窗口入库（inst-pdf-relayed）后自动翻新
+  const [toFetchDone, setToFetchDone] = useState<Record<number, string>>({});
+  const toFetchProbeRef = useRef<{ text: string | null; items: typeof toFetchItems }>({
+    text: null,
+    items: [],
+  });
+  toFetchProbeRef.current = { text: paywallList.text, items: toFetchItems };
+  const refreshToFetchProgress = () => {
+    const { text, items } = toFetchProbeRef.current;
+    if (!text || !items.length) return;
+    invoke<(string | null)[]>("to_fetch_progress", {
+      projectRoot: projectPath,
+      items: items.map((it) => ({ title: it.title, url: it.url })),
+    })
+      .then((names) => {
+        const map: Record<number, string> = {};
+        names?.forEach((n, i) => {
+          const it = items[i];
+          if (n && it) map[it.line] = n;
+        });
+        setToFetchDone(map);
+      })
+      .catch(() => {});
+  };
+  useEffect(() => {
+    if (paywallListOpen && paywallList.text) refreshToFetchProgress();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paywallListOpen, paywallList.text]);
+  useEffect(() => {
+    // 组件测试环境没有 Tauri 事件通道（__TAURI_INTERNALS__.transformCallback），
+    // 订阅直接跳过——进度刷新仍有面板开合与获取完成的触发点兜底
+    const internals = (globalThis as { __TAURI_INTERNALS__?: { transformCallback?: unknown } })
+      .__TAURI_INTERNALS__;
+    if (!projectPath || !internals?.transformCallback) return;
+    let un: (() => void) | undefined;
+    void listen<{ projectRoot?: string }>("inst-pdf-relayed", (e) => {
+      const root = e.payload?.projectRoot;
+      if (!root || root !== projectPath) return;
+      // App 层 save 在事件后 ~1s 完成，晚一点再查进度
+      window.setTimeout(() => refreshToFetchProgress(), 2500);
+    })
+      .then((u) => {
+        un = u;
+      })
+      .catch(() => {});
+    return () => un?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectPath]);
+  useEffect(() => {
+    if (!paywallListOpen) return;
+    invoke<{ sessionPresent: boolean; prefixConfigured: boolean }>(
+      "inst_session_status",
+    )
+      .then((s) => setToFetchInstActive(s.sessionPresent || s.prefixConfigured))
+      .catch(() => setToFetchInstActive(false));
+  }, [paywallListOpen]);
+  /** 把 papers/ 已拿到的全文挂进 Zotero（按钮点击即用户意图，按 DOI 匹配；
+   *  linked_file 引用 papers/ 绝对路径，不复制进 Zotero 存储） */
+  async function syncToZotero() {
+    const entries = toFetchItems
+      .filter((i) => !i.done && i.url)
+      .map((i) => ({ title: i.title, url: i.url }));
+    if (!entries.length) {
+      setZoteroSyncResult("清单里没有可同步的条目（要条目带 DOI 且未勾 ✓）");
+      return;
+    }
+    setZoteroSyncing(true);
+    setZoteroSyncResult(null);
+    try {
+      const r = await invoke<{
+        attached: string[];
+        created: string[];
+        skipped: string[];
+        missing: string[];
+        unmatched: string[];
+      }>("zotero_attach_fulltexts", {
+        projectRoot: projectPath,
+        entries,
+        risText: paywallRis ?? undefined,
+      });
+      const parts: string[] = [];
+      if (r.attached.length) parts.push(`挂上 ${r.attached.length} 篇`);
+      if (r.created.length) parts.push(`新建条目 ${r.created.length} 篇`);
+      if (r.skipped.length) parts.push(`已有附件跳过 ${r.skipped.length}`);
+      if (r.missing.length) parts.push(`还没拿到全文 ${r.missing.length}`);
+      if (r.unmatched.length) parts.push(`无 DOI 不同步 ${r.unmatched.length}`);
+      setZoteroSyncResult(parts.length ? `Zotero：${parts.join(" · ")}` : "Zotero：没有新东西可同步");
+    } catch (e) {
+      setZoteroSyncResult(`同步失败：${String(e)}`);
+    } finally {
+      setZoteroSyncing(false);
+    }
+  }
+
+  /** 逐篇获取（开放副本 → 机构通道）：PDF 落项目根 papers/ 并登记资源 */
+  async function fetchToFetchItem(item: ToFetchItem) {
+    if (!item.url) return;
+    setToFetchBusy((cur) => ({ ...cur, [item.line]: { status: "busy" } }));
+    try {
+      const res = await invoke<FetchedFulltextDto>("fetch_paper_fulltext", {
+        projectRoot: projectPath,
+        url: item.url,
+        fileNameHint: item.title,
+      });
+      setToFetchBusy((cur) => ({
+        ...cur,
+        [item.line]: { status: "ok", note: fulltextViaLabel(res.via) },
+      }));
+      refreshToFetchProgress();
+    } catch (e) {
+      setToFetchBusy((cur) => ({
+        ...cur,
+        [item.line]: { status: "error", note: String(e) },
+      }));
+    }
+  }
+
+  /** 手动关联本地 PDF（2026-09-17）：浏览器手动下载的文件名常是 main(1).pdf 这类
+   *  通用名，靠文件名永远对不上清单条目——显式选文件 + 按本行标题登记，行立即亮
+   *  「已存 papers/」（拷贝进 papers/，不动源文件） */
+  async function attachToFetchItem(item: ToFetchItem) {
+    const selected = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (!selected || typeof selected !== "string") return;
+    setToFetchBusy((cur) => ({ ...cur, [item.line]: { status: "busy" } }));
+    try {
+      const res = await invoke<FetchedFulltextDto>("attach_paper_pdf", {
+        projectRoot: projectPath,
+        sourcePath: selected,
+        title: item.title,
+      });
+      setToFetchBusy((cur) => ({
+        ...cur,
+        [item.line]: { status: "ok", note: `已关联：${res.name}` },
+      }));
+      refreshToFetchProgress();
+    } catch (e) {
+      setToFetchBusy((cur) => ({
+        ...cur,
+        [item.line]: { status: "error", note: String(e) },
+      }));
+    }
+  }
+  async function togglePaywallList() {
+    const next = !paywallListOpen;
+    setPaywallListOpen(next);
+    if (!next || paywallList.text != null || paywallList.error) return;
+    const candidates = ws
+      ? [
+          {
+            path: `${ws.worktreePath}/papers/to-fetch.md`,
+            root: ws.worktreePath,
+            from: "步骤工作区",
+          },
+          {
+            path: `${projectPath}/papers/to-fetch.md`,
+            root: projectPath,
+            from: "项目根",
+          },
+        ]
+      : [
+          {
+            path: `${projectPath}/papers/to-fetch.md`,
+            root: projectPath,
+            from: "项目根",
+          },
+        ];
+    for (const c of candidates) {
+      try {
+        const p = await invoke<{ text: string }>("read_file_preview", {
+          path: c.path,
+          root: c.root,
+        });
+        setPaywallList({ text: p.text, error: null, from: c.from });
+        // RIS 同源同目录（缺失不影响清单展开；同步到 Zotero 时有则建全题录条目）
+        try {
+          const risPath = c.path.replace(/to-fetch\.md$/, "to-fetch.ris");
+          const r = await invoke<{ text: string }>("read_file_preview", {
+            path: risPath,
+            root: c.root,
+          });
+          setPaywallRis(r.text);
+        } catch {
+          setPaywallRis(null);
+        }
+        return;
+      } catch {
+        // 试下一个位置
+      }
+    }
+    setPaywallList({
+      text: null,
+      error:
+        "还没找到 papers/to-fetch.md——agent 筛完会在步骤工作区生成缺全文清单（评审合并后进项目根）",
+      from: null,
+    });
+  }
   async function chatDraft() {
     if (!draft || chatBusy) return;
     setChatBusy(true);
@@ -1228,16 +1470,184 @@ export default function StepFlow({
               node.human!.timing === "after" &&
               afterReady(node.human!))) && (
             <div className="mt-1 pl-9 text-micro leading-5 text-l4">
-              <p className="whitespace-pre-wrap">{guidanceShort}</p>
-              {guidanceShort !== guidance && (
-                <details className="mt-1">
-                  <summary className="cursor-pointer select-none text-micro text-l4 hover:text-l2">
-                    怎么做
-                  </summary>
-                  <p className="mt-0.5 whitespace-pre-wrap text-l3">
-                    {guidance}
-                  </p>
-                </details>
+              {isPaywallTaskTitle(node.human!.title) ? (
+                <p className="whitespace-pre-wrap">{PAYWALL_SUMMARY}</p>
+              ) : (
+                <>
+                  <p className="whitespace-pre-wrap">{guidanceShort}</p>
+                  {guidanceShort !== guidance && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer select-none text-micro text-l4 hover:text-l2">
+                        怎么做
+                      </summary>
+                      <p className="mt-0.5 whitespace-pre-wrap text-l3">
+                        {guidance}
+                      </p>
+                    </details>
+                  )}
+                </>
+              )}
+              {/* 付费墙任务（2026-09-15 用户实测「不知道如何下手」）：第一步是看到
+                  「哪些文献缺全文」，清单就在 papers/to-fetch.md——就地展开，不必去文件页找 */}
+              {isPaywallTaskTitle(node.human!.title) && !node.done && (
+                <div className="mt-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void togglePaywallList()}
+                    className="rounded-sm px-1 py-0.5 text-micro text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
+                    title="展开 papers/to-fetch.md——agent 筛完列出的缺全文清单"
+                  >
+                    {paywallListOpen ? "收起待获取清单" : "查看待获取清单"}
+                    {paywallList.text && !paywallListOpen
+                      ? `（缺 ${countToFetchEntries(paywallList.text)} 篇）`
+                      : ""}
+                  </button>
+                  {paywallListOpen && (
+                    <div className="mt-1 rounded-sm ccode-well px-2 py-1.5">
+                      {paywallList.error ? (
+                        <p className="text-micro text-l4">
+                          {paywallList.error}
+                        </p>
+                      ) : paywallList.text == null ? (
+                        <p className="text-micro text-l4">加载中…</p>
+                      ) : (
+                        <>
+                          <p className="mb-1 text-micro text-l4">
+                            来自{paywallList.from} · papers/to-fetch.md · 已存{" "}
+                            {Object.keys(toFetchDone).length +
+                              toFetchItems.filter((i) => i.done && !toFetchDone[i.line]).length}
+                            /{toFetchItems.length} 篇
+                          </p>
+                          {toFetchItems.length > 0 ? (
+                            <ul className="max-h-56 space-y-0.5 overflow-auto">
+                              {toFetchItems.map((item) => {
+                                const st = toFetchBusy[item.line];
+                                const doneName = toFetchDone[item.line];
+                                const done = item.done || !!doneName;
+                                const can =
+                                  !done &&
+                                  !!item.url &&
+                                  canAttemptFulltext(item.url, toFetchInstActive);
+                                return (
+                                  <li
+                                    key={item.line}
+                                    className="flex min-w-0 items-center gap-2 text-micro leading-5"
+                                  >
+                                    <span
+                                      className={`min-w-0 flex-1 truncate ${done ? "text-l4 line-through" : "text-l3"}`}
+                                      title={item.title}
+                                    >
+                                      {item.title}
+                                    </span>
+                                    {done ? (
+                                      doneName ? (
+                                        <span
+                                          className="shrink-0 text-ok-text"
+                                          title={`papers/${doneName}`}
+                                        >
+                                          ✓ 已存 papers/
+                                        </span>
+                                      ) : (
+                                        <span className="shrink-0 text-l4">✓ 已勾</span>
+                                      )
+                                    ) : (
+                                      <>
+                                        {item.url && (
+                                          <button
+                                            type="button"
+                                            className="shrink-0 rounded-sm px-1 py-0.5 text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
+                                            title="在系统浏览器里打开这一篇（真实浏览器会话，出版商不拦截）；浏览器里点站方下载，落下的 PDF 由 Mesa 自动收进本项目 papers/ 并登记"
+                                            onClick={() => {
+                                              invoke("inst_browser_open", {
+                                                url: instOpenTarget(item.url),
+                                                projectRoot: projectPath,
+                                                title: item.title,
+                                                doi: item.url,
+                                              }).catch((e) => {
+                                                setZoteroSyncResult(`打开浏览器失败：${String(e)}`);
+                                              });
+                                            }}
+                                          >
+                                            浏览器打开
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          className="shrink-0 rounded-sm px-1 py-0.5 text-l4 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                                          disabled={st?.status === "busy"}
+                                          title="选一个已下载的 PDF 文件，按本行标题复制进 papers/ 并登记（文件名随意，浏览器下载的 main(1).pdf 也能对上号）"
+                                          onClick={() => void attachToFetchItem(item)}
+                                        >
+                                          {st?.status === "busy" ? "关联中…" : "关联本地 PDF"}
+                                        </button>
+                                        {can && (
+                                          <button
+                                            type="button"
+                                            className="shrink-0 rounded-sm px-1 py-0.5 text-l4 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                                            disabled={st?.status === "busy"}
+                                            title="自动获取：先查合法开放副本（预印本/仓储），再走机构通道（设置 → 网络 → 机构访问）。硬反爬墙站点（Wiley/Elsevier 等）多半取不到——失败就用「窗口打开」人工取"
+                                            onClick={() => void fetchToFetchItem(item)}
+                                          >
+                                            {st?.status === "busy"
+                                              ? "获取中…"
+                                              : st?.status === "ok"
+                                                ? "再取一次"
+                                                : st?.status === "error"
+                                                  ? "重试自动获取"
+                                                  : "自动获取"}
+                                          </button>
+                                        )}
+                                      </>
+                                    )}
+                                    {!done && st?.status === "ok" && (
+                                      <span
+                                        className="shrink-0 text-ok-text"
+                                        title={st.note}
+                                      >
+                                        ✓ 已落 papers/
+                                      </span>
+                                    )}
+                                    {!done && st?.status === "error" && (
+                                      <span
+                                        className="shrink-0 max-w-[50%] truncate text-err-text"
+                                        title={st.note ?? ""}
+                                      >
+                                        {st.note}
+                                      </span>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          ) : (
+                            <pre className="max-h-56 overflow-auto whitespace-pre-wrap font-mono text-micro leading-5 text-l3">
+                              {paywallList.text}
+                            </pre>
+                          )}
+                        </>
+                      )}
+                      <p className="mt-1 text-micro text-l4">
+                        窗口里下载的（页面自带按钮或「⤓ 取 PDF」）都会自动落 papers/ 并登记，
+                        本清单会实时标出已存的篇目；「自动获取」只对有合法开放副本或机构通道可达的
+                        条目有效，硬反爬墙站点用「窗口打开」
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void syncToZotero()}
+                          disabled={zoteroSyncing}
+                          title="把 papers/ 已拿到的全文挂进 Zotero 对应条目（按 DOI 匹配，linked_file 引用不复制）。需要 Zotero 正在运行并允许本机通信；首次写入 Zotero 会弹授权确认"
+                          className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                        >
+                          {zoteroSyncing ? "同步中…" : "同步到 Zotero"}
+                        </button>
+                        {zoteroSyncResult && (
+                          <span className="text-micro text-l4">{zoteroSyncResult}</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           )}

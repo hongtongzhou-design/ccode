@@ -512,6 +512,7 @@ dependencies = [
  "keyring",
  "md5",
  "notify",
+ "objc2",
  "portable-pty",
  "reqwest 0.12.28",
  "rusqlite",

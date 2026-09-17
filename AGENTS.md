@@ -550,6 +550,60 @@ src-tauri/src/
                              #   （旧 claude_hooks_attention 仅保留反序列化兼容迁移）；
                              #   session_confirm_detail（2026-08-24）：confirm 时从 payload 提取「在等什么」摘要
                              #   （message/tool_name/title 尽力而为），聊天层审批卡片用
+  inst_access.rs             # 机构访问通道（2026-09-16）：人登录一次、系统复用会话——登录窗（Tauri WebviewWindow
+                             #   label=inst-login）Cookie 落 0600 inst-session.json（值绝不出站，状态 DTO 只有
+                             #   域名/条数/时间）；EZproxy/OpenAthens 前缀 ?url= 改写（settings institutional_prefix，
+                             #   书签式前缀自动剥尾部 url=）；DOI→合法开放副本查证（Unpaywall best_oa_location
+                             #   .url_for_pdf 优先、OpenAlex 回落）；落地页 citation_pdf_url meta + 常见 PDF 链接
+                             #   形态提取；fetch_via_session 手动逐跳跟重定向（每跳按 host 重算 Cookie 头）。
+                             #   硬边界：不存机构账号密码/不做无人值守自动登录；scheduler/无头不携带会话；
+                             #   只由人 UI 逐篇触发（lit_watch::fetch_paper_fulltext 阶梯调用），不做批量。
+                             #   登录窗轮询走独立线程（Windows cookie API 在主线程同步调用会死锁）。
+                             #   窗内 PDF 落盘走**单一下载漏斗**（2026-09-16 终局，勿再加拦截层/页→本机回传）：
+                             #   builder 注册 on_download（Requested 把落点改写 <config>/ccode/tmp/inst-dl/、
+                             #   Finished 按 url→落点 map 对账读文件 → %PDF- 魔数校验 → 单槽暂存 →
+                             #   inst-pdf-relayed → App 层 inst_save_relayed_pdf 落 papers/）；页侧 LOGIN_INIT_SCRIPT
+                             #   常驻 ⤓ 胶囊（2s 周期重检直链）+ __mesaGrab（a[download] 按钮 → 合成
+                             #   a[download] 走 WKDownload → fetch 魔数校验）；点 /doi/pdf/ 拦住改保存
+                             #   （WKWebView 内联 PDF 无保存入口）；/doi/epdf/ 放行（Wiley/ACS 阅读页）；
+                             #   直链存成网页则改开阅读页。on_navigation 拦 pdfish 后 Rust 用窗口会话直拉（绕过
+                             #   页内 CORS，MDPI 的 mdpi-res.com 等 CDN），失败再回落页侧 grab；about:blank
+                             #   document-start 刷浅底防开窗黑屏。wry：download 属性走下载委托、application/pdf
+                             #   主框架导航被内联渲染——结论记 pipeline.md「机构访问通道」。
+                             #   ScienceDirect（2026-09-16 晚）：不放 citation_pdf_url、PDF 链接是 PII 路径不含
+                             #   DOI（通用探测两条路全落空）、View PDF 是 JS 弹层按钮——mesaSdPdfUrl 三级
+                             #   （#pdfLink href → 内嵌 JSON pdfDownload.urlMetadata token 直链 → 按 PII 构造
+                             #   /pdfft?download=true）；**SD 终局（三形态实测 + wry 源码）**：下载式请求
+                             #   （a[download]/WKDownload action）被回 HTML、普通导航被 wry 内联渲染白屏
+                             #   （wry navigation_policy_response 只看 canShowMIMEType、无视 Content-Disposition）、
+                             #   blob 下载 Finished 挂起——唯一通道 = 页内 fetch 取字节 + mesaChunkRelay
+                             #   分片回传（base64 64KB/片，mesa-chunk://c/{seq}/{total}/{b64} 合成锚点导航，
+                             #   Rust on_navigation 收片取消导航，不受 CSP/混合内容限制；收齐解码校验走既有
+                             #   inst-pdf-relayed 入库链；Zotero Connector 页内取字节带外送回的 webview 等价物）；
+                             #   胶囊创建即上文案（空胶囊=黑圈）；View PDF 命中后 closest('a[href]') 沿祖先找
+                             #   href、未检出直链 1.5s 宽限重测。SD 交互终态（用户拍板「进 View PDF 再下载」）：
+                             #   SD 页面不拦 View PDF（mesaIsSdPage）、grab 不点站方下载控件——让站方阅读器
+                             #   打开，mesaPdfUrl 内嵌扫描（iframe/object/embed）取 PDF 地址走分片回传。
+                             #   页侧通用分型层（同日深夜，按清单出版商收口，只加失败救援不动已通路）：
+                             #   mesaVerifiedGrab 验证式抓取（同源 pdfish 先 fetch 验明正身，验明后对真实 URL
+                             #   合成 a[download] 走 WKDownload——**禁 blob→a[download] 落盘**：macOS 上
+                             #   Requested 后 Finished 挂死（20:33 实测），__mesaDownloading 有 90s 看门狗；
+                             #   HTML 中间页由 mesaIntermediaryNext 解析 meta refresh/redirect-message/
+                             #   iframe·embed·object 内嵌 pdfish 再取，≤3 跳；Wiley/ACS 型 /doi/pdf/ 经
+                             #   mesaViewerUrl 非空跳过）；mesaPdfUrl 第二遍单链采用（RSC articlepdf 只带
+                             #   DOI 后缀/IEEE arnumber 不含 DOI 前缀——文章页全页唯一 PDF 链才用）；
+                             #   Rust got-html 回救 __mesaGrabVerified（拿到网页时页侧解析重试，Wiley 型仍走 epdf）。
+                             #   出版商分型纪律（用户指令，勿顾此失彼）：每家期刊 PDF 供给形态不同（已实证
+                             #   通用meta/DOI内链/Wiley-epdf/MDPI-CDN直拉/编号链(RSC·IEEE)/中间页(SD·IEEE)/
+                             #   SD复合/签名直链八型），为一家修问题只动该家命中的最窄分支、禁改通用路径，
+                             #   收尾逐一回归各型——细则见 pipeline.md「机构访问通道」⑦。
+                             #   收货通道 A/B/C（同日深夜用户定稿「让真实浏览器干浏览器的事」，Mesa 只收货）：
+                             #   A download_inbox.rs 监听 ~/Downloads 收 PDF（inst_browser_open 调起系统浏览器
+                             #   + 登记归属，六层过滤链收货进既有入库链，收完进回收站）；B 浏览器会话复用
+                             #   （设置页「在浏览器中登录」，内嵌窗留回落）；C extension/（MV3，ID 固定
+                             #   dmjplopfhbdamkihimfllomdmkfainnn）+ bin/mesa_helper.rs（native messaging，读 helper-context.json
+                             #   当前项目调 ccode_lib::helper_ingest）+ browser_bridge.rs（装 NativeMessagingHosts
+                             #   清单）。内嵌窗漏斗保留为过渡，通道 C 稳定后退役——细则见 pipeline.md ⑧
   fonts.rs                   # 终端字体打包与 brew 一键安装（Maple/Sarasa/Iosevka）
   ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报/评审沉淀起草生成；
                              # resolve_profile_from 最近使用回落跳过官方账号（OAuth 过期会甩 CLI 日志；显式/专用仍尊重）；
@@ -616,7 +670,8 @@ src-tauri/src/
                              # Desktop CLI 打开该树 / gh --web 开 PR（CodingOpDto；不走科研工作区库）；overview 按树/分支并行 git
   workspaces.rs              # 任务工作区（§6.10）：worktree + ccode/<name> 分支 CRUD、files-to-copy、CCODE_PORT、
                              # setup/archive 钩子、评审合并（health/merge/PR）、artifacts.yaml、
-                             # 人工事项状态（human_task_checks 勾选 + human_target_hit 落点检测 + human_target_count 命中计数/to-fetch 清单计数）、import_human_deliverable
+                             # 人工事项状态（human_task_checks 勾选 + human_target_hit 落点检测 + human_target_count 命中计数/to-fetch 清单计数——
+                             # 计数口径与前端 step-flow.ts parseToFetchItems 双端镜像：编号/列表行都算，裸行须带「 — DOI」尾巴，说明行与「待补」不算）、import_human_deliverable
                              # 交付导入（复制落点 + 登记提货单；v3.74 起 step/title 可选 + target_override 固定落点，
                              # 无步骤语境 = papers/imports/ 检索结果导入落主仓）、list_help_requests（.ccode/help-wanted.md 人工请求扫描）
   portwatch.rs               # 端口监控：LISTEN 列表、归属标注（cwd 最长前缀，回落 CCODE_PORT 段）、校验后 SIGTERM
@@ -756,7 +811,7 @@ src-tauri/src/
   已移出独立路线（「只做场景必需、不做扩展性功能」原则，见架构 v3.97）
 - **科研工具交付合同（2026-09-11；2026-09-12 收口来源）**：六套模板不另扩编排；库交付、Origin 数值图、Blender 示意和稿件载体由人选择，统一补进现有步骤技能/产物/人工事项。**文献从哪来只在检索步 `lit_source`**，不在创建弹层或 `科研工具/literature` 再问一遍；选 Zotero 才挂 `zotero-sync`。设定屏只填全局设定。稿件载体问在会换正式稿的步骤；库交付问在精读（无精读才在投稿适配）；Origin/Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。种子 v5 加 `blender-research` 及随包脚本；已有技能只经差异预览确认升级。模板同名但交付不同不可跳过。Zotero 只读在线内存快照、增量独立候选、来源+资源一起保存；外部 PDF 仅精确登记只读路径可配对阅读。复现合同与面板统一；上游验收引用不自动批准本步。细则见 `docs/conventions/pipeline.md` 末节。
 - **科研外部工具三线（2026-09-05 已融入）**：`origin-plot` / `zotero-sync` / `endnote-bridge` 已注册为内置技能并随种子版本 4 播种；仅 `zotero-sync` 默认挂到英文综述、科研论文、毕业论文的文献检索步骤。Origin 仍只作 Windows + Origin 2021+ 的可选外部工具驱动，EndNote 仍只作 XML/RIS 格式桥接，二者不默认进入模板，也不做 CWYW 无人值守自动化。Zotero 通道需按实机版本/授权探测，失败时回落 RIS/BibTeX 文件流程，不阻塞检索。
-  Origin 只做 Windows 实机（Mac 虚拟机方案否决）、EndNote 只走格式桥接（CWYW 无人值守否决）、Zotero 写库只走技能且必须有用户意图；场景 4 以 origin-plot 技能形态重新纳入。
+  Origin 只做 Windows 实机（Mac 虚拟机方案否决）、EndNote 只走格式桥接（CWYW 无人值守否决）、Zotero 写库只走技能或 UI 显式动作且必须有用户意图（2026-09-16 放宽：to-fetch 清单「同步到 Zotero」按钮即用户意图——zotero.rs zotero_attach_fulltexts 直连本地 API 按 DOI 挂 linked_file 附件，引用 papers/ 绝对路径不复制；Zotero 须运行中并允许本机通信，首次写入授权）；场景 4 以 origin-plot 技能形态重新纳入。
 - **定时任务与研究流程结合（核心路径已落地，细目见架构 §11.4 历史记录）**：边界已定——不给每步配定时任务，
   结合点是「产出回流」而非「配置下沉」。产出回流三件套已上线（v3.95：lit_watch.rs 解析巡检产物 + LitWatchCard
   雷达卡片 + 收件箱 lit: 文献胶囊 / Schedule.linkedStep 关联步骤 + RunRecord.newEntries / staleLitHint 复用

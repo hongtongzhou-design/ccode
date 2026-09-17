@@ -280,6 +280,12 @@ pub struct AppSettingsDto {
     pub outbound_proxy: Option<String>,
     /// NO_PROXY；出网代理有值且此项空时默认 localhost,127.0.0.1,::1
     pub outbound_no_proxy: Option<String>,
+    /// 机构访问前缀（EZproxy/OpenAthens 式，如 https://proxy.xxx.edu.cn/login?url=）：
+    /// 仅用于文献全文获取通道的 URL 改写与登录窗起始页。空 = 未配置。
+    /// 非密钥（登录会话 Cookie 另存 0600 inst-session.json，见 inst_access.rs）
+    pub institutional_prefix: Option<String>,
+    /// 机构登录窗上次打开的地址（学校图书馆/CARSI 入口或代理登录页），便于一键重开；非密钥
+    pub institutional_login_url: Option<String>,
 }
 
 pub const DEFAULT_NO_PROXY: &str = "localhost,127.0.0.1,::1";
@@ -345,6 +351,223 @@ pub fn official_outbound_env() -> Vec<(String, String)> {
         return Vec::new();
     }
     official_outbound_env_from(&read_current())
+}
+
+// ===== 出网代理自动检测（2026-09-16）=====
+// 候选来源：系统代理设置（macOS scutil / Windows 注册表 / Linux gsettings，均走
+// background_command）→ 环境变量 → 本机常见代理端口 TCP 探测。只做「检测出来供人
+// 点选」，不静默改写设置——填不填、用哪个仍由用户拍板（同会话里机构访问的口径）。
+
+/// 检测候选：完整代理 URL + 来源说明 + 端口是否活着（TCP 探测）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundProxyCandidateDto {
+    pub url: String,
+    pub source: String,
+    pub alive: bool,
+}
+
+/// 常见本机代理端口（国内主流客户端默认值）：is_http=false 的按 socks5 出 URL
+const COMMON_PROXY_PORTS: &[(u16, bool, &str)] = &[
+    (7890, true, "Clash 混合端口"),
+    (7897, true, "Clash Verge 默认混合端口"),
+    (10809, true, "V2RayN HTTP"),
+    (8118, true, "Privoxy"),
+    (6152, true, "Surge HTTP"),
+    (1080, false, "SOCKS 常用端口"),
+];
+
+/// TCP 探测代理端口是否在监听（400ms；host:port 解析失败按不在线处理）
+fn proxy_url_alive(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
+        return false;
+    };
+    use std::net::ToSocketAddrs as _;
+    let Ok(mut addrs) = format!("{host}:{port}").to_socket_addrs() else {
+        return false;
+    };
+    addrs
+        .next()
+        .and_then(|addr| {
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(400)).ok()
+        })
+        .is_some()
+}
+
+/// 环境变量值归一成代理 URL：没带 scheme 的补 http://（ socks5: 前缀已带 scheme 的原样）
+fn normalize_proxy_env_value(value: &str) -> String {
+    let t = value.trim();
+    if t.is_empty() || t.contains("://") {
+        return t.to_string();
+    }
+    format!("http://{t}")
+}
+
+/// macOS scutil --proxy 输出解析：HTTPEnable/HTTPProxy/HTTPPort、HTTPS 同款、SOCKS 同款，
+/// 启用（Enable : 1）才产出。纯函数供单测。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_scutil_proxy(text: &str) -> Vec<String> {
+    let get = |key: &str| -> Option<String> {
+        text.lines()
+            .map(str::trim)
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split(':').nth(1))
+            .map(|v| v.trim().to_string())
+    };
+    let mut out = Vec::new();
+    for (enable_key, host_key, port_key, scheme) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort", "https"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort", "http"),
+        ("SOCKSEnable", "SOCKSProxy", "SOCKSPort", "socks5"),
+    ] {
+        if get(enable_key).as_deref() != Some("1") {
+            continue;
+        }
+        if let (Some(host), Some(port)) = (get(host_key), get(port_key)) {
+            if !host.is_empty() && !port.is_empty() {
+                out.push(format!("{scheme}://{host}:{port}"));
+            }
+        }
+    }
+    out
+}
+
+/// Windows 注册表 ProxyEnable/ProxyServer 解析（reg query 输出）。ProxyServer 形如
+/// `127.0.0.1:7890` 或 `http=x:y;https=x:y;socks=x:y`。纯函数供单测。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_windows_reg_proxy(text: &str) -> Vec<String> {
+    let value_of = |name: &str| -> Option<String> {
+        text.lines()
+            .map(str::trim)
+            .find(|l| l.starts_with(name) && l.contains("REG_"))
+            .and_then(|l| l.rsplit(|c: char| c.is_whitespace()).next())
+            .map(str::to_string)
+    };
+    if value_of("ProxyEnable").as_deref() != Some("0x1") {
+        return Vec::new();
+    }
+    let Some(server) = value_of("ProxyServer") else {
+        return Vec::new();
+    };
+    if server.contains('=') {
+        // 分协议形式：优先 https，其次 http，再 socks
+        let seg = |k: &str| {
+            server
+                .split(';')
+                .find_map(|s| s.trim().strip_prefix(&format!("{k}=")))
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        for k in ["https", "http", "socks"] {
+            if let Some(v) = seg(k) {
+                let scheme = if k == "socks" { "socks5" } else { k };
+                return vec![format!("{scheme}://{v}")];
+            }
+        }
+        Vec::new()
+    } else if !server.is_empty() {
+        vec![format!("http://{server}")]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Linux GNOME 代理（gsettings manual 模式）：https 优先，回落 http；读不到返回空
+#[cfg(target_os = "linux")]
+fn gsettings_proxy() -> Vec<String> {
+    let run = |schema: &str, key: &str| -> Option<String> {
+        let out = crate::process::background_command("gsettings")
+            .args(["get", schema, key])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim().trim_matches('\'').to_string())
+    };
+    if run("org.gnome.system.proxy", "mode").as_deref() != Some("manual") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for schema in ["https", "http"] {
+        let (Some(host), Some(port)) = (
+            run(&format!("org.gnome.system.proxy.{schema}"), "host"),
+            run(&format!("org.gnome.system.proxy.{schema}"), "port"),
+        ) else {
+            continue;
+        };
+        if !host.is_empty() && port.parse::<u16>().is_ok() {
+            out.push(format!("{schema}://{host}:{port}"));
+        }
+    }
+    out
+}
+
+fn detect_outbound_proxy_inner() -> Result<Vec<OutboundProxyCandidateDto>, String> {
+    let mut urls: Vec<(String, String)> = Vec::new(); // (url, source)
+    // 1) 系统代理设置
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = crate::process::background_command("scutil").arg("--proxy").output() {
+            if out.status.success() {
+                for url in parse_scutil_proxy(&String::from_utf8_lossy(&out.stdout)) {
+                    urls.push((url, "系统代理".into()));
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = crate::process::background_command("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                for url in parse_windows_reg_proxy(&String::from_utf8_lossy(&out.stdout)) {
+                    urls.push((url, "系统代理".into()));
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    for url in gsettings_proxy() {
+        urls.push((url, "系统代理（GNOME）".into()));
+    }
+    // 2) 环境变量（GUI 启动常拿不到 shell 的，但终端里起 Mesa 的场景有值）
+    for key in [
+        "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            let url = normalize_proxy_env_value(&v);
+            if !url.is_empty() {
+                urls.push((url, format!("环境变量 {key}")));
+            }
+        }
+    }
+    // 3) 本机常见代理端口：只有探测到在监听才列（不摆死端口）
+    for (port, is_http, hint) in COMMON_PROXY_PORTS {
+        let scheme = if *is_http { "http" } else { "socks5" };
+        let url = format!("{scheme}://127.0.0.1:{port}");
+        if proxy_url_alive(&url) {
+            urls.push((url, format!("本机端口 · {hint}")));
+        }
+    }
+    // 去重（同 URL 保留首个来源），统一补 TCP 活性
+    let mut out: Vec<OutboundProxyCandidateDto> = Vec::new();
+    for (url, source) in urls {
+        if out.iter().any(|c| c.url == url) {
+            continue;
+        }
+        let alive = proxy_url_alive(&url);
+        out.push(OutboundProxyCandidateDto { url, source, alive });
+    }
+    Ok(out)
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -475,6 +698,10 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         terminal_color_report: s.terminal_color_report.or(Some(true)),
         outbound_proxy: s.outbound_proxy.filter(|v| !v.trim().is_empty()),
         outbound_no_proxy: s.outbound_no_proxy.filter(|v| !v.trim().is_empty()),
+        institutional_prefix: s.institutional_prefix.filter(|v| !v.trim().is_empty()),
+        institutional_login_url: s
+            .institutional_login_url
+            .filter(|v| !v.trim().is_empty()),
     }
 }
 
@@ -581,6 +808,14 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.outbound_no_proxy.is_some() {
         cur.outbound_no_proxy = patch.outbound_no_proxy.filter(|v| !v.trim().is_empty());
+    }
+    if patch.institutional_prefix.is_some() {
+        cur.institutional_prefix = patch.institutional_prefix.filter(|v| !v.trim().is_empty());
+    }
+    if patch.institutional_login_url.is_some() {
+        cur.institutional_login_url = patch
+            .institutional_login_url
+            .filter(|v| !v.trim().is_empty());
     }
 }
 
@@ -797,6 +1032,14 @@ pub async fn update_settings(patch: AppSettingsDto) -> Result<AppSettingsDto, St
     Ok(with_defaults(cur))
 }
 
+/// 出网代理自动检测（设置页「检测」按钮）：只出候选供点选，不改写任何设置
+#[tauri::command]
+pub async fn detect_outbound_proxy() -> Result<Vec<OutboundProxyCandidateDto>, String> {
+    tauri::async_runtime::spawn_blocking(detect_outbound_proxy_inner)
+        .await
+        .map_err(|e| format!("代理检测失败: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,6 +1058,48 @@ mod tests {
         assert!(write_to(&p, &AppSettingsDto::default()).is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "{invalid}");
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn scutil_proxy_parsing_takes_enabled_entries() {
+        let text = "<dictionary> {\n  HTTPEnable : 0\n  HTTPProxy : 0.0.0.0\n  HTTPPort : 0\n  HTTPSEnable : 1\n  HTTPSProxy : 127.0.0.1\n  HTTPSPort : 7890\n  SOCKSEnable : 1\n  SOCKSProxy : 127.0.0.1\n  SOCKSPort : 1080\n}\n";
+        assert_eq!(
+            parse_scutil_proxy(text),
+            vec![
+                "https://127.0.0.1:7890".to_string(),
+                "socks5://127.0.0.1:1080".to_string(),
+            ]
+        );
+        // 全关：无产出
+        assert!(parse_scutil_proxy("HTTPEnable : 0").is_empty());
+    }
+
+    #[test]
+    fn windows_reg_proxy_parsing_covers_both_forms() {
+        let plain = "HKEY_CURRENT_...\n    ProxyEnable    REG_DWORD    0x1\n    ProxyServer    REG_SZ    127.0.0.1:7890\n";
+        assert_eq!(
+            parse_windows_reg_proxy(plain),
+            vec!["http://127.0.0.1:7890".to_string()]
+        );
+        let per_proto = "    ProxyEnable    REG_DWORD    0x1\n    ProxyServer    REG_SZ    http=127.0.0.1:7890;https=127.0.0.1:7891;socks=127.0.0.1:1080\n";
+        assert_eq!(
+            parse_windows_reg_proxy(per_proto),
+            vec!["https://127.0.0.1:7891".to_string()]
+        );
+        // 未启用：无产出
+        let off = "    ProxyEnable    REG_DWORD    0x0\n    ProxyServer    REG_SZ    127.0.0.1:7890\n";
+        assert!(parse_windows_reg_proxy(off).is_empty());
+    }
+
+    #[test]
+    fn proxy_env_value_normalizes_scheme() {
+        assert_eq!(normalize_proxy_env_value("127.0.0.1:7890"), "http://127.0.0.1:7890");
+        assert_eq!(
+            normalize_proxy_env_value("socks5://127.0.0.1:1080"),
+            "socks5://127.0.0.1:1080"
+        );
+        assert_eq!(normalize_proxy_env_value("  http://p:80  "), "http://p:80");
+        assert_eq!(normalize_proxy_env_value(""), "");
     }
 
     #[test]

@@ -536,7 +536,10 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   `ensure_task_project_root`）。
 - **命中计数（v3.97）**：`human_target_count` 与 hit 同口径但返回命中文件数（DTO 字段 `hitCount`，
   两侧检测根取 **max**——合并后同一文件在项目根与工作树各有一份，相加会重复计数）；`papers/*.pdf` 落点且
-  同侧根存在 `papers/to-fetch.md` 时附 `expectedCount`（条目行 = 非空、非 # 标题、非「为空」注明行）。
+  同侧根存在 `papers/to-fetch.md` 时附 `expectedCount`——条目口径与前端 `src/step-flow.ts parseToFetchItems`
+  **双端镜像，改动需同步**（2026-09-16 对齐）：编号行（`N.` / `N、` / `N)`）与列表行（`- / * / +`，前缀后须有空白）
+  都算条目（✓ 剥掉、不必带链接）；裸行必须带「 — DOI/链接」尾巴才算——顶部说明文字行与「待补」占位不算
+  （旧口径「非空非 # 行全算」会把说明行多数进去，与展开面板条目数对不上，且补齐全量后 completion=all 永不满足）。
   UI 显示「已见到 N 个文件 / 清单共 M 篇」的进度感；**仍是存在性检测，不做逐篇对账**（标题匹配脆弱；
   逐篇对齐靠精读步 agent 收尾复查的简报约定）。
 - **人工补投的命名规范化职责在下游 agent，不在用户（v3.97 拍板）**：人工补投的 PDF 文件名随意，
@@ -744,6 +747,212 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   - **下载白名单与资源登记**：download_paper_pdf 仅 http/https、60MB 上限流式中止、%PDF- 魔数校验、文件名
     sanitize、落 papers/ 重名 -2/-3、自动登记 project.toml `[[resources]]` type="paper"；非直链（出版商页）前端
     禁用并提示手动下载，付费墙文献仍走 watch-followup.md「待人工下载」。
+  - **机构访问通道（2026-09-16，fetch_paper_fulltext 逐篇获取阶梯）**：形态是**人登录一次、系统复用会话**——
+    用户在设置 → 网络的「机构访问」里配 EZproxy/OpenAthens 前缀（非密，settings.json）并在独立登录窗完成学校
+    SSO（含 MFA），后端 `inst_access.rs` 读取登录窗 Cookie 落 0600 `inst-session.json`（与 keys.json 同纪律，
+    值绝不出站）。获取入口三处：检索步付费墙事项的 to-fetch 清单条目、雷达卡「来源」态命中行、watch-followup
+    待办行；按钮按 `canAttemptFulltext`（裸 DOI/doi.org 恒可试开放副本查证，其余落地页仅通道可用才摆）。
+    `parseToFetchItems` 兼容三代清单格式（编号式 / `- ` 列表符号式 / 旧裸行「标题 — DOI」——
+    2026-09-16 实测老项目裸行清单解析出 0 条回落纯文本预览，按钮整个不出现；裸行必须带
+    DOI/链接尾巴才认，说明文字不误收）。
+    阶梯 = 开放直链 → DOI 合法开放副本（Unpaywall `best_oa_location.url_for_pdf` 优先、OpenAlex 回落，
+    10s best-effort）→ 机构通道（前缀 `?url=` 改写 + 会话 Cookie 逐跳注入 + 落地页 `citation_pdf_url`
+    meta/常见 PDF 链接形态提取，登录页密码框探测提示重登）。落点/登记与 download_paper_pdf 同口径
+    （papers/ + resources，口径 C 原始资料直写项目根）。**三条硬边界**：只由人逐篇触发，scheduler/无头 Run
+    不携带机构会话、不做批量（出版商风控连坐全校 IP）；失败即回落 to-fetch.md/watch-followup.md 人工获取，
+    不自动重试；不存机构账号密码、不做无人值守自动登录（MFA 过不去）。前缀式先行，深信服类 WebVPN 私有
+    重写规则不泛化（留二期）。失败文案区分「会话过期重登」与「不在订阅范围」。
+    2026-09-16 二轮实测修订：① 登录窗注入 initialization_script 改写 `target=_blank` /
+    window.open（CARSI 资源页等在新窗口语义下内嵌 WebView 点不动——「点击不进去」的
+    根因）；② 登录窗**不自动关**，轮询按「域名+Cookie 名」指纹增量落罐（CARSI 要在窗里
+    继续点进出版商才有出版商会话，过早关窗永远差一步）；③ **出版商反爬墙现实**：Wiley
+    等对一切非浏览器客户端返回 403（带全量会话+浏览器 UA 亦然，Akamai TLS 指纹拦截，
+    与登录无关）——`institutional_failure_hint` 分流提示走「在机构窗口打开」
+    （`inst_open_url`：把该篇开进机构登录窗，共享会话与真浏览器引擎，人手下载后
+    「关联本地 PDF」导入）；雷达/清单的「打开来源」在会话态同路径。④ **PDF 中继（同日三轮，已废弃）**：
+    登录窗 initialization_script 注入「⤓ 保存 PDF 到 Mesa」浮动钮，页面上下文 fetch PDF 后
+    POST 给本机 127.0.0.1 中继。**教训（勿走回头路）**：https 页面向 127.0.0.1 的回传
+    会被 WebKit 拦（实测无声挂起）；占位符全量替换两次把注入脚本替出非法语法
+    （`window.12345 = 12345`）整段失效；合成 `<a download>` 请求被出版商另眼相待——同一
+    `/doi/pdf/` 直链 Wiley 回落地页 HTML 而非 PDF（13:59 实测）。整条 TCP 中继与占位符
+    机制已删除。⑤ **单一下载漏斗（2026-09-16 下午终局）**：wry 0.55.1 导航策略源码实证——
+    带 `download` 属性/attachment 的请求走**系统下载委托**（WKDownloadDelegate，tauri
+    `on_download` 直接暴露）；`application/pdf` 主框架导航会被 WKWebView **内联渲染**
+    （无 DOM、注入脚本全失效、无法保存）——「点下载没反应 / ⤓ 消失」的根因。终局架构：
+    - **builder 注册 `on_download`**：`Requested` 把落点改写 `<config>/ccode/tmp/inst-dl/`
+      （时间戳+序号前缀防并发、`sanitize_fs_name` 清洗建议名）并记 url→(落点,建议名) map；
+      `Finished` 按 map 对账（macOS 完成回调无路径）读文件 → %PDF- 魔数/60MB 校验（网页
+      HTML 诚实报错不入库）→ 单槽暂存 `stage_relayed_pdf` → `inst-pdf-relayed` → App 层
+      `inst_save_relayed_pdf` 落 papers/ + 登记（12:52 端到端验证过的入库链）；>1h 暂存
+      残留 sweep 清扫。窗内**一切**下载（页面自带按钮、⤓ 胶囊、导航拦截转下载）都汇进
+      这一条漏斗，不监听 ~/Downloads（不会误捞用户其他下载，落点完全受控）。
+    - **页侧 LOGIN_INIT_SCRIPT**：常驻 ⤓ 胶囊（每 2s 重检直链——citation_pdf_url/链接形态，
+      晚渲染、SPA 换页都追得上；未检出时置灰常驻给指引，不再一次判定永久沉默）+
+      `__mesaGrab`：先借 `a[download]`/真正的下载按钮，再给目标 URL 合成带文件名的
+      `a[download]`（同源 → WebKit `shouldPerformDownload` → wry 走下载委托、不进
+      `on_navigation`），最后 fetch→`%PDF-` 魔数→blob 下载。HTML/图片 Content-Type
+      或 JPEG/PNG 魔数一律不存、不换页。**禁止** `location.href` 打开 pdfish URL
+      （WKWebView 会内联 PDF，看起来像跳进一张图，脚本全死、漏斗接不住——2026-09-16
+      用户实测「点 PDF 跳到图片、下不了」）。点击层：PDF/epdf 链接 `preventDefault`
+      转 grab；`a[download]` 放行；其余 `_blank→_self`。`window.open` 对 pdfish 同样
+      grab，非 PDF 仍改本窗导航（CARSI 资源页）。about:blank 在 document-start 刷浅底
+      + `color-scheme:light`，消掉系统深色下的开窗黑屏。
+    - **`on_navigation` 拦高置信 pdfish 直链，放行 epdf 阅读器**（`pdfish_url`：`.pdf` /
+      `/doi/pdf/` / `pdfft` / `pdfdirect` / `getpdf` / `articlepdf` / `stamp.jsp`；
+      `/doi/epdf/` **不拦**——Wiley/ACS 工具栏 PDF 就是进这个网页阅读器；拦下来再下，
+      站点只给 HTML，阅读页也打不开）。直链存不成（拿到网页）则改打开 `/doi/epdf/`。
+      同 URL 10s 内第二次仍取消（`NAV_SUPPRESS` 只去重 grab，**不再放行**——放行就是
+      内联 PDF 这条死路）。拦下后 **Rust 用窗口会话直拉**（浏览器 UA + Referer，
+      绕过页内 CORS——MDPI 的 PDF 在 mdpi-res.com，页内 fetch/a[download] 都无效），
+      失败再回落 `__mesaGrab`。入库读内存槽，20s 内重复调用返回同一结果（开发态
+      StrictMode 会把 `inst-pdf-relayed` 听两次，第二次再读磁盘会 ENOENT——文件其实
+      已经进 papers/）。wry 源码：`a[download]` 走 Download 策略，不进这个回调。
+    - **页侧通用分型层（2026-09-16 深夜，按清单出版商全面收口）**：在既有通用路径之上
+      加失败救援，不动已通路（Wiley/epdf、MDPI CDN、ACS）的任何顺序。核心原则
+      **「首发纯净」**：对目标 URL 的第一次请求必须是下载本身——任何先行的 fetch
+      预检（哪怕只读响应头就断流）都会让随后的下载拿到 HTML（21:37 实测：SD 对同
+      URL 连击限速/单次资格，日志 got-html 两次；21:17 全量 fetch 后下载被直接挂起）。
+      ① **首发**：grab 主路径不做任何预检，直接单次合成 a[download]（`<a>` 延迟 60s
+      移除——过早 remove 可能取消在途下载）。② **`mesaPdfUrl` 第二遍单链采用**：
+      PII/编号式出版商的 PDF 链接不含 DOI 前缀（RSC articlepdf 只有 DOI 后缀、SD 是
+      PII、IEEE 是 arnumber），第一遍 DOI 过滤全筛光——文章页（有 citation_doi）
+      全页**只此一条** PDF 链接时第二遍采用；列表/检索页必然多条，不猜。
+      ③ **got-html 回救钩子 `__mesaGrabVerified` → `mesaVerifiedGrab`（只在下载已
+      失败后调用）**：先歇 2s 过连击限速窗，页内 fetch（带会话、跟 302）读落地——
+      HTML 中间页由 `mesaIntermediaryNext` 解析真链（meta refresh `CONTENT="0;URL=…"` /
+      `#redirect-message` 链接 / **iframe·embed·object 内嵌的 pdfish src/data**，
+      IEEE stamp.jsp iframe 内嵌 ielx 直链就是这种）→ 对真链发起**首次也是唯一一次**
+      下载（此前从未请求过它，token/限速干净）；若落地已是 PDF 响应头 → cancel 断流
+      再歇 2s 后对最终地址合成下载。Rust 侧同一 URL 30s 内只回救一次（防级联死循环）；
+      Wiley 型（有阅读页可转）维持原路开 epdf；旧窗口无钩子保持原报错。
+      **blob 落盘禁令（20:33 实测）**：blob→a[download] 在 macOS 上 Requested 后
+      Finished 挂起、永远卡「下载中」——必须对真实 URL 走网络下载；「下载中」浮条
+      加超时看门狗兜底任何挂死。
+      **SD 终局：三形态全实测 + wry 源码（21:59/22:10 两轮）**——SD 按请求形态区别
+      对待：页内 fetch 给 PDF；**「下载式」请求（a[download]/WKDownload action 路径）
+      一律回 HTML**（19:02/21:37/21:59）；**「普通导航」**响应虽是 PDF 但 wry 的
+      `navigation_policy_response` **只看 `canShowMIMEType`、无视
+      Content-Disposition**——`application/pdf` 可渲染就 Allow 内联，WKWebView 渲成
+      白屏（22:10 实测；Safari 会按 attachment 头转下载，wry 不会）。因此唯一可行
+      通道 = **页内 fetch 取字节（跟中间页 ≤3 跳 + %PDF- 魔数）→ `mesaChunkRelay`
+      分片回传**：base64 按 64KB 分片，每片一次 `mesa-chunk://c/{seq}/{total}/{b64}`
+      合成锚点导航——每次导航都过 `on_navigation`（Rust `handle_chunk_nav` 取消
+      导航并收片，页面不动），不受出版商 CSP / 混合内容限制；收齐后 base64 解码
+      → 魔数/60MB 校验 → 既有单槽暂存/`inst-pdf-relayed` 入库链。这是 Zotero
+      Connector「页内取字节、带外送回」架构的 webview 等价物（扩展消息通道换成
+      自定义 scheme 导航）。历史「页→127.0.0.1 回传被拦」教训不适用于此（TCP 中继
+      受 CSP connect-src 与混合内容双重限制，scheme 导航两者都不沾）。SD 路由：
+      `mesaIsSdPdfLink`（host 含 sciencedirect 且 path 含 pdfft）→ grab 直接走
+      fetch+分片回传；got-html 回救（歇 2s 过限速窗后）与其余出版商的最终 fetch
+      兜底同样以分片回传收尾。
+      **SD 交互终态（2026-09-16 深夜用户拍板「进 View PDF 再下载」）**：SD 页面
+      **不拦 View PDF**（`mesaIsSdPage` 早退）——让站方自己的阅读器/弹层打开；
+      grab 也**不点站方下载控件**（`!mesaIsSdPage() && mesaTryPageButton`——那
+      正是被挂起/回 HTML 的「下载式」请求，22:2x 实测点 View PDF 即触发看门狗）；
+      阅读器把真 PDF 内嵌在 iframe/object 里，`mesaPdfUrl` 的内嵌扫描
+      （`iframe[src], object[data], embed[src]`）识别后由胶囊走分片回传。
+    - **ScienceDirect 形态（2026-09-16 晚，第⑥类出版商实证）**：SD 文章页**不放
+      `citation_pdf_url` meta**（与多数出版商不同），PDF 链接是 **PII 路径不含 DOI**，
+      通用探测两条路全落空（DOI 过滤把所有 pdfft 链接筛光）；View PDF 是 JS 弹层按钮
+      （无可用 href），点它只弹「未检出直链」。页侧 `mesaSdPdfUrl` 三级优先（Zotero
+      适配器实证顺序）：页面自己的 `#pdfLink` href → 内嵌 JSON `article.pdfDownload.
+      urlMetadata`（path/pii/pdfExtension/md5/pid，机构网络预加载）拼 token 直链 →
+      按 PII 构造 `/pdfft?download=true`；只认 `/science/article/(abs/)?pii/` 路径，
+      期刊页/检索页不构造。EZproxy 改写域同样成立（基于 location.origin，走代理域名
+      带代理会话）。**pdfft 中间页陷阱（19:02 实测 got-html）**：pdfft 链接常返回
+      **带 meta refresh 的 HTML 中间页**而非 PDF——直接合成 a[download] 会把网页存
+      下来、魔数校验报「拿到的是网页」。`mesaSdVerifiedGrab`：SD 链接先页内 fetch
+      （带会话、自动跟 302）验明正身，PDF 即刻 blob 下载进漏斗；HTML 则按
+      `mesaSdIntermediaryNext` 解析 meta refresh `CONTENT="0;URL=…"` /
+      `#redirect-message` 链接再取（Zotero parseIntermediatePDFPage 同款，至多 3 跳）；
+      失败交回通用 a[download] 路径。另三个同日修复：**胶囊创建即上文案**（建出无
+      文字、页面无直链时 `u === pillUrl` 都为 null，reset 永不执行——空胶囊就是
+      一个黑圈）；**View PDF 命中后 `closest('a[href]')` 沿祖先找 href**（点中的
+      常是控件内层 span）；**View PDF 未检出直链时 1.5s 宽限重测**（SPA 首屏未就绪
+      点得早会假阴性——胶囊 2s 周期重检追得上，点击分支原先是一次性判定）。
+      `on_new_window` 对 pdfish 同样走这条入库，不把主窗导航到 PDF。
+    - **终态跨页重放**：下载期间页面常会跳转（换页/内嵌 PDF 视图），直接 eval 的
+      终态浮条打在死页面上看不见（2026-09-16 15:27 实测：下载入库成功但用户
+      「不知道下载到哪去了」）。终态记入 `LAST_DL_NOTICE`（240s 保鲜），
+      `spawn_notice_replay` 在登录窗存活期间每 3s eval `__mesaReplay(msg)`——
+      页面脚本页级守卫保证每页最多补播一次，换新页才出下一条。
+    - **⤓ 抓取顺序（2026-09-16 傍晚；同日夜修订「点 PDF 变图片」）**：① 只点
+      `a[download]` / 真正的 `button`（文案 Download PDF），**不点**「PDF」导航
+      链接（Wiley/ACS 的 `/doi/epdf/` 是图片阅读器，`/doi/pdf/` 主框架导航会被
+      内联成整页图）；② 对目标 URL 合成带文件名的 `a[download]`（同源走
+      WKDownload）；③ fetch 仅在前两步没触发 `on_download` 时，且必须 `%PDF-`
+      魔数通过。selfheal 不再 `location.href` 放行。`__mesaGrabBusy` 忙档防递归。
+      失败分支 eprintln + logbuf 双落。
+    - `on_new_window`（UIDelegate 层）：pdfish/epdf 不把主窗导航过去（会内联成图），
+      改为 eval grab；其余 target=_blank / window.open 改本窗导航（CARSI 资源页；
+      about:blank 弹窗放行）。**内联 PDF 死角的逃生门**：带签名的 PDF 直链（delivery
+      域，URL 无 pdf 特征）仍可能躲过 pdfish 拦截 → 主框架导航 → WKWebView 整页内联
+      渲染 PDF——无 DOM、脚本全失效、窗口无工具栏（2026-09-16 实测）。对策：建窗后
+      `with_webview` 对原生 WKWebView 开 `allowsBackForwardNavigationGestures`
+      （macOS；双指轻扫后退/前进，⤓ 胶囊 title 同步提示）；终极兜底 = 关窗重开
+      （会话已播种，免重登）。
+⑥ **窗口重开会话播种**：wry 窗口关闭后 cookie 存储即失。「窗口打开」先 about:blank
+    建窗，**只先种目标域 Cookie（约 80ms）立刻导航**；其余域后台补种，不再把整罐
+    逐条 set_cookie 再 `cookies_for_url` 轮询（那会让占位页卡很久）。占位页 4s/12s
+    换文案，避免「正在打开」一直转。目标若已是 PDF 直链则不导航（拦下来会停在空白页），
+    直接走拦截入库。
+⑦ **出版商分型纪律（2026-09-16 用户指令，改漏斗前必读）**：每家期刊/出版商的 PDF
+    供给形态都可能不一样，**不许顾此失彼**——为一家修问题时禁止改动会影响其他家的
+    通用路径。已实证分型：**通用 meta 型**（citation_pdf_url 直出——Springer/
+    Nature/T&F/IOP/AIP/APS/OUP/ACM/Cambridge/eLife/PLOS 等，多数出版商）、
+    **DOI 内链型**（链接含本篇 DOI——Wiley pdfdirect、ACS、T&F、AIP）、
+    **Wiley/ACS 型**（/doi/epdf/ 图片阅读页必须放行、/doi/pdf/ 拦下转存，验证式
+    抓取层不得抢跑）、**MDPI 型**（PDF 在跨域 CDN，页内 fetch/a[download] 全无效，
+    必须 Rust 窗口会话直拉）、**编号链型**（链接不含 DOI 前缀只有编号——RSC
+    articlepdf 只带 DOI 后缀、IEEE arnumber，靠第二遍单链采用）、**中间页型**
+    （SD pdfft meta refresh、IEEE stamp.jsp iframe 内嵌——靠 mesaVerifiedGrab
+    验证式抓取）、**ScienceDirect 复合型**（无 citation_pdf_url + PII + View PDF
+    JS 按钮，mesaSdPdfUrl 三级构造）、**签名直链型**（delivery 域 URL 无 pdf 特征，
+    躲过拦截整页内联——靠手势逃生门）。改动纪律：① 新增支持先实证该家真实 DOM/
+    链接形态（Zotero 官方适配器仓库是现成参考）；② 只加**该家命中的最窄分支**
+    （host/path 判定，参考 mesaSdPdfUrl 只认 /science/article/pii/），不动通用探测
+    与既有各型分支；③ 收尾逐一回归既有各型路径（epdf 放行、MDPI 直拉、SD 构造、
+    通用 meta、中间页验证抓取）再交用户实测。
+⑧ **收货通道 A/B/C（2026-09-16 深夜用户定稿，「让真实浏览器干浏览器的事」）**：
+    出版商反爬针对的是非浏览器客户端，内嵌窗伪装浏览器的漏斗注定逐家踩坑（⑤-⑦
+    全天实证）。新主线三通道，Mesa 只干收货的事——
+    - **通道 A（下载目录收货，`download_inbox.rs`）**：待获取清单/雷达卡的
+      「浏览器打开」（`inst_browser_open`：EZproxy 前缀改写后调起系统默认浏览器，
+      登记 PendingCatch + 写 helper-context.json 当前项目）→ 用户在真浏览器里点
+      站方下载落 ~/Downloads → notify 监听按**六层过滤链**收货（.pdf 扩展 /
+      **应用启动即恢复监听**——盘上登记在重启后也要有人接，此前等下一次
+      「浏览器打开」才启动、重启后的下载全漏；**决策全程诊断双落点**
+      （终端 + logbuf，每个跳过分支都有痕迹——2026-09-17 排障期加，勿删）；
+      大小稳定检测上限 30s（Safari 边下边写，6s 会截半截文件）；
+      启动快照排除既有文件 / 1.2s 大小稳定检测 / 5s 同文件去重 / %PDF- 魔数+60MB /
+      归属匹配：±90s 时间窗 + normalize_title 互相包含；名字对不上时兜底取**最近
+      打开**的那条（LIFO，2026-09-17 用户拍板「打开哪个就关联哪个」——错挂可回收
+      站找回 + 行内「关联本地 PDF」改正，漏收更难受）；**MDPI 编号归一**：文件名
+      reactions-07-00016 与标题永远对不上，但与
+      DOI 10.3390/reactions7010016 同源——DOI 后缀=刊名+卷+期(2位)+编号(末4位)、
+      文件名=刊名-卷-编号(5位)，两边归一成「刊名+卷整数+编号整数」比较（仅
+      10.3390 前缀启用）；**命中即消费**（登记出队落盘，不占后续下载窗口名额）；
+      同一篇重复「浏览器打开」刷新时间戳不追加）→ `set_relay_context`（语境跟命中
+      的那篇走）→ 既有 stage_relayed_pdf → inst-pdf-relayed 入库链 → 原文件挪
+      回收站可反悔。无 pending 且 10 分钟无
+      事件自动停 watcher，不常驻。**登记持久化**（download-pending.json，opened_at
+      用 SystemTime 跨进程判窗）：dev 热重启/应用重启不丢登记——2026-09-17 实测
+      重启把内存登记洗掉、用户下完 PDF 无人收。
+    - **通道 B（浏览器会话复用）**：设置 → 机构访问 → 「在浏览器中登录」（同
+      `inst_browser_open`，无项目语境）；浏览器 profile 一次登录持续有效，Mesa
+      不再倒 Cookie。内嵌窗登录保留作回落（`inst_open_login`，供无头阶梯
+      fetch_via_channel 与 EZproxy 调试）。
+    - **通道 C（浏览器扩展 + native messaging，`extension/` + `bin/mesa_helper.rs`
+      + `browser_bridge.rs`）**：扩展（MV3，ID 固定 `dmjplopfhbdamkihimfllomdmkfainnn`，manifest
+      内置 key）在文献页（有 citation_doi）插「存到 Mesa」——页内 fetch
+      （citation_pdf_url → 唯一 pdfish 链 → pdfish 内嵌）取字节验魔数 → base64 →
+      service worker connectNative(`dev.ccode.mesa`) → helper 读 4 字节帧、按
+      helper-context.json 的当前项目调 `ccode_lib::helper_ingest`（同一落盘口径）
+      → 回 `{ok, saved}`。「安装浏览器桥」写 NativeMessagingHosts 清单（macOS/
+      Linux 各浏览器目录、Windows 清单+注册表经 background_command），allowed_
+      origins 只锁扩展 ID。出版商看到的是真实登录用户的正常请求，零分型适配。
+    - **迁移**：内嵌窗 inst_open_url + 全部分型件保留为过渡回落（SD 用户已习惯
+      View PDF）；通道 C 稳定后整体退役。inst-session.json 继续供无头阶梯。
 
 ## 其他
 
@@ -788,7 +997,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 - 保留六套模板/原阶段数；工具是项目选择，不增设独立编排系统，不自动路由或自动并行。选择保存在 settings 的闭集 `科研工具/<key>：<value>`（`libraryExport` / `plotting` / `illustration` / `manuscript`），由 `research-tools.ts` 在应用/编辑步骤时补全技能、必需子集、交付、人工事项。**文献从哪来只认 `config.lit_source`**（流程线「确定文献来源」），不再写 `科研工具/literature`；切换来源时重应用合同，选 Zotero 才给检索/精读步挂 `zotero-sync`。外部库**交付**仍走 `libraryExport`，与来源分开；只认一份主 references.bib。交付问在精读（纳入清单 + `references.bib` 齐了）；没有精读步才问在期刊格式适配。创建项目时设定屏只填全局设定。稿件载体问在会换正式稿的步骤（期刊格式适配 / 返修 / 投稿材料）；文献库交付、Origin、Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。答案仍是项目级 `科研工具/*`，所有匹配步骤（含以后追加）一起补。不挡在模板列表前面。
 - 自动补入项以简报中的 `mesa-research-tools` 记录，反复应用幂等；撤销只移除本机制加入项。原生稿件替换字段若被手改，拒绝静默覆盖。更新旧步骤必须逐项预览、载入编辑草稿；不改旧 TASK.md 或产物。
 - Zotero 用只读 SQLite 在线备份到内存取得一致快照；不再顺序复制主库/WAL，不产生明文临时数据库。首次 bib、增量唯一候选、条目映射与 PDF 资源可追溯；来源与资源同次配置写回，不得前端回写旧 cfg。链接附件基目录须由人显式选择；读库绝不写个人库。
-- Zotero 导出的新键来自 library/item 稳定身份；已有主库键必须通过 DOI/条目差异人工保留，不自动换键。题录候选按 reference 资源登记；已登记只读外部 PDF 精确放行阅读/建笔记，不放行目录、不复制改名附件。
+- Zotero 导出的新键来自 library/item 稳定身份；已有主库键必须通过 DOI/条目差异人工保留，不自动换键。题录候选按 reference 资源登记；已登记只读外部 PDF 精确放行阅读/建笔记，不放行目录、不复制改名附件。2026-09-16 补：to-fetch 清单有「同步到 Zotero」按钮（zotero_attach_fulltexts，免 agent 会话）——papers/ 已拿到的全文按 DOI 匹配挂 linked_file 附件（引用 papers/ 绝对路径、不复制进 Zotero 存储），条目不存在时优先用同源 to-fetch.ris 的全题录新建（作者/年份/来源；RIS 缺失回落标题+DOI 最小条目）；无 DOI 的不同步（避免重复建条）。前提 Zotero 运行中 + 「允许其他应用与本机通信」+ 首次写入授权。写库规则放宽：技能或 UI 显式动作皆算用户意图。
 - `origin-plot` 仅 Windows 有许可证本机，`endnote-bridge` 仅离线格式桥/人工插件，`blender-research` 仅用户指定的科研示意。随包脚本与 SKILL.md 一同播种/更新，执行前核对参数；转换/示意成功不能作为科学真实性证明。Blender MCP 不在 worktree 沙箱内，交互只面向受控工程；最后保存脚本+场景并后台重建。
 - 开工检测以所选 Agent 的实际技能目录摘要为准，必需技能缺失/漂移不可启动；可选技能缺失只报告。Zotero 通道离线可继续已导入文件；读取可用不等于写入授权；不得把模板选择当成批量写库批准。
 - 原生 LaTeX/Word 投稿、返修合同声明真实输入和正式 PDF/源件，不运行 Markdown 说明文档的 Quarto 脚本冒充成稿；Word 引用域与插件刷新仍由人确认。LaTeX 模板日志统一 `output/compile.log`，latexmk 检测 ctex/fontspec 时用 XeLaTeX；实际引擎/宏包兼容仍需真实编译。

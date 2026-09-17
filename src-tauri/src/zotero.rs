@@ -100,6 +100,9 @@ fn open_snapshot(db_path: &Path) -> Result<Connection, String> {
         let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)
             .map_err(|e| format!("建立 Zotero 一致快照失败: {e}"))?;
         let deadline = Instant::now() + Duration::from_secs(30);
+        // 「库大读得慢」（More，有进展）与「被占用锁死」（Busy，毫无进展）分开计时：
+        // Zotero 开着时前者也要 30 秒，后者 5 秒就该放弃并说清怎么退出，不让用户白等
+        let mut busy_since = Instant::now();
         loop {
             match backup
                 .step(1024)
@@ -107,6 +110,7 @@ fn open_snapshot(db_path: &Path) -> Result<Connection, String> {
             {
                 rusqlite::backup::StepResult::Done => break,
                 rusqlite::backup::StepResult::More => {
+                    busy_since = Instant::now();
                     if Instant::now() >= deadline {
                         return Err(
                             "Zotero 库较大，未在时限内读完。请完全退出 Zotero 后重试。".into(),
@@ -114,9 +118,9 @@ fn open_snapshot(db_path: &Path) -> Result<Connection, String> {
                     }
                 }
                 _ => {
-                    if Instant::now() >= deadline {
+                    if Instant::now() >= busy_since + Duration::from_secs(5) {
                         return Err(
-                            "Zotero 正在写入库（开着或正在同步）。请完全退出 Zotero 后再导入，不要只是隐藏窗口。".into(),
+                            "Zotero 正在写入库（开着或正在同步），快照取不下来。请完全退出 Zotero 后再导入——macOS 点窗口红色 ✕ 只是关窗口，要用 ⌘Q 或 Dock 图标右键退出；Windows 退出后留意托盘里不再有 Zotero。".into(),
                         );
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -491,6 +495,42 @@ pub fn render_bibtex(items: &[ZoteroItemDto]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ris_parser_builds_doi_map_with_full_metadata() {
+        let ris = "TY  - JOUR\r\nAU  - Wang, Lei\r\nAU  - Chen, Xiaoming\r\nPY  - 2023-05-01\r\nTI  - Deep Learning for Materials\r\nT2  - Advanced Materials\r\nDO  - 10.1002/adma.202304268\r\nER  - \r\n\r\nTY  - JOUR\r\nAU  - 单作者无逗号\r\nPY  - 2024\r\nDO  - 10.1109/ICRA.1.\r\nER  - \r\n";
+        let map = parse_ris_by_doi(ris);
+        assert_eq!(map.len(), 2);
+        let r1 = &map["10.1002/adma.202304268"];
+        assert_eq!(r1.authors, vec!["Wang, Lei", "Chen, Xiaoming"]);
+        assert_eq!(r1.year.as_deref(), Some("2023"));
+        assert_eq!(r1.publication.as_deref(), Some("Advanced Materials"));
+        // DOI 尾部句点被归一剥掉；裸名作者保留
+        let r2 = &map["10.1109/icra.1"];
+        assert_eq!(r2.authors, vec!["单作者无逗号"]);
+        assert!(r2.publication.is_none());
+        // creators JSON：逗号名拆 first/last，裸名走 name
+        let c = ris_creators_json(&r1.authors);
+        assert_eq!(c[0]["lastName"], "Wang");
+        assert_eq!(c[0]["firstName"], "Lei");
+        let c2 = ris_creators_json(&r2.authors);
+        assert_eq!(c2[0]["name"], "单作者无逗号");
+        // 无 DO 的记录丢弃
+        assert!(parse_ris_by_doi("TY  - JOUR\nTI  - no doi\nER  - \n").is_empty());
+    }
+
+    #[test]
+    fn doi_norm_strips_prefixes_and_punctuation() {
+        assert_eq!(doi_norm("10.1002/adma.202304268"), "10.1002/adma.202304268");
+        assert_eq!(doi_norm("doi: 10.1038/x."), "10.1038/x");
+        assert_eq!(
+            doi_norm("https://doi.org/10.1016/j.nano.1,"),
+            "10.1016/j.nano.1"
+        );
+        assert!(is_doish("10.1002/adma.202304268"));
+        assert!(!is_doish("https://example.com/article"));
+        assert!(!is_doish("10.x/y"));
+    }
+
     fn item(title: &str, creators: &[&str], year: Option<&str>) -> ZoteroItemDto {
         ZoteroItemDto {
             key: "ABCD1234".into(),
@@ -750,6 +790,454 @@ pub struct ZoteroImportDto {
     pub missing_pdf: usize,
     pub config: crate::projects::ProjectConfigDto,
     pub manifest_rel: String,
+}
+
+// ===== 把 papers/ 已补全文挂进 Zotero（to-fetch 清单「同步到 Zotero」按钮，2026-09-16）=====
+// 免 agent 会话：Rust 直连 Zotero 本地 API（127.0.0.1:23119），按 DOI 找条目、
+// linked_file 附件挂 papers/ 的 PDF 绝对路径——不复制进 Zotero 存储（与「外部 PDF
+// 只读引用」同口径，避免双份文件）。条目不存在时按题录最小字段新建再挂。
+// 规则放宽记录：原「Zotero 写库只走技能」扩展为「技能或 UI 显式动作（按钮点击即
+// 用户意图）」，见 AGENTS.md / conventions/pipeline.md
+
+const ZOTERO_API: &str = "http://127.0.0.1:23119/api";
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToFetchEntryIn {
+    pub title: String,
+    /// DOI 或链接（链接暂不参与 Zotero 匹配，缺 DOI 的条目计入 unmatched）
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoteroAttachResultDto {
+    /// 已挂附件的条目标题
+    pub attached: Vec<String>,
+    /// 条目原先不存在、新建后挂上的
+    pub created: Vec<String>,
+    /// 条目已有同路径/同名附件，跳过
+    pub skipped: Vec<String>,
+    /// papers/ 还没拿到 PDF 的条目（不同步，仅汇报）
+    pub missing: Vec<String>,
+    /// 有 PDF 但既无 DOI 可查、也建不了条目的
+    pub unmatched: Vec<String>,
+}
+
+fn zotero_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .user_agent("Mesa zotero-attach (https://github.com/hongtongzhou-design/ccode)")
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))
+}
+
+/// 本地 API 可用性。注意探**真实路由** `/api/users/0/items`：`/api` 根路径在 Zotero 的
+/// 本地服务上无尾斜杠时 404（2026-09-16 实测：`/api`→404、`/api/`→200——不能用根路径探活）。
+/// 2xx = 通；403 = 未开「允许其他应用与本机通信」；404 = 版本无本地 API；连不上 = 没开
+async fn zotero_api_ready() -> Result<(), String> {
+    let client = zotero_client(5)?;
+    let resp = client
+        .get(format!("{ZOTERO_API}/users/0/items"))
+        .query(&[("limit", "1")])
+        .send()
+        .await
+        .map_err(|_| {
+            "连不上 Zotero 本地接口（127.0.0.1:23119）——同步需要 Zotero 正在运行".to_string()
+        })?;
+    match resp.status().as_u16() {
+        200..=299 => Ok(()),
+        403 => Err("Zotero 未开启本机通信：Zotero 设置 → 高级 → 常规 里勾选「允许其他应用与本机 Zotero 通信」后重试".into()),
+        404 => Err("Zotero 在运行但本地接口不可用（HTTP 404）——同步需要 Zotero 7.1 及以上版本；旧版本可手动拖 to-fetch.ris 兜底".into()),
+        code => Err(format!("Zotero 本地接口返回 HTTP {code}")),
+    }
+}
+
+/// DOI 归一比较：剥 doi:/https://doi.org/ 前缀、小写、去尾句读
+fn doi_norm(raw: &str) -> String {
+    let t = raw.trim();
+    let t = t
+        .strip_prefix("doi:")
+        .or_else(|| t.strip_prefix("DOI:"))
+        .map(str::trim)
+        .unwrap_or(t);
+    let t = t
+        .strip_prefix("https://doi.org/")
+        .or_else(|| t.strip_prefix("http://doi.org/"))
+        .unwrap_or(t);
+    t.trim_end_matches(['.', ',', ';', ')']).to_ascii_lowercase()
+}
+
+fn is_doish(s: &str) -> bool {
+    let mut parts = s.splitn(2, '/');
+    let prefix = parts.next().unwrap_or("");
+    let suffix = parts.next().unwrap_or("");
+    !suffix.is_empty()
+        && prefix.len() > 3
+        && prefix.starts_with("10.")
+        && prefix[3..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 从本地 API 响应（数组或 {items:[...]}）里抽条目列表
+fn items_of(v: &serde_json::Value) -> Vec<&serde_json::Value> {
+    if let Some(arr) = v.as_array() {
+        return arr.iter().collect();
+    }
+    v.get("items")
+        .and_then(|i| i.as_array())
+        .map(|a| a.iter().collect())
+        .unwrap_or_default()
+}
+
+/// 按 DOI 找条目 key；miss 返回 None
+async fn find_key_by_doi(client: &reqwest::Client, doi: &str) -> Result<Option<String>, String> {
+    let resp: serde_json::Value = client
+        .get(format!("{ZOTERO_API}/users/0/items"))
+        .query(&[("q", doi), ("limit", "10")])
+        .send()
+        .await
+        .map_err(|e| format!("查询 Zotero 条目失败: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("解析 Zotero 响应失败: {e}"))?;
+    Ok(items_of(&resp).into_iter().find_map(|it| {
+        let hit = it
+            .get("data")
+            .and_then(|d| d.get("DOI"))
+            .and_then(|d| d.as_str())
+            .is_some_and(|d| doi_norm(d) == doi);
+        if !hit {
+            return None;
+        }
+        it.get("key")?
+            .as_str()
+            .map(str::to_string)
+    }))
+}
+
+/// POST /users/0/items 的统一出口：解析 successful/failed 信封
+async fn post_items(
+    client: &reqwest::Client,
+    body: serde_json::Value,
+) -> Result<Vec<(String, String)>, String> {
+    let resp = client
+        .post(format!("{ZOTERO_API}/users/0/items"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("写入 Zotero 失败: {e}"))?;
+    let status = resp.status();
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 Zotero 写入响应失败: {e}"))?;
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err("Zotero 拒绝写入（可能需要授权）：Zotero 会弹出「允许应用写入」确认窗，点允许后重试；老版本可在设置里开本机通信".into());
+    }
+    if !status.is_success() {
+        return Err(format!("Zotero 写入返回 HTTP {status}"));
+    }
+    let mut out = Vec::new();
+    if let Some(failed) = v.get("failed").and_then(|f| f.as_object()) {
+        if !failed.is_empty() {
+            return Err(format!(
+                "Zotero 拒绝了部分写入（{} 条）：{:?}",
+                failed.len(),
+                failed.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+    // successful 信封或裸数组都认
+    if let Some(ok) = v.get("successful").and_then(|s| s.as_object()) {
+        for (_, item) in ok {
+            let key = item
+                .get("key")
+                .and_then(|k| k.as_str())
+                .or_else(|| {
+                    item.get("data")
+                        .and_then(|d| d.get("key"))
+                        .and_then(|k| k.as_str())
+                })
+                .unwrap_or("")
+                .to_string();
+            let title = item
+                .get("data")
+                .and_then(|d| d.get("title"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            out.push((key, title));
+        }
+        return Ok(out);
+    }
+    for item in items_of(&v) {
+        let key = item.get("key").and_then(|k| k.as_str()).unwrap_or("").to_string();
+        let title = item
+            .get("data")
+            .and_then(|d| d.get("title"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        out.push((key, title));
+    }
+    Ok(out)
+}
+
+/// 条目已挂的附件里是否已有同路径/同名 PDF（幂等跳过）
+async fn already_attached(
+    client: &reqwest::Client,
+    key: &str,
+    pdf_name: &str,
+    pdf_path: &str,
+) -> Result<bool, String> {
+    let resp: serde_json::Value = client
+        .get(format!("{ZOTERO_API}/users/0/items/{key}/children"))
+        .send()
+        .await
+        .map_err(|e| format!("读取条目附件失败: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("解析附件列表失败: {e}"))?;
+    Ok(items_of(&resp).iter().any(|c| {
+        let data = c.get("data").unwrap_or(&serde_json::Value::Null);
+        let path_hit = data
+            .get("path")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| p == pdf_path);
+        let name_hit = data
+            .get("title")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t.eq_ignore_ascii_case(pdf_name));
+        path_hit || name_hit
+    }))
+}
+
+/// to-fetch.ris 的单条题录（RIS 2004；字段缺则 None，不编造）
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RisRecord {
+    authors: Vec<String>,
+    year: Option<String>,
+    publication: Option<String>,
+}
+
+/// 解析 RIS 文本成 DOI → 题录映射（按 DO 字段归一匹配；无 DO 的记录丢弃）。
+/// 行格式 `XX  - 值`，宽容 CRLF/多余空白；TY 开新记录、ER 收尾
+fn parse_ris_by_doi(text: &str) -> std::collections::HashMap<String, RisRecord> {
+    let mut out = std::collections::HashMap::new();
+    let mut cur_doi: Option<String> = None;
+    let mut rec = RisRecord::default();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        // 按.Tag  - 切分不要求值侧空格（空值行 trim 后是 `ER  -`，带尾空格会切不开）
+        let Some((tag, value)) = trimmed.split_once("  -") else {
+            if let Some((t, v)) = trimmed.split_once("\t-") {
+                handle_ris_line(t.trim(), v.trim(), &mut rec, &mut cur_doi, &mut out);
+            }
+            continue;
+        };
+        handle_ris_line(tag.trim(), value, &mut rec, &mut cur_doi, &mut out);
+    }
+    // 没有 ER 收尾的尾巴记录也收
+    if let Some(doi) = cur_doi.take() {
+        if !doi.is_empty() {
+            out.entry(doi).or_insert(rec);
+        }
+    }
+    out
+}
+
+fn handle_ris_line(
+    tag: &str,
+    value: &str,
+    rec: &mut RisRecord,
+    cur_doi: &mut Option<String>,
+    out: &mut std::collections::HashMap<String, RisRecord>,
+) {
+    let tag = tag.to_ascii_uppercase();
+    let value = value.trim();
+    match tag.as_str() {
+        "TY" => {
+            *rec = RisRecord::default();
+            *cur_doi = None;
+        }
+        "AU" => {
+            if !value.is_empty() {
+                rec.authors.push(value.to_string());
+            }
+        }
+        "PY" | "DA" => {
+            // PY 常见 `2023` 或 `2023-05-01`：只取前 4 位年
+            let y: String = value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect();
+            if y.len() == 4 {
+                rec.year = Some(y);
+            }
+        }
+        "T2" | "JO" | "JF" => {
+            if !value.is_empty() && rec.publication.is_none() {
+                rec.publication = Some(value.to_string());
+            }
+        }
+        "DO" => {
+            let d = doi_norm(value);
+            if !d.is_empty() {
+                *cur_doi = Some(d);
+            }
+        }
+        "ER" => {
+            if let Some(doi) = cur_doi.take() {
+                out.entry(doi).or_insert(std::mem::take(rec));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// RIS AU（`姓, 名` / 裸名）→ Zotero creators JSON
+fn ris_creators_json(authors: &[String]) -> serde_json::Value {
+    serde_json::Value::Array(
+        authors
+            .iter()
+            .map(|a| {
+                if let Some((last, first)) = a.split_once(',') {
+                    serde_json::json!({
+                        "creatorType": "author",
+                        "firstName": first.trim(),
+                        "lastName": last.trim(),
+                    })
+                } else {
+                    serde_json::json!({
+                        "creatorType": "author",
+                        "name": a.trim(),
+                    })
+                }
+            })
+            .collect(),
+    )
+}
+
+/// 主流程：papers/ PDF × to-fetch 条目本地配对 → Zotero 本地 API 找/建条目 → 挂
+/// linked_file 附件（绝对路径，不复制进 Zotero 存储）
+async fn attach_fulltexts_inner(
+    project_root: &Path,
+    entries: &[ToFetchEntryIn],
+    ris_text: Option<&str>,
+) -> Result<ZoteroAttachResultDto, String> {
+    zotero_api_ready().await?;
+    let client = zotero_client(20)?;
+    let ris = ris_text.map(parse_ris_by_doi).unwrap_or_default();
+    let papers = project_root.join("papers");
+    let mut pdfs: Vec<PathBuf> = std::fs::read_dir(&papers)
+        .map_err(|_| "项目根没有 papers/ 目录".to_string())?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("pdf")))
+        .collect();
+    pdfs.sort();
+
+    let mut dto = ZoteroAttachResultDto::default();
+    let mut taken = std::collections::HashSet::new();
+    for entry in entries {
+        let want = crate::lit_watch::normalize_title(&entry.title);
+        if want.is_empty() {
+            continue;
+        }
+        let hit = pdfs.iter().position(|p| {
+            let key = p.to_string_lossy().into_owned();
+            if taken.contains(&key) {
+                return false;
+            }
+            let stem = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let have = crate::lit_watch::normalize_title(&stem);
+            !have.is_empty() && (have.contains(&want) || want.contains(&have))
+        });
+        let Some(pos) = hit else {
+            dto.missing.push(entry.title.clone());
+            continue;
+        };
+        let pdf = pdfs[pos].clone();
+        taken.insert(pdf.to_string_lossy().into_owned());
+        let pdf_path = pdf.to_string_lossy().into_owned();
+        let pdf_name = pdf
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let doi = doi_norm(&entry.url);
+        let key = if is_doish(&doi) {
+            match find_key_by_doi(&client, &doi).await? {
+                Some(k) => k,
+                // 条目不存在：按题录最小字段新建（journalArticle + DOI）
+                None => {
+                    // 有 RIS 题录（作者/年份/来源）就建全条目；没有回落最小条目（标题+DOI）
+                    let ris_rec = ris.get(&doi);
+                    let mut item = serde_json::json!({
+                        "itemType": "journalArticle",
+                        "title": entry.title,
+                        "DOI": doi,
+                    });
+                    if let Some(r) = ris_rec {
+                        if !r.authors.is_empty() {
+                            item["creators"] = ris_creators_json(&r.authors);
+                        }
+                        if let Some(y) = &r.year {
+                            item["date"] = serde_json::json!(y);
+                        }
+                        if let Some(p) = &r.publication {
+                            item["publicationTitle"] = serde_json::json!(p);
+                        }
+                    }
+                    let body = serde_json::json!([item]);
+                    let created = post_items(&client, body).await?;
+                    let Some((k, _)) = created.first() else {
+                        dto.unmatched.push(entry.title.clone());
+                        continue;
+                    };
+                    dto.created.push(entry.title.clone());
+                    k.clone()
+                }
+            }
+        } else {
+            // 没 DOI：无从可靠查重，不建重复条目（会话里 agent 可带全题录补建）
+            dto.unmatched.push(entry.title.clone());
+            continue;
+        };
+
+        if already_attached(&client, &key, &pdf_name, &pdf_path).await? {
+            dto.skipped.push(entry.title.clone());
+            continue;
+        }
+        let body = serde_json::json!([{
+            "itemType": "attachment",
+            "parentItem": key,
+            "linkMode": "linked_file",
+            "title": pdf_name,
+            "path": pdf_path,
+            "contentType": "application/pdf",
+        }]);
+        post_items(&client, body).await?;
+        dto.attached.push(entry.title.clone());
+    }
+    Ok(dto)
+}
+
+#[tauri::command]
+pub async fn zotero_attach_fulltexts(
+    project_root: String,
+    entries: Vec<ToFetchEntryIn>,
+    // to-fetch.ris 全文（前端从步骤工作区/项目根读好传入——RIS 与 to-fetch.md 同源）
+    ris_text: Option<String>,
+) -> Result<ZoteroAttachResultDto, String> {
+    let root = tauri::async_runtime::spawn_blocking(move || {
+        crate::projects::ensure_task_project_root(Path::new(&project_root))
+    })
+    .await
+    .map_err(|e| format!("校验项目目录失败: {e}"))??;
+    attach_fulltexts_inner(&root, &entries, ris_text.as_deref()).await
 }
 
 #[tauri::command]

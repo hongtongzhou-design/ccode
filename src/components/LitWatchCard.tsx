@@ -40,6 +40,12 @@ import {
   searchFieldClass,
 } from "./PageFrame";
 import { LIST_PREVIEW_CAP } from "../lit-list";
+import {
+  canAttemptFulltext,
+  fulltextViaLabel,
+  instOpenTarget,
+  type FetchedFulltextDto,
+} from "../inst-access";
 import { ListPreviewToggle } from "./FolderGroupedList";
 import { useAppStore } from "../store";
 import { relTime } from "../rel-time";
@@ -271,6 +277,9 @@ function WatchEntryRow({
   onCloseExplain,
   onRerun,
   onDownload,
+  onFetch,
+  canFetch,
+  onOpenSource,
   onAttach,
   onDismiss,
   included,
@@ -284,6 +293,11 @@ function WatchEntryRow({
   onCloseExplain: () => void;
   onRerun: () => void;
   onDownload: () => void;
+  /** 「来源」态（无开放直链）时的逐篇获取：走 开放副本/机构通道 阶梯 */
+  onFetch: () => void;
+  canFetch: boolean;
+  /** 打开来源页：有机构会话时开进机构登录窗（带会话能过反爬墙），否则系统浏览器 */
+  onOpenSource: () => void;
   onAttach: () => void;
   onDismiss: () => void;
   included: boolean;
@@ -354,13 +368,29 @@ function WatchEntryRow({
             {fulltext.kind === "pdf" && (
               <HoverTip tip={pdfTip.tip} text="开放获取全文，免费直接下载" up />
             )}
+            {fulltext.kind === "source" && canFetch && (
+              <button
+                type="button"
+                className={iconActionClass}
+                disabled={downloading}
+                title={
+                  downloading
+                    ? "获取中…"
+                    : "获取全文：先查合法开放副本（预印本/仓储），再走机构通道（设置 → 机构访问）"
+                }
+                aria-label={downloading ? "获取中" : "获取全文"}
+                onClick={onFetch}
+              >
+                <Download size={13} strokeWidth={1.8} />
+              </button>
+            )}
             {fulltext.kind === "source" && (
               <button
                 type="button"
                 className={iconActionClass}
-                title="没有免费全文直链，打开来源页面"
+                title="打开来源页面（有机构会话时在机构窗口打开，带登录能看全文）"
                 aria-label="打开来源"
-                onClick={() => void openUrl(sourceUrl(entry.url))}
+                onClick={onOpenSource}
               >
                 <ExternalLink size={13} strokeWidth={1.8} />
               </button>
@@ -923,6 +953,17 @@ export default function LitWatchCard({
   );
   const [hitQuery, setHitQuery] = useState("");
   const [showAllHits, setShowAllHits] = useState(false);
+  // 机构访问通道可用（前缀或会话任一）：决定「来源」态/待办行是否摆「获取全文」
+  const [instActive, setInstActive] = useState(false);
+  // 待办行「获取全文」的就地成功标记（watch-followup.md 是 agent 写的清单，不动文件）
+  const [fetchedFollowups, setFetchedFollowups] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    invoke<{ sessionPresent: boolean; prefixConfigured: boolean }>(
+      "inst_session_status",
+    )
+      .then((s) => setInstActive(s.sessionPresent || s.prefixConfigured))
+      .catch(() => setInstActive(false));
+  }, []);
 
   function showToast(text: string) {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -1164,6 +1205,49 @@ export default function LitWatchCard({
         return next;
       });
     }
+  }
+
+  /** 逐篇获取全文（「来源」态命中行 / 待办行）：后端阶梯 = 开放直链 → DOI 开放副本
+   *  （Unpaywall/OpenAlex）→ 机构通道（前缀改写 + 会话 + 落地页提取）。人工逐篇触发，
+   *  不做批量（出版商风控会连坐全校访问）。返回是否成功（待办行打就地成功标） */
+  async function fetchFulltext(
+    key: string,
+    url: string,
+    fileNameHint: string,
+  ): Promise<boolean> {
+    setDownloading((cur) => new Set(cur).add(key));
+    try {
+      const res = await invoke<FetchedFulltextDto>("fetch_paper_fulltext", {
+        projectRoot,
+        url,
+        fileNameHint,
+      });
+      showToast(`${fulltextViaLabel(res.via)}${res.name}`);
+      onConfigChanged();
+      return true;
+    } catch (reason) {
+      setError(String(reason));
+      return false;
+    } finally {
+      setDownloading((cur) => {
+        const next = new Set(cur);
+        next.delete(key);
+        return next;
+      });
+    }
+  }
+
+  /** 打开来源页：在系统浏览器里打开（真实浏览器会话，出版商不拦截）——浏览器里
+   *  点站方下载，落下的 PDF 由 Mesa 收货通道自动收进本项目 papers/（时间窗+标题
+   *  归属匹配）；内嵌机构窗保留作回落 */
+  function openWithSession(rawUrl: string, title?: string) {
+    if (!rawUrl.trim()) return;
+    invoke("inst_browser_open", {
+      url: instOpenTarget(rawUrl),
+      projectRoot,
+      title: title ?? rawUrl.trim().slice(0, 60),
+      doi: rawUrl,
+    }).catch((e) => setError(`打开浏览器失败：${String(e)}`));
   }
 
   /** 关联本地 PDF（命中条目 / 精读条目共用 ⋯ 菜单）：文件对话框选 PDF，
@@ -1510,6 +1594,11 @@ export default function LitWatchCard({
                           onDownload={() =>
                             void download(entry.id, entry.url, entry.title)
                           }
+                          canFetch={canAttemptFulltext(entry.url, instActive)}
+                          onFetch={() =>
+                            void fetchFulltext(entry.id, entry.url, entry.title)
+                          }
+                          onOpenSource={() => openWithSession(entry.url, entry.title)}
                           onAttach={() => void attachPdf(entry.title)}
                           onDismiss={() =>
                             setDismissed((cur) => dismissLitEntry(cur, entry.id))
@@ -1543,9 +1632,11 @@ export default function LitWatchCard({
                     </button>
                     {followupsOpen && (
                       <ul className="mt-1 space-y-0.5">
-                        {followups.map((f, i) => (
+                        {followups.map((f, i) => {
+                          const fkey = `${f.title}-${i}`;
+                          return (
                           <li
-                            key={`${f.title}-${i}`}
+                            key={fkey}
                             className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 hover:bg-hover"
                           >
                             <span className="min-w-0 flex-1 truncate text-xs text-l2">
@@ -1556,17 +1647,48 @@ export default function LitWatchCard({
                                 {f.note}
                               </span>
                             )}
+                            {f.url.trim() && canAttemptFulltext(f.url, instActive) && (
+                              <button
+                                type="button"
+                                className={`${ghostActionClass} shrink-0`}
+                                disabled={downloading.has(fkey)}
+                                title="逐篇获取全文：开放副本 → 机构通道（设置 → 机构访问）"
+                                onClick={() => {
+                                  void fetchFulltext(
+                                    fkey,
+                                    f.url,
+                                    f.title,
+                                  ).then(() => {
+                                    setFetchedFollowups((cur) =>
+                                      new Set(cur).add(fkey),
+                                    );
+                                  });
+                                }}
+                              >
+                                {fetchedFollowups.has(fkey)
+                                  ? "✓ 已获取，可再取"
+                                  : downloading.has(fkey)
+                                    ? "获取中…"
+                                    : "获取全文"}
+                              </button>
+                            )}
                             {f.url.trim() && (
                               <button
                                 type="button"
                                 className={`${ghostActionClass} shrink-0`}
-                                onClick={() => void openUrl(sourceUrl(f.url))}
+                                title={
+                                  instActive
+                                    ? "在机构登录窗打开（带登录会话，能看全文并下载 PDF）"
+                                    : "打开来源页面"
+                                }
+                                onClick={() => openWithSession(f.url, f.title)}
                               >
                                 打开来源
                               </button>
                             )}
                           </li>
-                        ))}
+                          );
+                        })}
                       </ul>
                     )}
                   </div>

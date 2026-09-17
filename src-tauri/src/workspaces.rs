@@ -2708,20 +2708,116 @@ pub(crate) fn human_target_count(root: &Path, target: &str) -> Option<usize> {
 }
 
 /// 待获取清单总篇数（v3.97）：仅 papers/*.pdf 落点且根下存在 papers/to-fetch.md 时现算。
-/// 条目行 = 非空、非 # 标题、非「为空」注明行；列表标记（- / *）剥掉后判定。
+/// 条目口径与前端 src/step-flow.ts parseToFetchItems 双端镜像（改动需同步）：
+/// 编号行（N. / N、 / N)）与列表行（- / * / +）都算条目（不必带链接，✓ 勾选标记剥掉）；
+/// 裸行必须带「 — DOI/链接」尾巴才算——挡住顶部说明文字与「待补」占位行。
+/// （2026-09-16 前的旧口径「非空非 # 行全算」会把说明行多数进去，
+/// 与展开面板的条目数对不上，且导致补齐全量后 completion=all 永不满足）
 fn to_fetch_entry_count(root: &Path, target: &str) -> Option<usize> {
     if target.trim().replace('\\', "/") != "papers/*.pdf" {
         return None;
     }
     let text = fs::read_to_string(root.join("papers").join("to-fetch.md")).ok()?;
-    let count = text
-        .lines()
-        .map(|l| l.trim().trim_start_matches(['-', '*']).trim())
-        .filter(|l| {
-            !l.is_empty() && !l.starts_with('#') && !l.contains("为空") && !l.starts_with("（无")
-        })
-        .count();
-    Some(count)
+    Some(text.lines().filter(|l| to_fetch_line_is_entry(l)).count())
+}
+
+/// to-fetch.md 单行是否算一条条目（to_fetch_entry_count 的口径内核）。
+/// 前缀判定与正则 `^(\d+)[.、)]\s+(✓\s*)?(.+)$` / `^[-*+]\s+(✓\s*)?(.+)$` 对齐：
+/// 前缀后必须有空白、剥 ✓ 后正文非空；两种前缀都不匹配时按裸行处理
+fn to_fetch_line_is_entry(raw: &str) -> bool {
+    let line = raw.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return false;
+    }
+    match strip_to_fetch_marker(line) {
+        Some(rest) => {
+            let body = rest.strip_prefix('✓').unwrap_or(rest).trim_start();
+            !body.is_empty()
+        }
+        None => to_fetch_bare_has_link_tail(line),
+    }
+}
+
+/// 剥掉条目行的编号（N. / N、 / N)）或列表符号（- / * / +）前缀；
+/// 前缀后必须紧跟空白（前端正则的 `\s+`），否则不算条目前缀，返回 None
+fn strip_to_fetch_marker(line: &str) -> Option<&str> {
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let after_digits = &line[digits..];
+    let marker_end = if digits > 0 {
+        // 编号必须带 [.、)] 之一收尾
+        match after_digits.chars().next() {
+            Some(c @ ('.' | '、' | ')')) => digits + c.len_utf8(),
+            _ => return None,
+        }
+    } else {
+        match after_digits.chars().next() {
+            Some(c @ ('-' | '*' | '+')) => c.len_utf8(),
+            _ => return None,
+        }
+    };
+    let rest = &line[marker_end..];
+    let ws = rest.len() - rest.trim_start().len();
+    (ws > 0).then(|| &rest[ws..])
+}
+
+/// 裸行条目判定：必须以「 — DOI/链接」尾巴收尾。末段 = 最后一个
+/// 「空白 — 空白」/「空白 -- 空白」分隔之后的部分（对应前端 split(/\s+—\s+|\s+--\s+/) 取末段）
+fn to_fetch_bare_has_link_tail(line: &str) -> bool {
+    let mut last_tail: Option<&str> = None;
+    let mut i = 0;
+    while i < line.len() {
+        if let Some(after) = strip_to_fetch_separator(&line[i..]) {
+            last_tail = Some(after);
+            i = line.len() - after.len();
+        } else {
+            i += line[i..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    last_tail.is_some_and(to_fetch_looks_link)
+}
+
+/// rest 以「空白+（— 或 --）+空白」开头时返回分隔符之后的剩余串
+fn strip_to_fetch_separator(rest: &str) -> Option<&str> {
+    let ws = rest.len() - rest.trim_start().len();
+    if ws == 0 {
+        return None;
+    }
+    let after_ws = &rest[ws..];
+    let dash = if after_ws.starts_with('—') {
+        '—'.len_utf8()
+    } else if after_ws.starts_with("--") {
+        2
+    } else {
+        return None;
+    };
+    let after_dash = &after_ws[dash..];
+    let ws2 = after_dash.len() - after_dash.trim_start().len();
+    (ws2 > 0).then(|| &after_dash[ws2..])
+}
+
+/// 末段是否像 DOI/链接（对应前端正则）：`doi:` 前缀可选；
+/// DOI = 10. + 4-9 位数字 + / + 非空白余段；链接 = http(s):// 开头且整体无空白
+fn to_fetch_looks_link(seg: &str) -> bool {
+    let s = seg.trim();
+    let body = match s.get(..4) {
+        Some(p) if p.eq_ignore_ascii_case("doi:") => s[4..].trim_start(),
+        _ => s,
+    };
+    if let Some(rest) = body.strip_prefix("10.") {
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if (4..=9).contains(&digits)
+            && rest[digits..].starts_with('/')
+            && !rest[digits + 1..].trim().is_empty()
+            && !rest[digits + 1..].chars().any(char::is_whitespace)
+        {
+            return true;
+        }
+    }
+    let lower = body.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return !body.chars().any(char::is_whitespace);
+    }
+    false
 }
 
 /// 通用人工事项清单计数：每行一个目标，忽略空行、标题和注释。
@@ -6940,14 +7036,44 @@ mod tests {
         assert_eq!(to_fetch_entry_count(&root, "papers/"), None);
         // 文件不存在 → None
         assert_eq!(to_fetch_entry_count(&root, "papers/*.pdf"), None);
-        // 标题/空行/「为空」注明行不算条目；列表标记剥掉
+        // 口径与前端 parseToFetchItems 双端镜像（2026-09-16 对齐）：
+        // 编号/列表行无链接也算（✓ 剥掉）；裸行必须带「 — DOI/链接」尾巴——
+        // 顶部说明文字行与「待补」占位不算，否则「清单共 N」比展开面板多数
         fs::write(
             root.join("papers/to-fetch.md"),
-            "# 待获取全文\n\n- Smith 2024 — 10.1/abc\n\n* 张三 2023 — 10.1/def\n（无付费文献则本清单为空）\nWang 2022 — 10.1/ghi\n",
+            concat!(
+                "# 待获取全文\n",
+                "以下为已纳入但项目资源未见对应 PDF 的文献；说明文字不算条目。\n",
+                "\n",
+                "1. Smith 2024 — 10.1002/abc\n",
+                "2. ✓ 张三 2023 — 10.1039/def\n",
+                "3. 无链接条目\n",
+                "- 列表符号条目 — 10.1002/ghi\n",
+                "\n",
+                "（无付费文献则本清单为空）\n",
+                "Wang 2022 — 10.1002/jkl\n",
+                "Easy Scalable (Mg/S)-Batteries — 待补\n",
+                "仅说明没有尾巴\n",
+            ),
         )
         .unwrap();
-        assert_eq!(to_fetch_entry_count(&root, "papers/*.pdf"), Some(3));
+        // = 编号 3 行 + 列表 1 行 + 裸行带 DOI 1 行
+        assert_eq!(to_fetch_entry_count(&root, "papers/*.pdf"), Some(5));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn to_fetch_entry_line_mirror_edges() {
+        // 前缀后无空白不算编号/列表，但裸行带尾巴仍算（前端正则 \s+ 与裸行回落同款）
+        assert!(to_fetch_line_is_entry("1.无空格编号 — 10.1002/x"));
+        assert!(!to_fetch_line_is_entry("1."));
+        assert!(!to_fetch_line_is_entry("-"));
+        assert!(to_fetch_line_is_entry("Bare — https://example.com/a.pdf"));
+        assert!(to_fetch_line_is_entry("带 doi 前缀 — doi:10.1002/x"));
+        assert!(!to_fetch_line_is_entry("数字不足 — 10.1/abc"));
+        assert!(to_fetch_line_is_entry("+ 加号也是列表 — 10.1002/y"));
+        assert!(to_fetch_line_is_entry("✓ 开头裸行 — 10.1002/z"));
+        assert!(!to_fetch_line_is_entry("尾巴带空格 — 10.1002/a b"));
     }
 
     #[test]

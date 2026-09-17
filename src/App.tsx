@@ -380,6 +380,55 @@ function App() {
     return () => unlisten?.();
   }, []);
 
+  // 机构窗口「⤓ 保存 PDF 到 Mesa」→ 自动入库（inst_access 中继）。带落盘语境的
+  // （从清单/雷达「窗口打开」进入）直接写进对应项目 papers/ 并登记资源；无语境的
+  // 只暂存，提示回项目手动「关联本地 PDF」。
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ path: string; size: number; projectRoot: string; fileNameHint: string }>(
+      "inst-pdf-relayed",
+      (e) => {
+        const { path, projectRoot, fileNameHint } = e.payload;
+        if (!projectRoot) {
+          void fireScheduleNotification(
+            "PDF 已在 Mesa 暂存",
+            "回到项目页用「关联本地 PDF」选中导入这份文件",
+            {},
+          );
+          return;
+        }
+        void invoke<{ name: string }>("inst_save_relayed_pdf", {
+          projectRoot,
+          path,
+          fileNameHint: fileNameHint || "paper",
+        })
+          .then((res) =>
+            fireScheduleNotification(
+              `已存进 papers/：${res.name}`,
+              "文献全文已落盘并登记进项目资源",
+              { projectRoot },
+            ),
+          )
+          .catch((err) =>
+            fireScheduleNotification("PDF 入库失败", String(err), { projectRoot }),
+          );
+      },
+    )
+      .then((u) => {
+        if (cancelled) {
+          u();
+          return;
+        }
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // 目标产出待验收 → OS 通知（runs.rs 的 goal-review-ready；回合结束冻结后提升待验收时发出）。
   // 交互式 CLI 交付后不退出进程，没有这个通知用户无从知道可以验收了。
   useEffect(() => {

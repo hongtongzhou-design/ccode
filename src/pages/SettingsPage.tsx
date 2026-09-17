@@ -52,6 +52,7 @@ import {
   resolvePaletteId,
 } from "../terminal-palettes";
 import { THEMES, isCustomThemeId, isLightTheme } from "../themes";
+import { instSessionLabel, type InstSessionStatus } from "../inst-access";
 import appCss from "../App.css?raw";
 import {
   parseThemeSwatchesFromCss,
@@ -229,6 +230,10 @@ const SETTING_NAV: { id: string; label: string; group: "basic" | "management" }[
   { id: "storage", label: "数据与存储", group: "management" },
   { id: "about", label: "关于", group: "management" },
 ];
+
+/** 机构登录窗的默认入口：CARSI 高校联盟（国内联邦登录，绝大多数高校接入）——
+ *  登录选学校 → 在资源页点进一个数据库（出版商会话建立）即可，前缀都可不填 */
+const DEFAULT_INST_LOGIN_URL = "https://www.carsi.edu.cn/";
 
 /** 依赖体检指引文案的平台参数（installGuidance 显式传参，纯逻辑不读平台） */
 const DEP_PLATFORM: DepPlatform = IS_MAC ? "mac" : IS_WINDOWS ? "win" : "linux";
@@ -791,6 +796,16 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [outboundNoProxy, setOutboundNoProxy] = useState("");
+  // 机构访问（高校/研究所全文通道）：前缀与登录页草稿 + 会话状态（值在后端 0600 文件，这里只有统计态）
+  const [institutionalPrefix, setInstitutionalPrefix] = useState("");
+  const [institutionalLoginUrl, setInstitutionalLoginUrl] = useState("");
+  const [instStatus, setInstStatus] = useState<InstSessionStatus | null>(null);
+  const [instBusy, setInstBusy] = useState<"login" | "capture" | "clear" | "bridge" | null>(null);
+  // 出网代理自动检测：候选由后端读系统代理/环境变量/常见端口产出，点选才写入
+  const [proxyDetecting, setProxyDetecting] = useState(false);
+  const [proxyCandidates, setProxyCandidates] = useState<
+    { url: string; source: string; alive: boolean }[] | null
+  >(null);
   // 自定义定价的表格草稿（保存时序列化为 pricing.json 的 {"前缀":[输入,输出]} 格式，后端校验不变）
   const [pricingRows, setPricingRows] = useState<
     { prefix: string; input: string; output: string }[]
@@ -925,6 +940,10 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         setOutboundProxy(settings.outboundProxy ?? "");
       if (!dirty.has("outboundNoProxy"))
         setOutboundNoProxy(settings.outboundNoProxy ?? "");
+      if (!dirty.has("institutionalPrefix"))
+        setInstitutionalPrefix(settings.institutionalPrefix ?? "");
+      if (!dirty.has("institutionalLoginUrl"))
+        setInstitutionalLoginUrl(settings.institutionalLoginUrl ?? "");
       if (!dirty.has("customFont")) {
         const fam = settings.terminalFontFamily ?? "JetBrains Mono";
         if (["JetBrains Mono", "Maple Mono NF CN", "Sarasa Mono SC", "Iosevka", "SF Mono", "Menlo", "Consolas"].includes(fam)) {
@@ -936,6 +955,140 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       }
     }
   }, [settings]);
+
+  // 机构访问：网络分区展开时拉会话状态；登录窗自动保存成功事件到达即刷新
+  async function loadInstStatus() {
+    try {
+      setInstStatus(await invoke<InstSessionStatus>("inst_session_status"));
+    } catch (e) {
+      setError(`机构访问状态加载失败：${String(e)}`);
+    }
+  }
+  useEffect(() => {
+    if (!visible || activeSection !== "network") return;
+    void loadInstStatus();
+  }, [visible, activeSection]);
+  useEffect(() => {
+    if (!visible) return;
+    const un = listen("inst-session-captured", () => {
+      setNotice("机构登录会话已保存，可以在文献清单里逐篇「获取全文」了");
+      void loadInstStatus();
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [visible]);
+
+  /** 出网代理检测：后端读系统代理/环境变量/常见端口，候选点选才写入 */
+  async function detectProxy() {
+    setProxyDetecting(true);
+    setError(null);
+    try {
+      setProxyCandidates(
+        await invoke<{ url: string; source: string; alive: boolean }[]>(
+          "detect_outbound_proxy",
+        ),
+      );
+    } catch (e) {
+      setError(`代理检测失败：${String(e)}`);
+    } finally {
+      setProxyDetecting(false);
+    }
+  }
+
+  function applyProxyCandidate(url: string) {
+    draftDirty.current.delete("outboundProxy");
+    setOutboundProxy(url);
+    void patch({ outboundProxy: url });
+    // 选完即收：候选列表是挑选工具，选中后留在页面上只剩噪音（2026-09-17 用户实测）
+    setProxyCandidates(null);
+  }
+
+  /** 打开机构登录（通道 B）：默认走系统浏览器——真实浏览器干浏览器的事，
+   *  登录一次后浏览器 profile 持续有效；文献下载由收货通道/浏览器桥接走 papers/。
+   *  什么都不填也行：默认开 CARSI 高校联盟入口（选学校 → 登录 → 顺手点进一个数据库） */
+  async function openInstLogin() {
+    const typed = institutionalLoginUrl.trim() || institutionalPrefix.trim();
+    const url = typed || DEFAULT_INST_LOGIN_URL;
+    if (!/^https?:\/\//i.test(url)) {
+      setError("机构登录页须是 http(s):// 开头的完整地址（学校图书馆入口或代理登录页）");
+      return;
+    }
+    setInstBusy("login");
+    setError(null);
+    try {
+      if (typed) await patch({ institutionalLoginUrl: typed });
+      await invoke("inst_browser_open", { url });
+      setNotice(
+        "已调起系统浏览器——选学校、完成账号登录后即可直接在浏览器里下载文献，Mesa 会自动收进项目 papers/（待获取清单点「浏览器打开」后 90 秒内落下的 PDF 自动归位）",
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInstBusy(null);
+    }
+  }
+
+  /** 旧通道回落：内嵌登录窗（会话倒回 Mesa，供 fetch_via_channel 无头阶梯用） */
+  async function openInstLoginEmbedded() {
+    const typed = institutionalLoginUrl.trim() || institutionalPrefix.trim();
+    const url = typed || DEFAULT_INST_LOGIN_URL;
+    if (!/^https?:\/\//i.test(url)) {
+      setError("机构登录页须是 http(s):// 开头的完整地址");
+      return;
+    }
+    setInstBusy("login");
+    setError(null);
+    try {
+      if (typed) await patch({ institutionalLoginUrl: typed });
+      await invoke("inst_open_login", { url });
+      setNotice("内嵌登录窗已打开——登录后会话自动增量保存（此通道仅供无头阶梯与调试，日常下载走浏览器）");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInstBusy(null);
+    }
+  }
+
+  /** 安装浏览器桥（通道 C）：写 NativeMessagingHosts 清单；扩展在仓库 extension/ 目录制 */
+  async function installBrowserBridge() {
+    setInstBusy("bridge");
+    setError(null);
+    try {
+      const results = await invoke<string[]>("install_browser_bridge");
+      setNotice(`浏览器桥：${results.join("；")}。接着在 Chrome/Edge 的扩展页开「开发者模式」→「加载已解压的扩展程序」选 Mesa 仓库的 extension/ 目录即可`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInstBusy(null);
+    }
+  }
+
+  async function captureInstSession() {
+    setInstBusy("capture");
+    setError(null);
+    try {
+      setInstStatus(await invoke<InstSessionStatus>("inst_capture_session"));
+      setNotice("机构会话已保存，可以在文献清单里逐篇「获取全文」了");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInstBusy(null);
+    }
+  }
+
+  async function clearInstSession() {
+    setInstBusy("clear");
+    setError(null);
+    try {
+      setInstStatus(await invoke<InstSessionStatus>("inst_clear_session"));
+      setNotice("机构会话已清除");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInstBusy(null);
+    }
+  }
 
   // 主题色卡：从 App.css 源文本抽色，不切正在显示的主题
   const themeSwatches = useMemo(() => {
@@ -2279,26 +2432,70 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       >
         <Row
           label="出网代理"
-          hint="只注入官方账号启动和组头「登录」。网关/中转启动不走，以免国内端点被绕到境外。连接上的附加环境变量同名键可覆盖。空 = 不注入。"
+          hint="只用于官方账号登录（网关启动不走）。空 = 不使用。「检测」探测本机代理（Clash / V2Ray 等），点候选即填。"
         >
-          <input
-            className={`${fieldFixed} w-72 font-mono text-xs`}
-            placeholder="http://127.0.0.1:7890"
-            value={outboundProxy}
-            onChange={(e) => {
-              draftDirty.current.add("outboundProxy");
-              setOutboundProxy(e.target.value);
-            }}
-            onBlur={() => {
-              draftDirty.current.delete("outboundProxy");
-              void patch({ outboundProxy: outboundProxy.trim() });
-            }}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter") return;
-              draftDirty.current.delete("outboundProxy");
-              void patch({ outboundProxy: outboundProxy.trim() });
-            }}
-          />
+          <div className="flex max-w-[34rem] flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <input
+                className={`${fieldFixed} min-w-0 flex-1 font-mono text-xs`}
+                placeholder="http://127.0.0.1:7890"
+                value={outboundProxy}
+                onChange={(e) => {
+                  draftDirty.current.add("outboundProxy");
+                  setOutboundProxy(e.target.value);
+                }}
+                onBlur={() => {
+                  draftDirty.current.delete("outboundProxy");
+                  void patch({ outboundProxy: outboundProxy.trim() });
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  draftDirty.current.delete("outboundProxy");
+                  void patch({ outboundProxy: outboundProxy.trim() });
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => void detectProxy()}
+                disabled={proxyDetecting}
+                className="h-8 shrink-0 rounded-sm border border-hairline px-3 text-sm text-l2 hover:bg-hover disabled:opacity-50"
+              >
+                {proxyDetecting ? "检测中…" : "检测"}
+              </button>
+            </div>
+            {proxyCandidates !== null &&
+              (proxyCandidates.length === 0 ? (
+                <p className="text-micro text-l4">
+                  没检测到本机代理——确认代理软件（Clash / V2Ray 等）在运行，或手动填写
+                </p>
+              ) : (
+                <ul className="space-y-0.5">
+                  {proxyCandidates.map((c) => (
+                    <li key={c.url}>
+                      <button
+                        type="button"
+                        onClick={() => applyProxyCandidate(c.url)}
+                        title="点选填入并保存"
+                        className={`flex w-full items-center gap-2 rounded-sm px-1.5 py-1 text-left text-micro hover:bg-hover ${
+                          outboundProxy.trim() === c.url ? "text-l1" : "text-l3"
+                        }`}
+                      >
+                        <span className="font-mono">{c.url}</span>
+                        <span className="shrink-0 text-l4">{c.source}</span>
+                        <span
+                          className={`ml-auto shrink-0 ${c.alive ? "text-ok-text" : "text-l4"}`}
+                        >
+                          {c.alive ? "运行中" : "未探到监听"}
+                        </span>
+                        {outboundProxy.trim() === c.url && (
+                          <span className="shrink-0 text-l4">· 当前</span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ))}
+          </div>
         </Row>
         <Row
           label="不走代理的地址"
@@ -2322,6 +2519,115 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               void patch({ outboundNoProxy: outboundNoProxy.trim() });
             }}
           />
+        </Row>
+        <Row
+          label="机构访问前缀"
+          hint="图书馆「校外访问」的 EZproxy / OpenAthens 前缀，形如 https://proxy.xxx.edu.cn/login?url=。留空 = 不使用（校园网直连可不填）。"
+        >
+          <input
+            className={`${fieldFixed} w-72 font-mono text-xs`}
+            placeholder="https://proxy.xxx.edu.cn/login?url="
+            value={institutionalPrefix}
+            onChange={(e) => {
+              draftDirty.current.add("institutionalPrefix");
+              setInstitutionalPrefix(e.target.value);
+            }}
+            onBlur={() => {
+              draftDirty.current.delete("institutionalPrefix");
+              void patch({ institutionalPrefix: institutionalPrefix.trim() });
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              draftDirty.current.delete("institutionalPrefix");
+              void patch({ institutionalPrefix: institutionalPrefix.trim() });
+            }}
+          />
+        </Row>
+        <Row
+          label="机构登录"
+          hint="点「在浏览器中登录」→ 选学校、完成登录（一次长期有效）。文献在浏览器里下载，Mesa 自动收进 papers/。不存账号密码、逐篇下载。"
+        >
+          <div className="flex max-w-[34rem] flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <input
+                className={`${fieldFixed} min-w-0 flex-1 font-mono text-xs`}
+                placeholder="https://www.carsi.edu.cn/"
+                value={institutionalLoginUrl}
+                onChange={(e) => {
+                  draftDirty.current.add("institutionalLoginUrl");
+                  setInstitutionalLoginUrl(e.target.value);
+                }}
+                onBlur={() => {
+                  draftDirty.current.delete("institutionalLoginUrl");
+                  void patch({
+                    institutionalLoginUrl: institutionalLoginUrl.trim(),
+                  });
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  draftDirty.current.delete("institutionalLoginUrl");
+                  void patch({
+                    institutionalLoginUrl: institutionalLoginUrl.trim(),
+                  });
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => void openInstLogin()}
+                disabled={instBusy !== null}
+                className="h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              >
+                {instBusy === "login" ? "打开中…" : "在浏览器中登录"}
+              </button>
+            </div>
+            <p className="flex flex-wrap items-center gap-x-2 text-micro text-l4">
+              <span>
+                会话：{instSessionLabel(instStatus)}
+                {instStatus?.prefixConfigured ? ` · 前缀 ${instStatus.prefixHost}` : ""}
+              </span>
+              {instStatus?.sessionPresent && (
+                <button
+                  type="button"
+                  onClick={() => void clearInstSession()}
+                  disabled={instBusy !== null}
+                  className="underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                >
+                  {instBusy === "clear" ? "清除中…" : "清除会话"}
+                </button>
+              )}
+            </p>
+            {/* 次要操作一行收口（说明进悬停提示，不占版面）：内嵌窗会话与浏览器桥都是
+                一次性/调试动作，主路径只有上方的「在浏览器中登录」 */}
+            <div className="flex items-center gap-4 border-t border-hairline pt-2">
+              <button
+                type="button"
+                onClick={() => void openInstLoginEmbedded()}
+                disabled={instBusy !== null}
+                className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                title="旧通道：内嵌登录窗，会话倒回 Mesa（无头阶梯/调试用，日常下载走浏览器）"
+              >
+                内嵌窗登录
+              </button>
+              <button
+                type="button"
+                onClick={() => void captureInstSession()}
+                disabled={instBusy !== null}
+                className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                title="手动保存在内嵌窗里登录得到的会话（浏览器通道不需要这一步）"
+              >
+                {instBusy === "capture" ? "保存中…" : "我已登录，保存会话"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void installBrowserBridge()}
+                disabled={instBusy !== null}
+                className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                title="装后到 Chrome/Edge 扩展页（开发者模式）加载 Mesa 仓库的 extension/ 目录，文献页即有「存到 Mesa」一键落 papers/"
+              >
+                {instBusy === "bridge" ? "安装中…" : "安装浏览器桥"}
+              </button>
+            </div>
+          </div>
         </Row>
       </Section>
 

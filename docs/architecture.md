@@ -457,6 +457,7 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 
 ## 10. 决策记录
 
+- **机构访问通道=人登录一次、系统复用会话（2026-09-16）**：付费墙全文获取不做「AI 拿学校账号自动登录」（MFA 过不去、SSO 密钥敏感、脚本式批量下载会被出版商风控连坐全校）。用户在设置 → 网络「机构访问」配 EZproxy/OpenAthens 前缀 + 在独立登录窗自己完成 SSO（含 MFA），后端 `inst_access.rs` 读登录窗 Cookie 落 0600 `inst-session.json`；`fetch_paper_fulltext` 阶梯 = 开放直链 → DOI 合法开放副本（Unpaywall/OpenAlex）→ 机构通道（前缀改写 + 会话逐跳注入 + 落地页 citation_pdf_url 提取）。入口三处（to-fetch 清单/雷达来源行/watch-followup 待办），只由人逐篇触发，无头不携带会话。同日夜修订：窗口点 PDF 不得主框架导航（Wiley/ACS epdf 是图片阅读器，WKWebView 内联 PDF 也像跳进一张图）——拦住走下载漏斗；开窗 about:blank 刷浅底防黑屏。细则 `conventions/pipeline.md`「机构访问通道」/ `safety.md` 会话罐。未做 Mesa Dev 实机界面验收。
 - **启动注入切聊天要立刻「进行中」（2026-09-14）**：带首条指令的新会话启动同时拉起聊天 `pendingReply`。从终端切到聊天，会话文件还没落盘也要显示正在回复、发送钮变进行中；TUI 开屏不算这一轮已经说完。纯逻辑 `tab-working.ts` `onPtyWorkingSilence`。
 - **Codex Shift+Enter 换行（2026-09-15）**：内嵌 xterm 对 Shift+Enter 仍发 `\r`，Codex composer 当成发送。键盘层改写为 kitty CSI-u `\x1b[13;2u`。细则 `conventions/terminal.md`。
 - **Codex 网关不要关 `features.apps`（2026-09-15）**：0.154 上 `-c features.apps=false` 会把用户 HTTP MCP（Consensus / Undermind）收成 `mcp__<名>` 占位，调用即 `unsupported call`（密钥已注入、端点可达也一样）。网关只关内置插件 `plugins.codex-app-tools@openai-bundled.enabled=false`，仍注 `web_search=disabled` / `service_tier=auto`。禁止 `enable_mcp_apps`。远程 MCP 不要默认写长 `startup_timeout_sec`（恢复会话会等满超时才画 TUI）。细则 `conventions/safety.md`。

@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildStepFlow,
+  countToFetchEntries,
   demoReadPaperResource,
   discussChatLabel,
+  isPaywallTaskTitle,
+  parseToFetchItems,
   pickDiscussResume,
   stepHasDiscussSession,
   stripOptionalTitlePrefix,
@@ -325,4 +328,85 @@ test("商量入口：能接回上次会话才叫继续讨论", () => {
   assert.equal(pickDiscussResume([{ ...newer, internal: true }], "文献检索与筛选"), null);
   assert.equal(stepHasDiscussSession([newer], "文献检索与筛选"), true);
   assert.equal(stepHasDiscussSession([newer], "文献精读与笔记"), false);
+});
+
+test("付费墙任务判定与待获取清单计数", () => {
+  assert.equal(isPaywallTaskTitle("下载付费墙文献全文"), true);
+  assert.equal(isPaywallTaskTitle("配置学术检索 MCP"), false);
+  // 列表条目计数：markdown 列表行算，标题/说明/空行不算
+  const md = [
+    "# 待获取清单",
+    "",
+    "以下文献缺全文：",
+    "- Paper A (doi:10.1/x)",
+    "- Paper B",
+    "1. Paper C",
+    "",
+    "说明文字一行",
+  ].join("\n");
+  assert.equal(countToFetchEntries(md), 3);
+  assert.equal(countToFetchEntries(""), 0);
+  // 裸行清单（老项目格式）也计入——此前只数带符号行显示「缺 0 篇」（2026-09-16）
+  assert.equal(
+    countToFetchEntries(
+      "# 待获取全文\n\n说明行不算。\n\n标题一 — 10.1002/a\n标题二 — 10.1002/b\n没尾巴的裸行不算\n",
+    ),
+    2,
+  );
+});
+
+test("parseToFetchItems：编号条目行解析（标题 — DOI，✓ 记已补齐）", () => {
+  const md = [
+    "# 待获取清单",
+    "",
+    "以下文献缺全文，补齐后编号后打 ✓：",
+    "1. Deep Learning for Materials — 10.1002/adma.202304268",
+    "2. ✓ Graph Neural Networks Survey — 10.1109/TPAMI.1",
+    "3. 无链接的条目",
+    "4. 落地链接条目 — https://www.sciencedirect.com/science/article/pii/X",
+    "- 不是编号行的列表条目",
+  ].join("\n");
+  const items = parseToFetchItems(md);
+  assert.equal(items.length, 5);
+  assert.deepEqual(items[0], {
+    line: 4,
+    title: "Deep Learning for Materials",
+    url: "10.1002/adma.202304268",
+    done: false,
+  });
+  assert.equal(items[1].done, true);
+  assert.equal(items[1].title, "Graph Neural Networks Survey");
+  assert.equal(items[2].url, "");
+  assert.equal(items[3].url, "https://www.sciencedirect.com/science/article/pii/X");
+  // 旧列表符号行：无链接也保留（url 空占位）
+  assert.equal(items[4].title, "不是编号行的列表条目");
+  assert.equal(items[4].url, "");
+  assert.equal(parseToFetchItems("").length, 0);
+  // 单段条目（没有 — 分隔）：标题即全文，url 留空不误吞
+  const single = parseToFetchItems("1. Just A Title");
+  assert.equal(single[0].title, "Just A Title");
+  assert.equal(single[0].url, "");
+});
+
+test("parseToFetchItems：旧格式裸行（无编号无符号）也出条目，说明文字不误收", () => {
+  const md = [
+    "# 待获取全文",
+    "",
+    "以下为已纳入但项目资源未见对应 PDF 的文献；开放获取自动下载结果见 papers/screening.md。",
+    "",
+    "Scalable synthesis of ferroelectric HfO2 films — 10.1002/adfm.202300001",
+    "",
+    "1Tb/Si composite thin films — 10.1063/5.0123456",
+    "有破折号的说明行 — 但尾巴不是链接",
+  ].join("\n");
+  const items = parseToFetchItems(md);
+  // 两行裸条目认出；说明行/无链接尾巴的行不收
+  assert.equal(items.length, 2);
+  assert.equal(items[0].title, "Scalable synthesis of ferroelectric HfO2 films");
+  assert.equal(items[0].url, "10.1002/adfm.202300001");
+  assert.equal(items[1].line, 7);
+  // 标题内含「 — 」：最后一段才当链接，其余归标题
+  const titled = parseToFetchItems("A study — of two parts — 10.1002/x.1");
+  assert.equal(titled[0].title, "A study — of two parts");
+  assert.equal(titled[0].url, "10.1002/x.1");
 });

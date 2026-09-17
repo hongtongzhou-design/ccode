@@ -99,9 +99,10 @@ function mcpLitSearchTask(): HumanTaskDto {
 function paywallPdfTask(timing: "after" | "during" = "after"): HumanTaskDto {
   return {
     title: "下载付费墙文献全文",
+    // 首句动作导向（2026-09-15 用户实测原首句「拿到全文后…」让人不知从哪下手）：
+    // 第一步是看清单，入口就挂在本行（StepFlow 的「查看待获取清单」就地展开）
     guidance:
-      "拿到全文后导入文献与数据，或直接拖到这一行——文件会落到**项目根 papers/**，不是当前工作区。\n\n" +
-      "agent 筛完会把拿不到全文的列进 papers/to-fetch.md，并附 papers/to-fetch.ris——拖进 Zotero 会自动建成待获取列表。渠道自选：机构图书馆、作者邮件索取 preprint 等。拿到后：把 PDF 拖到这一行，或拷进项目 papers/ 目录，或放进你的文献库后到「文献与数据」重新导入（进库的导完回来手动勾一下）。文件名随意，下一步 agent 会统一改成 作者年份-短标题.pdf；不补的话 agent 按摘要写笔记并标注「仅摘要」。",
+      "点「查看待获取清单」展开缺全文列表（附 to-fetch.ris，拖进 Zotero 自动建成待获取列表）。逐条处理：「自动获取」先查开放副本；取不到的（Wiley 等有反爬墙）点「浏览器打开」→ 在浏览器里点站方下载，Mesa 自动收进 papers/；手动拿到的 PDF 点行内「关联本地 PDF」选定或拷进项目根 papers/（文件名随意，下一步 agent 统一改名）。不想补的跳过——agent 会按摘要写笔记并标注「仅摘要」。",
     target: "papers/*.pdf",
     timing,
     optional: true,
@@ -126,7 +127,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式、检索日期与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；末尾写覆盖缺口声明（哪些库没检）；\n" +
       "4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律保留为 pending 候选并标注「待确认」，不冒充已决纳入，不允许自行裁掉；\n" +
       "5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI），并同步写入 papers/included.json（每篇一条，至少含稳定唯一字符串 id、title、decision（included/pending）、reason；与 md 记录一一对应）；\n" +
-      "6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（标题 — DOI）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR + TI/DO/UR 尽力而为，缺字段留空不编造），供用户一键导入 Zotero 建成待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n" +
+      "6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（编号清单，见 lit-search 产出格式）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR，TI 标题、AU 作者每位一行、PY 四位年份、T2 来源、DO、UR——筛选记录里已有的字段一律写入，只给 TI/DO/UR 会让 Zotero 里作者/年份/出版物全空；确无数据才留空，不编造），供用户导入 Zotero 建成题录完整的待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n" +
       "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/zotero-sync.md 均存在（RIS 允许有效空文件，其他文件非空；未启用或回落时报告原因；无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
@@ -1494,7 +1495,8 @@ export const RESOURCE_TYPE_LABELS: Record<string, string> = {
 };
 
 /** 一键开步预填的首条指令（TerminalPage 启动栏可编辑，留空不注入） */
-export const DEFAULT_KICKOFF_PROMPT = "读 TASK.md，按简报开始执行";
+export const DEFAULT_KICKOFF_PROMPT =
+  "读 TASK.md，按简报开始执行。开工先盘点本会话可用的 MCP 工具（如 Undermind / Consensus）——技能协议要求把它们纳入工作流（检索步骤当检索库用），工具在而没用要在覆盖缺口里写明原因";
 
 /** P2b「整理为笔记」开步预填指令：指向本流程写入的 notes/inbox.md */
 export const ORGANIZE_NOTES_PROMPT =

@@ -5,6 +5,9 @@ description = "Unified launcher, config center and session monitor for AI coding
 authors = ["hongtongzhou-design"]
 license = "MIT"
 edition = "2021"
+# 多 bin（主程序 ccode + 浏览器桥 mesa_helper）后 cargo run 必须指明默认目标，
+# 否则 tauri dev 起不来（2026-09-17 热更新窗口打不开的根因）
+default-run = "ccode"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -20,6 +23,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+objc2 = "0.6"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// inbox.md 条目上限：只取最新 500 条（收件箱只增不改，防超大文件拖垮前端）
 const MAX_ENTRIES: usize = 500;
 /// 下载 PDF 上限：60MB，流式读取超限即中止
-const DOWNLOAD_CAP: usize = 60 * 1024 * 1024;
+pub(crate) const DOWNLOAD_CAP: usize = 60 * 1024 * 1024;
 /// 下载总超时（含连接）：60MB 在慢速网络下给足余量
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// 文件名 sanitize 后主干（不含扩展名）的字符上限
@@ -121,6 +121,9 @@ pub struct AddIncludedResultDto {
 pub struct DownloadedPaperDto {
     pub path: String,
     pub name: String,
+    /// 命中 papers/ 已有同一份（字节级相同）未重复写入——前端据此改说「已有同一份」
+    #[serde(default)]
+    pub dedup: bool,
 }
 
 // ===== 公共小件 =====
@@ -761,7 +764,7 @@ fn remove_included_at(root: &Path, line_id: &str) -> Result<(), String> {
 // ===== PDF 下载 =====
 
 /// PDF 魔数宽松校验：前 1024 字节内含 %PDF- 即认（同 pdf.rs 口径，部分生成器写前导字节）
-fn looks_like_pdf(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_pdf(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(1024)];
     head.windows(5).any(|w| w == b"%PDF-")
 }
@@ -892,20 +895,153 @@ fn register_pdf(root: &Path, target: &Path) -> Result<DownloadedPaperDto, String
     Ok(DownloadedPaperDto {
         path: target.to_string_lossy().into_owned(),
         name: stem,
+        dedup: false,
     })
 }
 
-/// 落盘 + 资源登记（sync）：文件名清理 + 重名避让，写盘后登记
+/// 字节级查重：同尺寸 + md5 相同即认同一份（先比尺寸省哈希；papers/ 文件量
+/// 级下全扫可接受）。命中返回已有文件路径——重复导入不落第二份副本
+fn find_duplicate_pdf(papers: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let rd = fs::read_dir(papers).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        let is_pdf = p
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("pdf"));
+        if !is_pdf {
+            continue;
+        }
+        let Ok(meta) = fs::metadata(&p) else { continue };
+        if meta.len() != bytes.len() as u64 {
+            continue;
+        }
+        let Ok(have) = fs::read(&p) else { continue };
+        if md5::compute(&have) == md5::compute(bytes) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// 落盘 + 资源登记（sync）：文件名清理 + 重名避让，写盘后登记；
+/// 字节级重复（同一篇重复下载/导入）不写第二份，直接登记并回指已有文件
 fn save_and_register_pdf(
     root: &Path,
     file_name_hint: &str,
     bytes: &[u8],
 ) -> Result<DownloadedPaperDto, String> {
     let papers = papers_dir(root)?;
+    if let Some(dup) = find_duplicate_pdf(&papers, bytes) {
+        let mut existing = register_pdf(root, &dup)?;
+        existing.dedup = true;
+        return Ok(existing);
+    }
     let name = sanitize_pdf_name(file_name_hint);
     let target = unique_pdf_path(&papers, &name);
     fs::write(&target, bytes).map_err(|e| format!("写入 PDF 失败: {e}"))?;
     register_pdf(root, &target)
+}
+
+// ===== 待获取清单进度（StepFlow 逐篇「已存 papers」状态）=====
+
+/// 清单条目探针（title 必填；url 是 DOI/链接，供文件名 DOI 兜底匹配）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToFetchProbe {
+    pub title: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+/// 逐条对照 papers/ 已有 PDF，返回同序命中文件名（未命中 None）——
+/// 「哪些下载了」不再靠人记。匹配口径：规范化标题互相包含（Zotero 挂附件同款，
+/// 短边 ≥8 字符防误命中）为主，DOI 归一后按文件名包含兜底（自动下载常以 DOI 命名）
+#[tauri::command]
+pub async fn to_fetch_progress(
+    project_root: String,
+    items: Vec<ToFetchProbe>,
+) -> Result<Vec<Option<String>>, String> {
+    Ok(to_fetch_progress_inner(Path::new(&project_root), &items))
+}
+
+/// DOI 归一（口径同 zotero::doi_norm——那边有用户并行改动，此处小复制不碰它）
+fn probe_doi_norm(raw: &str) -> String {
+    let mut s = raw.trim().to_ascii_lowercase();
+    for p in [
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "doi:",
+    ] {
+        if let Some(rest) = s.strip_prefix(p) {
+            s = rest.to_string();
+            break;
+        }
+    }
+    s.trim_end_matches(['.', ',', ';']).to_string()
+}
+
+fn to_fetch_progress_inner(root: &Path, items: &[ToFetchProbe]) -> Vec<Option<String>> {
+    let papers = root.join("papers");
+    let mut pdfs: Vec<String> = std::fs::read_dir(&papers)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().into_string().unwrap_or_default())
+                .filter(|n| n.to_ascii_lowercase().ends_with(".pdf"))
+                .collect()
+        })
+        .unwrap_or_default();
+    pdfs.sort();
+    let mut taken = std::collections::HashSet::new();
+    items
+        .iter()
+        .map(|it| {
+            let want = normalize_title(&it.title);
+            let doi = probe_doi_norm(&it.url);
+            let hit = pdfs.iter().position(|name| {
+                if name.is_empty() || taken.contains(name) {
+                    return false;
+                }
+                let stem = name.trim_end_matches(".pdf");
+                let have = normalize_title(stem);
+                let short = have.len().min(want.len());
+                if short >= 8 && (have.contains(&want) || want.contains(&have)) {
+                    return true;
+                }
+                // DOI 兜底：文件名里可能用 -/_ 替代了 DOI 的斜杠；也认只含
+                // DOI 尾段的命名（如 mrc.2017.101.pdf——12:52 窗口下载按服务端
+                // 建议名落盘，尾段本身已足够区分）
+                doi.len() >= 8 && {
+                    let lower = name.to_ascii_lowercase();
+                    let suffix = doi.split_once('/').map(|(_, s)| s).unwrap_or_default();
+                    lower.contains(&doi)
+                        || lower.contains(&doi.replace('/', "-"))
+                        || lower.contains(&doi.replace('/', "_"))
+                        || (suffix.len() >= 8 && lower.contains(suffix))
+                }
+            });
+            match hit {
+                Some(pos) => {
+                    taken.insert(pdfs[pos].clone());
+                    Some(pdfs[pos].clone())
+                }
+                None => None,
+            }
+        })
+        .collect()
+}
+
+/// inst_access（窗口中继 PDF）共用的落盘入口：同一 papers/ + 登记口径
+pub(crate) fn save_paper_bytes(
+    root: &Path,
+    file_name_hint: &str,
+    bytes: &[u8],
+) -> Result<DownloadedPaperDto, String> {
+    save_and_register_pdf(root, file_name_hint, bytes)
 }
 
 /// 关联本地 PDF（sync）：用户手动下载的 PDF 复制进 papers/ 并按标题登记。
@@ -1170,6 +1306,94 @@ pub async fn download_paper_pdf(
     .map_err(|e| format!("保存 PDF 失败: {e}"))?
 }
 
+/// fetch_paper_fulltext 返回：落盘信息 + 实际命中的渠道（前端 toast 区分「开放副本/机构通道」）
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchedFulltextDto {
+    pub path: String,
+    pub name: String,
+    /// direct（开放直链）| oa（合法开放副本）| institutional（机构通道）
+    pub via: String,
+    /// papers/ 已有同一份（字节级相同），未重复写入
+    #[serde(default)]
+    pub dedup: bool,
+}
+
+/// 全文阶梯的统一目标：裸 DOI（含 `doi:` 前缀）补成 doi.org 落地；http(s) 原样；其余拒绝
+fn normalize_fetch_target(raw: &str) -> Result<String, String> {
+    let t = raw.trim();
+    if !t.contains("://") {
+        if let Some(doi) = crate::inst_access::doi_from_url(t) {
+            return Ok(format!("https://doi.org/{doi}"));
+        }
+        return Err(format!("仅支持 http(s) 链接或 DOI（收到 {t}）"));
+    }
+    let parsed = reqwest::Url::parse(t).map_err(|e| format!("链接无效: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(t.to_string()),
+        s => Err(format!("仅支持 http/https 链接（收到 {s}）")),
+    }
+}
+
+/// 全文获取阶梯（2026-09-16「机构访问」拍板形态：人登录一次、系统复用会话）：
+/// 1. 开放直链（现有 fetch_pdf_bytes 口径，%PDF- 魔数校验）；
+/// 2. DOI → 合法开放副本（Unpaywall/OpenAlex，绿 OA/预印本/仓储）；
+/// 3. 机构通道（代理前缀改写 + 会话 Cookie + 落地页 citation_pdf_url 提取）。
+/// 只服务 UI 逐篇人工触发（to-fetch 清单/雷达卡「获取全文」钮），scheduler/无头不调用。
+async fn fetch_fulltext_bytes(raw_url: &str) -> Result<(Vec<u8>, &'static str), String> {
+    let target = normalize_fetch_target(raw_url)?;
+    let direct_err = match fetch_pdf_bytes(&target).await {
+        Ok(bytes) => return Ok((bytes, "direct")),
+        Err(e) => e,
+    };
+    if let Some(doi) = crate::inst_access::doi_from_url(&target) {
+        if let Some((oa_url, _src)) = crate::inst_access::oa_pdf_url_for(&doi).await {
+            if let Ok(bytes) = fetch_pdf_bytes(&oa_url).await {
+                return Ok((bytes, "oa"));
+            }
+        }
+    }
+    let channel = crate::inst_access::InstitutionalChannel::load();
+    if channel.active() {
+        let via_error = match crate::inst_access::fetch_via_channel(&target, &channel).await {
+            Ok(bytes) => return Ok((bytes, "institutional")),
+            Err(e) => e,
+        };
+        return Err(crate::inst_access::institutional_failure_hint(&via_error));
+    }
+    Err(format!(
+        "开放直链不可用（{direct_err}），且未配置机构访问：到设置 → 网络 → 机构访问 配置学校图书馆前缀后重试，或手动下载后用「关联本地 PDF」导入"
+    ))
+}
+
+/// 逐篇获取全文（付费墙清单/雷达卡「获取全文」）：阶梯见 fetch_fulltext_bytes，
+/// 落盘与登记同 download_paper_pdf（papers/ + project.toml，口径 C 原始资料直写项目根）
+#[tauri::command]
+pub async fn fetch_paper_fulltext(
+    project_root: String,
+    url: String,
+    file_name_hint: String,
+) -> Result<FetchedFulltextDto, String> {
+    let root = {
+        let pr = project_root.clone();
+        tauri::async_runtime::spawn_blocking(move || gated_root(&pr))
+            .await
+            .map_err(|e| format!("校验项目目录失败: {e}"))??
+    };
+    let (bytes, via) = fetch_fulltext_bytes(&url).await?;
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        save_and_register_pdf(&root, &file_name_hint, &bytes)
+    })
+    .await
+    .map_err(|e| format!("保存 PDF 失败: {e}"))??;
+    Ok(FetchedFulltextDto {
+        path: saved.path,
+        name: saved.name,
+        via: via.to_string(),
+        dedup: saved.dedup,
+    })
+}
+
 /// 关联本地 PDF（精读清单/新命中的「关联本地 PDF…」）：付费墙等自动下载失败的场景，
 /// 用户手动下载后选中文件，一步完成 复制进 papers/ + 登记 project.toml
 #[tauri::command]
@@ -1199,6 +1423,76 @@ mod tests {
     }
 
     #[test]
+    fn save_paper_bytes_dedups_identical_content() {
+        let dir = tmpdir("dedup");
+        let bytes = b"%PDF-1.4 fake but identical";
+        let a = super::save_paper_bytes(&dir, "First Title", bytes).unwrap();
+        assert!(!a.dedup);
+        // 同内容再导入：不写第二份，回指已有文件
+        let b = super::save_paper_bytes(&dir, "Second Different Title", bytes).unwrap();
+        assert!(b.dedup);
+        assert_eq!(a.path, b.path);
+        // 不同内容正常落新文件
+        let c = super::save_paper_bytes(&dir, "Third Title", b"%PDF-1.5 other bytes").unwrap();
+        assert!(!c.dedup);
+        assert_ne!(a.path, c.path);
+        let count = std::fs::read_dir(dir.join("papers"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "pdf"))
+            .count();
+        assert_eq!(count, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn to_fetch_progress_matches_title_and_doi() {
+        let dir = std::env::temp_dir().join(format!(
+            "mesa-tofetch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let papers = dir.join("papers");
+        std::fs::create_dir_all(&papers).unwrap();
+        std::fs::write(
+            papers.join("Reactivation of dissolved polysulfides with nitrogen doped graphene decorated carbon cloth as an effective int.pdf"),
+            b"%PDF-1.4 stub",
+        )
+        .unwrap();
+        std::fs::write(papers.join("10.1002-idm2.70075.pdf"), b"%PDF-1.4 stub").unwrap();
+        std::fs::write(papers.join("mrc.2017.101.pdf"), b"%PDF-1.4 stub").unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        let r = super::to_fetch_progress_inner(
+            Path::new(&root),
+            &[
+                super::ToFetchProbe {
+                    title: "Reactivation of dissolved polysulfides with nitrogen-doped graphene decorated carbon cloth".into(),
+                    url: "10.1002/aenm.202300000".into(),
+                },
+                super::ToFetchProbe {
+                    title: "Bridging Fundamentals and Practice".into(),
+                    url: "https://doi.org/10.1002/idm2.70075".into(),
+                },
+                super::ToFetchProbe {
+                    title: "Magnesium-sulfur battery: its beginning and recent progress".into(),
+                    url: "10.1557/mrc.2017.101".into(),
+                },
+                super::ToFetchProbe {
+                    title: "Not In The List At All".into(),
+                    url: "".into(),
+                },
+            ],
+        );
+        assert!(r[0].as_deref().unwrap().contains("Reactivation"));
+        assert!(r[1].as_deref().unwrap().contains("idm2.70075"));
+        assert!(r[2].as_deref().unwrap().contains("mrc.2017.101"));
+        assert!(r[3].is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn papers_dir_strips_verbatim_and_stays_inside() {
         let root = tmpdir("papers-verb");
         let papers = papers_dir(&root).unwrap();
