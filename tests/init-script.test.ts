@@ -336,6 +336,17 @@ test("mesaPdfUrl：citation_pdf_url 优先、DOI 命中优先、单链第二遍�
     }),
     "https://www.sciencedirect.com/science/article/pii/S092583882604209X/pdfft?md5=t&pid=p.pdf",
   );
+  // SD 文章页：页内唯一 pdfish 锚链是补充材料（mmc1.pdf）——通用单链采用会
+  // 误收，SD 整页不进通用启发式，回落 PII 构造兜底（2026-09-17 对齐口径）
+  assert.equal(
+    runPdfUrl({
+      pathname: "/science/article/pii/S092583882604209X",
+      origin: "https://www.sciencedirect.com",
+      metaDoi: "10.1016/j.jallcom.2026.190140",
+      hrefs: ["/science/article/pii/S092583882604209X/pdf/mmc1.pdf"],
+    }),
+    "https://www.sciencedirect.com/science/article/pii/S092583882604209X/pdfft?download=true",
+  );
 });
 
 test("语法门自检：老 bug 形态（变量名被替换成数字）必须被抓住", () => {

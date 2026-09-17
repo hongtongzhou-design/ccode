@@ -19,19 +19,28 @@ fn helper_exe_path() -> Result<std::path::PathBuf, String> {
     let dir = exe
         .parent()
         .ok_or_else(|| "定位程序目录失败".to_string())?;
-    let name = if cfg!(windows) {
-        "mesa_helper.exe"
+    // 无后缀名在前：dev 下 target/debug/mesa_helper 是真实构建（tauri dev 会把
+    // externalBin 占位文件按带后缀名复制进来，不能让 0 字节占位抢在真身前面）；
+    // 打包版 sidecar 按 externalBin 约定保留 target-triple 后缀，回落到带后缀名
+    let suffix = env!("TAURI_ENV_TARGET_TRIPLE");
+    let names: Vec<String> = if cfg!(windows) {
+        vec![
+            "mesa_helper.exe".into(),
+            format!("mesa_helper-{suffix}.exe"),
+        ]
     } else {
-        "mesa_helper"
+        vec!["mesa_helper".into(), format!("mesa_helper-{suffix}")]
     };
-    let p = dir.join(name);
-    if !p.exists() {
-        return Err(format!(
-            "找不到 helper（{}）——开发模式需 cargo build 生成；打包版随应用分发",
-            p.display()
-        ));
+    for name in &names {
+        let p = dir.join(name);
+        if p.exists() {
+            return Ok(p);
+        }
     }
-    Ok(p)
+    Err(format!(
+        "找不到 helper（尝试 {names:?} 于 {}）——开发模式需 cargo build 生成；打包版随应用分发",
+        dir.display()
+    ))
 }
 
 fn host_manifest(helper: &std::path::Path) -> String {

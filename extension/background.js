@@ -9,6 +9,23 @@
 const HOST = 'dev.ccode.mesa';
 const pdfTabs = new Map();
 
+// Uint8Array → base64（与 content.js 的 b64 同款分块实现；MV3 无共享模块，保持双份）
+function b64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));
+  }
+  return btoa(s);
+}
+
+// 角标全防御（个别环境 action API 未就绪时不允许 worker 回调抛错）
+function badge(tabId, text, color) {
+  try {
+    chrome.action.setBadgeText({ tabId, text });
+    if (color) chrome.action.setBadgeBackgroundColor({ tabId, color });
+  } catch (_) {}
+}
+
 // 观察型 webRequest（MV3 允许非阻塞监听）：识别主框架 PDF 响应 → 图标亮角标
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
@@ -19,11 +36,13 @@ chrome.webRequest.onHeadersReceived.addListener(
     const pdf = ct && /application\/pdf/i.test(ct.value || '');
     if (pdf) {
       pdfTabs.set(details.tabId, details.url);
-      chrome.action.setBadgeText({ tabId: details.tabId, text: 'PDF' });
-      chrome.action.setBadgeBackgroundColor({ tabId: details.tabId, color: '#1c6b2d' });
-    } else if (pdfTabs.has(details.tabId)) {
+      badge(details.tabId, 'PDF', '#1c6b2d');
+    } else {
+      // 无条件清角标（2026-09-17 修正）：badge 状态跨 worker 重启存活而 pdfTabs
+      // 内存态不存活——按 pdfTabs.has 条件清理会在重启后留下永久 'PDF' 死角标；
+      // 空串 setBadgeText 是幂等无害操作
       pdfTabs.delete(details.tabId);
-      chrome.action.setBadgeText({ tabId: details.tabId, text: '' });
+      badge(details.tabId, '');
     }
   },
   { urls: ['<all_urls>'] },
@@ -43,10 +62,11 @@ chrome.action.onClicked.addListener(async (tab) => {
     if (pdfUrl && chrome.downloads && chrome.downloads.download) {
       try {
         await chrome.downloads.download({ url: pdfUrl });
-        return;
       } catch (_) {
-        /* 下载失败继续走页内路径 */
+        // 用户取消另存对话框 / 下载被浏览器拦下：尊重用户意图，不回退页内
+        // 路径（2026-09-17 修正——旧代码取消后意外触发页内取字节）
       }
+      return;
     }
     if (chrome.tabs && chrome.tabs.sendMessage) {
       await chrome.tabs.sendMessage(tab.id, { kind: 'mesa-save-from-icon' });
@@ -60,10 +80,24 @@ chrome.action.onClicked.addListener(async (tab) => {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.kind === 'mesa-pdf-page' && sender.tab && sender.tab.id != null) {
     pdfTabs.set(sender.tab.id, sender.tab.url || msg.url);
-    chrome.action.setBadgeText({ tabId: sender.tab.id, text: 'PDF' });
-    chrome.action.setBadgeBackgroundColor({ tabId: sender.tab.id, color: '#1c6b2d' });
+    badge(sender.tab.id, 'PDF', '#1c6b2d');
     sendResponse({ ok: true });
     return false;
+  }
+  // 内容脚本跨源 fetch 被 CORS 拦下时的回退：后台 service worker 受
+  // host_permissions 豁免可代取字节（Cookie 口径可能不同，尽力而为）
+  if (msg && msg.kind === 'mesa-fetch-url' && msg.url) {
+    (async () => {
+      try {
+        const r = await fetch(msg.url, { credentials: 'include' });
+        if (!r.ok) { sendResponse({ ok: false, error: 'HTTP ' + r.status }); return; }
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        sendResponse({ ok: true, bytesB64: b64(bytes) });
+      } catch (e) {
+        sendResponse({ ok: false, error: e && e.message ? e.message : String(e) });
+      }
+    })();
+    return true; // 异步 sendResponse
   }
   if (!msg || msg.kind !== 'mesa-save-pdf') return false;
   (async () => {

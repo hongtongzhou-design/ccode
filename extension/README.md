@@ -24,6 +24,9 @@ fetch PDF 字节，经 native messaging 送给 Mesa 的 helper 落进当前项�
   响应，Zotero Connector 同款模式），点一下即触发浏览器下载——文件落 ~/Downloads
   由 Mesa 通道 A 自动收进 papers/（扩展后台 fetch 因 SameSite=Lax 带不上出版商
   会话，浏览器自己的下载栈 Cookie 完整）。文章页点图标等同按页内按钮。
+  **前置条件**：通道 A 只收 Mesa「在浏览器打开」后 ±90 秒内落的下载——先用
+  Mesa 待获取清单/雷达卡里的「在浏览器打开」调起浏览器，再点图标下载，下载
+  才有人认领；自己另开标签页下的文件 Mesa 不会动。
 
 - 「当前项目」= 最近一次在 Mesa 里用「浏览器打开」打开过文献的项目
   （Mesa 写 `~/Library/Application Support/ccode/helper-context.json` 告知 helper）。

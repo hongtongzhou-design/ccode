@@ -108,8 +108,13 @@ fn match_pending(
     let in_window: Vec<usize> = pendings
         .iter()
         .enumerate()
+        // 时钟偏移 fail-closed（2026-09-17 修正）：opened_at 在未来（重启回拨/跨进程
+        // 落盘时间戳漂移）时 duration_since 报 Err——旧 unwrap_or(ZERO) 把它当
+        // 「刚打开」永久留在窗内；一律按出窗处理
         .filter(|(_, p)| {
-            now.duration_since(p.opened_at).unwrap_or(Duration::ZERO) <= CATCH_WINDOW
+            now.duration_since(p.opened_at)
+                .map(|d| d <= CATCH_WINDOW)
+                .unwrap_or(false)
         })
         .map(|(i, _)| i)
         .collect();
@@ -224,8 +229,8 @@ pub async fn inst_browser_open(
                 q.retain(|p| {
                     std::time::SystemTime::now()
                         .duration_since(p.opened_at)
-                        .unwrap_or(Duration::ZERO)
-                        < PENDING_TTL
+                        .map(|d| d < PENDING_TTL)
+                        .unwrap_or(false)
                 });
                 // 同一篇重复「浏览器打开」：刷新时间戳，不追加（防窗口内出现
                 // 同 URL 多条、白占多条名额）
@@ -240,7 +245,12 @@ pub async fn inst_browser_open(
                         project_root: root.clone(),
                         title_norm: crate::lit_watch::normalize_title(title),
                         title: title.to_string(),
-                        doi: doi.clone().unwrap_or_default(),
+                        // 前端给到的可能是 doi.org 链接 / doi: 前缀 / 带句读——归一成
+                        // 裸 DOI 再存（MDPI 编号归一按 10.3390/ 前缀剥，喂 URL 永不命中）
+                        doi: doi
+                            .as_deref()
+                            .and_then(crate::inst_access::doi_from_url)
+                            .unwrap_or_default(),
                         open_url: target.clone(),
                         opened_at: now,
                     });
@@ -273,7 +283,16 @@ fn ensure_watcher(app: &tauri::AppHandle) -> Result<(), String> {
     {
         return Ok(());
     }
-    let dir = downloads_dir()?;
+    // 闩锁纪律（2026-09-17 修正）：swap 置 true 之后任何提前返回都必须复位，
+    // 否则一次瞬时失败（如定位不到下载目录）会把「单实例」永久占死——
+    // 后续「在浏览器打开」全被 Ok(()) 假成功吞掉，再无人监听
+    let dir = match downloads_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            WATCHER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+            return Err(e);
+        }
+    };
     // 快照既有 PDF：后续事件里命中快照的一律跳过
     let mut snap: HashMap<std::ffi::OsString, u64> = HashMap::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -302,10 +321,13 @@ fn ensure_watcher(app: &tauri::AppHandle) -> Result<(), String> {
     }
     let app = app.clone();
     let dir_disp = dir.display().to_string();
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("download-inbox".into())
         .spawn(move || watcher_loop(app, dir))
-        .map_err(|e| format!("启动收货监听失败: {e}"))?;
+    {
+        WATCHER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+        return Err(format!("启动收货监听失败: {e}"));
+    }
     dinbox_log(&format!("监听已启动: {dir_disp}"));
     Ok(())
 }
@@ -343,8 +365,8 @@ fn watcher_loop(app: tauri::AppHandle, dir: PathBuf) {
                 q.retain(|p| {
                     std::time::SystemTime::now()
                         .duration_since(p.opened_at)
-                        .unwrap_or(Duration::ZERO)
-                        < PENDING_TTL
+                        .map(|d| d < PENDING_TTL)
+                        .unwrap_or(false)
                 });
                 if q.len() != before {
                     save_pendings(&q);
@@ -455,8 +477,8 @@ fn consider_file(app: &tauri::AppHandle, path: &Path) {
                     .filter(|p| {
                         std::time::SystemTime::now()
                             .duration_since(p.opened_at)
-                            .unwrap_or(Duration::ZERO)
-                            <= CATCH_WINDOW
+                            .map(|d| d <= CATCH_WINDOW)
+                            .unwrap_or(false)
                     })
                     .count()
             ));
@@ -563,6 +585,24 @@ mod tests {
         let q = vec![pending("Old Paper", CATCH_WINDOW + Duration::from_secs(5))];
         assert_eq!(
             match_pending(&q, "Old Paper", std::time::SystemTime::now()),
+            None
+        );
+    }
+
+    #[test]
+    fn future_opened_at_is_out_of_window() {
+        // 时钟偏移/跨进程落盘时间戳漂移导致 opened_at 在未来：fail-closed 出窗，
+        // 不当「刚打开」永久留在窗内（2026-09-17 修正的回归钉）
+        let q = vec![PendingCatch {
+            project_root: "/proj".into(),
+            title_norm: crate::lit_watch::normalize_title("Future Paper"),
+            title: "Future Paper".into(),
+            doi: String::new(),
+            open_url: "https://doi.org/10.1/x".into(),
+            opened_at: std::time::SystemTime::now() + Duration::from_secs(300),
+        }];
+        assert_eq!(
+            match_pending(&q, "Future Paper", std::time::SystemTime::now()),
             None
         );
     }

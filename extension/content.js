@@ -2,20 +2,23 @@
 // 设计原则（总思路「让真实浏览器干浏览器的事」）：出版商看到的是真实登录用户
 // 的正常页内请求，不触发任何风控分支；扩展只做「取字节 → 送 Mesa」。
 // 检测：citation_doi meta（有才是文献页）→ 右下角「存到 Mesa」按钮；
-// 取 PDF 地址（与 Mesa 内嵌窗脚本同口径的三级来源，2026-09-17 补 SD 分型）：
-//   ① citation_pdf_url meta（多数出版商）；
-//   ② 唯一 pdfish <a>（多链不猜）→ pdfish 内嵌（阅读器 iframe/object/embed）；
-//   ③ ScienceDirect：不放 citation_pdf_url、链接是 PII 路径不含 DOI、View PDF
-//     是 JS 按钮——#pdfLink → 内嵌 JSON pdfDownload.urlMetadata（token 直链）→
-//     按 PII 构造 /pdfft?download=true（Zotero 适配器实证顺序）；
-// fetch(credentials) → %PDF- 魔数 → base64 → background → native messaging →
-// mesa_helper → save_paper_bytes 落当前项目 papers/。
+// 取 PDF 地址（2026-09-17 与 Zotero 适配器对齐：SD 专用链整页先于通用启发式）：
+//   ① citation_pdf_url meta（多数出版商；直接信，%PDF- 魔数兜底——/pdf 无点
+//     结尾的 MDPI/IOP 形态曾被正则误杀）；
+//   ② ScienceDirect 文章页整页走专用链：#pdfLink → 内嵌 JSON pdfDownload.
+//     urlMetadata（token 直链）→ 内嵌阅读器 → 按 PII 构造 /pdfft?download=true
+//     （SD 页内唯一 pdfish 链常是补充材料，通用单链采用会误收）；
+//   ③ 通用启发式：DOI 命中链 → 唯一 pdfish <a>（多链不猜）→ pdfish 内嵌；
+// fetch(credentials)（跨源被 CORS 拦则回退后台代取）→ %PDF- 魔数 → base64 →
+// background → native messaging → mesa_helper → save_paper_bytes 落当前项目 papers/。
 
 (function () {
   if (window.__mesaExtLoaded) return;
   window.__mesaExtLoaded = 1;
 
-  var PDFISH = /\.pdf(\?|#|$)|\/pdf\/|pdfft|pdfdirect|getpdf|articlepdf|stamp\.jsp|\/doi\/epdf\//i;
+  // 2026-09-17 修正：\/pdf\/ 收窄成 \/pdf(\/|\?|#|$)——MDPI/IOP 的 citation_pdf_url
+  // 形如 …/22/1/1/pdf?version=…（无点、问号结尾），旧式会被误杀
+  var PDFISH = /\.pdf(\?|#|$)|\/pdf(\/|\?|#|$)|pdfft|pdfdirect|getpdf|articlepdf|stamp\.jsp|\/doi\/epdf\//i;
 
   function pageDoi() {
     var m = document.querySelector('meta[name="citation_doi"], meta[name="dc.Identifier"]');
@@ -44,19 +47,21 @@
     } catch (e) {}
   }
 
-  // ScienceDirect 三级取链（与 Mesa 内嵌窗 mesaSdPdfUrl 同口径）
-  function sdPdfUrl() {
+  // ScienceDirect 三级取链（与 Mesa 内嵌窗 mesaSdPdfUrl 同口径）；strict = 只认
+  // 高置信信号（#pdfLink / token 直链），构造式兜底由调用方收尾
+  function sdPdfUrl(strict) {
     var m = location.pathname.match(/^\/science\/article\/(?:abs\/)?pii\/([^/?#]+)/i);
     if (!m) return null;
     try {
       var pl = document.getElementById('pdfLink');
       if (pl && pl.href && pl.href !== '#' && PDFISH.test(pl.href)) return pl.href;
     } catch (e) {}
-    try {
-      var scripts = document.querySelectorAll('script[type="application/json"]');
-      for (var i = 0; i < scripts.length; i++) {
-        var t = scripts[i].textContent || '';
-        if (t.indexOf('pdfDownload') < 0) continue;
+    var scripts = document.querySelectorAll('script[type="application/json"]');
+    for (var i = 0; i < scripts.length; i++) {
+      var t = scripts[i].textContent || '';
+      if (t.indexOf('pdfDownload') < 0) continue;
+      // 单个 script 解析失败只跳过它（截断 JSON / 非 JSON 误命中），不弃全扫
+      try {
         var data = JSON.parse(t);
         var um = data && data.article && data.article.pdfDownload
           && data.article.pdfDownload.urlMetadata;
@@ -66,15 +71,44 @@
             + '?md5=' + encodeURIComponent(um.queryParams.md5)
             + '&pid=' + encodeURIComponent(um.queryParams.pid);
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
+    if (strict) return null;
     return location.origin + '/science/article/pii/' + m[1] + '/pdfft?download=true';
+  }
+
+  // SD 文章页判定（最窄分支纪律：只认 /science/article/(abs/)?pii/）
+  function isSdArticle() {
+    return /^\/science\/article\/(?:abs\/)?pii\/[^/?#]+/i.test(location.pathname);
+  }
+
+  // 内嵌阅读器扫描（iframe/object/embed 里的 pdfish 地址）
+  function embeddedPdf() {
+    var ems = document.querySelectorAll('iframe[src], object[data], embed[src]');
+    for (var k = 0; k < ems.length; k++) {
+      var s = ems[k].src || ems[k].data || '';
+      if (s && PDFISH.test(s)) return fixPdfUrl(s);
+    }
+    return null;
   }
 
   function pdfUrl() {
     if (isPdfPage()) return location.href;
+    // ① 站方声明的 citation_pdf_url 直接信（不再过 PDFISH——/pdf 无点结尾等形态
+    // 曾被误杀）；拿到的是不是 PDF 由 %PDF- 魔数兜底校验
     var m = document.querySelector('meta[name="citation_pdf_url"]');
-    if (m && m.content && PDFISH.test(m.content)) return fixPdfUrl(m.content);
+    if (m && m.content) return fixPdfUrl(m.content);
+    // ② ScienceDirect 文章页整页走专用链，不进通用启发式（Zotero 适配器顺序，
+    // 2026-09-17 对齐）：SD 页内 pdfish 锚链常是补充材料，通用单链采用会误收。
+    // 顺序 = #pdfLink/token 直链 → 内嵌阅读器 → PII 构造兜底
+    if (isSdArticle()) {
+      var sdt = sdPdfUrl(true);
+      if (sdt) return sdt;
+      var em = embeddedPdf();
+      if (em) return em;
+      return sdPdfUrl(false);
+    }
+    // ③ 通用启发式：DOI 命中链 → 唯一 pdfish 链（多链不猜）→ pdfish 内嵌
     var as = document.querySelectorAll('a[href]');
     var hits = [];
     var seen = {};
@@ -86,12 +120,7 @@
       if (!seen[h]) { seen[h] = 1; hits.push(h); }
     }
     if (hits.length === 1) return hits[0];
-    var ems = document.querySelectorAll('iframe[src], object[data], embed[src]');
-    for (var k = 0; k < ems.length; k++) {
-      var s = ems[k].src || ems[k].data || '';
-      if (s && PDFISH.test(s)) return fixPdfUrl(s);
-    }
-    return sdPdfUrl();
+    return embeddedPdf();
   }
 
   function looksLikePdf(b) {
@@ -115,15 +144,33 @@
     setTimeout(function () { btn.textContent = '存到 Mesa'; btn.style.opacity = '1'; }, 4000);
   }
 
+  // 取字节：页内 fetch 优先（带真实会话，设计主路径）；跨源被 CORS 拦下时回退
+  // 请后台 service worker 代取——MV3 起内容脚本 fetch 受页面 CORS 约束，
+  // host_permissions 只豁免后台（Cookie 口径可能不同，尽力而为的兜底）
+  async function fetchBytes(u) {
+    try {
+      var r = await fetch(u, { credentials: 'include' });
+      if (!r.ok) throw new Error('站点没给文件（HTTP ' + r.status + '）');
+      return new Uint8Array(await r.arrayBuffer());
+    } catch (e) {
+      var sw = await chrome.runtime.sendMessage({ kind: 'mesa-fetch-url', url: u });
+      if (!sw || !sw.ok) throw e;
+      var s = atob(sw.bytesB64 || '');
+      var b = new Uint8Array(s.length);
+      for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
+      return b;
+    }
+  }
+
   async function save() {
+    if (!btn) return; // 图标转发等无按钮场景的保险（2026-09-17：btn 为 null 时
+    // 旧代码在 btn.disabled 处直接 TypeError，且吞在 unhandled rejection 里）
     btn.disabled = true;
     btn.textContent = '取 PDF 中…';
     try {
       var u = pdfUrl();
       if (!u) { status('这页没检出 PDF 链接', false); return; }
-      var r = await fetch(u, { credentials: 'include' });
-      if (!r.ok) { status('站点没给文件（HTTP ' + r.status + '）', false); return; }
-      var bytes = new Uint8Array(await r.arrayBuffer());
+      var bytes = await fetchBytes(u);
       if (!looksLikePdf(bytes)) { status('拿到的不是 PDF（未订阅？）', false); return; }
       btn.textContent = '传输中…（' + Math.round(bytes.length / 1024) + ' KB）';
       var reply = await chrome.runtime.sendMessage({
@@ -133,8 +180,12 @@
         url: location.href,
         bytesB64: b64(bytes)
       });
-      if (reply && reply.ok) status('✓ 已存进 papers/：' + (reply.saved || ''), true);
-      else status('✗ ' + ((reply && reply.error) || 'Mesa 未响应'), false);
+      if (reply && reply.ok) {
+        status('✓ 已存进 papers/：' + (reply.saved || '')
+          + (reply.project ? '（项目 ' + reply.project + '）' : ''), true);
+      } else {
+        status('✗ ' + ((reply && reply.error) || 'Mesa 未响应'), false);
+      }
     } catch (e) {
       status('✗ 取 PDF 失败：' + (e && e.message ? e.message : e), false);
     } finally {
@@ -157,11 +208,18 @@
     document.body.appendChild(btn);
   }
 
-  // 工具栏图标点击（background 转发）：等同按一次页内按钮
+  // 工具栏图标点击（background 转发）：等同按一次页内按钮。图标是按需入口，
+  // 页面可能还没轮到 ensureButton 周期——先补一次；仍无按钮（既无 citation_doi
+  // 也不是 PDF 页）如实回失败，不再假成功
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.kind === 'mesa-save-from-icon') {
-      save();
-      sendResponse({ ok: true });
+      ensureButton();
+      if (btn) {
+        save();
+        sendResponse({ ok: true });
+      } else {
+        sendResponse({ ok: false, error: '这页没检出可保存的文献' });
+      }
     }
     return false;
   });

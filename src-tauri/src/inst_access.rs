@@ -763,6 +763,16 @@ const LOGIN_INIT_SCRIPT: &str = r#"
       var mu = mesaFixPdfUrl(m.content);
       if (mesaPdfRe.test(mu)) return mu;
     }
+    // SD 文章页整页走专用链，不进通用启发式（2026-09-17 与扩展 content.js /
+    // Zotero 适配器顺序对齐）：SD 页内 pdfish 锚链常是补充材料，通用单链采用会
+    // 误收。顺序 = #pdfLink/token 直链 → 内嵌阅读器 → PII 构造兜底
+    if (mesaIsSdArticle()) {
+      var sdt = mesaSdPdfUrl(true);
+      if (sdt) return sdt;
+      var em = mesaEmbeddedPdf();
+      if (em) return em;
+      return mesaSdPdfUrl(false);
+    }
     var doi = mesaPageDoi();
     var as = document.querySelectorAll('a[href]');
     var distinct = {};
@@ -775,17 +785,26 @@ const LOGIN_INIT_SCRIPT: &str = r#"
       if (!distinct[h]) { distinct[h] = 1; onlyLink = h; }
     }
     // 第二遍（2026-09-16）：PII/编号式出版商的 PDF 链接不含 DOI 前缀（RSC
-    // articlepdf 只有 DOI 后缀、SD 是 PII、IEEE 是 arnumber）——本页是文章页
+    // articlepdf 只有 DOI 后缀、IEEE 是 arnumber）——本页是文章页
     // （有 citation_doi）且全文只此一条 PDF 链接（列表/检索页必然多条）时采用
     if (onlyLink && Object.keys(distinct).length === 1) return onlyLink;
-    // 站方阅读器（SD View PDF 弹层等）：真 PDF 常以内嵌 iframe/object 呈现——
-    // 取内嵌地址供 fetch+分片回传（2026-09-16 用户拍板：View PDF 不拦、进阅读器取）
+    // 站方阅读器：真 PDF 常以内嵌 iframe/object 呈现——取内嵌地址供 fetch+分片
+    // 回传（2026-09-16 用户拍板：View PDF 不拦、进阅读器取）
+    return mesaEmbeddedPdf();
+  }
+  // SD 文章页判定（最窄分支纪律：只认 /science/article/(abs/)?pii/，期刊页/
+  // 检索页不构造）
+  function mesaIsSdArticle() {
+    return /^\/science\/article\/(?:abs\/)?pii\/[^/?#]+/i.test(location.pathname);
+  }
+  // 内嵌阅读器扫描（iframe/object/embed 里的 pdfish 地址）
+  function mesaEmbeddedPdf() {
     var ems = document.querySelectorAll('iframe[src], object[data], embed[src]');
     for (var k = 0; k < ems.length; k++) {
       var s = ems[k].src || ems[k].data || '';
       if (s && mesaPdfRe.test(s)) return mesaFixPdfUrl(s);
     }
-    return mesaSdPdfUrl();
+    return null;
   }
   function mesaSuggestName(u) {
     try {
@@ -824,18 +843,22 @@ const LOGIN_INIT_SCRIPT: &str = r#"
   // ① 页面自己的 #pdfLink（href 是站方链接，可能是中间页——verifiedGrab 会跟跳）；
   // ② 内嵌 JSON 的 urlMetadata（机构网络预加载，token 直链）；③ 按 PII 构造 pdfft
   // （无 token 实测也常直出 PDF）。EZproxy 改写域同样成立——全部基于 location.origin
-  function mesaSdPdfUrl() {
+  // strict = 只认高置信信号（#pdfLink / token 直链），不做 PII 构造兜底——
+  // 构造链排在通用内嵌扫描之后由调用方收尾（阅读器态真 PDF 就内嵌在 iframe，
+  // token 直链优先于构造链）
+  function mesaSdPdfUrl(strict) {
     var m = location.pathname.match(/^\/science\/article\/(?:abs\/)?pii\/([^/?#]+)/i);
     if (!m) return null;
     try {
       var pl = document.getElementById('pdfLink');
       if (pl && pl.href && pl.href !== '#' && mesaPdfRe.test(pl.href)) return pl.href;
     } catch (e) {}
-    try {
-      var scripts = document.querySelectorAll('script[type="application/json"]');
-      for (var i = 0; i < scripts.length; i++) {
-        var t = scripts[i].textContent || '';
-        if (t.indexOf('pdfDownload') < 0) continue;
+    var scripts = document.querySelectorAll('script[type="application/json"]');
+    for (var i = 0; i < scripts.length; i++) {
+      var t = scripts[i].textContent || '';
+      if (t.indexOf('pdfDownload') < 0) continue;
+      // 单个 script 解析失败只跳过它（截断 JSON / 非 JSON 误命中），不弃全扫
+      try {
         var data = JSON.parse(t);
         var um = data && data.article && data.article.pdfDownload
           && data.article.pdfDownload.urlMetadata;
@@ -845,8 +868,9 @@ const LOGIN_INIT_SCRIPT: &str = r#"
             + '?md5=' + encodeURIComponent(um.queryParams.md5)
             + '&pid=' + encodeURIComponent(um.queryParams.pid);
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
+    if (strict) return null;
     return location.origin + '/science/article/pii/' + m[1] + '/pdfft?download=true';
   }
   // 「中间页」判定与解析（2026-09-16 泛化，不限 SD）：不少出版商的 pdfish 链接

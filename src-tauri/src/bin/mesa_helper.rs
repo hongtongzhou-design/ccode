@@ -13,7 +13,9 @@ fn read_frame(stdin: &mut impl Read) -> Option<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stdin.read_exact(&mut len_buf).ok()?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len == 0 || len > 96 * 1024 * 1024 {
+    // 60MB PDF ≈ 80MB base64 + JSON 包裹；上限 192MB 让「超过 60MB」的解码后
+    // 校验有机会回话（上限卡死 = 读帧失败退出循环，浏览器只见断连没有原因）
+    if len == 0 || len > 192 * 1024 * 1024 {
         return None;
     }
     let mut buf = vec![0u8; len];
@@ -89,7 +91,15 @@ fn handle(msg: &serde_json::Value) -> serde_json::Value {
     let doi = msg.get("doi").and_then(|v| v.as_str()).unwrap_or("");
     let hint = if !title.trim().is_empty() { title } else { doi };
     match ccode_lib::helper_ingest(&root, hint, &bytes) {
-        Ok(saved) => serde_json::json!({"ok": true, "saved": saved}),
+        Ok(saved) => {
+            // 回执带项目名（2026-09-17）：helper-context 是上次「在浏览器打开」留下的
+            // 语境，可能已过期——入库落进哪个项目必须当场可见，错存能立刻发现
+            let project = std::path::Path::new(&root)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            serde_json::json!({"ok": true, "saved": saved, "project": project})
+        }
         Err(e) => serde_json::json!({"ok": false, "error": e}),
     }
 }
