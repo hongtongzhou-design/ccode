@@ -970,10 +970,24 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   }, [visible, activeSection]);
   useEffect(() => {
     if (!visible) return;
-    const un = listen("inst-session-captured", () => {
-      setNotice("机构登录会话已保存，可以在文献清单里逐篇「获取全文」了");
-      void loadInstStatus();
-    });
+    const un = listen<{ credible?: boolean; empty?: boolean }>(
+      "inst-session-captured",
+      (e) => {
+        // 入口页一打开的 pre-auth Cookie 也算「保存」，但真取全文只会报会话过期——
+        // 如实区分（2026-09-17 审计：旧文案在用户还没登录时就说「可以取全文了」）；
+        // 空罐事件是窗里全部登出，文案不得再说「检测到入口会话」
+        if (e.payload?.empty) {
+          setNotice("登录窗里的会话已全部退出，本地保存的会话已同步清空");
+        } else {
+          setNotice(
+            e.payload?.credible === false
+              ? "已检测到入口页会话——完成机构登录后会自动更新，届时才能逐篇「获取全文」"
+              : "机构登录会话已保存，可以在文献清单里逐篇「获取全文」了",
+          );
+        }
+        void loadInstStatus();
+      },
+    );
     return () => {
       void un.then((f) => f());
     };
@@ -1050,13 +1064,16 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  /** 安装浏览器桥（通道 C）：写 NativeMessagingHosts 清单；扩展在仓库 extension/ 目录制 */
+  /** 安装浏览器桥（通道 C）：写 NativeMessagingHosts 清单 + 把扩展目录就位到
+   *  配置目录（结果里带实际路径——装 DMG 的用户没有仓库，不能再指仓库目录） */
   async function installBrowserBridge() {
     setInstBusy("bridge");
     setError(null);
     try {
       const results = await invoke<string[]>("install_browser_bridge");
-      setNotice(`浏览器桥：${results.join("；")}。接着在 Chrome/Edge 的扩展页开「开发者模式」→「加载已解压的扩展程序」选 Mesa 仓库的 extension/ 目录即可`);
+      setNotice(
+        `浏览器桥：${results.join("；")}。只支持 Chrome/Edge 等 Chromium 系浏览器（Safari/Firefox 装不了扩展，用「浏览器打开」+90 秒自动收货即可）`,
+      );
     } catch (e) {
       setError(String(e));
     } finally {
@@ -2534,14 +2551,28 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             }}
             onBlur={() => {
               draftDirty.current.delete("institutionalPrefix");
-              void patch({ institutionalPrefix: institutionalPrefix.trim() });
+              const v = institutionalPrefix.trim();
+              // 非法即拒绝持久化（终检 #6 残留：缺 scheme 的前缀此前照样写进
+              // settings.json，只靠事后红字提示；现在保存口就拦）
+              if (v && !/^https?:\/\//i.test(v)) return;
+              void patch({ institutionalPrefix: v });
             }}
             onKeyDown={(e) => {
               if (e.key !== "Enter") return;
               draftDirty.current.delete("institutionalPrefix");
-              void patch({ institutionalPrefix: institutionalPrefix.trim() });
+              const v = institutionalPrefix.trim();
+              if (v && !/^https?:\/\//i.test(v)) return;
+              void patch({ institutionalPrefix: v });
             }}
           />
+          {/* 口径分裂修正（2026-09-17 审计）：缺 scheme 的前缀会被通道加载静默
+              丢弃——以前状态页报「已配置」、按钮亮着，取全文却永远走不通 */}
+          {instStatus?.prefixInvalid && (
+            <p className="text-micro text-err-text">
+              前缀不是合法的 http(s) 地址——机构通道当前没有在使用它，请补全
+              scheme（如上例以 https:// 开头）
+            </p>
+          )}
         </Row>
         <Row
           label="机构登录"
@@ -2584,6 +2615,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               <span>
                 会话：{instSessionLabel(instStatus)}
                 {instStatus?.prefixConfigured ? ` · 前缀 ${instStatus.prefixHost}` : ""}
+                {instStatus?.capturedFrom ? ` · 入口 ${instStatus.capturedFrom}` : ""}
               </span>
               {instStatus?.sessionPresent && (
                 <button
@@ -2622,9 +2654,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 onClick={() => void installBrowserBridge()}
                 disabled={instBusy !== null}
                 className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
-                title="装后到 Chrome/Edge 扩展页（开发者模式）加载 Mesa 仓库的 extension/ 目录，文献页即有「存到 Mesa」一键落 papers/"
+                title="实验功能：安装后到 Chrome/Edge 扩展页（开发者模式）「加载已解压的扩展程序」，选安装结果里给出的扩展目录（已自动就位到本机配置目录），文献页即有「存到 Mesa」一键落 papers/。日常用「浏览器打开」自动收货即可，不必依赖此按钮"
               >
-                {instBusy === "bridge" ? "安装中…" : "安装浏览器桥"}
+                {instBusy === "bridge" ? "安装中…" : "安装浏览器桥（实验）"}
               </button>
             </div>
           </div>
