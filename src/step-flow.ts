@@ -80,6 +80,8 @@ export function buildStepFlow(args: {
   pendingDecisions?: number;
   /** 本步要问的科研工具。稿件载体是开工前提，排在 agent 前；其余不挡主动作，沉到可选区。 */
   toolAsks?: Array<{ key: string; label: string }>;
+  /** 精读/投稿步：保存进项目之后出现「导入到 EndNote」，不写进 TASK.md，点一下才生成。 */
+  endnoteExport?: boolean;
 }): StepFlow {
   const { step, states, hasDraft, runStatus } = args;
   const pendingDecisions = args.pendingDecisions ?? 0;
@@ -169,10 +171,15 @@ export function buildStepFlow(args: {
     });
   }
   // 5. after 人工事项（agent 干完才轮到人）。
-  //    v3.97 起**一律进主干**（用户拍板：「补充付费墙文献」这类收尾项就是流程的第三步，
-  //    沉到可选分隔线下会让人觉得它不存在）；optional 的仍带「可选」徽标且不参与
-  //    「当前节点」判定（见下方 currentKey），不会卡住流程指示
+  //    付费墙这类收尾进主干、排在评审前（v3.97：沉到可选区会让人以为不存在）。
+  //    EndNote 交差依赖「保存进项目」后的 xml，排在评审后、可选区，免得开工前像要先勾。
+  const afterMain: typeof states = [];
+  const afterEndnote: typeof states = [];
   for (const h of humans("after")) {
+    if (h.optional && isEndnoteTaskTitle(h.title)) afterEndnote.push(h);
+    else afterMain.push(h);
+  }
+  for (const h of afterMain) {
     nodes.push({
       key: `human:${h.title}`,
       kind: "human",
@@ -197,6 +204,33 @@ export function buildStepFlow(args: {
           : undefined,
     done: runStatus === "done",
   });
+  for (const h of afterEndnote) {
+    if (runStatus === "pending") continue;
+    nodes.push({
+      key: `human:${h.title}`,
+      kind: "human",
+      section: "optional",
+      label: stripOptionalTitlePrefix(h.title),
+      hint: runStatus === "done"
+        ? "保存进项目之后，打开导入文件。"
+        : "先保存进项目，才会有导入文件。",
+      done: h.done,
+      human: h,
+    });
+  }
+  if (args.endnoteExport && runStatus !== "pending" && afterEndnote.length === 0) {
+    nodes.push({
+      key: "endnote-export",
+      kind: "human",
+      section: "optional",
+      label: "导入到 EndNote",
+      hint: runStatus === "done"
+        ? "点「生成RIS并导入」后，把下载里的 Mesa-EndNote-import.ris 拖到 EndNote 图标上（Dock 或应用程序，不要拖进窗口）。导入完再勾选。"
+        : "先保存进项目，再生成RIS并导入。",
+      done: false,
+      skipCurrent: true,
+    });
+  }
   for (const ask of (args.toolAsks ?? []).filter((item) => item.key !== "manuscript")) {
     nodes.push({
       key: `tool:${ask.key}`,
@@ -233,6 +267,10 @@ export function isPaywallTaskTitle(title: string): boolean {
 
 export function isPendingConfirmTaskTitle(title: string): boolean {
   return title.includes("待确认");
+}
+
+export function isEndnoteTaskTitle(title: string): boolean {
+  return title.includes("EndNote");
 }
 
 /** to-fetch.md 的条目计数——与 parseToFetchItems 同一口径（单一出处）：

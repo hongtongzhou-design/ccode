@@ -63,6 +63,20 @@ export function cwdBasename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
+/** 该工作区还有活着的 Agent 进程（不是回落 shell）。步骤不得因此被 git ahead 打成待评审。 */
+export function workspaceHasLiveAgent(
+  worktreePath: string | undefined,
+  inputs: readonly RunOverviewInput[],
+): boolean {
+  if (!worktreePath) return false;
+  const root = worktreePath.replace(/\\/g, "/").replace(/\/+$/, "");
+  return inputs.some((input) => {
+    if (!input.running || input.shell) return false;
+    const cwd = input.cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+    return cwd === root || cwd.startsWith(`${root}/`);
+  });
+}
+
 /** 「要你管」排序：待确认 > 工作中 > 其余 agent 运行中 > shell / 已退出。
  *  「已回复」（done）不占档——回合结束不阻塞决策，归入普通运行/退出档 */
 export function itemRank(input: RunOverviewInput): number {

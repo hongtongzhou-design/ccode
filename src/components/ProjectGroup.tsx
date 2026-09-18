@@ -36,11 +36,16 @@ import { RESOURCE_TYPE_LABELS, settingsForTemplateApply } from "../pipeline-pres
 import { startPipelineStep } from "../pipeline-start";
 import type { KickoffLaunch } from "../kickoff-launch";
 import { upsertLitSourceSection } from "../task-md-sections";
-import { isDecisionsOnly } from "../step-decisions";
+import { isTaskMdStub } from "../step-decisions";
 import { demoReadPaperResource } from "../step-flow";
 import { normSep } from "../path-utils";
 import { beginAskAi } from "./AskAiModal";
-import { runIdForPath, type RunOverviewInput } from "../run-overview";import type {
+import {
+  runIdForPath,
+  workspaceHasLiveAgent,
+  type RunOverviewInput,
+} from "../run-overview";
+import type {
   DiscoveredResourceDto,
   ZoteroLibraryDto,
   EnsureGitDto,
@@ -158,7 +163,6 @@ function StepperCell({
   circleLabel,
   circleDisabled,
   pulsing,
-  attention,
   selected,
   onCircleClick,
 }: {
@@ -169,8 +173,6 @@ function StepperCell({
   circleLabel: string;
   circleDisabled: boolean;
   pulsing: boolean;
-  /** 终端注意力点：confirm=待确认（warn 点）；null/缺省不显示 */
-  attention?: "confirm" | "done" | null;
   /** 聚焦选中（v3.70：点圆 = 下方只看这一步）：中性高亮环 */
   selected?: boolean;
   onCircleClick: () => void;
@@ -182,7 +184,7 @@ function StepperCell({
   return (
     <li className="flex min-w-0 items-center justify-center">
       <span
-        className="ccode-well relative shrink-0 px-[3px]"
+        className="ccode-well shrink-0 px-[3px]"
         onMouseEnter={showTip}
         onMouseLeave={hideTip}
         onFocus={showTip}
@@ -207,11 +209,6 @@ function StepperCell({
             } ${active ? "ring-2 ring-cta/50" : ""} ${selected ? "ring-2 ring-l1/70" : ""}`}
           />
         </button>
-        {attention === "confirm" && (
-          <span
-            className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-warn-text"
-          />
-        )}
         <HoverTip tip={tip} text={circleTitle} warn={circleWarn} />
       </span>
     </li>
@@ -236,7 +233,8 @@ function wsLastConfig(
   }
 }
 
-/** 步骤的终端注意力（步进器大圆角标）：cwd 落在工作区内的运行标签，confirm（待确认）优先于 done（已完成） */
+/** 步骤的终端注意力（流程线「已跑完」）：cwd 落在工作区内的运行标签，confirm 优先于 done。
+ *  Agent 进程还在跑时不把中途助手正文当成「已跑完」。 */
 function stepAttention(
   ws: WorkspaceDto | undefined,
   inputs: RunOverviewInput[],
@@ -248,7 +246,9 @@ function stepAttention(
     const cwd = normSep(input.cwd).replace(/\/+$/, "");
     if (cwd !== root && !cwd.startsWith(`${root}/`)) continue;
     if (input.attention === "confirm") return "confirm";
-    if (input.attention === "done") found = "done";
+    if (input.attention === "done" && !(input.running && !input.shell)) {
+      found = "done";
+    }
   }
   return found;
 }
@@ -294,6 +294,7 @@ function deriveStepStatus(
   workspaces: WorkspaceDto[],
   health: Record<string, WorkspaceHealthDto>,
   drift: Record<string, WorkspaceDriftDto>,
+  liveInputs: RunOverviewInput[] = [],
 ): { key: StepStatusKey; ws?: WorkspaceDto } {
   const ws = workspaces.find((w) => w.name === step.workspaceName);
   // 预置完成（示例课题检索步）：主仓已有产物、尚未建工作区 → 视为已完成。
@@ -307,6 +308,10 @@ function deriveStepStatus(
   const d = drift[ws.id];
   if (d?.canResolveMerge === true || h?.conflict === true) {
     return { key: "blocked", ws };
+  }
+  // Agent 还在跑：即使已经有待合并提交，也还是进行中，不能提前「去评审」
+  if (workspaceHasLiveAgent(ws.worktreePath, liveInputs)) {
+    return { key: "active", ws };
   }
   // 衔接工作区「已合并」规则：merged_at 置位且没有新的待合并提交
   if (ws.status === "active" && ws.mergedAt && h?.ahead === 0) {
@@ -978,7 +983,7 @@ export default function ProjectGroup({
           { projectRoot: project.path, stepName: s.name },
         );
         const raw = cur?.text?.trim() ?? "";
-        if (!raw || isDecisionsOnly(raw)) continue;
+        if (!raw || isTaskMdStub(raw)) continue;
         const nextText = upsertLitSourceSection(cur?.text ?? "", target);
         if (nextText !== cur?.text) {
           await invoke("write_task_draft", {
@@ -1255,15 +1260,21 @@ export default function ProjectGroup({
   const stepStatuses = useMemo(
     () =>
       (cfg?.steps ?? []).map((s) =>
-        deriveStepStatus(s, workspaces, health, drift),
+        deriveStepStatus(s, workspaces, health, drift, terminalRunInputs),
       ),
-    [cfg, workspaces, health, drift],
+    [cfg, workspaces, health, drift, terminalRunInputs],
   );
   /** 按索引取状态；越界回落现算（artifactsStep 等可能指向已删步骤） */
   const statusAt = (i: number) =>
     stepStatuses[i] ??
     (cfg?.steps[i]
-      ? deriveStepStatus(cfg.steps[i], workspaces, health, drift)
+      ? deriveStepStatus(
+          cfg.steps[i],
+          workspaces,
+          health,
+          drift,
+          terminalRunInputs,
+        )
       : null);
   /** 资源构成一句话（折叠态也让人知道里面有什么）：按类型计数，零资源时明说扫过了 */
   const resourceSummary = (() => {
@@ -1443,7 +1454,7 @@ export default function ProjectGroup({
     const i = cfg.steps.findIndex((s) => s.name === focusStepName);
     return i >= 0 ? describeStep(i) : null;
   })();
-  // 聚焦步骤的终端注意力（流程线 agent 节点「已跑完」提示用；大圆角标同一 stepAttention 口径）
+  // 聚焦步骤的终端注意力（流程线 agent 节点「已跑完」提示用）
   const focusAttention = stepAttention(
     focusDesc?.st.ws && focusDesc.st.ws.status === "active"
       ? focusDesc.st.ws
@@ -1751,8 +1762,6 @@ export default function ProjectGroup({
                       ? profiles.find((p) => p.id === last.profileId)
                       : undefined;
                     // 状态/目录/agent + 点击动作提示并入悬浮全文（白话双层），圆上只留状态色
-                    // 注意力角标：cwd 落在工作区内的终端标签有待确认/已完成时上点（confirm 优先）
-                    const attention = stepAttention(activeWs, terminalRunInputs);
                     // 点击 = 聚焦该步骤（下方卡片区只看这一步）；推进动作归流程线节点/卡片行/任务行
                     const circleTitle = [
                       `${step.name} · ${statusLabel}`,
@@ -1764,8 +1773,6 @@ export default function ProjectGroup({
                       last.agentId
                         ? `Agent：${last.agentId}${lastProfile ? ` / ${lastProfile.name}` : ""}`
                         : null,
-                      attention === "confirm" ? "终端：待你确认" : null,
-                      attention === "done" ? "终端：agent 已跑完" : null,
                       "点击在下方只看这一步",
                     ]
                       .filter(Boolean)
@@ -1785,7 +1792,6 @@ export default function ProjectGroup({
                         circleLabel={`${step.name}：${statusLabel}`}
                         circleDisabled={false}
                         pulsing={starting === i}
-                        attention={attention}
                         selected={selected}
                         onCircleClick={() => onCircleClick(i)}
                       />
@@ -2115,7 +2121,7 @@ export default function ProjectGroup({
                   {{
                     search: "让 agent 检索",
                     zotero: "我有 Zotero 库",
-                    folder: "我有一堆 PDF / 题录",
+                    folder: "我已有 PDF / 题录",
                   }[cfg.litSource?.trim() || "search"] ?? "让 agent 检索"}
                 </span>
                 <span className="text-micro text-l4" title="在流程线的「确定文献来源」里更改">

@@ -37,7 +37,7 @@ outputs: [papers/endnote-report.json]
 ### 1. 出库桥接（references.bib → EndNote）
 
 - 产出 `papers/endnote-import.xml`（EndNote XML 格式，EndNote 首选导入格式，字段保真最好；这是本技能主产物）：
-  - 最小字段集：ref-type（Journal Article=17，其余类型按 EndNote XML 对照表）、authors（`姓, 名` 逐作者一个 author 元素）、
+  - 最小字段集：ref-type（Journal Article=17，其余类型按 EndNote XML 对照表）、authors（`姓, 名` 逐作者一个 author 元素；「名 姃」无逗号源串（OpenAlex 等）自动翻转为末词作姓，末词为缩写（PubMed 风格 `Smith JM`）时首词作姓，已带逗号者不动；回流 .bib 输出保持源格式）、
     title、secondary-title（期刊名）、year、volume/number/pages、electronic-resource-num（DOI）、urls
   - 附件：项目 `papers/` 下已配对的 PDF 写进 `pdf-urls`（用 absolute file URL），导入后人工核对附件是否成功绑定，不能假定每个版本/路径都自动成功
   - 生成脚本放 `analysis/`（可复现、`main()` 入口）；bib 解析用现成库（如 Python bibtexparser），缺字段留空不编造

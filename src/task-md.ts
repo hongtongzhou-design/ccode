@@ -1,5 +1,5 @@
 import { litSourceSectionLines } from "./task-md-sections.ts";
-import { decisionPolicyText } from "./step-decisions.ts";
+import { decisionPolicyBlock } from "./step-decisions.ts";
 import { RESOURCE_TYPE_LABELS } from "./pipeline-presets.ts";
 import { effectiveProjectRules } from "./project-context.ts";
 import { stripOptionalTitlePrefix } from "./step-flow.ts";
@@ -45,7 +45,7 @@ export function renderTaskMd(
       "",
     );
   }
-  lines.push("## 决策暂停策略", decisionPolicyText(step.decisionMode), "");
+  lines.push("## 决策暂停策略", decisionPolicyBlock(step), "");
   const inputs = (step.inputs ?? []).map((x) => x.trim()).filter(Boolean);
   const optionalInputs = (step.optionalInputs ?? [])
     .map((x) => x.trim())
@@ -212,7 +212,7 @@ export function renderTaskMd(
   lines.push(
     "",
     "## 收尾",
-    "完成时把本步源稿、脚本与清单全部 git 提交——不提交，系统会认为这一步仍在进行中。",
+    "达到完成标准后再把剩余源稿、脚本与清单全部提交——不提交，系统会认为这一步仍在进行中。中途提交只存档，停工门见上文「决策暂停策略」。",
     "派生产物只写本工作区产物目录（评审合并后自动进项目根对应目录）；文献 PDF 写项目根 papers/。绕开这两条（例如派生产物直写项目根）的产物属于未验收产物，不保证保留。",
   );
   return `${lines.join("\n")}\n`;

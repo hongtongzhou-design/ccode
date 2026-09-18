@@ -1,4 +1,5 @@
 import type { HumanTaskDto, ProjectStepDto } from "./types";
+import { KEEP_WORKING_CLAUSE } from "./step-decisions.ts";
 
 /**
  * 内置流水线模板库（§11.3 机制二、§11.4 P1b 首启引导轻量版）：
@@ -65,6 +66,18 @@ const MANUSCRIPT_FINALS = [
 /** 科研质量门复用文字，不增加编排层；报告状态不替代人的验收。 */
 const QUALITY_STATUS =
   "验收摘要放在本步主要报告开头（不另建报告）：① 回答了什么；② 关键证据/复现入口；③ 尚未验证；④ 影响结论的未决问题；⑤ 需要人决定什么。摘要引用正文位置，不抄长报告。质量状态与未决事项统一在此维护：已生成待审 / 有条件接受（仅可准备）/ 证据通过（限定范围）/ 阻塞；问题记责任人、影响、处置证据和复核人。Agent 不能代填人工批准；文件、Git 合并、final 名称不等于质量通过。关键真实性/方法/引用支持/授权缺口不能仅移入局限放行。数据/方法/来源改变时在原报告记失效文件、版本与重验结果，未经重验不得复用旧结论；无变化写无。\n";
+
+/** 精读步 TASK 合同。写法细节以 lit-notes 技能为准；此处堵住「每篇都有文件=完成」。 */
+const LIT_NOTES_WRITE =
+  "写法见 lit-notes 技能。叙述用中文，材料名/离子/电解液/方法缩写/图表编号等惯用英文原词保留，不强翻。" +
+  "禁止整段粘贴英文摘要或 PDF 抽取原文。未读完只在 notes/index.json 记 reviewStatus=pending、notePath 可空，禁止生成八段占位文件（文件存在会被标成已读）。" +
+  "可逆准备只含 PDF 改名、index 骨架、bib 对账、合法 OA 尝试，不包括批量生成笔记正文。" +
+  "「按摘要记」= 根据摘要消化来写并标「仅摘要」，不是贴英文。" +
+  "分批读写时每批已读的写真笔记、可中途 git 提交；提交后立刻继续：先写完已确认核心篇（有 PDF 的写精读），再按摘要写完非核心，不要每批停下来等人。" +
+  "pending 只留给待确认、或摘要和题录都不足以写笔记的篇，不是「先写一批再汇报」的许可。\n";
+
+const LIT_NOTES_INDEX_RECORDS =
+  "machine:records:notes/index.json::id,bibKey,fulltextStatus,reviewStatus";
 
 const QUESTION_GATE =
   "G1 问题与可行性：在候选报告中比较回答后改变什么认识、最邻近证据/反例、可区分解释、资料依赖、总预算和最小可回答范围、继续/缩题/停止判据。允许负结果与证据不足，不以热点/gap 数量选题。先给决策摘要：待决问题→可行方案→推荐及证据位置→代价/不确定性→等待边界；无合理备选也说明，不凑选项。未回复只做可逆摸底，不锁定问题；不会判断交导师/方法专家。\n";
@@ -177,13 +190,14 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     workspaceName: "lit-notes",
     brief:
       "输入：上一步产物 papers/included.md 与 papers/to-fetch.md（已随 main 合并在本工作区内）。全程按 lit-notes 技能执行。\n" +
-      "1. 先整理人工补投：项目根 papers/（见上方「项目根」，含未进本工作区的文件，按绝对路径读）中命名不符「作者年份-短标题.pdf」的 PDF，对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n" +
-      "2. 精读范围先给依据：**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇（列篇目）其余按摘要记」写进 .ccode/help-wanted.md 问用户一句**（附兜底：未回复可整理已有资料；不默认排除关键全文或降低核心证据要求），写完仅推进无依赖、可逆的准备；\n" +
-      "3. 全文来源优先级（写死）：「项目资源」已登记 PDF 绝对路径（只读，不改名）→ 项目根 papers/ 已有 PDF（含人工补投）→ 开放获取补下到项目根 papers/（arXiv/PMC/作者主页 preprint）→ 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」，不得装作读过全文；\n" +
-      "4. 每篇产出 notes/<序号-短标题>.md，有实际 PDF 时开头记来源锚点行「> 来源 PDF：<项目内相对路径或已登记只读资源绝对路径>.pdf」，无 PDF 改记 DOI/URL，不造虚假路径（沉浸阅读区靠它认回笔记不另建重复），固定结构按 lit-notes 技能八段：一句话总结（≤50字）/ 研究问题 / 方法（附可复现细节）/ 主要结果（区分观察结果的支持范围与作者推测，注页码+表/图编号）/ 局限（作者自述与本笔记识别分开列）/ 可引用点（原文关键句+页码或段落位置）/ 与本课题的关系 / 疑问与待跟进（待跟进引用同时追加 papers/to-fetch.md）；\n" +
+      LIT_NOTES_WRITE +
+      "1. 先整理人工补投：项目根 papers/（见上方「项目根」，含未进本工作区的文件，按绝对路径读）中命名不符「作者年份-短标题.pdf」的 PDF，对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 处理已确认纳入项（清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n" +
+      "2. 精读范围先给依据：**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇（列篇目）其余按摘要记」写进 .ccode/help-wanted.md 问用户一句**（附兜底：未回复只做可逆准备；不默认排除关键全文或降低核心证据要求）；\n" +
+      "3. 全文来源优先级（写死）：「项目资源」已登记 PDF 绝对路径（只读，不改名）→ 项目根 papers/ 已有 PDF（含人工补投）→ 开放获取补下到项目根 papers/（arXiv/PMC/作者主页 preprint）→ 仍缺按摘要写笔记并标注「仅摘要·待全文」，不得装作读过全文；\n" +
+      "4. 用户确认的核心篇：有 PDF 的读正文按技能八段写笔记。上下文写不下可分批，提交后立刻继续，直到确认过的核心篇（有 PDF 的）都写成精读，并且非核心也按摘要写完短记。index pending 只留给待确认或无法按摘要写的篇。有实际 PDF 时笔记开头记来源锚点行「> 来源 PDF：<项目内相对路径或已登记只读资源绝对路径>.pdf」，无 PDF 改记 DOI/URL，不造虚假路径；\n" +
       "5. 每篇先按 DOI/版本/键匹配 references.bib，缺失才追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」，不得编造）；\n" +
       "6. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在项目根 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n" +
-      "完成标准：included.md 每篇都有对应笔记与 bib 条目，notes/index.json 与 included.json 全部 id 对齐，记录 notePath/bibKey/fulltextStatus/reviewStatus（含 pending 不冒充精读完成）；notes/ 与 references.bib 均已提交。\n" +
+      "完成标准：notes/index.json 与 included.json 全部 id 对齐（仅待确认或无法按摘要写的篇 notePath 可空）；已写笔记符合 lit-notes 写法；确认过的核心篇未写完、或已确认要按摘要记的非核心还没写完，则不得结束本轮等人，验收摘要写明剩余篇数，质量状态不得高于已生成待审。清单全有文件不等于完成。\n" +
       QUALITY_STATUS,
     inputs: ["papers/included.md", "papers/included.json", "papers/to-fetch.md"],
     optionalInputs: ["papers/*.pdf"],
@@ -192,21 +206,12 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "machine:count:notes/*.md>=1",
       "machine:file:references.bib",
       "machine:contains:papers/included.md::—",
-      "machine:records:notes/index.json::id,notePath,bibKey,fulltextStatus,reviewStatus",
+      LIT_NOTES_INDEX_RECORDS,
       "machine:same-ids:papers/included.json::notes/index.json",
     ],
     skills: ["lit-notes"],
     run: [],
-    humanTasks: [
-      {
-        title: "继续精读笔记（沉浸阅读区）",
-        guidance:
-          "验收后想补读或修正哪篇笔记：项目详情的产物清单、或终端页文件树里点开 notes/ 中那份 md →「⛶ 沉浸阅读」进三栏阅读区（笔记｜PDF｜Agent 并排，笔记可直接改，右栏 agent 也能改同一份）。改的是主仓里的笔记本身——改完到「改动」面板提交一下，后面的大纲/初稿步骤读到的就是你的修改版（主仓未提交的改动不进下一步工作区，开工弹层也会提醒）。",
-        target: "",
-        timing: "after",
-        optional: true,
-      },
-    ],
+    // 「继续精读笔记（沉浸阅读区）」已撤（2026-09-19）：说明书不是收尾活，入口在笔记/PDF 的「⛶ 沉浸阅读」。
     // 「精读力度怎么分」卡片已移除（v3.97，用户拍板）：力度要看到清单规模和全文到位率才定得了，
     // 开工前点卡片等于让人盲猜——与 v3.89 移除「纳入标准定多严」同一道理。
     // 改为 agent 粗读清单后带着数字经 help-wanted.md 按需问（见上方简报第 2 条）。
@@ -346,10 +351,12 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     role: "both",
     workspaceName: "lit-survey-gap",
     brief:
-      "输入：上一步的 papers/included.md、papers/to-fetch.md 与 references.bib。按 lit-notes 技能完成精读与笔记：先整理项目根 papers/ 里的人工补投并更新 to-fetch.md；已有 notes/ 先核对原文版本、全文状态和问题范围；有效则复用，变化则保留人写内容并更新受影响项。全文缺失时按摘要+可见元数据写笔记并标注「仅摘要·待全文」。\n" +
-      "**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇」写进 .ccode/help-wanted.md 问用户一句**（未回复仅做无依赖、可逆准备）。\n" +
-      "在笔记基础上按主题归纳研究现状写入 survey/literature.md，提炼有实质差别的候选研究问题（无合理备选可只留一个）并逐一分析现有工作的 gap，写入 survey/gap-analysis.md。先把候选、每个 gap 的证据与我建议的研究问题写入 .ccode/help-wanted.md 问用户一句（未回复只保留候选，不替人确定研究问题），写完只做无依赖、可逆的准备。\n" +
-      "完成标准：included.md 每篇都有对应笔记与 references.bib 条目；survey/literature.md 与 survey/gap-analysis.md 齐全；研究问题的候选/人批准状态与取舍理由可追溯；同步写 notes/index.json，与 included.json 的 id、笔记/bib/全文/复核状态对齐。\n" +
+      "输入：上一步的 papers/included.md、papers/to-fetch.md 与 references.bib。按 lit-notes 技能完成精读与笔记。\n" +
+      LIT_NOTES_WRITE +
+      "先整理项目根 papers/ 里的人工补投并更新 to-fetch.md；已有 notes/ 先核对原文版本、全文状态和问题范围；有效则复用，变化则保留人写内容并更新受影响项。全文缺失时按摘要写笔记并标注「仅摘要·待全文」。\n" +
+      "**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇」写进 .ccode/help-wanted.md 问用户一句**（未回复仅做可逆准备，不含批量生成笔记）。用户确认的核心篇有 PDF 的读正文写精读；其余按摘要写短记。index pending 只留给待确认或无法按摘要写的篇。\n" +
+      "在已写笔记基础上按主题归纳研究现状写入 survey/literature.md，提炼有实质差别的候选研究问题（无合理备选可只留一个）并逐一分析现有工作的 gap，写入 survey/gap-analysis.md。先把候选、每个 gap 的证据与我建议的研究问题写入 .ccode/help-wanted.md 问用户一句（未回复只保留候选，不替人确定研究问题），写完只做无依赖、可逆的准备。摘要-only 不得支撑需要全文的 gap。\n" +
+      "完成标准：notes/index.json 与 included.json 全部 id 对齐（仅待确认或无法按摘要写的篇 notePath 可空）；已写笔记符合 lit-notes 写法；survey/literature.md 与 survey/gap-analysis.md 齐全；研究问题的候选/人批准状态与取舍理由可追溯。确认过的核心篇未写完、或已确认要按摘要记的非核心还没写完，则不得结束本轮等人，质量状态不得高于已生成待审。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     inputs: ["papers/included.md", "papers/included.json", "papers/to-fetch.md"],
     optionalInputs: ["references.bib", "papers/*.pdf", "notes/"],
@@ -361,7 +368,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "references.bib",
       "papers/to-fetch.md",
     ],
-    acceptanceCriteria: ["machine:records:notes/index.json::id,notePath,bibKey,fulltextStatus,reviewStatus", "machine:same-ids:papers/included.json::notes/index.json"],
+    acceptanceCriteria: [LIT_NOTES_INDEX_RECORDS, "machine:same-ids:papers/included.json::notes/index.json"],
     skills: ["lit-notes"],
     run: [],
     humanTasks: [
@@ -761,26 +768,17 @@ const THESIS_STEPS: ProjectStepDto[] = [
     workspaceName: "lit-notes",
     brief:
       "输入：papers/included.md 与 papers/to-fetch.md。全程按 lit-notes 技能。已有 notes/ 先核对原文版本、全文状态和问题范围；有效则复用，变化则保留人写内容并更新受影响项。\n" +
+      LIT_NOTES_WRITE +
       "1. 整理项目根 papers/ 人工补投并更新 to-fetch.md；\n" +
-      "2. **先报清单规模与全文到位率，建议核心精读篇目**，写入 .ccode/help-wanted.md（未回复仅做无依赖、可逆准备）；\n" +
-      "3. 逐篇产出 notes/<序号-短标题>.md（lit-notes 八段）并追加 references.bib；全文未得按摘要写并标「仅摘要·待全文」。\n" +
-      "完成标准：included.md 每篇都有对应笔记与 bib 条目；notes/index.json 保留 included.json 的全部 id，记录 notePath/bibKey/fulltextStatus/reviewStatus。\n" + QUALITY_STATUS,
+      "2. **先报清单规模与全文到位率，建议核心精读篇目**，写入 .ccode/help-wanted.md（未回复仅做可逆准备，不含批量生成笔记）；\n" +
+      "3. 用户确认的核心篇有 PDF 的读正文按技能八段写笔记；其余按摘要写短记。全文未得按摘要写并标「仅摘要·待全文」。index pending 只留给待确认或无法按摘要写的篇。\n" +
+      "完成标准：notes/index.json 保留 included.json 的全部 id（仅待确认或无法按摘要写的篇 notePath 可空）；已写笔记符合 lit-notes 写法。确认过的核心篇未写完、或已确认要按摘要记的非核心还没写完，则不得结束本轮等人，质量状态不得高于已生成待审。\n" + QUALITY_STATUS,
     inputs: ["papers/included.md", "papers/included.json", "papers/to-fetch.md"],
     optionalInputs: ["papers/*.pdf", "notes/", "references.bib"],
     expectedArtifacts: ["notes/*.md", "notes/index.json", "references.bib", "papers/to-fetch.md"],
-    acceptanceCriteria: ["machine:records:notes/index.json::id,notePath,bibKey,fulltextStatus,reviewStatus", "machine:same-ids:papers/included.json::notes/index.json"],
+    acceptanceCriteria: [LIT_NOTES_INDEX_RECORDS, "machine:same-ids:papers/included.json::notes/index.json"],
     skills: ["lit-notes"],
     run: [],
-    humanTasks: [
-      {
-        title: "继续精读笔记（沉浸阅读区）",
-        guidance:
-          "验收后想补读或修正哪篇笔记：点开 notes/ 中那份 md →「⛶ 沉浸阅读」。改的是主仓笔记，改完到改动面板提交。",
-        target: "",
-        timing: "after",
-        optional: true,
-      },
-    ],
     decisions: [],
   },
   {
@@ -1522,7 +1520,7 @@ export const RESOURCE_TYPE_LABELS: Record<string, string> = {
 
 /** 一键开步预填的首条指令（TerminalPage 启动栏可编辑，留空不注入） */
 export const DEFAULT_KICKOFF_PROMPT =
-  "读 TASK.md，按简报开始执行。开工先盘点本会话可用的 MCP 工具（如 Undermind / Consensus）——技能协议要求把它们纳入工作流（检索步骤当检索库用），工具在而没用要在覆盖缺口里写明原因";
+  `读 TASK.md，按简报做到完成标准。停哪些见「决策暂停策略」。${KEEP_WORKING_CLAUSE} 开工先盘点本会话可用的 MCP 工具（如 Undermind / Consensus）——技能协议要求把它们纳入工作流（检索步骤当检索库用），工具在而没用要在覆盖缺口里写明原因`;
 
 /** P2b「整理为笔记」开步预填指令：指向本流程写入的 notes/inbox.md */
 export const ORGANIZE_NOTES_PROMPT =

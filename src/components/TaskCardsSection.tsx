@@ -12,7 +12,7 @@ import {
   unstartedSeeds,
 } from "../task-cards";
 import { buildTaskMdPreview } from "../pipeline-start";
-import { isDecisionsOnly } from "../step-decisions";
+import { CONTINUE_STEP_PROMPT, isTaskMdStub, resolveTaskMdSource } from "../step-decisions";
 import { filterProjectSessions } from "../project-status";
 import { pickDiscussResume } from "../step-flow";
 import { IS_WINDOWS } from "../hotkeys";
@@ -56,7 +56,7 @@ function launchBarAgent(): string {
 /**
  * 话题区（项目详情，流水线步进器下方）：卡片 = 对话的归档文件夹（任务书沉淀统一走草稿）。
  * 恒为单步骤聚焦视图（v3.81 起无总览态）：头部 ‹ › 箭头与步进器大圆同口径切步骤；
- * 行主动作 = 聊想法（未绑工作区）/ 开工（挂步骤的卡，走一键开步链路）/ 继续（已绑工作区，开终端预填「阅读 TASK.md 并继续任务」）。
+ * 行主动作 = 聊想法（未绑工作区）/ 开工（挂步骤的卡，走一键开步链路）/ 继续（已绑工作区，开终端预填 CONTINUE_STEP_PROMPT）。
  * 展开手风琴按卡片 id 记忆在本组件内——ProjectGroup 以项目 key 挂载，切项目自然清空。
  */
 export default function TaskCardsSection({
@@ -443,7 +443,7 @@ export default function TaskCardsSection({
     }
   }
 
-  /** 继续（已绑定工作区的卡）：开终端新会话，cwd = 工作树，预填「阅读 TASK.md 并继续任务」。
+  /** 继续（已绑定工作区的卡）：开终端新会话，cwd = 工作树，预填 CONTINUE_STEP_PROMPT。
    *  kimi 无启动注入参数：启动栏保留指令文本由用户手动发送（pty_spawn promptDropped 既有处理） */
   function onContinue(card: TaskCardDto) {
     const ws = card.workspace
@@ -457,7 +457,7 @@ export default function TaskCardsSection({
       cwd: ws.worktreePath,
       extraEnv: {},
       title: card.name,
-      initialPrompt: "阅读 TASK.md 并继续任务",
+      initialPrompt: CONTINUE_STEP_PROMPT,
       ...(projectLaunch ?? {}),
       autoStart: Boolean(projectLaunch?.profileId),
       surface: "terminal",
@@ -465,8 +465,9 @@ export default function TaskCardsSection({
     setPage("terminal");
   }
 
-  /** 「跟 AI 商量一下」开聊前的草稿播种（v3.90）：空草稿/仅决策答案的草稿先灌入当前模板拼装——
-   *  商量的产出就是最终落盘的 TASK.md，从零起草会把简报/预期产物/提货单丢掉。
+  /** 「跟 AI 商量一下」开聊前的草稿播种（v3.90）：空/仅决策答案/仅评审沉淀的草稿
+   *  先灌入当前模板拼装（沉淀段接到后面）——商量的产出就是最终落盘的 TASK.md，
+   *  从零起草会把简报/预期产物/提货单丢掉。
    *  决策答案不丢：buildTaskMdPreview 的「已定方向」段本就解析自草稿（gatherTaskMdExtras）。
    *  已有正文草稿时不覆盖，agent 接着它改 */
   async function seedDraftForChat() {
@@ -477,20 +478,20 @@ export default function TaskCardsSection({
       { projectRoot: projectPath, stepName: step.name },
     );
     const raw = cur?.text?.trim() ?? "";
-    if (raw && !isDecisionsOnly(raw)) return;
+    if (raw && !isTaskMdStub(raw)) return;
     const assembled = await buildTaskMdPreview(projectPath, step, cfg);
     await invoke("write_task_draft", {
       projectRoot: projectPath,
       stepName: step.name,
-      content: assembled,
+      content: resolveTaskMdSource(raw, assembled),
       expectedRevision: cur?.revision ?? null,
     });
     onDraftChanged?.();
   }
 
   /** 「预览/编辑 TASK.md」的统一加载（v3.90：入口合一，不再有「草稿」概念）：
-   *  有正文内容读文件全文；否则给模板拼装（只读展示不落盘——纯看不留痕，
-   *  保存才经 write_task_draft 落地；与 seedDraftForChat 同一拼装出处） */
+   *  有可执行正文读文件全文；否则给模板拼装并接上评审沉淀（只读展示不落盘——
+   *  纯看不留痕，保存才经 write_task_draft 落地；与 seedDraftForChat 同一出处） */
   async function loadTaskMdForStep(): Promise<{ text: string; revision: string | null }> {
     const step = focusStepDto;
     if (!step) return { text: "", revision: null };
@@ -499,8 +500,11 @@ export default function TaskCardsSection({
       { projectRoot: projectPath, stepName: step.name },
     );
     const raw = cur?.text?.trim() ?? "";
-    if (raw && !isDecisionsOnly(raw)) return { text: cur?.text ?? "", revision: cur?.revision ?? null };
-    return { text: await buildTaskMdPreview(projectPath, step, cfg), revision: cur?.revision ?? null };
+    if (raw && !isTaskMdStub(raw)) return { text: cur?.text ?? "", revision: cur?.revision ?? null };
+    return {
+      text: resolveTaskMdSource(raw, await buildTaskMdPreview(projectPath, step, cfg)),
+      revision: cur?.revision ?? null,
+    };
   }
 
   /** 想法卡行（想法区）：主按钮 = 只读纯聊「聊想法」；「◈ 沉淀进任务书」只在开工前渲染
@@ -597,7 +601,7 @@ export default function TaskCardsSection({
             <button
               type="button"
               onClick={() => onContinue(card)}
-              title="开终端新会话，预填「阅读 TASK.md 并继续任务」；会话自动归入本卡"
+              title="开终端新会话，预填继续做到完成标准；会话自动归入本卡"
               className={`${actionBtn} shrink-0`}
             >
               继续

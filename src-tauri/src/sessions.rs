@@ -4547,7 +4547,9 @@ fn codex_tail_state(lines: &[String]) -> &'static str {
                 };
                 match get_str(p, "type") {
                     Some("user_message") => return "working",
-                    Some("agent_message") | Some("task_complete") => return "done",
+                    // 中途流式正文不是回合结束；Codex 工具调用之间也会写 agent_message
+                    Some("agent_message") => continue,
+                    Some("task_complete") => return "done",
                     _ => continue,
                 }
             }
@@ -9461,6 +9463,17 @@ mod tests {
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"干活"}]}}"#,
         ]);
         assert_eq!(codex_tail_state(&user), "working");
+        // 工具输出之后的中途 agent_message 不是收尾
+        let mid = s(&[
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"1"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"改名完成"}}"#,
+        ]);
+        assert_eq!(codex_tail_state(&mid), "working");
+        let complete = s(&[
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"好"}]}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+        ]);
+        assert_eq!(codex_tail_state(&complete), "done");
     }
 
     #[test]

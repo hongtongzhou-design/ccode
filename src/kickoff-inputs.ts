@@ -54,3 +54,38 @@ export function expectedDeliverLine(expected: readonly string[]): string {
   if (names.length === 0) return "按任务书交付本步产物";
   return `本步要交：${names.join("、")}`;
 }
+
+/** 文件是否已经是本步骤声明要读的输入（含可选 / 任一组）。
+ *  开工弹层「未登记」提醒不该再把这些文件当成陌生发现——上面「上一步接到」已经点过名。 */
+export function isDeclaredStepInput(
+  relPath: string,
+  step: {
+    inputs?: string[];
+    optionalInputs?: string[];
+    anyOfInputs?: string[][];
+  },
+): boolean {
+  const path = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!path) return false;
+  const patterns = [
+    ...(step.inputs ?? []),
+    ...(step.optionalInputs ?? []),
+    ...((step.anyOfInputs ?? []).flat()),
+  ]
+    .map((x) => x.trim().replace(/\\/g, "/"))
+    .filter(Boolean);
+  const base = path.split("/").pop() ?? path;
+  return patterns.some(
+    (pattern) =>
+      matchesInputPattern(path, pattern) || matchesInputPattern(base, pattern),
+  );
+}
+
+function matchesInputPattern(value: string, pattern: string): boolean {
+  if (pattern.endsWith("/")) {
+    const dir = pattern.replace(/\/+$/, "");
+    return value === dir || value.startsWith(`${dir}/`);
+  }
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped.replace(/\*/g, ".*")}$`).test(value);
+}

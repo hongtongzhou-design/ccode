@@ -69,6 +69,8 @@ test("三套文献链都有稳定 ID、全文状态与笔记覆盖，而非仅�
     assert.ok(notes.acceptanceCriteria?.some((x) => x.includes("fulltextStatus,reviewStatus")), id);
   }
   assert.match(skill("lit-notes"), /无实际 PDF 不伪造来源锚点/);
+  assert.match(skill("lit-notes"), /中途 git 提交只保存进度/);
+  assert.match(skill("lit-notes"), /不得结束本轮等人/);
   assert.match(skill("lit-search"), /同一研究多个报告/);
   assert.match(skill("lit-search"), /严格检索不等于完整系统综述/);
 });

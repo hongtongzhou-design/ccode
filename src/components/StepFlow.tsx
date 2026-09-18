@@ -14,6 +14,7 @@ import {
   discussChatLabel,
   doiFromToFetchUrl,
   formatZoteroDuplicatePrompt,
+  isEndnoteTaskTitle,
   isPaywallTaskTitle,
   isPendingConfirmTaskTitle,
   missingToFetchCount,
@@ -35,7 +36,7 @@ import {
   DECISION_STATUS_ASK,
   decisionAsk,
   formatDecisionAnswer,
-  isDecisionsOnly,
+  isTaskMdStub,
   parseDecisionAnswer,
   parseDecisions,
   recommendedAnswers,
@@ -171,7 +172,7 @@ const LIT_SOURCES: {
   },
   {
     id: "folder",
-    label: "我有一堆 PDF / 题录",
+    label: "我已有 PDF / 题录",
     hint: "把 PDF 或 RIS/XML 题录放进项目，开工时自动解析。",
     action: "去放入题录 / PDF →",
     focus: "files",
@@ -334,10 +335,10 @@ export default function StepFlow({
   // 答案存在草稿的「已定方向」小节里（草稿是开工合同，不另立一份状态），选中态由它回填
   const decisions = step.decisions ?? [];
   const answered = parseDecisions(draft?.text ?? "");
-  /** 已有编辑内容（v3.90：UI 不再暴露「草稿」概念）= 文件有正文；
-      仅含「已定方向」答案的不算——那只是点选记录，不是编辑过的 TASK.md */
+  /** 已有编辑内容（v3.90：UI 不再暴露「草稿」概念）= 文件有可执行正文；
+      仅含已定方向 / 评审沉淀 / 标题的不算——那不是编辑过的 TASK.md */
   const draftHasBody =
-    !!draft?.text?.trim() && !isDecisionsOnly(draft.text ?? "");
+    !!draft?.text?.trim() && !isTaskMdStub(draft.text ?? "");
   const taskMdBtnClass = `shrink-0 rounded-sm px-1 py-0.5 text-micro disabled:opacity-50 ${
     draftHasBody
       ? "text-cta-pill-text hover:bg-hover"
@@ -390,7 +391,7 @@ export default function StepFlow({
   /** 聊任务书（v3.72）：讨论直接服务于 TASK.md 内容文件——非只读启动（agent 要写文件），
    *  指令约束只许新建/修改这一个文件；不用卡片的只读保护（那是不动文件口径）。
    *  直接进终端并自动启动，不打开右栏预览（看任务书用流程线弹层）。
-   *  v3.90 起先播种（onSeedDraft）：空文件/仅决策答案的文件先灌入模板拼装——
+   *  v3.90 起先播种（onSeedDraft）：空文件/仅决策答案/仅评审沉淀的文件先灌入模板拼装——
    *  商量改的就是最终落盘的 TASK.md，从零起草会把简报/预期产物/提货单全丢掉 */
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -416,6 +417,8 @@ export default function StepFlow({
     line: string;
     detail?: string;
   } | null>(null);
+  const [endnoteOpenNote, setEndnoteOpenNote] = useState<string | null>(null);
+  const [endnoteChecked, setEndnoteChecked] = useState(false);
   const [toFetchBusy, setToFetchBusy] = useState<
     Record<number, { status: "busy" | "ok" | "error"; note?: string }>
   >({});
@@ -699,6 +702,18 @@ export default function StepFlow({
       await invoke("zotero_open_papers", { projectRoot: projectPath });
     } catch (e) {
       setZoteroSyncResult({ line: String(e), detail: String(e) });
+    }
+  }
+
+  async function openEndnoteImport() {
+    setEndnoteOpenNote("正在从 references.bib 生成 RIS…");
+    try {
+      const msg = await invoke<string>("endnote_export_xml", {
+        projectRoot: projectPath,
+      });
+      setEndnoteOpenNote(msg);
+    } catch (e) {
+      setEndnoteOpenNote(String(e));
     }
   }
 
@@ -999,6 +1014,11 @@ export default function StepFlow({
     litSource,
     pendingDecisions: decisionGaps.length,
     toolAsks: toolAskFields.map((field) => ({ key: field.key, label: field.label })),
+    endnoteExport:
+      step.skills.includes("lit-notes") ||
+      step.workspaceName === "journal-format" ||
+      step.workspaceName === "submission-materials" ||
+      /^rebuttal-r\d+$/.test(step.workspaceName ?? ""),
   });
   const seeds = step.discussionSeeds ?? [];
 
@@ -1050,6 +1070,24 @@ export default function StepFlow({
   function nodeActions(node: StepFlowNode) {
     switch (node.kind) {
       case "human": {
+        if (node.key === "endnote-export" || (node.human && isEndnoteTaskTitle(node.human.title))) {
+          const ready = runStatus === "done";
+          return (
+            <button
+              type="button"
+              disabled={!ready}
+              onClick={() => void openEndnoteImport()}
+              title={
+                ready
+                  ? "生成下载里的 Mesa-EndNote-import.ris，并打开 EndNote"
+                  : "先保存进项目，再生成RIS并导入"
+              }
+              className="ml-auto shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+            >
+              生成RIS并导入
+            </button>
+          );
+        }
         const papersTarget = isPapersTarget(node.human!.target);
         // after 档事项依赖 agent 的产出才知道要做什么（付费墙清单是 agent 筛完才列出来的）。
         // 就绪口径放宽到「agent 跑完/清单已产出」（afterReady），不再死等 git 待评审——
@@ -1184,15 +1222,17 @@ export default function StepFlow({
   function renderNode(node: StepFlowNode, dense = false) {
     const isCurrent = node.key === flow.currentKey;
     const ic = icon(node);
-    const guidance = node.kind === "human" ? node.human?.guidance?.trim() : "";
+    const human = node.human;
+    const done = node.key === "endnote-export" ? endnoteChecked : node.done;
+    const guidance = node.kind === "human" ? human?.guidance?.trim() : "";
     const guidanceShort = guidance ? guidancePreview(guidance) : "";
     return (
       <li
         key={node.key}
         data-node-key={node.key}
         title={
-          node.kind === "human" && node.human!.guidance && (dense || !isCurrent)
-            ? node.human!.guidance
+          node.kind === "human" && human?.guidance && (dense || !isCurrent)
+            ? human.guidance
             : undefined
         }
         data-human-task={
@@ -1221,8 +1261,8 @@ export default function StepFlow({
         } ${
           // 还轮不到（after 档且 agent 未产出/未跑完）：整行压暗，不写「等 agent」那种话
           node.kind === "human" &&
-          node.human!.timing === "after" &&
-          !afterReady(node.human!) &&
+          human?.timing === "after" &&
+          !afterReady(human) &&
           !node.done
             ? "opacity-45"
             : ""
@@ -1246,12 +1286,19 @@ export default function StepFlow({
               {node.kind === "human" ? "" : ic.text}
             </span>
           )}
-          {node.kind === "human" ? (
+          {node.key === "endnote-export" ? (
+            <Checkbox
+              className="shrink-0"
+              checked={endnoteChecked}
+              onChange={setEndnoteChecked}
+              title="勾选 = 已经在 EndNote 里导入完"
+            />
+          ) : node.kind === "human" && human ? (
             <Checkbox
               className="shrink-0"
               checked={node.done}
-              disabled={busyTitle === node.human!.title}
-              onChange={(checked) => void toggle(node.human!, checked)}
+              disabled={busyTitle === human.title}
+              onChange={(checked) => void toggle(human, checked)}
               title={
                 node.done
                   ? "已完成；取消勾选会保留为未完成，需重新勾选确认"
@@ -1263,7 +1310,7 @@ export default function StepFlow({
             className={`min-w-0 flex-1 truncate ${
               dense ? "text-xs" : "text-sm"
             } ${
-              node.done
+              done
                 ? "text-l4 line-through"
                 : isCurrent
                   ? "text-l1"
@@ -1278,12 +1325,12 @@ export default function StepFlow({
               一个永远不打勾的条目看起来就像没做完的必办项 */}
           {node.section === "main" &&
             node.kind === "human" &&
-            node.human!.optional &&
+            human?.optional &&
             !node.done && (
             <span
               className="shrink-0 rounded-sm bg-raised px-1.5 py-0.5 text-micro text-l4"
               title={
-                isPaywallTaskTitle(node.human!.title)
+                isPaywallTaskTitle(human.title)
                   ? "可选：不做也能跑完这一步。跳过的篇目下一篇按摘要记"
                   : "可选：不做也能跑完这一步"
               }
@@ -1294,7 +1341,7 @@ export default function StepFlow({
 
           {/* 付费墙进度只认清单已存/总数，不拿 papers/ 里全部 PDF 当「已见到」——
               那会把无关文件算进来，和清单「已存 21/89」对不上。 */}
-          {node.kind === "human" && isPendingConfirmTaskTitle(node.human!.title) ? null : node.kind === "human" && isPaywallTaskTitle(node.human!.title) ? (
+          {node.kind === "human" && human && isPendingConfirmTaskTitle(human.title) ? null : node.kind === "human" && human && isPaywallTaskTitle(human.title) ? (
             toFetchItems.length > 0 ? (
               <span
                 className="shrink-0 text-micro tabular-nums text-l4"
@@ -1302,16 +1349,16 @@ export default function StepFlow({
               >
                 {paywallSavedCount}/{toFetchItems.length}
               </span>
-            ) : node.human!.expectedCount != null ? (
+            ) : human.expectedCount != null ? (
               <span className="shrink-0 text-micro tabular-nums text-l4">
-                清单 {node.human!.expectedCount}
+                清单 {human.expectedCount}
               </span>
             ) : null
-          ) : node.kind === "human" && node.human!.hitCount != null ? (
+          ) : node.kind === "human" && human?.hitCount != null ? (
             <span className="shrink-0 text-micro text-l4">
-              已见到 {node.human!.hitCount} 个文件
-              {node.human!.expectedCount != null
-                ? ` / 清单共 ${node.human!.expectedCount} 篇`
+              已见到 {human.hitCount} 个文件
+              {human.expectedCount != null
+                ? ` / 清单共 ${human.expectedCount} 篇`
                 : ""}
             </span>
           ) : null}
@@ -1321,8 +1368,16 @@ export default function StepFlow({
             例外：评审节点的验收引导不看「当前」身份（v3.97）——hint 已按 runStatus 门控
             （待开始无文案、进行中预告、待评审给步骤）；agent 跑完没提交时当前节点一直停在
             agent 上，若死守 isCurrent，验收引导永远显示不出来（用户实测） */}
-        {!dense && (isCurrent || node.kind === "review") && node.hint && (
-          <p className="mt-1 pl-9 text-micro text-l4">{node.hint}</p>
+        {!dense &&
+          (isCurrent ||
+            node.kind === "review" ||
+            node.key === "endnote-export") &&
+          node.hint && (
+          <p className="mt-1 pl-9 text-micro leading-5 text-l4">
+            {node.key === "endnote-export" && endnoteOpenNote
+              ? endnoteOpenNote
+              : node.hint}
+          </p>
         )}
         {node.kind === "input" && node.key.startsWith("tool:") && onSetResearchTool && tools && (
           <div className="ml-9 mt-2.5">
@@ -1702,7 +1757,8 @@ export default function StepFlow({
             就绪（afterReady）且未完成时就地展示清单；做法进行内按钮 title，不写说明书。
             学术检索 MCP 同款：沉在可选区永远不是当前节点，必须就地给预设入口。 */}
         {node.kind === "human" &&
-          isAcademicMcpTaskTitle(node.human!.title) &&
+          human &&
+          isAcademicMcpTaskTitle(human.title) &&
           !node.done &&
           !dense && (
             <div className="mt-1 flex flex-wrap items-center gap-2 pl-9">
@@ -1748,7 +1804,8 @@ export default function StepFlow({
             </div>
           )}
         {node.kind === "human" &&
-          isPendingConfirmTaskTitle(node.human!.title) &&
+          human &&
+          isPendingConfirmTaskTitle(human.title) &&
           !node.done &&
           !dense && (
             <div className="mt-1 pl-9 text-micro leading-5 text-l4">
@@ -1788,17 +1845,18 @@ export default function StepFlow({
           )}
         {!dense &&
           node.kind === "human" &&
+          human &&
           guidance &&
-          !isAcademicMcpTaskTitle(node.human!.title) &&
-          !isPendingConfirmTaskTitle(node.human!.title) &&
+          !isAcademicMcpTaskTitle(human.title) &&
+          !isPendingConfirmTaskTitle(human.title) &&
           (isCurrent ||
             (!node.done &&
-              node.human!.timing === "after" &&
-              afterReady(node.human!))) && (
+              human.timing === "after" &&
+              afterReady(human))) && (
             <div className="mt-1 pl-9 text-micro leading-5 text-l4">
-              {isPaywallTaskTitle(node.human!.title) ? (
+              {isPaywallTaskTitle(human.title) ? (
                 <p>{PAYWALL_HINT}</p>
-              ) : isPendingConfirmTaskTitle(node.human!.title) ? (
+              ) : isPendingConfirmTaskTitle(human.title) ? (
                 <p>{PENDING_HINT}</p>
               ) : (
                 <>
@@ -1817,7 +1875,7 @@ export default function StepFlow({
               )}
               {/* 付费墙：清单就是入口。折叠标题带缺篇数；做法进行内按钮 title，
                   不再在清单上下各写一段说明书。 */}
-              {isPaywallTaskTitle(node.human!.title) && !node.done && (
+              {isPaywallTaskTitle(human.title) && !node.done && (
                 <div className="mt-1.5">
                   <button
                     type="button"

@@ -1,7 +1,7 @@
 import type { ProjectStepDto } from "./types";
 
 export interface ResearchTools {
-  libraryExport: "none" | "zotero" | "endnote";
+  libraryExport: "none" | "endnote";
   plotting: "python" | "origin";
   illustration: "none" | "blender";
   manuscript: "markdown" | "latex" | "word";
@@ -10,7 +10,7 @@ export const DEFAULT_RESEARCH_TOOLS: ResearchTools = {
   libraryExport: "none", plotting: "python", illustration: "none", manuscript: "markdown",
 };
 export const RESEARCH_TOOL_FIELDS = [
-  { key: "libraryExport", label: "文献库交付", options: [["none", "不写外部库"], ["zotero", "Zotero（逐批确认）"], ["endnote", "EndNote XML / RIS"]] },
+  { key: "libraryExport", label: "EndNote 交差", options: [["none", "不需要"], ["endnote", "EndNote XML / RIS"]] },
   { key: "plotting", label: "数值图", options: [["python", "Python"], ["origin", "Origin（Windows）"]] },
   { key: "illustration", label: "结构 / 装置示意", options: [["none", "不需要"], ["blender", "Blender"]] },
   { key: "manuscript", label: "稿件载体", options: [["markdown", "Markdown / Quarto"], ["latex", "LaTeX（原生源码）"], ["word", "已有 Word（人工插件验收）"]] },
@@ -35,9 +35,15 @@ function stepTakesReading(step: Pick<ProjectStepDto, "skills">): boolean {
   return step.skills.some((s) => s === "lit-search" || s === "lit-notes");
 }
 function stepTakesLibraryExport(step: Pick<ProjectStepDto, "skills" | "workspaceName">): boolean {
-  // 精读才有完整 references.bib；检索只有清单、润色只是核对引用。
-  // 没有精读的流程（投稿与返修）才问在格式适配 / 投稿材料。
+  // EndNote XML 挂在有完整 bib 的精读步；没有精读的流程才挂格式适配 / 投稿材料。
   if (step.skills.includes("lit-notes")) return true;
+  return step.workspaceName === "submission-materials"
+    || step.workspaceName === "journal-format"
+    || /^rebuttal-r\d+$/.test(step.workspaceName ?? "");
+}
+/** 流程线只在没有精读的投稿链上问 EndNote。Zotero 进库不是设定，是检索步待获取里的「同步到 Zotero」。 */
+function stepAsksLibraryExport(step: Pick<ProjectStepDto, "skills" | "workspaceName">): boolean {
+  if (step.skills.includes("lit-notes")) return false;
   return step.workspaceName === "submission-materials"
     || step.workspaceName === "journal-format"
     || /^rebuttal-r\d+$/.test(step.workspaceName ?? "");
@@ -70,7 +76,7 @@ export function researchToolFieldsForSteps(steps: readonly ProjectStepDto[]): Re
   }));
 }
 function stepMatchesAsk(field: ResearchToolField, step: Pick<ProjectStepDto, "name" | "workspaceName" | "skills" | "expectedArtifacts">): boolean {
-  if (field.key === "libraryExport") return stepTakesLibraryExport(step);
+  if (field.key === "libraryExport") return stepAsksLibraryExport(step);
   if (field.key === "plotting") return stepTakesPlotting(step);
   if (field.key === "illustration") return stepTakesIllustration(step);
   return stepAsksManuscript(step);
@@ -119,29 +125,22 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
   }
   const added: Added = { skills: [], required: [], artifacts: [], human: [] };
   const notes: string[] = [];
-  const mount = (skill: string, artifacts: string[], note: string, human?: string) => {
+  const mount = (skill: string, artifacts: string[], note: string, human?: string, optional = false) => {
     if (!step.skills.includes(skill)) { step.skills.push(skill); added.skills.push(skill); }
     if (!step.requiredSkills.includes(skill)) { step.requiredSkills.push(skill); added.required.push(skill); }
     for (const path of artifacts) if (!step.expectedArtifacts.includes(path)) { step.expectedArtifacts.push(path); added.artifacts.push(path); }
     if (human && !step.humanTasks.some((h) => h.title === human)) {
-      step.humanTasks.push({ title: human, guidance: note, target: "", timing: "after", completion: "manual" });
+      step.humanTasks.push({ title: human, guidance: note, target: "", timing: "after", completion: "manual", optional: optional || undefined });
       added.human.push(human);
     }
     notes.push(note);
   };
   const reading = stepTakesReading(step);
-  const bibliography = stepTakesLibraryExport(step);
   const figures = stepTakesPlotting(step);
   const illustration = stepTakesIllustration(step);
   const lit = litSource.trim();
-  if ((lit === "zotero" && reading) || (tools.libraryExport === "zotero" && bibliography)) {
+  if (lit === "zotero" && reading) {
     mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：进库用清单「同步到 Zotero」或拖 to-fetch.ris（原生 RIS/BibTeX）。本地 API 只读，不要 POST 假装写库。PDF 直接拖进 Zotero，一般会按元数据对上已有条目。出库用「从 Zotero 导入」。已有主 bib 键不改。");
-  }
-  if (tools.libraryExport === "endnote" && bibliography) {
-    mount("endnote-bridge", ["papers/endnote-report.json"], "EndNote：来源 XML/RIS 先归一成候选并列差异，确认后才合并 references.bib，已有键不改。要求出库时交付 papers/endnote-import.xml 与 papers/endnote-report.json；Word 原件/域不被 Markdown 往返覆盖。", "人工核对 EndNote 导入与 Word 引用插件");
-    if (!step.expectedArtifacts.includes("papers/endnote-import.xml")) {
-      step.expectedArtifacts.push("papers/endnote-import.xml"); added.artifacts.push("papers/endnote-import.xml");
-    }
   }
   const outputRoot = artifactDir.replace(/\\/g, "/").replace(/\/+$/, "") || "artifacts";
   if ((tools.plotting === "origin" || tools.illustration === "blender") && (outputRoot.startsWith("/") || outputRoot.includes(":") || outputRoot.split("/").some((part) => !part || part === "." || part === ".."))) {

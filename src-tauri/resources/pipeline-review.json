@@ -17,7 +17,7 @@
       "name": "文献检索与筛选",
       "role": "both",
       "workspaceName": "lit-search",
-      "brief": "输入：课题主题（见上方「课题主题」段；未填写时只能提出候选主题写入 papers/screening.md「检索主题假设」，等待人确认后正式筛选；期间只做可逆摸底）。全程按 lit-search 技能执行。全局设定若写了「综述深度：严格档」，按技能严格档（引用扩展强制、screening 末尾 PRISMA-S 最小披露）；未写或标准档则按技能默认标准档。方法类型先按叙述性/范围/系统综述确认；严格检索不是完整系统综述。单人/人工或 Agent 复核范围在 Methods 如实声明，系统综述需完整方案与对应质量评价。\n1. 制定纳入/排除标准（年份、语言、来源级别、相关性口径），写进 papers/screening.md。**先粗检一轮报数再定标准**：用主题词在 OpenAlex 粗查命中量，把「命中约 N 篇」与你建议的标准写进 .ccode/help-wanted.md 问用户一句（附兜底：未回复只做试检，不冻结标准或正式筛选），写完仅推进无依赖、可逆的准备。正式标准按问题制定，不为凑篇数或结果而改；\n2. 先解析人工导入的题录（RIS/BibTeX/CSV），三处都要看：① 本文件「项目根」下 papers/imports/；② 工作区内 papers/imports/；③ 「项目资源」段类型为「引文」的条目、以及「上一步产物（提货单）」段中来自「人工交付」的条目——后两类给绝对路径，按路径直读、勿复制。都没有才跳过。解析后按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式、检索日期与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；末尾写覆盖缺口声明（哪些库没检）；\n4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律保留为 pending 候选并标注「待确认」，不冒充已决纳入，不允许自行裁掉；\n5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI），并同步写入 papers/included.json（每篇一条，至少含稳定唯一字符串 id、title、decision（included/pending）、reason；与 md 记录一一对应）；\n6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（编号清单，见 lit-search 产出格式）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR，TI 标题、AU 作者每位一行、PY 四位年份、T2 来源、DO、UR——筛选记录里已有的字段一律写入，只给 TI/DO/UR 会让 Zotero 里作者/年份/出版物全空；确无数据才留空，不编造），供用户导入 Zotero 建成题录完整的待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/zotero-sync.md 均存在（RIS 允许有效空文件，其他文件非空；未启用或回落时报告原因；无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。\nG1 问题与可行性：在候选报告中比较回答后改变什么认识、最邻近证据/反例、可区分解释、资料依赖、总预算和最小可回答范围、继续/缩题/停止判据。允许负结果与证据不足，不以热点/gap 数量选题。先给决策摘要：待决问题→可行方案→推荐及证据位置→代价/不确定性→等待边界；无合理备选也说明，不凑选项。未回复只做可逆摸底，不锁定问题；不会判断交导师/方法专家。\n验收摘要放在本步主要报告开头（不另建报告）：① 回答了什么；② 关键证据/复现入口；③ 尚未验证；④ 影响结论的未决问题；⑤ 需要人决定什么。摘要引用正文位置，不抄长报告。质量状态与未决事项统一在此维护：已生成待审 / 有条件接受（仅可准备）/ 证据通过（限定范围）/ 阻塞；问题记责任人、影响、处置证据和复核人。Agent 不能代填人工批准；文件、Git 合并、final 名称不等于质量通过。关键真实性/方法/引用支持/授权缺口不能仅移入局限放行。数据/方法/来源改变时在原报告记失效文件、版本与重验结果，未经重验不得复用旧结论；无变化写无。\n",
+      "brief": "输入：课题主题（见上方「课题主题」段；未填写时只能提出候选主题写入 papers/screening.md「检索主题假设」，等待人确认后正式筛选；期间只做可逆摸底）。全程按 lit-search 技能执行。全局设定若写了「综述深度：严格档」，按技能严格档（引用扩展强制、screening 末尾 PRISMA-S 最小披露）；未写或标准档则按技能默认标准档。方法类型先按叙述性/范围/系统综述确认；严格检索不是完整系统综述。单人/人工或 Agent 复核范围在 Methods 如实声明，系统综述需完整方案与对应质量评价。\n1. 制定纳入/排除标准（年份、语言、来源级别、相关性口径），写进 papers/screening.md。**先粗检一轮报数再定标准**：用主题词在 OpenAlex 粗查命中量，把「命中约 N 篇」与你建议的标准写进 .ccode/help-wanted.md 问用户一句（附兜底：未回复只做试检，不冻结标准或正式筛选），写完仅推进无依赖、可逆的准备。正式标准按问题制定，不为凑篇数或结果而改；\n2. 先解析人工导入的题录（RIS/BibTeX/CSV），三处都要看：① 本文件「项目根」下 papers/imports/；② 工作区内 papers/imports/；③ 「项目资源」段类型为「引文」的条目、以及「上一步产物（提货单）」段中来自「人工交付」的条目——后两类给绝对路径，按路径直读、勿复制。都没有才跳过。解析后按 lit-search 技能口径去重合并进候选池，每条保留来源标注；\n3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式、检索日期与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；末尾写覆盖缺口声明（哪些库没检）；\n4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律保留为 pending 候选并标注「待确认」，不冒充已决纳入，不允许自行裁掉；\n5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI），并同步写入 papers/included.json（每篇一条，至少含稳定唯一字符串 id、title、decision（included/pending）、reason；与 md 记录一一对应）；\n6. 全文获取只针对 decision=included：开放获取下载到项目根 papers/；付费墙写入 to-fetch.md / to-fetch.ris。**禁止把 pending 写入 to-fetch.md，也不得下载其全文。**若 included.json 仍有 pending：把待确认篇目（标题+理由）写入 .ccode/help-wanted.md 请人逐篇纳入或排除（未回复不把 pending 当已纳入、不进待获取），只推进已纳入篇目的全文获取。pending 经人改成 included 后才允许补进 to-fetch。开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（编号清单，见 lit-search 产出格式）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR，TI 标题、AU 作者每位一行、PY 四位年份、T2 来源、DO、UR——筛选记录里已有的字段一律写入，只给 TI/DO/UR 会让 Zotero 里作者/年份/出版物全空；确无数据才留空，不编造），供用户导入 Zotero 建成题录完整的待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/zotero-sync.md 均存在（RIS 允许有效空文件，其他文件非空；未启用或回落时报告原因；无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。\nG1 问题与可行性：在候选报告中比较回答后改变什么认识、最邻近证据/反例、可区分解释、资料依赖、总预算和最小可回答范围、继续/缩题/停止判据。允许负结果与证据不足，不以热点/gap 数量选题。先给决策摘要：待决问题→可行方案→推荐及证据位置→代价/不确定性→等待边界；无合理备选也说明，不凑选项。未回复只做可逆摸底，不锁定问题；不会判断交导师/方法专家。\n验收摘要放在本步主要报告开头（不另建报告）：① 回答了什么；② 关键证据/复现入口；③ 尚未验证；④ 影响结论的未决问题；⑤ 需要人决定什么。摘要引用正文位置，不抄长报告。质量状态与未决事项统一在此维护：已生成待审 / 有条件接受（仅可准备）/ 证据通过（限定范围）/ 阻塞；问题记责任人、影响、处置证据和复核人。Agent 不能代填人工批准；文件、Git 合并、final 名称不等于质量通过。关键真实性/方法/引用支持/授权缺口不能仅移入局限放行。数据/方法/来源改变时在原报告记失效文件、版本与重验结果，未经重验不得复用旧结论；无变化写无。\n",
       "expectedArtifacts": [
         "papers/screening.md",
         "papers/included.md",
@@ -56,8 +56,16 @@
           "completion": "manual"
         },
         {
+          "title": "核对待确认篇目",
+          "guidance": "展开清单逐篇纳入或排除。纳入且没有 PDF 的会进下面的待获取。没有待确认可跳过。",
+          "target": "",
+          "timing": "after",
+          "optional": true,
+          "completion": "manual"
+        },
+        {
           "title": "下载付费墙文献全文",
-          "guidance": "点「查看待获取清单」展开缺全文列表（附 to-fetch.ris，拖进 Zotero 自动建成待获取列表）。逐条处理：「自动获取」先查开放副本；取不到的（Wiley 等有反爬墙）点「浏览器打开」→ 在浏览器里点站方下载，Mesa 自动收进 papers/；手动拿到的 PDF 点行内「关联本地 PDF」选定或拷进项目根 papers/（文件名随意，下一步 agent 统一改名）。不想补的跳过——agent 会按摘要写笔记并标注「仅摘要」。",
+          "guidance": "只补已纳入、缺 PDF 的篇目，落到项目根 papers/。待确认先拍板，不要先下。不想补可跳过——下一篇按摘要记。",
           "target": "papers/*.pdf",
           "timing": "after",
           "optional": true
@@ -69,7 +77,7 @@
       "name": "文献精读与笔记",
       "role": "both",
       "workspaceName": "lit-notes",
-      "brief": "输入：上一步产物 papers/included.md 与 papers/to-fetch.md（已随 main 合并在本工作区内）。全程按 lit-notes 技能执行。\n1. 先整理人工补投：项目根 papers/（见上方「项目根」，含未进本工作区的文件，按绝对路径读）中命名不符「作者年份-短标题.pdf」的 PDF，对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 清单逐篇精读（先读「待确认」之外的纳入项；清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n2. 精读范围先给依据：**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇（列篇目）其余按摘要记」写进 .ccode/help-wanted.md 问用户一句**（附兜底：未回复可整理已有资料；不默认排除关键全文或降低核心证据要求），写完仅推进无依赖、可逆的准备；\n3. 全文来源优先级（写死）：「项目资源」已登记 PDF 绝对路径（只读，不改名）→ 项目根 papers/ 已有 PDF（含人工补投）→ 开放获取补下到项目根 papers/（arXiv/PMC/作者主页 preprint）→ 仍缺（papers/to-fetch.md 中的付费文献）按摘要+可见元数据写笔记，并在笔记开头标注「仅摘要·待全文」，不得装作读过全文；\n4. 每篇产出 notes/<序号-短标题>.md，有实际 PDF 时开头记来源锚点行「> 来源 PDF：<项目内相对路径或已登记只读资源绝对路径>.pdf」，无 PDF 改记 DOI/URL，不造虚假路径（沉浸阅读区靠它认回笔记不另建重复），固定结构按 lit-notes 技能八段：一句话总结（≤50字）/ 研究问题 / 方法（附可复现细节）/ 主要结果（区分观察结果的支持范围与作者推测，注页码+表/图编号）/ 局限（作者自述与本笔记识别分开列）/ 可引用点（原文关键句+页码或段落位置）/ 与本课题的关系 / 疑问与待跟进（待跟进引用同时追加 papers/to-fetch.md）；\n5. 每篇先按 DOI/版本/键匹配 references.bib，缺失才追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」，不得编造）；\n6. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在项目根 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n完成标准：included.md 每篇都有对应笔记与 bib 条目，notes/index.json 与 included.json 全部 id 对齐，记录 notePath/bibKey/fulltextStatus/reviewStatus（含 pending 不冒充精读完成）；notes/ 与 references.bib 均已提交。\n验收摘要放在本步主要报告开头（不另建报告）：① 回答了什么；② 关键证据/复现入口；③ 尚未验证；④ 影响结论的未决问题；⑤ 需要人决定什么。摘要引用正文位置，不抄长报告。质量状态与未决事项统一在此维护：已生成待审 / 有条件接受（仅可准备）/ 证据通过（限定范围）/ 阻塞；问题记责任人、影响、处置证据和复核人。Agent 不能代填人工批准；文件、Git 合并、final 名称不等于质量通过。关键真实性/方法/引用支持/授权缺口不能仅移入局限放行。数据/方法/来源改变时在原报告记失效文件、版本与重验结果，未经重验不得复用旧结论；无变化写无。\n",
+      "brief": "输入：上一步产物 papers/included.md 与 papers/to-fetch.md（已随 main 合并在本工作区内）。全程按 lit-notes 技能执行。\n写法见 lit-notes 技能。叙述用中文，材料名/离子/电解液/方法缩写/图表编号等惯用英文原词保留，不强翻。禁止整段粘贴英文摘要或 PDF 抽取原文。未读完只在 notes/index.json 记 reviewStatus=pending、notePath 可空，禁止生成八段占位文件（文件存在会被标成已读）。可逆准备只含 PDF 改名、index 骨架、bib 对账、合法 OA 尝试，不包括批量生成笔记正文。「按摘要记」= 根据摘要消化来写并标「仅摘要」，不是贴英文。分批读写时每批已读的写真笔记、可中途 git 提交；提交后立刻继续：先写完已确认核心篇（有 PDF 的写精读），再按摘要写完非核心，不要每批停下来等人。pending 只留给待确认、或摘要和题录都不足以写笔记的篇，不是「先写一批再汇报」的许可。\n1. 先整理人工补投：项目根 papers/（见上方「项目根」，含未进本工作区的文件，按绝对路径读）中命名不符「作者年份-短标题.pdf」的 PDF，对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 处理已确认纳入项（清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n2. 精读范围先给依据：**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇（列篇目）其余按摘要记」写进 .ccode/help-wanted.md 问用户一句**（附兜底：未回复只做可逆准备；不默认排除关键全文或降低核心证据要求）；\n3. 全文来源优先级（写死）：「项目资源」已登记 PDF 绝对路径（只读，不改名）→ 项目根 papers/ 已有 PDF（含人工补投）→ 开放获取补下到项目根 papers/（arXiv/PMC/作者主页 preprint）→ 仍缺按摘要写笔记并标注「仅摘要·待全文」，不得装作读过全文；\n4. 用户确认的核心篇：有 PDF 的读正文按技能八段写笔记。上下文写不下可分批，提交后立刻继续，直到确认过的核心篇（有 PDF 的）都写成精读，并且非核心也按摘要写完短记。index pending 只留给待确认或无法按摘要写的篇。有实际 PDF 时笔记开头记来源锚点行「> 来源 PDF：<项目内相对路径或已登记只读资源绝对路径>.pdf」，无 PDF 改记 DOI/URL，不造虚假路径；\n5. 每篇先按 DOI/版本/键匹配 references.bib，缺失才追加一条 BibTeX（作者/年份/标题/出处/DOI 齐全，缺字段标「待补」、未经权威源核对标「待核」，不得编造）；\n6. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在项目根 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n完成标准：notes/index.json 与 included.json 全部 id 对齐（仅待确认或无法按摘要写的篇 notePath 可空）；已写笔记符合 lit-notes 写法；确认过的核心篇未写完、或已确认要按摘要记的非核心还没写完，则不得结束本轮等人，验收摘要写明剩余篇数，质量状态不得高于已生成待审。清单全有文件不等于完成。\n验收摘要放在本步主要报告开头（不另建报告）：① 回答了什么；② 关键证据/复现入口；③ 尚未验证；④ 影响结论的未决问题；⑤ 需要人决定什么。摘要引用正文位置，不抄长报告。质量状态与未决事项统一在此维护：已生成待审 / 有条件接受（仅可准备）/ 证据通过（限定范围）/ 阻塞；问题记责任人、影响、处置证据和复核人。Agent 不能代填人工批准；文件、Git 合并、final 名称不等于质量通过。关键真实性/方法/引用支持/授权缺口不能仅移入局限放行。数据/方法/来源改变时在原报告记失效文件、版本与重验结果，未经重验不得复用旧结论；无变化写无。\n",
       "inputs": [
         "papers/included.md",
         "papers/included.json",
@@ -89,7 +97,7 @@
         "machine:count:notes/*.md>=1",
         "machine:file:references.bib",
         "machine:contains:papers/included.md::—",
-        "machine:records:notes/index.json::id,notePath,bibKey,fulltextStatus,reviewStatus",
+        "machine:records:notes/index.json::id,bibKey,fulltextStatus,reviewStatus",
         "machine:same-ids:papers/included.json::notes/index.json",
         "人工质量验收：按报告开头的验收摘要逐项核对证据、决定与未决问题；G1–G5 只检查本步适用项，不重复上游有效检查。",
         "正文引用键均能在 references.bib 解析；未解析键与待补元数据已列出。"
@@ -98,15 +106,6 @@
         "lit-notes"
       ],
       "run": [],
-      "humanTasks": [
-        {
-          "title": "继续精读笔记（沉浸阅读区）",
-          "guidance": "验收后想补读或修正哪篇笔记：项目详情的产物清单、或终端页文件树里点开 notes/ 中那份 md →「⛶ 沉浸阅读」进三栏阅读区（笔记｜PDF｜Agent 并排，笔记可直接改，右栏 agent 也能改同一份）。改的是主仓里的笔记本身——改完到「改动」面板提交一下，后面的大纲/初稿步骤读到的就是你的修改版（主仓未提交的改动不进下一步工作区，开工弹层也会提醒）。",
-          "target": "",
-          "timing": "after",
-          "optional": true
-        }
-      ],
       "decisions": [],
       "requiredSkills": [
         "lit-notes"

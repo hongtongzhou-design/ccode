@@ -105,6 +105,7 @@ mod usage;
 mod watch_review;
 mod workspaces;
 mod ws_settings;
+mod endnote;
 mod zotero;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -438,6 +439,7 @@ pub fn run() {
             zotero::zotero_bbt_status,
             zotero::zotero_install_bbt,
             zotero::zotero_open_import,
+            endnote::endnote_export_xml,
             zotero::zotero_match_dois,
             zotero::zotero_open_papers,
             projects::pdf_owner_project,

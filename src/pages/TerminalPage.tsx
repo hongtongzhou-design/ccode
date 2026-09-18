@@ -138,6 +138,7 @@ import {
   ptyInputLooksLikeSubmit,
   ptyOutputMarksWorking,
   shouldArmWorkingOnLaunch,
+  PTY_LIVE_MS,
 } from "../tab-working";
 import type { RunOverviewInput } from "../run-overview";
 import type {
@@ -933,6 +934,8 @@ const TerminalView = memo(function TerminalView({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [pendingReply, setPendingReplyState] = useState(false);
   const pendingReplyRef = useRef(false);
+  const agentProcRef = useRef({ running: false, shellActive: false });
+  agentProcRef.current = { running, shellActive };
   // 本地即时/排队消息：已发送但会话文件尚未记下的用户消息队列（连发多条都保留）
   const pendingUsersRef = useRef<ChatMessageDto[]>([]);
   const pendingAssistantKeysRef = useRef<Set<string>>(new Set());
@@ -953,9 +956,11 @@ const TerminalView = memo(function TerminalView({
         stopPendingReplyPolling();
         return;
       }
-      // 兜底：回复永远不来（进程崩溃/会话文件写入失败）时 3 分钟后停轮询并摘掉「等待回复」
+      // 兜底：回复永远不来（进程崩溃/会话文件写入失败）时 3 分钟后停轮询并摘掉「等待回复」。
+      // Agent 还在跑就不超时——精读这种长工具回合经常超过 3 分钟。
       if (Date.now() - pendingReplySinceRef.current > 3 * 60 * 1000) {
-        setPendingReply(false);
+        const live = agentProcRef.current;
+        if (!live.running || live.shellActive) setPendingReply(false);
         return;
       }
       void fetchConversation(true);
@@ -2146,7 +2151,12 @@ const TerminalView = memo(function TerminalView({
           hasAssistantText([message]) &&
           !pendingAssistantKeysRef.current.has(JSON.stringify(message.blocks)),
       );
-      if (pendingReplyRef.current && hasNewAssistantText && missing.length === 0) {
+      if (
+        pendingReplyRef.current &&
+        hasNewAssistantText &&
+        missing.length === 0 &&
+        conversationTurnSettled(parsedMessages)
+      ) {
         setPendingReply(false);
       }
       // 等回复期间不把上一轮助手正文当成「这一轮已生成完」
@@ -2189,6 +2199,7 @@ const TerminalView = memo(function TerminalView({
           tail: state,
           armed: ptyWorkingArmedRef.current,
           turnSettled,
+          ptyLive: Date.now() - lastOutputAtRef.current < PTY_LIVE_MS,
         });
         ptyWorkingArmedRef.current = next.armed;
         return next.attention;

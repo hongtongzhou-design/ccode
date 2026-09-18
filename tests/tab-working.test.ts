@@ -162,6 +162,28 @@ test("会话尾部 done/confirm 立刻停转圈并卸武装", () => {
   );
 });
 
+test("PTY 还在出字时，会话文件中途 done 不得停转圈", () => {
+  assert.deepEqual(
+    applyTailAttention({
+      prev: "working",
+      tail: "done",
+      armed: true,
+      ptyLive: true,
+    }),
+    { attention: "working", armed: true },
+  );
+  assert.deepEqual(
+    applyTailAttention({
+      prev: "working",
+      tail: "working",
+      armed: true,
+      turnSettled: true,
+      ptyLive: true,
+    }),
+    { attention: "working", armed: true },
+  );
+});
+
 test("会话文件 sticky working 不得在熄灭后重新点亮", () => {
   assert.deepEqual(
     applyTailAttention({ prev: null, tail: "working", armed: false }),

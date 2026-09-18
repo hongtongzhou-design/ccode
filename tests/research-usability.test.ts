@@ -13,8 +13,8 @@ const md = (id: string) => find(id).steps.map((s) => renderTaskMd(s, {
 }, "/pilot/project"));
 
 test("任务书减重不靠删阶段/门禁：共用摘要一次，格式适配不重复终审", () => {
-  // Measured before this optimization, same project path and renderer inputs.
-  const before: Record<string, number> = { review: 15922, "research-paper": 22113, "data-processing": 9577, thesis: 22838, "submission-rebuttal": 6493, "latex-paper": 10297 };
+  // 上限含按步骤派生的停工清单（拍板/先报再问/样张）。
+  const before: Record<string, number> = { review: 16500, "research-paper": 23200, "data-processing": 10400, thesis: 23700, "submission-rebuttal": 6493, "latex-paper": 10297 };
   for (const t of PIPELINE_TEMPLATES) {
     const tasks = md(t.id);
     assert.ok(tasks.reduce((n, s) => n+s.length, 0) < before[t.id], t.id);

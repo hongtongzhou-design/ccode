@@ -457,6 +457,11 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 
 ## 10. 决策记录
 
+- **停工门按步骤从合同派生**（2026-09-19）：六套模板的 TASK.md 都走 `decisionPolicyBlock`。必须停的来自硬暂停决策、先报再问、开工前/执行中必做人工事项、格式适配的样张。可选收尾（如沉浸阅读）不算中途停工。批次提交不是停工。开步首条与「继续」同一句。不靠自动拆任务或自动连发「继续」。已有项目改任务书或下一轮开步才带新口径。细则 `conventions/pipeline.md` / `step-decisions.ts`。
+- **精读流程线不再问文献库交付**（2026-09-19）：三个胶囊不是执行钮，和检索步「同步到 Zotero」抢同一件事。Zotero 进库只留待获取那一颗；`libraryExport` 只保留 EndNote，问在项目设置（无精读才问投稿适配）。zotero-sync 只跟 `lit_source`。
+- **精读步不再挂「继续精读笔记」人工事项**（2026-09-19）：那是说明书，不是收尾活；占主干、写「验收后」却排在去评审前。入口只留笔记/PDF 上的「⛶ 沉浸阅读」。文献库交付仍问在精读、可选、不挡去评审。已有课题档案卡同步删这一条。
+- **评审壳增加 files 档**（2026-09-19）：用户发现精读评审套了实验验收壳。分流改为 screening / files / acceptance / default。精读与写作看分组文件后保存进项目；实验/清洗/EDA 才有验收摘要和接受/退回。六套模板按产物判定，不按步骤名各做一页。
+- **精读笔记禁止摘要灌装交差**（2026-09-18）：叙述用中文，术语可留英文原词，禁止整段粘贴英文摘要；未读完不生成占位文件（否则界面标已读）；机器验收只管 index 覆盖，不要求每篇都有 `notePath`。TASK 简报不得写「每篇产出笔记」当完成标准。技能与三套精读模板同步。已有项目下一轮开步才带新简报。细则 `conventions/pipeline.md` / lit-notes 技能。
 - **机构访问通道=人登录一次、系统复用会话（2026-09-16）**：付费墙全文获取不做「AI 拿学校账号自动登录」（MFA 过不去、SSO 密钥敏感、脚本式批量下载会被出版商风控连坐全校）。用户在设置 → 网络「机构访问」配 EZproxy/OpenAthens 前缀 + 在独立登录窗自己完成 SSO（含 MFA），后端 `inst_access.rs` 读登录窗 Cookie 落 0600 `inst-session.json`；`fetch_paper_fulltext` 阶梯 = 开放直链 → DOI 合法开放副本（Unpaywall/OpenAlex）→ 机构通道（前缀改写 + 会话逐跳注入 + 落地页 citation_pdf_url 提取）。入口三处（to-fetch 清单/雷达来源行/watch-followup 待办），只由人逐篇触发，无头不携带会话。同日夜修订：窗口点 PDF 不得主框架导航（Wiley/ACS epdf 是图片阅读器，WKWebView 内联 PDF 也像跳进一张图）——拦住走下载漏斗；开窗 about:blank 刷浅底防黑屏。细则 `conventions/pipeline.md`「机构访问通道」/ `safety.md` 会话罐。未做 Mesa Dev 实机界面验收。
 - **启动注入切聊天要立刻「进行中」（2026-09-14）**：带首条指令的新会话启动同时拉起聊天 `pendingReply`。从终端切到聊天，会话文件还没落盘也要显示正在回复、发送钮变进行中；TUI 开屏不算这一轮已经说完。纯逻辑 `tab-working.ts` `onPtyWorkingSilence`。
 - **Codex Shift+Enter 换行（2026-09-15）**：内嵌 xterm 对 Shift+Enter 仍发 `\r`，Codex composer 当成发送。键盘层改写为 kitty CSI-u `\x1b[13;2u`。细则 `conventions/terminal.md`。
@@ -930,6 +935,14 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 | v3.250 | **侧栏 Mesa 字标**（用户截图：标题有点小、位置不对）。字标改 `.ccode-brand-mark` 20px/600、略收字距，不走按钮 `text-*`（会被 `font: inherit` 吞掉）。水平与「工作」组头对齐（`px-3.5`），贴底靠近导航，去掉 `tracking-wide`。 |
 | v3.254 | **MCP 预设支持 stdio + 安装引导**：remote 填 url/headers；stdio 填 command/args，`{home}` 打开表单时展开为家目录绝对路径（三平台统一走家目录，不用官方 Windows 示例的 `C:\`）。需要本机软件的 server 用 setup 步骤引导，Mesa 不代装。从预设新建点「添加并启用」即写入 MCP 可写的 Agent，新开对话可用（Grok 只读除外）。Blender 官方 MCP 走这条：`uv --directory ~/blender_mcp/mcp run --with mcp<2 blender-mcp`（官方依赖 `mcp>=1.2.0` 会装到 v2，`FastMCP`/`MCPServer` 改名后秒退），先装 Blender 5.1 与官方插件。打开弹层只读探测本机（Blender 版本 / 插件文件 / uv / `~/blender_mcp` / TCP 9876），已就绪打勾，查不到不假装完成。 |
 | v3.255 | **用量归属按会话粒度 + 计费范围统一**（模块审计收口）。官方账号登记从「agent+项目粘住」改为按会话级 provenance（启动 hint/恢复目标已知即写）；启动时不知会话 id 的 agent 由重建索引按 `session_meta.profile_id` 解析认证方式兜底；旧项目级行只回填登记时刻（created_at）已存在的会话，不再粘住新会话，历史不丢。`session_meta.internal`（无头 AI/定时巡检按会话 id 登记）纳入用量索引，定时巡检不再被计费。总费用卡与花费折线/最贵榜同一计费范围（官方账号与 internal 不计费），二者的 token 量在总卡单列展示。 |
+| 2026-09-18 | **评审沉淀不得顶掉 TASK.md 模板**（用户：精读步任务书只剩「上一步评审沉淀」一段）。根因是 v3.72 `append_step_draft` 在下一步无文件时只写标题头+沉淀段，开工弹层把非 `isDecisionsOnly` 的草稿当全文。闸门改为 `isTaskMdStub`（空/仅标题/仅已定方向/仅评审沉淀），`resolveTaskMdSource` 走模板拼装并把沉淀接到后面；预览/播种同一口径。精读步模板简报未改。 |
+| 2026-09-18 | **精读开工不把 papers/ 已接到的 PDF 再标未登记**（用户：13 个未登记文件是不是我一篇篇下的付费文献）。检索步 Agent 把开放获取全文直写 `papers/`（作者年份-短标题.pdf），不写档案卡；付费墙「获取全文」才登记。弹层「上一步接到 papers/ · N 篇」已计数。未登记列表改排除本步骤声明输入（`isDeclaredStepInput`）。 |
+| 2026-09-18 | **长跑时转圈/已跑完/人工请求跳转**（用户：精读还在跑，标签不转、聊天无运行态、步骤却「已跑完 / 去评审」；人工请求只有知道了）。Codex `agent_message` 中途不当 done；PTY 还在出字时会话尾部 done 不得停转圈；活进程优先于 git ahead，步骤保持进行中。「去终端回答」取代「知道了」。 |
+| 2026-09-18 | **精读笔记禁止摘要灌装交差**（用户：精读应是读后消化，不是英文摘要模板；随后：中文不是绝对，术语可留英文）。根因是 TASK 写「每篇产出笔记」+ 机器验收要求 index 全量且 `notePath` 非空，Agent 用脚本把 OpenAlex 摘要填进八段。技能改为读完再写、叙述中文/术语可留英文、未读 pending 且 `notePath` 可空；三套精读简报同步；`records` 不再要求 `notePath`。已有项目不静默改 TASK.md。细则 `conventions/pipeline.md` / lit-notes 技能。 |
+| 2026-09-19 | **评审壳 files 档**（用户：精读评审不是检索那套，后续步骤和其他模板一起改）。非检索步骤不再一律 acceptance。精读/大纲/写作/排版走文件分组；实验执行、分析、清洗、EDA 才验收。 |
+| 2026-09-19 | **撤精读步「继续精读笔记」人工事项**（用户：那条和文献库交付是否合理）。说明书不是收尾活；沉浸阅读入口在文件上。 |
+| 2026-09-19 | **精读不问文献库交付**（用户：三个按钮怎么执行，前面不是已有同步到 Zotero）。Zotero 进库只留待获取执行钮；EndNote 交差改项目设置。 |
+| 2026-09-19 | **步进器大圆去掉待确认黄点**（用户：没必要）。v3.59 已拿掉「已回复」绿点，待确认角标一并删除。待确认仍在运行页标签、聊天审批条、收件箱。 |
 
 ## 11. 演进线（2026-08 定稿）
 

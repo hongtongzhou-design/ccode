@@ -44,7 +44,7 @@
   `--color-ok/err/warn` 只作 **pill 底色**（必须配 `text-*-text`），`--color-*-text` 同时供 pill 文字与
   **一切实心状态圆点/圆形**使用。**禁止用底色档铺实心形状**——浅色下 `--color-warn` 是浅黄 `#fdf1cd`，
   铺成圆点/22px 步进器大圆会在近白 canvas 上消失（v3.85 已修 `stepCircleClass` 的 blocked、
-  步进器注意力角标、任务卡主仓改动点三处；同为实心圆的 done 本就用 `-text` 档，原先是自相矛盾）；
+  任务卡主仓改动点；同为实心圆的 done 本就用 `-text` 档，原先是自相矛盾；大圆右上角待确认角标 2026-09-19 用户拍板拿掉）；
   **结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
   仅留给需警惕的小 pill）；**diff 增删行铺底走专用令牌 `--color-diff-add-bg/fg`、`--color-diff-del-bg/fg`**（v3.81：
   深色主题沿用深底浅字，浅色主题在 `[data-theme$="-light"]` 统一覆写为 GitHub 式浅底深字——ok/err 深底整行铺在浅底上
@@ -425,8 +425,7 @@
   pending 无工作区=startStep、已归档=restoreWs、进行中/待评审/阻塞=onOpenTerminal(ws)、done=setPendingTerminal 开主仓 shell 终端。
   状态/目录/agent/profile + 点击动作提示收进**应用内 tooltip**（`useHoverTip`/`HoverTip`，fixed 定位、横向钳制、滚动/缩放/点击即关）：
   原生 title 在 WKWebView 上行为不稳定（不渲染或残留数秒串到相邻控件），圆的悬浮提示**一律走应用内 tooltip，禁再回退原生 title**；
-  事件挂包裹 span，禁用态也可悬浮。**大圆右上角注意力角标**（size-2 圆点）：cwd 落在工作区内的终端标签有待确认=bg-warn-text（同上，v3.85 由 bg-warn 改）；
-  v3.59 起「已回复」绿点移除（每回合结束都会亮，噪音大于信号，用户否决），只留待确认；数据只读消费 `terminalRunInputs` 镜像，不新增轮询。
+  事件挂包裹 span，禁用态也可悬浮。**大圆右上角不放注意力角标**（2026-09-19 用户拍板：待确认黄点没必要；v3.59 已拿掉「已回复」绿点）。待确认只留运行页标签黄点、聊天层审批条、收件箱。
   **v3.61 步进器精简（用户拍板）**：**圆视觉 22px（按钮保持 28px 热区）**；**圆前/圆后小方块的按钮职责删除**
   （伪装成虚线块可发现性为零、与步骤 ⋯ 重复、误触打开全宽覆盖层代价高），小方块视觉保留为普通虚线块（DashBlock），
   SquareButton 组件移除；「编辑步骤」（openEditor(i) 定位卡片，PipelineEditor `focusStep` prop 滚动 + 聚焦简报框）与

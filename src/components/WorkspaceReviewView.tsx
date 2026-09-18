@@ -8,6 +8,7 @@ import {
   groupReviewFiles,
   sortReviewPaths,
 } from "../screening-review";
+import { groupDeliveryFiles, sortDeliveryPaths } from "../review-file-groups";
 import { resolveStepReviewProfile } from "../step-review";
 import { REVIEW_SAVE, reviewSavePrimaryLabel } from "../review-save-copy";
 import WatchRunReview from "./WatchRunReview";
@@ -306,14 +307,14 @@ function DiffSide({
       : "text-l4";
   return (
     <div
-      className={`grid min-w-0 grid-cols-[44px_minmax(max-content,1fr)] ${tone}`}
+      className={`grid min-w-0 grid-cols-[44px_minmax(0,1fr)] ${tone}`}
     >
       <span
         className={`select-none border-r border-hairline px-2 text-right ${noTone}`}
       >
         {lineNo ?? ""}
       </span>
-      <span className="whitespace-pre px-2 text-l2">{text || " "}</span>
+      <span className="min-w-0 overflow-x-auto whitespace-pre px-2 text-l2">{text || " "}</span>
     </div>
   );
 }
@@ -421,19 +422,23 @@ function DiffTable({
         return (
           <div
             key={index}
-            className="grid grid-cols-2 divide-x divide-hairline"
+            className="grid min-w-0 grid-cols-2 divide-x divide-hairline"
             style={{ minWidth }}
           >
-            <DiffSide
-              lineNo={row.oldNo}
-              text={row.oldText}
-              kind={row.oldKind}
-            />
-            <DiffSide
-              lineNo={row.newNo}
-              text={row.newText}
-              kind={row.newKind}
-            />
+            <div className="min-w-0 overflow-hidden">
+              <DiffSide
+                lineNo={row.oldNo}
+                text={row.oldText}
+                kind={row.oldKind}
+              />
+            </div>
+            <div className="min-w-0 overflow-hidden">
+              <DiffSide
+                lineNo={row.newNo}
+                text={row.newText}
+                kind={row.newKind}
+              />
+            </div>
           </div>
         );
       })}
@@ -660,17 +665,16 @@ function ChangeTree({
 }
 
 function GroupedReviewFiles({
-  files,
+  groups,
   onSelect,
   activePath,
   expandAll = false,
 }: {
-  files: GitFileDto[];
+  groups: { id: string; label: string; files: GitFileDto[] }[];
   onSelect: (path: string) => void;
   activePath: string | null;
   expandAll?: boolean;
 }) {
-  const groups = useMemo(() => groupReviewFiles(files), [files]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
     () => new Set(["machine"]),
   );
@@ -1683,10 +1687,19 @@ function LiveWorkspaceReviewView({
   );
   const orderedFiles = useMemo(() => {
     if (!reviewProfile.groupFiles) return filteredFiles;
-    const order = sortReviewPaths(filteredFiles.map((file) => file.path));
+    const order =
+      reviewProfile.kind === "screening"
+        ? sortReviewPaths(filteredFiles.map((file) => file.path))
+        : sortDeliveryPaths(filteredFiles.map((file) => file.path));
     const map = new Map(filteredFiles.map((file) => [file.path, file]));
     return order.map((path) => map.get(path)).filter((file): file is GitFileDto => !!file);
-  }, [filteredFiles, reviewProfile.groupFiles]);
+  }, [filteredFiles, reviewProfile.groupFiles, reviewProfile.kind]);
+  const reviewFileGroups = useMemo(() => {
+    if (!reviewProfile.groupFiles) return [];
+    return reviewProfile.kind === "screening"
+      ? groupReviewFiles(orderedFiles)
+      : groupDeliveryFiles(orderedFiles);
+  }, [orderedFiles, reviewProfile.groupFiles, reviewProfile.kind]);
   const tree = useMemo(() => buildChangeTree(filteredFiles), [filteredFiles]);
   const filteredConflictFiles = useMemo(
     () =>
@@ -2698,7 +2711,7 @@ function LiveWorkspaceReviewView({
       </section>}
       {deliveryPreview && deliveryReview && <Suspense fallback={<p className="px-3 py-2 text-xs text-l3">加载固定副本预览…</p>}><OfficePreviewModal path={`${deliveryReview.payloadDir}/${deliveryPreview}`} root={deliveryReview.payloadDir} onClose={() => setDeliveryPreview(null)} /></Suspense>}
       {!diff?.reviewOnly && researchError && <p role="alert" className="px-3 py-2 text-xs text-err-text">{researchError}</p>}
-      {!diff?.reviewOnly && researchContext?.root === worktreePath && reviewProfile.kind !== "default" && reviewProfile.kind !== "screening" && <div className="max-h-[42vh] shrink-0 overflow-y-auto border-b border-hairline px-3">
+      {!diff?.reviewOnly && researchContext?.root === worktreePath && reviewProfile.kind === "acceptance" && <div className="max-h-[42vh] shrink-0 overflow-y-auto border-b border-hairline px-3">
         {reviewProfile.evidence === "report" && (
           <ResearchEvidencePanel root={worktreePath} patterns={researchReportPatterns(researchContext.step, "acceptance")} kind="acceptance" />
         )}
@@ -3096,7 +3109,7 @@ function LiveWorkspaceReviewView({
                 <p className="px-3 py-2 text-xs text-l4">没有匹配文件</p>
               ) : reviewProfile.groupFiles ? (
                 <GroupedReviewFiles
-                  files={orderedFiles}
+                  groups={reviewFileGroups}
                   onSelect={selectFile}
                   activePath={activePath}
                   expandAll={Boolean(normalizedQuery)}
@@ -3199,7 +3212,7 @@ function LiveWorkspaceReviewView({
                   <p className="px-3 py-2 text-xs text-l4">没有匹配文件</p>
                 ) : (
                   <GroupedReviewFiles
-                    files={orderedFiles}
+                    groups={reviewFileGroups}
                     onSelect={selectFile}
                     activePath={activePath}
                     expandAll={Boolean(normalizedQuery)}

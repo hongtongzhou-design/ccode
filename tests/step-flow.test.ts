@@ -8,6 +8,7 @@ import {
   doiFromToFetchUrl,
   formatZoteroAttachSummary,
   formatZoteroDuplicatePrompt,
+  isEndnoteTaskTitle,
   isPaywallTaskTitle,
   missingToFetchCount,
   parseToFetchItems,
@@ -142,6 +143,30 @@ test("after 事项未完成时卡在 after 节点（评审之前）", () => {
   assert.equal(flow.currentKey, "human:下载付费");
 });
 
+test("EndNote 交差在精读保存后出现，不挡开工、不靠项目设置", () => {
+  const pending = buildStepFlow({
+    step: step({}),
+    states: [],
+    hasDraft: false,
+    runStatus: "pending",
+    endnoteExport: true,
+  });
+  assert.equal(pending.nodes.some((n) => n.key === "endnote-export"), false);
+  const done = buildStepFlow({
+    step: step({}),
+    states: [],
+    hasDraft: true,
+    runStatus: "done",
+    endnoteExport: true,
+  });
+  const endnote = done.nodes.find((n) => n.key === "endnote-export");
+  assert.equal(endnote?.section, "optional");
+  assert.ok(
+    done.nodes.findIndex((n) => n.kind === "review") <
+      done.nodes.findIndex((n) => n.key === endnote?.key),
+  );
+});
+
 test("可选 after 事项进主干但不抢「当前节点」（v3.97）", () => {
   const flow = buildStepFlow({
     step: step({}),
@@ -224,6 +249,11 @@ test("只有决策项、没有讨论种子：discuss 节点照常出现", () => 
     pendingDecisions: 1,
   });
   assert.ok(flow.nodes.some((n) => n.key === "discuss"));
+});
+
+test("EndNote 交差事项按标题识别", () => {
+  assert.equal(isEndnoteTaskTitle("导入到 EndNote"), true);
+  assert.equal(isPaywallTaskTitle("导入到 EndNote"), false);
 });
 
 test("既无决策项也无种子：不生成 discuss 节点，当前直接落 agent（v3.89）", () => {

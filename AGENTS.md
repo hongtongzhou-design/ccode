@@ -277,7 +277,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 剪贴板图片条目判定/MIME→扩展名/粘贴反馈文案（tests/terminal-input.test.ts）
   terminal-welcome.ts        # 终端未启动空态：isTerminalIdle / 卡上「将在 … 启动」目录文案
                              # （tests/terminal-welcome.test.ts）
-  tab-working.ts             # 终端标签「生成中」虚线圆：PTY 出字才转；启动注入等回复期间 TUI 开屏不熄灭；会话已落完助手正文
+  tab-working.ts             # 终端标签「生成中」虚线圆：PTY 出字才转；启动注入等回复期间 TUI 开屏不熄灭；会话已落完助手正文；PTY 仍出字时 Codex 中途 done 不得停转圈
                              # 立刻停，sticky working 不得续命；armed 回合不因 PTY 2s 静默熄灭（推理思考间隙≠回合结束，
                              # armed 只由会话层收尾/确认/退出清，未 armed 的 working 仍 2s 静默熄灭兜底——2026-09-15 修正
                              # 「终端还在出字、标签与聊天层却无运行态」）；出字时间戳记任意 agent 输出（焦点重绘抑制窗内也记，
@@ -321,21 +321,22 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   gateway-draft.ts           # 网关库槽位纯逻辑：effectiveSlotUrl 主输入跟随/脱离、slotsFollowMaster、firstProbeableSlot
   goal-review.ts             # 目标验收弹层分组与文案：科研按文献/笔记/数据/论文、工作按文档/表格/幻灯（tests/goal-review.test.ts）
   history-view.ts            # 历史时间线白话翻译层（✓保存进项目/⚙自动保存/◔保存，hash/分支名降为二级）
-  step-review.ts             # 科研步骤评审档案闭集 screening/acceptance/default；一张审阅壳按类型拼区块（tests/step-review.test.ts）
+  step-review.ts             # 科研步骤评审档案闭集 screening/files/acceptance/default；一张审阅壳按类型拼区块（tests/step-review.test.ts）
   review-save-copy.ts        # 科研保存链白话：保存进项目；不是编程合进基准、不是科研验收决定
-  kickoff-inputs.ts          # 开步确认弹层「上一步接到的输入」芯片（纯展示）
+  kickoff-inputs.ts          # 开步确认弹层「上一步接到的输入」芯片；isDeclaredStepInput 排除已声明输入，不进未登记列表
   lit-list.ts                # 无流程科研文献/笔记列表：展示名、编号、状态与过滤纯逻辑
   model-switch.ts            # 各 CLI 多模型注入能力表 + 启动栏提示纯逻辑（对应 agent_specs.model_switch）
   nav-capsule.ts             # 侧栏可配置胶囊入口（恢复侧栏始终保留，不在此列）
   project-context-load.ts    # 启动环境说明拼装：读档案卡和顶层目录，失败仍返回能用的短包
   research-report.ts         # 研究报告节抽取/相对路径解析（只认显式报告节，不认 TASK 指令或推断结论）
   screening-review.ts        # 检索/筛选评审主面：计数/待拍板/筛选决定、表默认 pending、文件分组；included.md/json 不与表并列摊 diff（tests/screening-review.test.ts）
+  review-file-groups.ts      # 精读/写作评审文件分组：笔记/稿件/引文/待获取/过程（tests/review-file-groups.test.ts）
   research-tools.ts          # 科研工具注入 withResearchTools；旧「文献主来源」设置键写回时剥除——来源只认 lit_source
   academic-mcp.ts            # 检索步「配置学术检索 MCP」：预设名、登录注入（tests/academic-mcp.test.ts）
   session-filter.ts          # 对话页筛选纯逻辑（tests/session-filter.test.ts）
   session-search.ts          # 对话搜索纯逻辑：分词、元数据即时过滤、正文命中合并排序
   session-transfer.ts        # 会话导入向导纯逻辑：状态文案、目标目录预填、可否执行
-  step-decisions.ts          # 决策项：答案落任务书草稿固定小节（decisionGate/orderedAnswers/parseDecisions，tests/step-decisions.test.ts）
+  step-decisions.ts          # 决策项：答案落任务书草稿固定小节；isTaskMdStub = 空/仅决策/仅评审沉淀不算可执行正文，resolveTaskMdSource 走模板拼装并接沉淀（decisionGate/orderedAnswers/parseDecisions，tests/step-decisions.test.ts）
   terminal-resume.ts         # 终端会话恢复的标签复用与配置挑选纯逻辑（2026-09-08 审计修复）
   store.ts                   # zustand 状态
 src-tauri/src/
@@ -819,7 +820,7 @@ src-tauri/src/
   均已落地；后续只保留文档/回归走查与发布动作，不把历史批次重复列为功能未完成。
   批次顺序为用户拍板：E 先行，批次 C（实验数据分析）/D（表征分析）转待办；场景 4（agent 辅助做图）不做独立产品能力，改由按需挂载的 origin-plot 技能承接、
   已移出独立路线（「只做场景必需、不做扩展性功能」原则，见架构 v3.97）
-- **科研工具交付合同（2026-09-11；2026-09-12 收口来源）**：六套模板不另扩编排；库交付、Origin 数值图、Blender 示意和稿件载体由人选择，统一补进现有步骤技能/产物/人工事项。**文献从哪来只在检索步 `lit_source`**，不在创建弹层或 `科研工具/literature` 再问一遍；选 Zotero 才挂 `zotero-sync`。设定屏只填全局设定。稿件载体问在会换正式稿的步骤；库交付问在精读（无精读才在投稿适配）；Origin/Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。种子 v5 加 `blender-research` 及随包脚本；已有技能只经差异预览确认升级。模板同名但交付不同不可跳过。Zotero 只读在线内存快照、增量独立候选、来源+资源一起保存；外部 PDF 仅精确登记只读路径可配对阅读。复现合同与面板统一；上游验收引用不自动批准本步。细则见 `docs/conventions/pipeline.md` 末节。
+- **科研工具交付合同（2026-09-11；2026-09-12 收口来源）**：六套模板不另扩编排；库交付、Origin 数值图、Blender 示意和稿件载体由人选择，统一补进现有步骤技能/产物/人工事项。**文献从哪来只在检索步 `lit_source`**，不在创建弹层或 `科研工具/literature` 再问一遍；选 Zotero 才挂 `zotero-sync`。设定屏只填全局设定。稿件载体问在会换正式稿的步骤；Zotero 进库只走检索步待获取「同步到 Zotero」，精读流程线不问文献库交付；EndNote 交差在项目设置（无精读才问投稿适配）；Origin/Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。种子 v5 加 `blender-research` 及随包脚本；已有技能只经差异预览确认升级。模板同名但交付不同不可跳过。Zotero 只读在线内存快照、增量独立候选、来源+资源一起保存；外部 PDF 仅精确登记只读路径可配对阅读。复现合同与面板统一；上游验收引用不自动批准本步。细则见 `docs/conventions/pipeline.md` 末节。
 - **科研外部工具三线（2026-09-05 已融入）**：`origin-plot` / `zotero-sync` / `endnote-bridge` 已注册为内置技能并随种子版本 4 播种；仅 `zotero-sync` 默认挂到英文综述、科研论文、毕业论文的文献检索步骤。Origin 仍只作 Windows + Origin 2021+ 的可选外部工具驱动，EndNote 仍只作 XML/RIS 格式桥接，二者不默认进入模板，也不做 CWYW 无人值守自动化。Zotero 通道需按实机版本/授权探测，失败时回落 RIS/BibTeX 文件流程，不阻塞检索。
   Origin 只做 Windows 实机（Mac 虚拟机方案否决）、EndNote 只走格式桥接（CWYW 无人值守否决）、Zotero 写库只走技能或 UI 显式动作且必须有用户意图（2026-09-16 放宽：to-fetch 清单「同步到 Zotero」按钮即用户意图——zotero.rs zotero_attach_fulltexts 直连本地 API 按 DOI 挂 linked_file 附件，引用 papers/ 绝对路径不复制；Zotero 须运行中并允许本机通信，首次写入授权）；场景 4 以 origin-plot 技能形态重新纳入。
 - **定时任务与研究流程结合（核心路径已落地，细目见架构 §11.4 历史记录）**：边界已定——不给每步配定时任务，

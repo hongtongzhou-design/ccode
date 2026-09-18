@@ -2899,8 +2899,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         />
       )}
       {/* 人工请求完整内容层（v3.97）：收件箱行只放 40 字预览，全文在这里看。
-          回复方式 = 到该工作区终端直接告诉 agent（或在源文件 .ccode/help-wanted.md 里写）——
-          每条请求都自带兜底方案，不回也不停工 */}
+          主动作是跳到对应终端回答；不回它会按每条自带的兜底方案继续，不停工 */}
       {helpView && (
         <div
           className="ccode-fade fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -2915,7 +2914,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               {helpView.workspaceName ? ` / ${helpView.workspaceName}` : ""}
             </h2>
             <p className="mb-3 shrink-0 text-xs text-l4">
-              Agent 干到一半需要你拍板的事。回到对应终端直接回答它即可；不回复它会按每条自带的兜底方案继续，不停工。
+              Agent 干到一半需要你拍板。去对应终端直接告诉它；它还在干活时先打断再回答。不回它会按每条兜底继续。
             </p>
             <ol className="min-h-0 flex-1 list-decimal space-y-2 overflow-auto pl-5">
               {helpView.items.map((item, i) => (
@@ -2941,10 +2940,30 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
               </button>
               <button
                 type="button"
-                onClick={() => setHelpView(null)}
+                title="打开该步骤终端，直接回答这些请求"
+                onClick={() => {
+                  const view = helpView;
+                  setHelpView(null);
+                  const ws =
+                    workspaces.find((w) => w.id === view.workspaceId) ??
+                    workspaces.find((w) => w.worktreePath === view.root);
+                  if (ws) {
+                    void buildWorkspaceTerminalRequest(ws).then((req) => {
+                      setPendingTerminal(req);
+                      setPage("terminal");
+                    });
+                    return;
+                  }
+                  setPendingTerminal({
+                    cwd: view.root,
+                    extraEnv: {},
+                    title: view.workspaceName ?? view.repoName,
+                  });
+                  setPage("terminal");
+                }}
                 className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110"
               >
-                知道了
+                去终端回答
               </button>
             </div>
           </div>

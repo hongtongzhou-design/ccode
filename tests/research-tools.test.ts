@@ -44,8 +44,9 @@ test("Blender 只挂研究设计/结构示意，不替代统计图；EndNote 交
   assert.ok(!withResearchTools(template("review").steps.find((s) => s.workspaceName === "outline")!, tools).skills.includes("blender-research"));
   assert.ok(!steps[0].skills.includes("endnote-bridge"));
   const notes = steps.find((s) => s.skills.includes("lit-notes"))!;
-  assert.ok(notes.skills.includes("endnote-bridge"));
-  assert.ok(notes.expectedArtifacts.includes("papers/endnote-import.xml"));
+  assert.equal(notes.skills.includes("endnote-bridge"), false);
+  assert.equal(notes.expectedArtifacts.includes("papers/endnote-import.xml"), false);
+  assert.equal((notes.humanTasks ?? []).some((h) => h.title.includes("EndNote")), false);
   assert.ok(!steps.at(-1)!.skills.includes("endnote-bridge"));
 });
 
@@ -67,13 +68,14 @@ test("选定模板后只出示相关工具字段", () => {
   const reviewKeys = researchToolFieldsForSteps(template("review").steps).map((f) => f.key);
   assert.ok(!reviewKeys.includes("illustration"));
   assert.ok(reviewKeys.includes("manuscript"));
+  assert.ok(reviewKeys.includes("libraryExport"));
   assert.ok(!reviewKeys.includes("plotting"));
 });
 
 test("工具问在用得上的那一步；综述不问稿件载体", () => {
   const review = template("review").steps;
   assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "outline")!, review).map((f) => f.key), []);
-  assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "lit-notes")!, review).map((f) => f.key), ["libraryExport"]);
+  assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "lit-notes")!, review).map((f) => f.key), []);
   assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "polish")!, review).map((f) => f.key), []);
   assert.deepEqual(researchToolAskFieldsForStep(review.find((s) => s.workspaceName === "draft")!, review).map((f) => f.key), []);
   const paper = template("research-paper").steps;

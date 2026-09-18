@@ -10,6 +10,7 @@ import {
   expectedDeliverNames,
   formatKickoffChip,
   chipFileName,
+  isDeclaredStepInput,
 } from "../src/kickoff-inputs.ts";
 
 const profiles = [
@@ -132,6 +133,24 @@ test("formatKickoffChip：included 用篇、缺的标还没有", () => {
     }),
     { label: "outline.md · 还没有", missing: true },
   );
+});
+
+test("isDeclaredStepInput：精读步 papers/*.pdf 已在上一步接到，不算陌生未登记", () => {
+  const notes = {
+    inputs: ["papers/included.md", "papers/included.json", "papers/to-fetch.md"],
+    optionalInputs: ["papers/*.pdf"],
+  };
+  assert.equal(
+    isDeclaredStepInput(
+      "papers/Ford2018-cross-linked-ionomer-gel-separators-for.pdf",
+      notes,
+    ),
+    true,
+  );
+  assert.equal(isDeclaredStepInput("papers/included.md", notes), true);
+  assert.equal(isDeclaredStepInput("notes/01-foo.md", notes), false);
+  assert.equal(isDeclaredStepInput("data/raw.csv", notes), false);
+  assert.equal(isDeclaredStepInput("papers/foo.pdf", { inputs: [] }), false);
 });
 
 test("expectedDeliverLine：列出本步产物短名", () => {

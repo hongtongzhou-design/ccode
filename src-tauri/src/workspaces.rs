@@ -3747,6 +3747,11 @@ pub async fn merge_workspace(
     if out.archived {
         emit_ws_archived(&app, &paths.0, &paths.1);
     }
+    if out.merged {
+        if let Err(e) = crate::endnote::export_if_configured(std::path::Path::new(&paths.1)) {
+            crate::logbuf::record("warn", "endnote", &format!("保存进项目后生成 EndNote 导入文件失败: {e}"));
+        }
+    }
     Ok(out)
 }
 

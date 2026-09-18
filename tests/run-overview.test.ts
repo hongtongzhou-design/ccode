@@ -5,6 +5,7 @@ import {
   buildRunOverview,
   cwdBasename,
   itemRank,
+  workspaceHasLiveAgent,
   type RunOverviewInput,
 } from "../src/run-overview.ts";
 
@@ -40,6 +41,24 @@ test("itemRank 优先级：待确认 > 工作中 > 其余运行中 > shell/已�
   assert.equal(itemRank(input({ running: true })), 2);
   assert.equal(itemRank(input({ shell: true })), 3);
   assert.equal(itemRank(input({})), 3);
+});
+
+test("workspaceHasLiveAgent：进程还在跑不算待评审，回落 shell 不算", () => {
+  const ws = "/ccode/workspaces/lit-notes";
+  assert.equal(
+    workspaceHasLiveAgent(ws, [
+      input({ cwd: ws, running: true, shell: false, attention: "done" }),
+    ]),
+    true,
+  );
+  assert.equal(
+    workspaceHasLiveAgent(ws, [
+      input({ cwd: ws, running: true, shell: true }),
+    ]),
+    false,
+  );
+  assert.equal(workspaceHasLiveAgent(ws, [input({ cwd: "/other", running: true })]), false);
+  assert.equal(workspaceHasLiveAgent(undefined, [input({ cwd: ws, running: true })]), false);
 });
 
 test("buildRunOverview 按「要你管」排序，同级保持标签原顺序", () => {

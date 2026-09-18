@@ -6,6 +6,8 @@ export type TabAttention = "done" | "working" | "confirm" | null;
 export const PTY_ECHO_SUPPRESS_MS = 300;
 /** 已经出过字之后，PTY 静默这么久视为本轮生成结束 */
 export const PTY_WORKING_SILENCE_MS = 2000;
+/** 会话文件把中途助手正文标成 done 时，PTY 在这段时间内出过字则转圈接着转 */
+export const PTY_LIVE_MS = 8000;
 
 export function ptyInputLooksLikeSubmit(data: string, kimiEnter: string): boolean {
   return data.includes("\r") || data.includes("\n") || data.includes(kimiEnter);
@@ -51,15 +53,21 @@ export function ptyOutputMarksWorking(input: {
 }
 
 /** 会话尾部 working 很黏（user 行直到 assistant 落盘），不得在 PTY 已熄灭后重新点亮转圈。
- *  会话窗口已经落完助手正文时立刻 done，不等 sticky working / PTY 静默。 */
+ *  会话窗口已经落完助手正文、且 PTY 不再出字时立刻 done。
+ *  Codex 会在工具调用之间写入助手正文，会话尾部提前变 done；PTY 还在出字时不得停转圈。 */
 export function applyTailAttention(input: {
   prev: TabAttention;
   tail: string;
   armed: boolean;
   turnSettled?: boolean;
+  ptyLive?: boolean;
 }): { attention: TabAttention; armed: boolean } {
   if (input.tail === "confirm") return { attention: "confirm", armed: false };
-  if (input.tail === "done" || input.turnSettled) {
+  const fileSaysOver = input.tail === "done" || Boolean(input.turnSettled);
+  if (fileSaysOver) {
+    if (input.ptyLive && (input.armed || input.prev === "working")) {
+      return { attention: "working", armed: input.armed };
+    }
     return { attention: "done", armed: false };
   }
   if (input.tail === "working") {

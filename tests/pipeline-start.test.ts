@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderTaskMd } from "../src/task-md.ts";
+import { PIPELINE_TEMPLATES, settingsForTemplateApply } from "../src/pipeline-presets.ts";
+import { KEEP_WORKING_CLAUSE } from "../src/step-decisions.ts";
 import type { ProjectConfigDto, ProjectStepDto } from "../src/types.ts";
 
 function step(partial: Partial<ProjectStepDto> = {}): ProjectStepDto {
@@ -40,6 +42,35 @@ test("TASK.md 收尾：派生产物走工作区，直写项目根的是未验收
   assert.match(md, /派生产物只写本工作区产物目录/);
   assert.match(md, /文献 PDF 写项目根 papers\//);
   assert.doesNotMatch(md, /必须落在上方项目根对应目录/);
+  assert.match(md, /决策暂停策略/);
+  assert.match(md, /本步中途没有必须等人拍板的事项/);
+  assert.match(md, /一批工作、一次 git 提交或进度汇报不是停工理由/);
+  assert.match(md, /停工门见上文「决策暂停策略」/);
+  assert.doesNotMatch(md, /完成时把本步源稿、脚本与清单全部 git 提交——不提交/);
+});
+
+test("六套模板的 TASK.md 都带本步停工清单，格式步要停下来看样张", () => {
+  for (const t of PIPELINE_TEMPLATES) {
+    const cfg: ProjectConfigDto = {
+      artifactDir: "artifacts",
+      resources: [],
+      steps: t.steps,
+      settings: settingsForTemplateApply(t),
+      rulesOwned: true,
+    };
+    for (const s of t.steps) {
+      const md = renderTaskMd(s, cfg, "/pilot/project");
+      assert.ok(md.includes(KEEP_WORKING_CLAUSE), `${t.id}/${s.name} 缺做到做完`);
+      assert.match(md, /本步必须停下来等你|本步中途没有必须等人拍板的事项/);
+    }
+  }
+  const format = PIPELINE_TEMPLATES.find((t) => t.id === "submission-rebuttal")!
+    .steps.find((s) => s.workspaceName === "journal-format")!;
+  const md = renderTaskMd(format, {
+    artifactDir: "artifacts", resources: [], steps: [format],
+  }, "/pilot/project");
+  assert.match(md, /开工前等你做完：放入成稿/);
+  assert.match(md, /渲染出样张后停下来让你看版式/);
 });
 
 test("TASK.md 不含目标验收的「保持原样」段", () => {

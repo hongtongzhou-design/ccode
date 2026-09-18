@@ -29,6 +29,7 @@ import {
 import {
   expectedDeliverNames,
   formatKickoffChip,
+  isDeclaredStepInput,
   type KickoffInputChip,
 } from "../kickoff-inputs";
 import {
@@ -38,7 +39,7 @@ import {
   type TaskMdEditorState,
 } from "../task-cards";
 import { gatherTaskMdExtras, renderTaskMd } from "../pipeline-start";
-import { decisionGate, isDecisionsOnly } from "../step-decisions";
+import { decisionGate, isTaskMdStub, resolveTaskMdSource } from "../step-decisions";
 import { RESOURCE_TYPE_LABELS } from "../pipeline-presets";
 import type {
   ArtifactEntryDto,
@@ -162,8 +163,8 @@ export default function KickoffConfirmDialog({
   const [resSaving, setResSaving] = useState(false);
   const [resError, setResError] = useState<string | null>(null);
 
-  // 任务书草稿（v3.72）：草稿存在时编辑区初始内容 = 草稿全文（优先于模板拼装）；
-  // undefined = 尚未加载（等草稿到达再初始化编辑区，避免先显示拼装再被草稿闪换）
+  // 任务书草稿（v3.72）：有可执行正文时编辑区初始 = 文件全文（优先于模板拼装）；
+  // 空/仅决策/仅评审沉淀走 resolveTaskMdSource。undefined = 尚未加载（防闪换）
   const [draftText, setDraftText] = useState<string | null | undefined>(
     undefined,
   );
@@ -343,7 +344,13 @@ export default function KickoffConfirmDialog({
       .catch(() => {});
     invoke<DiscoveredResourceDto[]>("discover_resources", { path: projectPath })
       .then((items) => {
-        if (!stale) setResCandidates(items.filter((d) => !d.exists));
+        if (!stale) {
+          setResCandidates(
+            items.filter(
+              (d) => !d.exists && !isDeclaredStepInput(d.path, step),
+            ),
+          );
+        }
       })
       .catch(() => {});
     invoke<{ relPath: string; text: string | null }>("read_task_draft", {
@@ -393,16 +400,14 @@ export default function KickoffConfirmDialog({
     );
   }, [extras, stepNow, cfgLocal, skillMeta, projectPath]);
 
-  // 编辑区初始化：草稿有正文时草稿优先于模板拼装——草稿是讨论的直接产物，所见即所得；
-  // 但「只点了几个选项」生成的草稿（只有「已定方向」段、没有正文）不算数：
-  // 那种草稿顶掉拼装会把简报/产物/人工事项全丢掉，agent 会拿到一份没有任务的任务书。
-  // 这种情况走模板拼装——拼装里已经带上了「已定方向」段，拍板结果一样不丢。
-  // 「恢复默认拼装」仍可回到模板拼装。等草稿加载完再初始化，避免闪换
+  // 编辑区初始化：有可执行正文时文件全文优先于模板拼装——讨论的直接产物，所见即所得。
+  // 空文件 / 只点了决策项 / 评审沉淀新建的小节都不算正文：顶掉拼装会把简报、产物、
+  // 技能、人工事项丢掉。这种情况走模板拼装，并把评审沉淀接到后面。
+  // 「恢复默认拼装」仍回模板拼装。等草稿加载完再初始化，避免闪换
   useEffect(() => {
     if (assembled === null || draftText === undefined) return;
-    const raw = draftText?.trim() ?? "";
-    const draft = raw && !isDecisionsOnly(raw) ? raw : null;
-    dispatchEditor({ type: "assemble", text: appendUpstreamAcceptance(draft ?? assembled, extras?.upstream ?? []) });
+    const source = resolveTaskMdSource(draftText, assembled);
+    dispatchEditor({ type: "assemble", text: appendUpstreamAcceptance(source, extras?.upstream ?? []) });
     setEditorReady(true);
   }, [assembled, draftText, extras]);
 
@@ -776,7 +781,8 @@ export default function KickoffConfirmDialog({
           </div>
         )}
 
-        {/* 未登记资源提醒（只提醒不阻断，默认不勾选）：登记后进 TASK.md 的「项目资源」段 */}
+        {/* 未登记资源提醒（只提醒不阻断，默认不勾选）：登记后进 TASK.md 的「项目资源」段。
+            本步骤声明要读的输入（如精读的 papers/*.pdf）上面「上一步接到」已经点过名，不重复列。 */}
         {resCandidates && resCandidates.length > 0 && (
           <div className="mb-3 shrink-0 rounded-md ccode-well px-2.5 py-2">
             <div className="mb-1 text-xs text-l3">
@@ -911,7 +917,7 @@ export default function KickoffConfirmDialog({
         </div>
         {taskMdOpen && (
           <>
-            {draftText?.trim() && !isDecisionsOnly(draftText.trim()) && (
+            {draftText?.trim() && !isTaskMdStub(draftText) && (
               <p className="mb-1 shrink-0 text-micro text-l4">
                 内容来自你编辑过的 TASK.md（{draftRel ?? ""}；改这里只影响本次落盘，不回写该文件）
               </p>

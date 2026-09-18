@@ -217,6 +217,104 @@ export function stripDecisions(draft: string): string {
   return [...lines.slice(0, start), ...lines.slice(end)].join("\n").trim();
 }
 
+/** append_step_draft 写的评审沉淀小节标题。
+ *  完整形如「## 上一步（lit-search）评审沉淀（2026-09-18T08:18:13Z）」；
+ *  测试与旧调用也可能不带工作区名。`.+?` 非贪婪，避免把时间戳括号吞进去。 */
+const REVIEW_DISTILL_HEADING = /^##\s+上一步(?:（.+?）)?评审沉淀/;
+
+function isAtxHeading(line: string): boolean {
+  return /^#{1,6}\s/.test(line.trim());
+}
+
+function isH2(line: string): boolean {
+  return /^##\s+/.test(line.trim());
+}
+
+/** 草稿里所有评审沉淀小节（标题+正文），多段之间空行分隔。 */
+export function reviewDistillSections(draft: string): string {
+  const lines = draft.split(/\r?\n/);
+  const out: string[] = [];
+  let capturing = false;
+  const chunk: string[] = [];
+  const flush = () => {
+    const text = chunk.join("\n").trim();
+    if (text) out.push(text);
+    chunk.length = 0;
+  };
+  for (const line of lines) {
+    const t = line.trim();
+    if (REVIEW_DISTILL_HEADING.test(t)) {
+      if (capturing) flush();
+      capturing = true;
+      chunk.push(line);
+      continue;
+    }
+    if (capturing) {
+      if (isH2(t) && !REVIEW_DISTILL_HEADING.test(t)) {
+        flush();
+        capturing = false;
+      } else {
+        chunk.push(line);
+      }
+    }
+  }
+  if (capturing) flush();
+  return out.join("\n\n").trim();
+}
+
+/** 去掉已定方向、评审沉淀和纯标题行后的剩余正文。空串 = 没有可执行任务书。 */
+export function stripTaskMdChrome(draft: string): string {
+  const kept: string[] = [];
+  let skipping = false;
+  for (const line of stripDecisions(draft).split(/\r?\n/)) {
+    const t = line.trim();
+    if (REVIEW_DISTILL_HEADING.test(t)) {
+      skipping = true;
+      continue;
+    }
+    if (skipping) {
+      if (isH2(t) && !REVIEW_DISTILL_HEADING.test(t)) {
+        skipping = false;
+      } else {
+        continue;
+      }
+    }
+    if (!t || isAtxHeading(t)) continue;
+    kept.push(line);
+  }
+  return kept.join("\n").trim();
+}
+
+/** 这份草稿还没有可执行任务书正文。
+ *
+ *  空文件、只剩标题、只点了决策项、评审「沉淀到下一步」新建的小节——都不是任务书。
+ *  开工/预览/播种若把它们当全文，会把模板简报、预期产物、技能、人工事项整份顶掉。 */
+export function isTaskMdStub(draft: string): boolean {
+  if (!draft.trim()) return true;
+  return stripTaskMdChrome(draft).length === 0;
+}
+
+/** 模板拼装后面接上草稿里的评审沉淀（已有同样段落不重复）。 */
+export function withReviewDistill(
+  assembled: string,
+  draft: string | null | undefined,
+): string {
+  const sections = reviewDistillSections(draft ?? "");
+  if (!sections) return assembled;
+  if (assembled.includes(sections)) return assembled;
+  return `${assembled.trimEnd()}\n\n${sections}\n`;
+}
+
+/** 开工弹层 / 预览 / 播种共用：有可执行正文用文件全文；否则模板拼装并接上评审沉淀。 */
+export function resolveTaskMdSource(
+  draft: string | null | undefined,
+  assembled: string,
+): string {
+  const raw = draft?.trim() ?? "";
+  if (raw && !isTaskMdStub(raw)) return draft ?? assembled;
+  return withReviewDistill(assembled, raw);
+}
+
 /** 草稿是不是「只有拍板结果、没有正文」。
  *
  *  这个判定是给开工用的：开工弹层的规则是「草稿非空则草稿全文顶掉模板拼装」（v3.72），
@@ -224,7 +322,8 @@ export function stripDecisions(draft: string): string {
  *  不该把整份简报顶掉——那样 agent 会拿到一份没有任务的任务书。
  *  这种草稿走模板拼装（拼装里已经带上「已定方向」段），只有真写了正文才走草稿全文。
  *
- *  只剩标题行（如 append_step_draft 建的「# 任务书草稿：<步骤>」）也算没有正文。 */
+ *  只剩标题行（如 append_step_draft 建的「# 任务书草稿：<步骤>」）也算没有正文。
+ *  开工/预览/播种的完整闸门是 isTaskMdStub（还覆盖空文件与评审沉淀 stub）。 */
 export function isDecisionsOnly(draft: string): boolean {
   if (!draft.trim()) return false;
   if (parseDecisions(draft).size === 0) return false;
@@ -314,6 +413,14 @@ export function decisionGate(
   return { mode, missing, gaps, blocked, needsAck, prepareOnly };
 }
 
+/** 决策暂停策略才是停工门：批次提交/进度汇报不是。开步首条与「继续」共用。 */
+export const KEEP_WORKING_CLAUSE =
+  "一批工作、一次 git 提交或进度汇报不是停工理由；未达完成标准且不必拍板时，用户没说停就继续。";
+
+/** 卡片「继续」预填：接回已有步骤，不是新开一轮。 */
+export const CONTINUE_STEP_PROMPT =
+  `阅读 TASK.md 并继续做到完成标准。停哪些见「决策暂停策略」。${KEEP_WORKING_CLAUSE}`;
+
 export function decisionPolicyText(mode: string | undefined): string {
   if (mode === "hard_pause") {
     return "hard_pause：遇到新的待拍板问题，写入 .ccode/help-wanted.md 并暂停本步骤，等待人明确答复后继续；不得自行采用推荐值或「未回复即继续」。";
@@ -322,6 +429,74 @@ export function decisionPolicyText(mode: string | undefined): string {
     return "soft_pause：遇到待拍板问题，写入 .ccode/help-wanted.md 并暂停受影响的操作；只可推进无依赖、可逆的部分，等待人明确答复后恢复受影响的操作。";
   }
   return "auto_continue：一般问题写入 .ccode/help-wanted.md 并附可逆兜底方案，可按兜底继续；涉及目标/对象范围、关键处理规则、结论范围、隐私、伦理、合规、主指标或不可逆操作时必须等待人明确授权，不得默认同意。";
+}
+
+type WaitStep = {
+  name?: string;
+  workspaceName?: string;
+  brief?: string;
+  decisionMode?: string;
+  decisions?: { q: string }[];
+  humanTasks?: { title: string; timing?: string; optional?: boolean }[];
+};
+
+function humanTitle(title: string): string {
+  return title.replace(/^（可选）\s*/, "").trim();
+}
+
+function isLayoutProofStep(step: WaitStep): boolean {
+  const n = `${step.name ?? ""} ${step.workspaceName ?? ""}`;
+  return /格式适配|期刊格式|journal-format|latex-final/.test(n);
+}
+
+/** 从本步已有合同派生必须停的事项：拍板题、先报再问、开工前/执行中人工、排版样张。 */
+export function stepWaitItems(step: WaitStep): { during: string[]; after: string[] } {
+  const during: string[] = [];
+  const after: string[] = [];
+  const mode = step.decisionMode === "hard_pause" || step.decisionMode === "soft_pause"
+    ? step.decisionMode : "auto_continue";
+  for (const d of step.decisions ?? []) {
+    const q = d.q.trim();
+    if (!q) continue;
+    if (mode === "hard_pause") during.push(`拍板后再锁范围：${q}`);
+    else if (mode === "soft_pause") during.push(`未答则只做无依赖准备：${q}`);
+  }
+  const brief = step.brief ?? "";
+  if (/help-wanted\.md/.test(brief) && /问用户/.test(brief)) {
+    during.push(
+      "简报里「先报依据再问」的那一项：写入 .ccode/help-wanted.md；问完按该条兜底做无依赖准备，未答不得锁死标准、核心篇目、大纲骨架或目标期刊",
+    );
+  }
+  for (const h of step.humanTasks ?? []) {
+    if (h.optional) continue;
+    const title = humanTitle(h.title);
+    if (!title) continue;
+    if (h.timing === "before") during.push(`开工前等你做完：${title}`);
+    else if (h.timing === "during") during.push(`执行中等你交付：${title}`);
+    else if (h.timing === "after") after.push(`完成后交给你：${title}`);
+  }
+  if (isLayoutProofStep(step)) {
+    after.push("渲染出样张后停下来让你看版式与裁剪，不要未经你看就当排版通过");
+  }
+  return { during, after };
+}
+
+/** 写入 TASK.md 的整段：模式说明 + 本步停哪些 + 其余做到做完。 */
+export function decisionPolicyBlock(step: WaitStep): string {
+  const lines = [decisionPolicyText(step.decisionMode)];
+  const { during, after } = stepWaitItems(step);
+  if (during.length === 0) {
+    lines.push("本步中途没有必须等人拍板的事项。");
+  } else {
+    lines.push("本步必须停下来等你：");
+    for (const item of during) lines.push(`- ${item}`);
+  }
+  if (after.length > 0) {
+    lines.push("达到完成标准后交给你（不要自行宣称已通过）：");
+    for (const item of after) lines.push(`- ${item}`);
+  }
+  lines.push(KEEP_WORKING_CLAUSE);
+  return lines.join("\n");
 }
 
 /** 「全部用推荐值」要写入的答案：未答项取首个选项（模板里首项即推荐值）；

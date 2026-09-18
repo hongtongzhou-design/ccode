@@ -21,9 +21,18 @@ def decode_bib_text(value):
     while i < len(value):
         char = value[i]
         if char == chr(92):
-            if i + 1 >= len(value) or value[i + 1] not in '&%_#{}$':
+            if i + 1 >= len(value):
                 raise ValueError('TeX macro/accent requires an explicit Unicode export before exchange')
-            out.append(value[i + 1]); i += 2; continue
+            nxt = value[i + 1]
+            if nxt in '&%_#{}$':
+                out.append(nxt); i += 2; continue
+            # BibTeX 引号转义 \"word，不是 TeX 变音 \"o / \"{o}
+            if nxt == '"':
+                rest = value[i + 2:]
+                if rest.startswith('{') or (rest[:1].isalpha() and not rest[1:2].isalpha()):
+                    raise ValueError('TeX macro/accent requires an explicit Unicode export before exchange')
+                out.append('"'); i += 2; continue
+            raise ValueError('TeX macro/accent requires an explicit Unicode export before exchange')
         if char not in '{}': out.append(char)
         i += 1
     return ''.join(out)
@@ -176,12 +185,31 @@ def escape_bib(value):
     return ''.join('\\'+c if c in '&%_#{}$' else c for c in str(value))
 
 
+def family_comma(author):
+    # EndNote/RIS 作者按「姓, 名」解析；OpenAlex 等「名 姃」无逗号串会整串进姓字段，
+    # 引用就成 (Jinlong et al., 2026)。无逗号多词名翻转为末词作姓；末词本身是
+    # 缩写（PubMed 风格 Smith JM）时首词才是姓。已带逗号或单词名原样保留。
+    name = str(author).strip()
+    if not name or ',' in name:
+        return author
+    tokens = name.split()
+    if len(tokens) < 2:
+        return author
+    last = tokens[-1].replace('.', '')
+    if last.isalpha() and last.isupper() and len(last) <= 3:
+        return tokens[0] + ', ' + ' '.join(tokens[1:])
+    return tokens[-1] + ', ' + ' '.join(tokens[:-1])
+
+
 def render(records, suffix):
     if suffix == '.xml':
+        # EndNote.dtd：ref-type/@name 必填，record 子元顺序固定。缺 name 或顺序错会静默导入 0 条。
+        type_code = {'article':17,'book':6,'incollection':5,'inproceedings':47,'phdthesis':32}
+        type_name = {17:'Journal Article',6:'Book',5:'Book Section',47:'Conference Paper',32:'Thesis',13:'Generic'}
         root = ET.Element('xml'); rows = ET.SubElement(root, 'records')
-        for r in records:
+        for i, r in enumerate(records, 1):
             item = ET.SubElement(rows, 'record')
-            def put(path, value):
+            def put(path, value, attrs=None):
                 parent = item
                 parts = path.split('/')
                 for part in parts[:-1]:
@@ -189,24 +217,99 @@ def render(records, suffix):
                     if child is None:
                         child = ET.SubElement(parent, part)
                     parent = child
-                ET.SubElement(parent, parts[-1]).text = str(value)
-            put('ref-type', {'article':17,'book':6,'incollection':5,'inproceedings':47,'phdthesis':32}.get(r.get('type'),13))
+                el = ET.SubElement(parent, parts[-1], attrs or {})
+                el.text = str(value)
+            code = type_code.get(r.get('type'), 13)
+            ET.SubElement(item, 'source-app', {'name':'EndNote','version':'21.0'}).text = 'EndNote'
+            put('rec-number', i)
+            put('ref-type', code, {'name': type_name.get(code, 'Generic')})
+            for author in r.get('authors', []): put('contributors/authors/author', family_comma(author))
+            if r.get('title'): put('titles/title', r['title'])
+            if r.get('journal'): put('titles/secondary-title', r['journal'])
+            if r.get('pages'): put('pages', r['pages'])
+            if r.get('volume'): put('volume', r['volume'])
+            if r.get('number'): put('number', r['number'])
+            if r.get('year'): put('dates/year', r['year'])
+            if r.get('isbn'): put('isbn', r['isbn'])
             put('label', r['id'])
-            for author in r.get('authors', []): put('contributors/authors/author', author)
-            for key,path in {'title':'titles/title','journal':'titles/secondary-title','year':'dates/year','doi':'electronic-resource-num','url':'urls/web-urls/url','volume':'volume','number':'number','pages':'pages','isbn':'isbn'}.items():
-                if r.get(key): put(path,r[key])
-            for attachment in r.get('attachments', []): put('urls/pdf-urls/url',attachment)
+            if r.get('url'): put('urls/web-urls/url', r['url'])
+            for attachment in r.get('attachments', []): put('urls/pdf-urls/url', attachment)
+            if r.get('doi'): put('electronic-resource-num', r['doi'])
         return ET.tostring(root, encoding='unicode', xml_declaration=True) + '\n'
     if suffix == '.ris':
+        def line(tag, value):
+            return f'{tag}  - {str(value).replace(chr(13), " ").replace(chr(10), " ")}'
+        def split_pages(pages):
+            s = str(pages).replace('–', '-').replace('—', '-').replace('−', '-')
+            if '-' in s:
+                a, b = s.split('-', 1)
+                return a.strip(), b.strip()
+            return s.strip(), ''
         result = []
         for r in records:
-            result.append('TY  - ' + {'article':'JOUR','book':'BOOK','incollection':'CHAP','inproceedings':'CONF','phdthesis':'THES'}.get(r.get('type'),'GEN'))
-            for author in r.get('authors', []): result.append('AU  - '+author)
-            for key,tag in {'id':'ID','title':'TI','journal':'JO','year':'PY','doi':'DO','volume':'VL','number':'IS','pages':'SP','url':'UR','isbn':'SN'}.items():
-                if r.get(key): result.append(f'{tag}  - '+str(r[key]).replace('\n',' '))
-            for attachment in r.get('attachments', []): result.append('L1  - '+attachment)
-            result.append('ER  - \n')
-        return '\n'.join(result)
+            result.append(line('TY', {'article':'JOUR','book':'BOOK','incollection':'CHAP','inproceedings':'CONF','phdthesis':'THES'}.get(r.get('type'), 'JOUR')))
+            for author in r.get('authors', []):
+                result.append(line('AU', family_comma(author)))
+            if r.get('title'):
+                result.append(line('TI', r['title']))
+            if r.get('journal'):
+                result.append(line('JO', r['journal']))
+                result.append(line('T2', r['journal']))
+            if r.get('year'):
+                result.append(line('PY', r['year']))
+            if r.get('doi'):
+                result.append(line('DO', r['doi']))
+            if r.get('volume'):
+                result.append(line('VL', r['volume']))
+            if r.get('number'):
+                result.append(line('IS', r['number']))
+            if r.get('pages'):
+                start, end = split_pages(r['pages'])
+                if start:
+                    result.append(line('SP', start))
+                if end:
+                    result.append(line('EP', end))
+            if r.get('url'):
+                result.append(line('UR', r['url']))
+            for attachment in r.get('attachments', []):
+                result.append(line('L1', attachment))
+            result.append('ER  - ')
+            result.append('')
+        # EndNote 认 CRLF。不要加 BOM：带 BOM 时不认 TY 行，会跳过格式选择、静默导入 0 条。
+        return '\r\n'.join(result) + '\r\n'
+    if suffix == '.enw':
+        def split_pages(pages):
+            s = str(pages).replace('–', '-').replace('—', '-').replace('−', '-')
+            if '-' in s:
+                a, b = s.split('-', 1)
+                return a.strip(), b.strip()
+            return s.strip(), ''
+        type_name = {'article':'Journal Article','book':'Book','incollection':'Book Section','inproceedings':'Conference Paper','phdthesis':'Thesis'}
+        result = []
+        for r in records:
+            result.append('%0 ' + type_name.get(r.get('type'), 'Journal Article'))
+            for author in r.get('authors', []):
+                result.append('%A ' + family_comma(author))
+            if r.get('year'):
+                result.append('%D ' + str(r['year']).replace('\n', ' '))
+            if r.get('title'):
+                result.append('%T ' + str(r['title']).replace('\n', ' '))
+            if r.get('journal'):
+                result.append('%J ' + str(r['journal']).replace('\n', ' '))
+            if r.get('volume'):
+                result.append('%V ' + str(r['volume']))
+            if r.get('number'):
+                result.append('%N ' + str(r['number']))
+            if r.get('pages'):
+                start, end = split_pages(r['pages'])
+                result.append('%P ' + (f'{start}-{end}' if end else start))
+            if r.get('doi'):
+                result.append('%R ' + str(r['doi']))
+            if r.get('url'):
+                result.append('%U ' + str(r['url']))
+            result.append('%F ' + r['id'])
+            result.append('')
+        return '\r\n'.join(result) + '\r\n'
     if suffix == '.bib':
         result = []
         for r in records:
@@ -257,7 +360,7 @@ def main():
             unique.append(r)
         output=render(unique,a.output.suffix.lower())
         report={'inputCount':len(records),'outputCount':len(unique),'inputSha256':hashlib.sha256(a.input.read_bytes()).hexdigest(),'existingUnchanged':True,'proposalOnly':True,'changes':changes,'warnings':warnings,'normalizedRecords':unique,
-            'manualChecks':['Confirm diff before merging the main bibliography','Import XML using EndNote XML / RIS using Reference Manager (RIS); verify in your EndNote version','Check attachment resolution and Word plugin citations manually']}
+            'manualChecks':['Confirm diff before merging the main bibliography','Import XML using EndNote XML / RIS using Reference Manager (RIS); verify in your EndNote version','Author names flipped to "Family, Given" (heuristic for given-first sources); spot-check hyphenated or Chinese-order names','Check attachment resolution and Word plugin citations manually']}
         for path,text in [(a.output,output),(a.report,json.dumps(report,ensure_ascii=False,indent=2)+'\n')]:
             path.parent.mkdir(parents=True,exist_ok=True)
             with path.open('x',encoding='utf-8',newline='\n') as f:f.write(text)
