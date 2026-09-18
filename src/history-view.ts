@@ -3,10 +3,11 @@
  * 纯逻辑，供 HistoryOverlay 渲染与 node --test 复用。
  *
  * 取舍：时间线只含当前分支 first-parent 主线——工作区分支上的过程提交不单独列出，
- * 它们的成果通过 merge commit（✓ 验收合并）体现，保持时间线简洁可读。
+ * 它们的成果通过 merge commit（✓ 保存进项目）体现，保持时间线简洁可读。
  */
 
 import type { HistoryEntryDto } from "./types";
+import { historyWorkspaceSaveTitle } from "./review-save-copy.ts";
 
 export type HistoryKind = "merge" | "auto" | "save";
 
@@ -29,7 +30,7 @@ function fileStats(entry: HistoryEntryDto): string {
   return `${entry.files} 个文件 +${entry.additions} −${entry.deletions}`;
 }
 
-/** 单条提交 → 白话条目：验收合并 / 自动保存 / 保存 */
+/** 单条提交 → 白话条目：保存进项目 / 自动保存 / 保存 */
 export function translateHistoryEntry(
   entry: HistoryEntryDto,
   wsSteps: WsStepMap,
@@ -39,7 +40,7 @@ export function translateHistoryEntry(
     if (branch.startsWith("ccode/")) {
       const ws = branch.slice("ccode/".length);
       // 工作区名映射流水线步骤名；匹配不到（步骤已改名/删除）用工作区名
-      return { kind: "merge", icon: "✓", title: `验收合并：${wsSteps[ws] ?? ws}`, stats: "" };
+      return { kind: "merge", icon: "✓", title: historyWorkspaceSaveTitle(wsSteps[ws] ?? ws), stats: "" };
     }
     return {
       kind: "merge",

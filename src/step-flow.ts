@@ -1,9 +1,10 @@
 import type { HumanTaskStateDto, ProjectStepDto } from "./types";
+import { REVIEW_SAVE } from "./review-save-copy.ts";
 
 /** 步骤内协同流程线（v3.71）的纯逻辑：把「这一步里人和 agent 的动作」按先后排成有序节点链，
  *  全部状态派生（无状态机）。节点顺序 = 讨论种子 → before 人工事项 → agent 执行
  *  → during 人工事项（并行段） → after 人工事项（v3.97 起一律进主干——收尾项是流程的一步，
- *  沉到可选分隔线下会让用户以为它不存在） → 评审合并。
+ *  沉到可选分隔线下会让用户以为它不存在） → 评审保存进项目。
  *  「当前节点」= 第一个未完成节点（currentNodeKey），组件高亮并就地展开其操作区；
  *  **可选人工事项不参与当前节点判定**——不做也能跑完，让它当「当前」会把指示卡死。
  *  例外：agent 节点的「开始/恢复工作区/去终端看看」不受当前节点门控——开始始终可用，
@@ -14,7 +15,7 @@ export type StepRunStatus =
   | "pending" // 未开始（无工作区或已归档）
   | "active" // agent 进行中
   | "review" // agent 做完了待评审（含阻塞——阻塞也走评审入口）
-  | "done"; // 已合并
+  | "done"; // 已保存进项目
 
 export interface StepFlowNode {
   key: string;
@@ -182,17 +183,17 @@ export function buildStepFlow(args: {
       human: h,
     });
   }
-  // 6. 评审合并（验收层是护城河：每步成果人工评审才合并）
+  // 6. 评审保存（护城河：每步成果人工核对后才写入项目）
   nodes.push({
     key: "review",
     kind: "review",
     section: "main",
-    label: "你验收，合并进主文件夹",
+    label: REVIEW_SAVE.reviewNodeLabel,
     hint:
       runStatus === "review"
-        ? "逐文件核对改动与产物，确认无误后提交并合并；有问题回终端继续修改"
+        ? REVIEW_SAVE.reviewHintReady
         : runStatus === "active"
-          ? "AI 提交产出后，回来核对并合并"
+          ? REVIEW_SAVE.reviewHintActive
           : undefined,
     done: runStatus === "done",
   });
@@ -230,11 +231,99 @@ export function isPaywallTaskTitle(title: string): boolean {
   return title.includes("付费");
 }
 
+export function isPendingConfirmTaskTitle(title: string): boolean {
+  return title.includes("待确认");
+}
+
 /** to-fetch.md 的条目计数——与 parseToFetchItems 同一口径（单一出处）：
  *  编号/列表行无链接也算，裸行须带「 — DOI/链接」尾巴。2026-09-16 修正：
  *  旧实现只数带符号的行，老项目裸行清单显示「缺 0 篇」而面板里条目明明在。 */
 export function countToFetchEntries(text: string): number {
   return parseToFetchItems(text).length;
+}
+
+/** 还缺几篇：条目里去掉已勾 ✓ 的、去掉已对照上 papers/ 的（to_fetch_progress
+ *  的行号 → 文件名映射；面板没开过时映射为空，只按 ✓ 算）。2026-09-17 审计：
+ *  折叠按钮旧口径显示全部条目数，清单补了一大半后还写「缺 12 篇」，与展开
+ *  面板的「已存 X/Y」自相矛盾 */
+export function missingToFetchCount(
+  text: string,
+  doneByLine: Record<number, string>,
+): number {
+  return parseToFetchItems(text).filter((i) => !i.done && !doneByLine[i.line]).length;
+}
+
+/** 已存篇数：清单勾 ✓ 或对照上 papers/ 的都算。 */
+export function toFetchSavedCount(
+  items: ToFetchItem[],
+  doneByLine: Record<number, string>,
+): number {
+  return items.filter((i) => i.done || Boolean(doneByLine[i.line])).length;
+}
+
+/** 已存条目对应的项目内相对路径。文件名来自 to_fetch_progress，只取末段。 */
+export function toFetchPaperRel(fileName: string): string {
+  const name = fileName.replace(/\\/g, "/").split("/").pop()?.trim() ?? "";
+  return name ? `papers/${name}` : "";
+}
+
+/** 切走文件页会卸掉任务页：已存对照先记在进程内，回来第一帧不要全变成未获取。 */
+const toFetchDoneMemo = new Map<string, Record<number, string>>();
+
+export function rememberToFetchDone(
+  root: string,
+  map: Record<number, string>,
+): void {
+  toFetchDoneMemo.set(root, { ...map });
+}
+
+export function recalledToFetchDone(root: string): Record<number, string> {
+  const hit = toFetchDoneMemo.get(root);
+  return hit ? { ...hit } : {};
+}
+
+/** 从 to-fetch 行的 DOI/链接抽出可对照的 DOI；没有则 null。 */
+export function doiFromToFetchUrl(url: string): string | null {
+  const t = url.trim().replace(/^doi:\s*/i, "");
+  const fromOrg = /(?:dx\.)?doi\.org\/(10\.\d{4,9}\/\S+)/i.exec(t);
+  const raw = fromOrg?.[1] ?? (/^(10\.\d{4,9}\/\S+)$/i.test(t) ? t : "");
+  if (!raw) return null;
+  const doi = raw.replace(/[?#].*$/, "").replace(/[.,;)]+$/g, "").toLowerCase();
+  return /^10\.\d{4,9}\/\S+$/i.test(doi) ? doi : null;
+}
+
+/** 库里已有对照 DOI 时才出确认文案；Zotero 没开不拦。 */
+export function formatZoteroDuplicatePrompt(m: {
+  reachable: boolean;
+  present: number;
+  total: number;
+}): string | null {
+  if (!m.reachable || m.present <= 0 || m.total <= 0) return null;
+  return `Zotero 库里已有 ${m.present} 篇（对照清单 ${m.total} 个 DOI）。再导入可能重复。仍要打开 to-fetch.ris？`;
+}
+
+/** 「同步到 Zotero」结果：界面只留一句摘要，失败明细进悬浮。 */
+export function formatZoteroAttachSummary(r: {
+  attached: string[];
+  created: string[];
+  skipped: string[];
+  missing: string[];
+  unmatched: string[];
+  failed?: string[];
+}): { line: string; detail?: string } {
+  const parts: string[] = [];
+  if (r.attached.length) parts.push(`挂上 ${r.attached.length} 篇`);
+  if (r.created.length) parts.push(`新建 ${r.created.length} 篇`);
+  if (r.skipped.length) parts.push(`已有附件 ${r.skipped.length}`);
+  if (r.missing.length) parts.push(`还没拿到全文 ${r.missing.length} 篇`);
+  if (r.unmatched.length) parts.push(`无 DOI ${r.unmatched.length}`);
+  if (r.failed?.length) parts.push(`失败 ${r.failed.length} 篇`);
+  const line = parts.length ? parts.join(" · ") : "没有新东西可同步";
+  const failed = r.failed ?? [];
+  const detail = failed.length
+    ? `${failed.slice(0, 3).join("；")}${failed.length > 3 ? " 等" : ""}`
+    : undefined;
+  return { line, detail };
 }
 
 /** to-fetch.md 单条待获取条目（lit-search 技能口径：`N. [✓ ] 标题 — DOI`） */

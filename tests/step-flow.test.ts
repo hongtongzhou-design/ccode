@@ -5,11 +5,19 @@ import {
   countToFetchEntries,
   demoReadPaperResource,
   discussChatLabel,
+  doiFromToFetchUrl,
+  formatZoteroAttachSummary,
+  formatZoteroDuplicatePrompt,
   isPaywallTaskTitle,
+  missingToFetchCount,
   parseToFetchItems,
   pickDiscussResume,
   stepHasDiscussSession,
   stripOptionalTitlePrefix,
+  recalledToFetchDone,
+  rememberToFetchDone,
+  toFetchPaperRel,
+  toFetchSavedCount,
 } from "../src/step-flow.ts";
 import type { HumanTaskStateDto, ProjectStepDto } from "../src/types.ts";
 
@@ -58,7 +66,7 @@ test("节点顺序：种子 → before → agent → during → after → 评审
       "agent:AI 干活：检索筛选",
       "human:补检索词",
       "human:下载付费",
-      "review:你验收，合并进主文件夹",
+      "review:你核对后，保存进项目",
     ],
   );
   // 当前节点 = 第一个未完成（种子未聊）
@@ -409,4 +417,108 @@ test("parseToFetchItems：旧格式裸行（无编号无符号）也出条目，
   const titled = parseToFetchItems("A study — of two parts — 10.1002/x.1");
   assert.equal(titled[0].title, "A study — of two parts");
   assert.equal(titled[0].url, "10.1002/x.1");
+});
+
+
+test("missingToFetchCount：折起态计数去掉已勾与已存（2026-09-17 审计）", () => {
+  // ✓ 紧跟编号（parseToFetchItems 的口径：`N. ✓ 标题`）
+  const md = [
+    "1. ✓ Paper One — 10.1/a",
+    "2. Paper Two — 10.1/b",
+    "3. Paper Three — 10.1/c",
+    "4. ✓ Paper Four — 10.1/d",
+  ].join("\n");
+  // 都没对照 papers/：缺 2（两条已勾 ✓ 不算）
+  assert.equal(missingToFetchCount(md, {}), 2);
+  // 行 2 已对照上 papers/（to_fetch_progress 的行号映射）：只缺行 3
+  assert.equal(missingToFetchCount(md, { 2: "Paper Two.pdf" }), 1);
+  // 全部处理完：0
+  assert.equal(
+    missingToFetchCount(md, { 2: "Paper Two.pdf", 3: "Paper Three.pdf" }),
+    0,
+  );
+  assert.equal(missingToFetchCount("", {}), 0);
+});
+
+test("toFetchSavedCount：已勾与对照 papers/ 都算已存", () => {
+  const items = parseToFetchItems(
+    ["1. ✓ Paper One — 10.1/a", "2. Paper Two — 10.1/b", "3. Paper Three — 10.1/c"].join(
+      "\n",
+    ),
+  );
+  assert.equal(toFetchSavedCount(items, {}), 1);
+  assert.equal(toFetchSavedCount(items, { 2: "Paper Two.pdf" }), 2);
+  assert.equal(toFetchSavedCount([], {}), 0);
+});
+
+test("rememberToFetchDone：切走再回来第一帧能拿到已存对照", () => {
+  rememberToFetchDone("/p", { 2: "Paper Two.pdf", 5: "Paper Five.pdf" });
+  assert.deepEqual(recalledToFetchDone("/p"), {
+    2: "Paper Two.pdf",
+    5: "Paper Five.pdf",
+  });
+  assert.deepEqual(recalledToFetchDone("/other"), {});
+  const a = recalledToFetchDone("/p");
+  a[2] = "mutated.pdf";
+  assert.equal(recalledToFetchDone("/p")[2], "Paper Two.pdf");
+});
+
+test("toFetchPaperRel：只取文件名落到 papers/", () => {
+  assert.equal(toFetchPaperRel("Paper Two.pdf"), "papers/Paper Two.pdf");
+  assert.equal(toFetchPaperRel("sub/Paper Two.pdf"), "papers/Paper Two.pdf");
+  assert.equal(toFetchPaperRel("C:\\\\tmp\\\\Paper Two.pdf"), "papers/Paper Two.pdf");
+  assert.equal(toFetchPaperRel("  "), "");
+  assert.equal(toFetchPaperRel(""), "");
+});
+
+test("doiFromToFetchUrl：裸 DOI、doi.org、无 DOI", () => {
+  assert.equal(doiFromToFetchUrl("10.1021/abc"), "10.1021/abc");
+  assert.equal(doiFromToFetchUrl("doi:10.1021/ABC."), "10.1021/abc");
+  assert.equal(doiFromToFetchUrl("https://doi.org/10.1021/abc"), "10.1021/abc");
+  assert.equal(doiFromToFetchUrl("https://example.com/article"), null);
+  assert.equal(doiFromToFetchUrl(""), null);
+});
+
+test("formatZoteroDuplicatePrompt：没开或 0 命中不出确认", () => {
+  assert.equal(
+    formatZoteroDuplicatePrompt({ reachable: false, present: 0, total: 10 }),
+    null,
+  );
+  assert.equal(
+    formatZoteroDuplicatePrompt({ reachable: true, present: 0, total: 10 }),
+    null,
+  );
+  const line = formatZoteroDuplicatePrompt({
+    reachable: true,
+    present: 21,
+    total: 89,
+  });
+  assert.ok(line?.includes("21"));
+  assert.ok(line?.includes("89"));
+});
+
+test("formatZoteroAttachSummary：界面只留一句，失败明细另放", () => {
+  const empty = formatZoteroAttachSummary({
+    attached: [],
+    created: [],
+    skipped: [],
+    missing: [],
+    unmatched: [],
+  });
+  assert.equal(empty.line, "没有新东西可同步");
+  assert.equal(empty.detail, undefined);
+
+  const mixed = formatZoteroAttachSummary({
+    attached: ["a"],
+    created: ["b", "c"],
+    skipped: [],
+    missing: ["d", "e", "f"],
+    unmatched: [],
+    failed: ["Paper A：error decoding", "Paper B：timeout", "Paper C：x", "Paper D：y"],
+  });
+  assert.equal(mixed.line, "挂上 1 篇 · 新建 2 篇 · 还没拿到全文 3 篇 · 失败 4 篇");
+  assert.equal(
+    mixed.detail,
+    "Paper A：error decoding；Paper B：timeout；Paper C：x 等",
+  );
 });

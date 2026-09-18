@@ -13,6 +13,7 @@ import ArtifactChecklist, {
   absoluteResourcePath,
   formatSize,
 } from "./ArtifactChecklist";
+import { REVIEW_SAVE } from "../review-save-copy";
 import TaskCardsSection from "./TaskCardsSection";
 
 import ResourceListSection from "./ResourceListSection";
@@ -312,8 +313,9 @@ function deriveStepStatus(
     return { key: "done", ws };
   }
   if (!h) return { key: "checking", ws };
-  if (h.uncommitted) return { key: "active", ws };
+  // 有待合并提交就是待评审；未提交改动（纳入/排除等）不得把「去评审」打回进行中
   if (h.ahead > 0) return { key: "review", ws };
+  if (h.uncommitted) return { key: "active", ws };
   return { key: "active", ws };
 }
 
@@ -499,7 +501,7 @@ export default function ProjectGroup({
 
   // 保存历史（白话时间线）：全宽覆盖层，同 PipelineEditor 形态
   const [historyOpen, setHistoryOpen] = useState(false);
-  // 工作区名 → 步骤名：merge commit 的「验收合并」优先显示步骤名
+  // 工作区名 → 步骤名：merge commit 的「保存进项目」优先显示步骤名
   const wsStepMap = Object.fromEntries(
     (cfg?.steps ?? []).map((s) => [s.workspaceName, s.name]),
   );
@@ -1837,7 +1839,7 @@ export default function ProjectGroup({
             projectPath={projectPath}
             workspaceName={artStep.workspaceName}
             root={artMerged ? repoPath : artWs.worktreePath}
-            rootLabel={artMerged ? "主文件夹（已合并）" : "工作区"}
+            rootLabel={artMerged ? REVIEW_SAVE.artifactRootMerged : "工作区"}
           />
         </div>
       )}

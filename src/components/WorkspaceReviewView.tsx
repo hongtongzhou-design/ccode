@@ -1,7 +1,15 @@
 import ResearchEvidencePanel from "./ResearchEvidencePanel";
 import ResearchReproductionPanel from "./ResearchReproductionPanel";
 import ResearchAcceptancePanel from "./ResearchAcceptancePanel";
+import ScreeningReviewPanel from "./ScreeningReviewPanel";
 import { researchReportPatterns, reproductionEntrypoints } from "../research-report";
+import {
+  blockerPrimaryText,
+  groupReviewFiles,
+  sortReviewPaths,
+} from "../screening-review";
+import { resolveStepReviewProfile } from "../step-review";
+import { REVIEW_SAVE, reviewSavePrimaryLabel } from "../review-save-copy";
 import WatchRunReview from "./WatchRunReview";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -124,6 +132,12 @@ function parseHunkStart(
   const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
   if (!match) return null;
   return { oldStart: Number(match[1]), newStart: Number(match[2]) };
+}
+
+const fileDiffCache = new Map<string, { text: string; rows: DiffLine[] }>();
+
+function fileDiffCacheKey(worktreePath: string, path: string, revision: number) {
+  return `${worktreePath}\t${path}\t${revision}`;
 }
 
 function parseDiff(text: string): DiffLine[] {
@@ -274,22 +288,32 @@ function DiffSide({
   text: string;
   kind: "context" | "add" | "delete" | "blank";
 }) {
+  // 增删行只铺语义底色，正文保持中性阅读色（text-l2），绿/红收进行号槽——
+  // 整文件新增时不再是一面绿字墙（GitHub/VS Code 同手法，约定见 design-system.md）
   const tone =
     kind === "add"
-      ? "bg-diff-add-bg text-diff-add-fg"
+      ? "bg-diff-add-bg"
       : kind === "delete"
-        ? "bg-diff-del-bg text-diff-del-fg"
+        ? "bg-diff-del-bg"
         : kind === "blank"
-          ? "bg-inset/40 text-l4"
-          : "text-l2";
+          ? "bg-inset/40"
+          : "";
+  const noTone =
+    kind === "add" || kind === "delete"
+      ? kind === "add"
+        ? "text-diff-add-fg"
+        : "text-diff-del-fg"
+      : "text-l4";
   return (
     <div
       className={`grid min-w-0 grid-cols-[44px_minmax(max-content,1fr)] ${tone}`}
     >
-      <span className="select-none border-r border-hairline px-2 text-right text-l4">
+      <span
+        className={`select-none border-r border-hairline px-2 text-right ${noTone}`}
+      >
         {lineNo ?? ""}
       </span>
-      <span className="whitespace-pre px-2">{text || " "}</span>
+      <span className="whitespace-pre px-2 text-l2">{text || " "}</span>
     </div>
   );
 }
@@ -336,9 +360,11 @@ function foldContextRows(
 function DiffTable({
   rows,
   minWidth = 720,
+  unified = false,
 }: {
   rows: DiffLine[];
   minWidth?: number;
+  unified?: boolean;
 }) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const displayRows = useMemo(
@@ -381,6 +407,17 @@ function DiffTable({
             </div>
           );
         }
+        if (unified) {
+          return (
+            <div key={index} className="min-w-0">
+              <DiffSide
+                lineNo={row.newNo ?? row.oldNo}
+                text={row.newKind === "blank" ? row.oldText : row.newText}
+                kind={row.newKind === "blank" ? row.oldKind : row.newKind}
+              />
+            </div>
+          );
+        }
         return (
           <div
             key={index}
@@ -409,15 +446,20 @@ function DiffFileSection({
   worktreePath,
   revision,
   register,
+  unified = false,
+  cached,
 }: {
   file: GitFileDto;
   worktreePath: string;
   revision: number;
   register: (path: string, element: HTMLElement | null) => void;
+  unified?: boolean;
+  cached?: { text: string; rows: DiffLine[] } | null;
 }) {
   const sectionRef = useRef<HTMLElement | null>(null);
-  const [visible, setVisible] = useState(false);
-  const [text, setText] = useState<string | null>(null);
+  const [visible, setVisible] = useState(true);
+  const [text, setText] = useState<string | null>(cached?.text ?? null);
+  const [rows, setRows] = useState<DiffLine[]>(cached?.rows ?? []);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -438,14 +480,27 @@ function DiffFileSection({
   }, [file.path, register, worktreePath]);
 
   useEffect(() => {
+    if (cached?.text) {
+      setText(cached.text);
+      setRows(cached.rows);
+    }
+  }, [cached]);
+
+  useEffect(() => {
     // 图片文件不取文本 diff，渲染期交给 ImagePairView 双栏对比
-    if (!visible || isImagePath(file.path)) return;
+    if (!visible || isImagePath(file.path) || cached?.text) return;
     let cancelled = false;
-    setText(null);
     setError(null);
     invoke<string>("workspace_file_diff", { worktreePath, path: file.path })
       .then((value) => {
-        if (!cancelled) setText(value);
+        if (cancelled) return;
+        const parsed = parseDiff(value);
+        fileDiffCache.set(fileDiffCacheKey(worktreePath, file.path, revision), {
+          text: value,
+          rows: parsed,
+        });
+        setText(value);
+        setRows(parsed);
       })
       .catch((reason) => {
         if (!cancelled) setError(String(reason));
@@ -453,10 +508,9 @@ function DiffFileSection({
     return () => {
       cancelled = true;
     };
-  }, [file.path, revision, visible, worktreePath]);
+  }, [cached?.text, file.path, revision, visible, worktreePath]);
 
   const image = isImagePath(file.path);
-  const rows = useMemo(() => (text == null ? [] : parseDiff(text)), [text]);
   return (
     <section
       ref={(element) => {
@@ -497,7 +551,7 @@ function DiffFileSection({
       ) : rows.length === 0 ? (
         <p className="px-4 py-5 text-xs text-l4">无可显示的文本差异</p>
       ) : (
-        <DiffTable rows={rows} minWidth={680} />
+        <DiffTable rows={rows} minWidth={unified ? undefined : 680} unified={unified} />
       )}
     </section>
   );
@@ -598,6 +652,75 @@ function ChangeTree({
                 depth={depth + 1}
               />
             )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function GroupedReviewFiles({
+  files,
+  onSelect,
+  activePath,
+  expandAll = false,
+}: {
+  files: GitFileDto[];
+  onSelect: (path: string) => void;
+  activePath: string | null;
+  expandAll?: boolean;
+}) {
+  const groups = useMemo(() => groupReviewFiles(files), [files]);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
+    () => new Set(["machine"]),
+  );
+  return (
+    <>
+      {groups.map((group) => {
+        const closed = !expandAll && collapsed.has(group.id);
+        return (
+          <div key={group.id} className="mb-1">
+            <button
+              type="button"
+              onClick={() => {
+                setCollapsed((current) => {
+                  const next = new Set(current);
+                  if (next.has(group.id)) next.delete(group.id);
+                  else next.add(group.id);
+                  return next;
+                });
+              }}
+              className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-micro text-l4 hover:bg-hover"
+            >
+              {closed ? (
+                <ChevronRight aria-hidden="true" className="h-3 w-3 shrink-0" />
+              ) : (
+                <ChevronDown aria-hidden="true" className="h-3 w-3 shrink-0" />
+              )}
+              <span>{group.label}</span>
+              <span className="ml-auto">{group.files.length}</span>
+            </button>
+            {!closed &&
+              group.files.map((file) => (
+                <button
+                  key={file.path}
+                  type="button"
+                  onClick={() => onSelect(file.path)}
+                  title={file.path}
+                  className={`flex h-7 w-full items-center gap-1.5 border-l-2 pr-2 text-left text-xs hover:bg-hover ${
+                    activePath === file.path
+                      ? "border-cta bg-rail-sel text-l1"
+                      : "border-transparent text-l2"
+                  }`}
+                  style={{ paddingLeft: 22 }}
+                >
+                  <File aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l3" />
+                  <span className="min-w-0 flex-1 truncate">{file.path.split("/").pop()}</span>
+                  <span className={`font-mono ${STATUS_STYLE[file.status] ?? "text-l3"}`}>
+                    {file.status === "??" ? "U" : file.status}
+                  </span>
+                </button>
+              ))}
           </div>
         );
       })}
@@ -713,7 +836,7 @@ function ConflictFileSection({
                 ? "建议任务版"
                 : advice.choice === "theirs"
                   ? `建议 ${baseBranch}`
-                  : "建议人工合并"}
+                  : "建议手选"}
             </span>
             <span
               className="min-w-0 flex-1 truncate text-l4"
@@ -841,7 +964,7 @@ function MainRepoCommitPanel({
   return (
     <div className="mt-1.5 rounded-md ccode-well p-2 text-l2">
       <p className="mb-2 text-micro text-l4">
-        提交 = 把改动保存到任务分支。合并后才会进入项目主线历史；文件本身不会丢。
+        提交 = 把改动保存到任务分支。保存进项目后才会进入项目主线历史；文件本身不会丢。
       </p>
       {loadError ? (
         <p className="text-xs text-err-text">{loadError}</p>
@@ -1035,6 +1158,8 @@ function LiveWorkspaceReviewView({
   const [staleUpstream, setStaleUpstream] = useState<string | null>(null);
   const setPage = useAppStore((s) => s.setPage);
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+  const setFilePreviewReq = useAppStore((s) => s.setFilePreviewReq);
+  const [screeningPane, setScreeningPane] = useState<"list" | "process" | "files">("files");
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1252,7 +1377,10 @@ function LiveWorkspaceReviewView({
                 states
                   .filter(
                     (s) =>
-                      s.step === step.name && s.timing === "after" && !s.done,
+                      s.step === step.name &&
+                      s.timing === "after" &&
+                      !s.done &&
+                      !s.optional,
                   )
                   .map((s) => s.title),
               );
@@ -1336,7 +1464,7 @@ function LiveWorkspaceReviewView({
           })
         ).trim();
       } catch {
-        content = `「${diff.workspaceName}」已验收合并。请读项目根已有产物与本步 TASK.md 接着做，不要编造未出现的文献。`;
+        content = REVIEW_SAVE.distillFallback(diff.workspaceName);
       }
     }
     if (content) {
@@ -1527,21 +1655,23 @@ function LiveWorkspaceReviewView({
   const hasCommitted = (health?.ahead ?? 0) > 0;
   const hasTaskChanges = (diff?.files.length ?? 0) > 0;
   const hardBlocked = blockers.length > 0;
-  // 约定：merged_at && ahead == 0 时合并按钮显示禁用的「已合并」，
-  // 新提交令 ahead > 0 后恢复「合并」
-  const primaryLabel = hasUncommitted
-    ? "提交并合并"
-    : hasCommitted
-      ? "合并"
-      : mergedAt
-        ? "已合并"
-        : "无待合并提交";
+  // 约定：merged_at && ahead == 0 时按钮显示禁用的「已保存进项目」，
+  // 新提交令 ahead > 0 后恢复「保存进项目」
+  const primaryLabel = reviewSavePrimaryLabel({
+    hasUncommitted,
+    hasCommitted,
+    mergedAt,
+  });
   const canPrimary =
     !busy &&
     !hardBlocked && !deliveryError && !!deliveryReview &&
     // 提交信息可留空（v3.97）：finish 里留空走本地默认信息，按钮不再因空信息变灰
     (hasUncommitted || hasCommitted);
   const normalizedQuery = fileQuery.trim().toLocaleLowerCase();
+  const reviewProfile = resolveStepReviewProfile(
+    researchContext?.step ?? null,
+    (diff?.files ?? []).map((file) => file.path),
+  );
   const filteredFiles = useMemo(
     () =>
       (diff?.files ?? []).filter(
@@ -1551,6 +1681,12 @@ function LiveWorkspaceReviewView({
       ),
     [diff?.files, normalizedQuery],
   );
+  const orderedFiles = useMemo(() => {
+    if (!reviewProfile.groupFiles) return filteredFiles;
+    const order = sortReviewPaths(filteredFiles.map((file) => file.path));
+    const map = new Map(filteredFiles.map((file) => [file.path, file]));
+    return order.map((path) => map.get(path)).filter((file): file is GitFileDto => !!file);
+  }, [filteredFiles, reviewProfile.groupFiles]);
   const tree = useMemo(() => buildChangeTree(filteredFiles), [filteredFiles]);
   const filteredConflictFiles = useMemo(
     () =>
@@ -1563,13 +1699,78 @@ function LiveWorkspaceReviewView({
   );
   const displayedPaths = conflictMode
     ? filteredConflictFiles
-    : filteredFiles.map((file) => file.path);
+    : orderedFiles.map((file) => file.path);
+  const stackedFiles = useMemo(() => {
+    if (conflictMode) return orderedFiles;
+    if (reviewProfile.groupFiles) {
+      const current = activePath
+        ? orderedFiles.find((entry) => entry.path === activePath)
+        : orderedFiles[0];
+      return current ? [current] : [];
+    }
+    if (!reviewProfile.hideListDiffs) return orderedFiles;
+    if (!activePath) return [];
+    const file = orderedFiles.find((entry) => entry.path === activePath);
+    return file ? [file] : [];
+  }, [activePath, conflictMode, orderedFiles, reviewProfile.groupFiles, reviewProfile.hideListDiffs]);
+  const [diffCacheTick, setDiffCacheTick] = useState(0);
+  useEffect(() => {
+    if (!diff || conflictMode) return;
+    const prefix = `${worktreePath}\t`;
+    const suffix = `\t${revision}`;
+    for (const key of [...fileDiffCache.keys()]) {
+      if (key.startsWith(prefix) && !key.endsWith(suffix)) fileDiffCache.delete(key);
+    }
+    let cancelled = false;
+    const queue = diff.files.filter((file) => !isImagePath(file.path));
+    let index = 0;
+    const worker = async () => {
+      while (index < queue.length && !cancelled) {
+        const file = queue[index++];
+        const key = fileDiffCacheKey(worktreePath, file.path, revision);
+        if (fileDiffCache.has(key)) continue;
+        try {
+          const text = await invoke<string>("workspace_file_diff", {
+            worktreePath,
+            path: file.path,
+          });
+          if (cancelled) return;
+          fileDiffCache.set(key, { text, rows: parseDiff(text) });
+          setDiffCacheTick((tick) => tick + 1);
+        } catch {
+          /* 点开时再拉 */
+        }
+      }
+    };
+    void Promise.all([worker(), worker(), worker()]);
+    return () => {
+      cancelled = true;
+    };
+  }, [conflictMode, diff, revision, worktreePath]);
+  const filesInDrawer = reviewProfile.filesInDrawer && !conflictMode && !health?.conflict;
+  const showFilePane = !filesInDrawer;
+  const screeningReview = reviewProfile.kind === "screening";
 
   useEffect(() => {
     if (displayedPaths.length === 0) return;
-    if (!activePath || !displayedPaths.includes(activePath))
-      setActivePath(displayedPaths[0]);
-  }, [activePath, displayedPaths]);
+    if (reviewProfile.hideListDiffs) {
+      if (activePath && !displayedPaths.includes(activePath)) setActivePath(null);
+      return;
+    }
+    if (activePath && displayedPaths.includes(activePath)) return;
+    setActivePath(displayedPaths[0]);
+  }, [activePath, displayedPaths, reviewProfile.hideListDiffs]);
+
+  useEffect(() => {
+    if (!reviewRailOpen || !filesInDrawer) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setReviewRailOpen(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [filesInDrawer, reviewRailOpen]);
 
   const registerSection = useCallback(
     (path: string, element: HTMLElement | null) => {
@@ -1581,6 +1782,7 @@ function LiveWorkspaceReviewView({
 
   function selectFile(path: string) {
     setActivePath(path);
+    if (reviewProfile.filesInDrawer) setReviewRailOpen(true);
     suppressTrackRef.current = true;
     if (suppressTrackTimerRef.current !== null)
       window.clearTimeout(suppressTrackTimerRef.current);
@@ -1588,9 +1790,11 @@ function LiveWorkspaceReviewView({
       suppressTrackRef.current = false;
       suppressTrackTimerRef.current = null;
     }, 600);
-    sectionRefs.current
-      .get(path)
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!reviewProfile.groupFiles) {
+      sectionRefs.current
+        .get(path)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   }
 
   const trackActiveFile = useCallback(() => {
@@ -1792,7 +1996,7 @@ function LiveWorkspaceReviewView({
 
   async function finishConflict(mergeAfter: boolean) {
     if (!diff) return;
-    if (mergeAfter && !deliveryReviewRef.current) { setError("非 Git 产物尚未完成评审，请先刷新并查看后再合并"); return; }
+    if (mergeAfter && !deliveryReviewRef.current) { setError(REVIEW_SAVE.needDelivery); return; }
     if (unresolvedFiles.length > 0) {
       setError(`还有 ${unresolvedFiles.length} 个冲突文件未选择版本`);
       return;
@@ -1800,7 +2004,7 @@ function LiveWorkspaceReviewView({
     if (
       mergeAfter &&
       !(await confirmDialog(
-        `将提交冲突解决结果并合并进本地 ${diff.baseBranch}，工作区保留且不推送。继续？`,
+        `将提交冲突解决结果并保存进项目，工作区保留且不推送。继续？`,
       ))
     )
       return;
@@ -1813,7 +2017,7 @@ function LiveWorkspaceReviewView({
       await invoke<string>("workspace_finish_merge", { id: diff.workspaceId });
       resolvedCommitted = true;
       if (!mergeAfter) {
-        setResult("冲突解决结果已提交，可稍后继续审阅并合并");
+        setResult("冲突解决结果已提交，可稍后继续审阅并保存进项目");
         await refresh();
         return;
       }
@@ -1862,7 +2066,7 @@ function LiveWorkspaceReviewView({
       await refresh();
     } catch (reason) {
       setError(
-        `${resolvedCommitted ? "解决结果已提交，但最终合并未完成：" : ""}${reason}`,
+        `${resolvedCommitted ? "解决结果已提交，但尚未保存进项目：" : ""}${reason}`,
       );
       await refresh(true);
     } finally {
@@ -1941,13 +2145,13 @@ function LiveWorkspaceReviewView({
 
   async function finish(mode: FinishMode) {
     if (readOnlyRunReview) {
-      setError("定时 Run 只能只读评审，不能在此提交、合并或归档");
+      setError(REVIEW_SAVE.readonlyRun);
       return;
     }
     if (!diff || !status || !health) return;
     const shouldCommit = status.files.length > 0;
     const shouldMerge = mode === "merge" || mode === "merge-archive";
-    if (shouldMerge && !deliveryReviewRef.current) { setError("非 Git 产物尚未完成评审，请先刷新并查看后再合并"); return; }
+    if (shouldMerge && !deliveryReviewRef.current) { setError(REVIEW_SAVE.needDelivery); return; }
     const shouldArchive = mode === "archive";
     const archive = mode === "merge-archive";
     // 提交信息可留空（v3.97，面向不懂编程的用户）：留空走本地规则默认信息
@@ -1957,9 +2161,7 @@ function LiveWorkspaceReviewView({
     if (
       shouldMerge &&
       !(await confirmDialog(
-        `${shouldCommit ? "将提交当前全部改动，然后" : "将"}把 ${diff.branch} 合并进 ${diff.baseBranch}${
-          archive ? "并归档工作区" : "（保留工作区）"
-        }。继续？`,
+        REVIEW_SAVE.confirmSave(shouldCommit, archive),
       ))
     ) {
       return;
@@ -1999,7 +2201,7 @@ function LiveWorkspaceReviewView({
           const reasons = blockerText(latest);
           if (latest.uncommitted) reasons.unshift("任务里还有没保存的改动");
           throw new Error(
-            `提交已完成，但尚不可合并：${reasons.join("；") || "健康检查未通过"}`,
+            REVIEW_SAVE.cannotSaveYet(reasons.join("；")),
           );
         }
         if (committed) {
@@ -2051,7 +2253,7 @@ function LiveWorkspaceReviewView({
         onClose();
         return;
       } else {
-        setResult("改动已提交，可继续审阅或稍后合并");
+        setResult("改动已提交，可继续审阅或稍后保存进项目");
       }
       await refresh();
     } catch (reason) {
@@ -2089,12 +2291,15 @@ function LiveWorkspaceReviewView({
           <div className="ml-auto flex shrink-0 items-center gap-2">
             <button
               type="button"
-              onClick={() => setReviewRailOpen(true)}
-              aria-label="打开文件列表"
-              className="ccode-review-rail-trigger flex h-8 items-center gap-1.5 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
+              onClick={() => {
+                if (filesInDrawer) setActivePath(null);
+                setReviewRailOpen(true);
+              }}
+              aria-label={filesInDrawer ? "打开对照文件" : "打开文件列表"}
+              className={`${filesInDrawer ? "" : "ccode-review-rail-trigger "}flex h-8 items-center gap-1.5 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1`}
             >
               <File aria-hidden="true" className="h-3.5 w-3.5" />
-              文件列表
+              {filesInDrawer ? "对照文件" : "文件列表"}
             </button>
             <button
               type="button"
@@ -2156,7 +2361,7 @@ function LiveWorkspaceReviewView({
                     ) : unresolvedFiles.length > 0 ? (
                       <>还剩 {unresolvedFiles.length} 个冲突</>
                     ) : (
-                      "完成解决并合并"
+                      REVIEW_SAVE.finishConflict
                     )}
                   </button>
                   <button
@@ -2182,6 +2387,7 @@ function LiveWorkspaceReviewView({
                   type="button"
                   onClick={() => void finish("merge")}
                   disabled={!canPrimary}
+                  title={hardBlocked ? blockerPrimaryText(blockers) : undefined}
                   className="min-w-32 rounded-l border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
                 >
                   {busy ? "处理中…" : primaryLabel}
@@ -2206,6 +2412,12 @@ function LiveWorkspaceReviewView({
         {diff && (
           <div className="flex min-h-9 items-center gap-3 border-t border-hairline px-3 py-1.5 text-xs">
             <div className="flex min-w-0 items-center gap-2 text-l3">
+              {reviewProfile.headerHint ? (
+                <span className="text-l2">
+                  {diff.files.length} 个文件 · {reviewProfile.headerHint}
+                </span>
+              ) : (
+                <>
               <GitBranch aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
               <span className="max-w-44 truncate font-mono text-l2">
                 {diff.branch}
@@ -2226,6 +2438,8 @@ function LiveWorkspaceReviewView({
                   {health.ahead > 0 && health.behind > 0 && " · "}
                   {health.behind > 0 && `主分支新增 ${health.behind} 个保存点`}
                 </span>
+              )}
+                </>
               )}
             </div>
 
@@ -2317,13 +2531,10 @@ function LiveWorkspaceReviewView({
                     {aiBusy ? "◈…" : "◈"}
                   </button>
                 </div>
-                <span className="text-micro text-l4">
-                  直接点「提交并合并」就行——这栏是可选的
-                </span>
               </div>
             ) : (
               <span
-                title={`默认只合并到本地 ${diff.baseBranch} 并保留工作区；不会自动推送远程`}
+                title={REVIEW_SAVE.localOnlyHint}
                 className="ml-auto flex h-7 w-7 items-center justify-center rounded-sm text-l4"
               >
                 ⓘ
@@ -2336,7 +2547,8 @@ function LiveWorkspaceReviewView({
             无 bib/全文无引用/无预期产物/无收尾事项时不渲染，不给非写作类项目添噪声；
             数据进评审时一次性读取，失败静默降级；收尾事项只提醒不阻断合并 */}
         {diff &&
-          ((citations && citations.bibFound && citations.totalRefs > 0) ||
+          (screeningReview ||
+            (citations && citations.bibFound && citations.totalRefs > 0) ||
             (artifacts && artifacts.total > 0) ||
             (humanClosing && humanClosing.length > 0)) && (
             <div className="border-t border-hairline px-3 py-1.5 text-xs">
@@ -2382,8 +2594,34 @@ function LiveWorkspaceReviewView({
                     收尾事项 {humanClosing.length} 件待做
                   </span>
                 )}
+                {screeningReview && (
+                  <div className="ml-auto flex shrink-0 gap-1">
+                    {(
+                      [
+                        ["list", "清单"],
+                        ["process", "过程"],
+                        ["files", "文件"],
+                      ] as const
+                    ).map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setScreeningPane(id)}
+                        className={`rounded-sm px-2 py-0.5 ${
+                          screeningPane === id
+                            ? "bg-rail-sel text-l1"
+                            : "text-l3 hover:text-l1"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
+              {reviewProfile.showReportDisclaimer && (
               <p className="mt-1 text-micro text-l4">文件已产出、引用键可解析不代表内容已通过审查；接受改动前仍须核对证据与未决事项。</p>
+              )}
               {citeExpanded && citations && citations.missing.length > 0 && (
                 <p className="mt-1 break-all font-mono text-micro text-warn-text">
                   缺失引用键：{citations.missing.join("、")}
@@ -2391,12 +2629,68 @@ function LiveWorkspaceReviewView({
               )}
             </div>
           )}
+        {diff && !conflictMode && blockers.length > 0 && (
+          <div className="border-t border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
+            <div className="flex items-center gap-2">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn-text" />
+              <span className="min-w-0 flex-1">{blockerPrimaryText(blockers)}</span>
+              {blockers.some((b) => b.key === "main-dirty") && repoPath && (
+                <button
+                  type="button"
+                  onClick={() => setMainCommitOpen((value) => !value)}
+                  className="rounded-sm px-2 py-0.5 text-warn-text hover:bg-hover"
+                >
+                  {mainCommitOpen ? "收起提交面板" : "提交主文件夹的改动…"}
+                </button>
+              )}
+              {blockers.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setShowBlockers((value) => !value)}
+                  className="rounded-sm px-2 py-0.5 text-warn-text hover:bg-hover"
+                >
+                  {showBlockers ? "收起" : "全部"}
+                </button>
+              )}
+            </div>
+            {(showBlockers || mainCommitOpen) && (
+              <div className="mt-1.5 border-t border-hairline pt-1.5 text-l3">
+                {showBlockers && (
+                  <ul className="space-y-1">
+                    {blockers.map((blocker) => (
+                      <li key={blocker.key}>• {blocker.text}</li>
+                    ))}
+                    {health?.conflict && health.conflictFiles.length > 0 && (
+                      <li>• 冲突文件：{health.conflictFiles.join("、")}</li>
+                    )}
+                  </ul>
+                )}
+                {blockers.some((b) => b.key === "main-dirty") && (
+                  <p className="text-micro text-l4">
+                    提交 = 把主文件夹改动保存到项目主线历史；文件本身不会丢，保存后才能继续保存进项目。
+                  </p>
+                )}
+                {mainCommitOpen && repoPath && (
+                  <MainRepoCommitPanel
+                    repoPath={repoPath}
+                    onCommitted={() => {
+                      setMainCommitOpen(false);
+                      setResult("主文件夹的改动已保存到项目历史");
+                      void refresh();
+                    }}
+                    onCancel={() => setMainCommitOpen(false)}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </header>
 
-      {!diff?.reviewOnly && deliveryError && <p role="alert" className="px-3 py-2 text-xs text-err-text">非 Git 产物未能冻结：{deliveryError}。请刷新评审后再合并。</p>}
+      {!diff?.reviewOnly && deliveryError && <p role="alert" className="px-3 py-2 text-xs text-err-text">非 Git 产物未能冻结：{deliveryError}。请刷新评审后再保存进项目。</p>}
       {!diff?.reviewOnly && deliveryReview && deliveryReview.files.length > 0 && <section aria-label="非 Git 产物评审" className="max-h-48 shrink-0 overflow-auto border-b border-hairline px-3 py-2 text-xs">
         <h3 className="font-medium">非 Git 产物 · {deliveryReview.files.length} 项</h3>
-        <p className="text-micro text-l3">合并只带回这版固定副本。看过后内容变化会要求重看；同名冲突不覆盖，未接收文件保留在工作区。</p>
+        <p className="text-micro text-l3">保存进项目只带回这版固定副本。看过后内容变化会要求重看；同名冲突不覆盖，未接收文件保留在工作区。</p>
         <ul>{deliveryReview.files.map((file) => <li key={file.path} className="flex gap-2 py-0.5">
           <button type="button" className="min-w-0 flex-1 truncate text-left text-l2 hover:underline disabled:text-l4" disabled={file.disposition !== "copy"} onClick={() => setDeliveryPreview(file.path)}>{file.path}</button>
           <span className="shrink-0 text-micro text-l3">{file.disposition === "copy" ? `${(file.size / 1024).toFixed(1)} KB · ${file.sha256?.slice(0, 8)}` : file.disposition === "conflict" ? "同名存在，不覆盖" : file.disposition === "protected" ? "保护路径跳过" : file.disposition === "too_large" ? "超出冻结预算" : "随 Git 提交"}</span>
@@ -2404,11 +2698,15 @@ function LiveWorkspaceReviewView({
       </section>}
       {deliveryPreview && deliveryReview && <Suspense fallback={<p className="px-3 py-2 text-xs text-l3">加载固定副本预览…</p>}><OfficePreviewModal path={`${deliveryReview.payloadDir}/${deliveryPreview}`} root={deliveryReview.payloadDir} onClose={() => setDeliveryPreview(null)} /></Suspense>}
       {!diff?.reviewOnly && researchError && <p role="alert" className="px-3 py-2 text-xs text-err-text">{researchError}</p>}
-      {!diff?.reviewOnly && researchContext?.root === worktreePath && <div className="max-h-[42vh] shrink-0 overflow-y-auto border-b border-hairline px-3">
-        <ResearchEvidencePanel root={worktreePath} patterns={researchReportPatterns(researchContext.step, "acceptance")} kind="acceptance" />
-        {researchContext.hasReproduction &&
+      {!diff?.reviewOnly && researchContext?.root === worktreePath && reviewProfile.kind !== "default" && reviewProfile.kind !== "screening" && <div className="max-h-[42vh] shrink-0 overflow-y-auto border-b border-hairline px-3">
+        {reviewProfile.evidence === "report" && (
+          <ResearchEvidencePanel root={worktreePath} patterns={researchReportPatterns(researchContext.step, "acceptance")} kind="acceptance" />
+        )}
+        {reviewProfile.showReproduction && researchContext.hasReproduction &&
           <ResearchReproductionPanel key={`${worktreePath}:${researchContext.workspace.id}`} workspace={researchContext.workspace} step={researchContext.step} artifactDir={researchContext.artifactDir} onLaunched={onClose} onRun={(record) => setResearchRunId(record.id)} />}
-        <ResearchAcceptancePanel workspace={researchContext.workspace} step={researchContext.step} runId={researchRunId} />
+        {reviewProfile.acceptance === "default" && (
+          <ResearchAcceptancePanel workspace={researchContext.workspace} step={researchContext.step} runId={researchRunId} />
+        )}
       </div>}
 
       {/* 上游漂移提醒（启发式，只提醒不阻断）：上游步骤晚于本步最后推进时间合并，
@@ -2420,65 +2718,6 @@ function LiveWorkspaceReviewView({
         </div>
       )}
 
-      {diff && !conflictMode && blockers.length > 0 && (
-        <div className="shrink-0 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
-          <div className="flex items-center gap-2">
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn-text" />
-            <span className="min-w-0 flex-1">
-              {blockers.length} 项问题需要处理
-            </span>
-            <button
-              type="button"
-              onClick={() => setShowBlockers((value) => !value)}
-              className="rounded-sm px-2 py-0.5 text-warn-text hover:bg-hover"
-            >
-              {showBlockers ? "收起" : "查看"}
-            </button>
-          </div>
-          {showBlockers && (
-            <div className="mt-1.5 border-t border-hairline pt-1.5 text-l3">
-              <ul className="space-y-1">
-                {blockers.map((blocker) => (
-                  <li key={blocker.key}>
-                    <div className="flex items-center gap-2">
-                      <span>• {blocker.text}</span>
-                      {blocker.key === "main-dirty" && repoPath && (
-                        <button
-                          type="button"
-                          onClick={() => setMainCommitOpen((value) => !value)}
-                          className="rounded-sm px-2 py-0.5 text-warn-text hover:bg-hover"
-                        >
-                          {mainCommitOpen ? "收起提交面板" : "提交主文件夹的改动…"}
-                        </button>
-                      )}
-                    </div>
-                    {blocker.key === "main-dirty" && (
-                      <p className="pl-3 text-micro text-l4">
-                        提交 =
-                        把主文件夹改动保存到项目主线历史；文件本身不会丢，保存后才能继续合并。
-                      </p>
-                    )}
-                  </li>
-                ))}
-                {health?.conflict && health.conflictFiles.length > 0 && (
-                  <li>• 冲突文件：{health.conflictFiles.join("、")}</li>
-                )}
-              </ul>
-              {mainCommitOpen && repoPath && (
-                <MainRepoCommitPanel
-                  repoPath={repoPath}
-                  onCommitted={() => {
-                    setMainCommitOpen(false);
-                    setResult("主文件夹的改动已保存到项目历史");
-                    void refresh();
-                  }}
-                  onCancel={() => setMainCommitOpen(false)}
-                />
-              )}
-            </div>
-          )}
-        </div>
-      )}
       {diff && conflictMode && staleBase && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-warn-text">
           <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn-text" />
@@ -2501,7 +2740,7 @@ function LiveWorkspaceReviewView({
       {ledgerPending && diff && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-inset px-3 py-1.5 text-xs text-err-text">
           <span className="min-w-0 truncate">
-            ✗ Git 已合并，产物接收或验收记录尚未完成
+            ✗ {REVIEW_SAVE.ledgerPending}
           </span>
           <button
             type="button"
@@ -2642,8 +2881,29 @@ function LiveWorkspaceReviewView({
         <div className="p-6 text-sm text-err-text">
           {error ?? "无法加载工作区审阅数据"}
         </div>
-      ) : (
-        <div className="flex min-h-0 flex-1">
+      ) : showFilePane ? (
+        <>
+        {screeningReview && screeningPane !== "files" && researchContext?.root === worktreePath && (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <ScreeningReviewPanel
+              root={worktreePath}
+              stepName={researchContext.step.name}
+              projectRoot={researchContext.workspace.repoPath}
+              pane={screeningPane}
+              onOpenPdf={(path) => {
+                const projectRoot = researchContext.workspace.repoPath;
+                setSelectProjectReq(projectRoot);
+                setFilePreviewReq({
+                  projectRoot,
+                  path,
+                  token: Date.now(),
+                });
+                setPage("workspaces");
+              }}
+            />
+          </div>
+        )}
+        <div className={`flex min-h-0 flex-1 ${reviewProfile.hideListDiffs ? "min-h-[42vh]" : ""} ${screeningReview && screeningPane !== "files" ? "hidden" : ""}`}>
           {reviewRailOpen && (
             <button
               type="button"
@@ -2724,18 +2984,28 @@ function LiveWorkspaceReviewView({
               <div className="flex h-full items-center justify-center text-sm text-l4">
                 当前任务相对 {diff.baseBranch} 没有改动
               </div>
-            ) : filteredFiles.length === 0 ? (
+            ) : orderedFiles.length === 0 ? (
               <div className="flex h-full items-center justify-center text-sm text-l4">
                 没有匹配的改动文件
               </div>
+            ) : stackedFiles.length === 0 ? (
+              <div className="flex h-full items-center justify-center px-8 text-center text-sm text-l4">
+                纳入清单见上方表格。右侧可打开筛选记录或待获取原文。
+              </div>
             ) : (
-              filteredFiles.map((file) => (
+              stackedFiles.map((file) => (
                 <DiffFileSection
                   key={file.path}
                   file={file}
                   worktreePath={diff.worktreePath}
                   revision={revision}
                   register={registerSection}
+                  unified={file.status === "A" || file.status === "??"}
+                  cached={
+                    diffCacheTick >= 0
+                      ? fileDiffCache.get(fileDiffCacheKey(worktreePath, file.path, revision)) ?? null
+                      : null
+                  }
                 />
               ))
             )}
@@ -2824,6 +3094,13 @@ function LiveWorkspaceReviewView({
                 )
               ) : tree.length === 0 ? (
                 <p className="px-3 py-2 text-xs text-l4">没有匹配文件</p>
+              ) : reviewProfile.groupFiles ? (
+                <GroupedReviewFiles
+                  files={orderedFiles}
+                  onSelect={selectFile}
+                  activePath={activePath}
+                  expandAll={Boolean(normalizedQuery)}
+                />
               ) : (
                 <ChangeTree
                   nodes={tree}
@@ -2865,7 +3142,7 @@ function LiveWorkspaceReviewView({
                     ].join(" ")}
                   />
                   <span>
-                    {hardBlocked ? "处理顶部提示后继续" : "从右上角提交或合并"}
+                    {hardBlocked ? blockerPrimaryText(blockers) : REVIEW_SAVE.footerReady}
                   </span>
                 </div>
               )}
@@ -2879,6 +3156,82 @@ function LiveWorkspaceReviewView({
             </button>
           </aside>
         </div>
+        </>
+      ) : null}
+
+      {diff && filesInDrawer && reviewRailOpen && (
+        <>
+          <button
+            type="button"
+            aria-label="关闭对照文件"
+            onClick={() => setReviewRailOpen(false)}
+            className="absolute inset-0 z-40 border-0 bg-black/32"
+          />
+          <div
+            role="dialog"
+            aria-label="对照文件"
+            className="absolute inset-y-0 right-0 z-40 flex w-[min(56rem,96vw)] border-l border-hairline bg-canvas"
+          >
+            <aside className="flex w-[220px] shrink-0 flex-col border-r border-hairline bg-rail2">
+              <div className="flex h-12 shrink-0 items-center justify-between border-b border-hairline px-3">
+                <span className="text-sm text-l1">对照文件</span>
+                <button
+                  type="button"
+                  onClick={() => setReviewRailOpen(false)}
+                  className="text-xs text-l3 hover:text-l1"
+                >
+                  关闭
+                </button>
+              </div>
+              <div className="shrink-0 border-b border-hairline p-3">
+                <div className="flex h-8 items-center gap-2 rounded-sm border border-field bg-canvas px-2">
+                  <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+                  <input
+                    value={fileQuery}
+                    onChange={(event) => setFileQuery(event.target.value)}
+                    placeholder="筛选文件…"
+                    className="min-w-0 flex-1 bg-transparent text-xs text-l2 outline-none placeholder:text-l4"
+                  />
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-auto py-1">
+                {orderedFiles.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-l4">没有匹配文件</p>
+                ) : (
+                  <GroupedReviewFiles
+                    files={orderedFiles}
+                    onSelect={selectFile}
+                    activePath={activePath}
+                    expandAll={Boolean(normalizedQuery)}
+                  />
+                )}
+              </div>
+            </aside>
+            <main className="min-w-0 flex-1 overflow-auto">
+              {stackedFiles.length === 0 ? (
+                <div className="flex h-full items-center justify-center px-8 text-center text-sm text-l4">
+                  点左侧文件看改动
+                </div>
+              ) : (
+                stackedFiles.map((file) => (
+                  <DiffFileSection
+                    key={file.path}
+                    file={file}
+                    worktreePath={diff.worktreePath}
+                    revision={revision}
+                    register={registerSection}
+                    unified
+                    cached={
+                      diffCacheTick >= 0
+                        ? fileDiffCache.get(fileDiffCacheKey(worktreePath, file.path, revision)) ?? null
+                        : null
+                    }
+                  />
+                ))
+              )}
+            </main>
+          </div>
+        </>
       )}
 
       {finishMenu && !staleBase && (
@@ -2906,11 +3259,11 @@ function LiveWorkspaceReviewView({
                   ...(!hardBlocked
                     ? [
                         {
-                          label: "合并（保留工作区）",
+                          label: REVIEW_SAVE.keepWorkspace,
                           onSelect: () => void finish("merge"),
                         },
                         {
-                          label: "合并并归档",
+                          label: REVIEW_SAVE.saveAndArchive,
                           onSelect: () => void finish("merge-archive"),
                         },
                       ]

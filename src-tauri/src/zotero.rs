@@ -10,8 +10,9 @@
 
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -113,7 +114,7 @@ fn open_snapshot(db_path: &Path) -> Result<Connection, String> {
                     busy_since = Instant::now();
                     if Instant::now() >= deadline {
                         return Err(
-                            "Zotero 库较大，未在时限内读完。请完全退出 Zotero 后重试。".into(),
+                            "Zotero 库较大，未在时限内读完。请完全退出 Zotero 后重试。".into()
                         );
                     }
                 }
@@ -531,6 +532,83 @@ mod tests {
         assert!(!is_doish("10.x/y"));
     }
 
+    #[test]
+    fn zotero_write_error_maps_readonly_plaintext() {
+        assert!(zotero_local_write_unsupported(
+            "Endpoint does not support method"
+        ));
+        assert!(zotero_local_write_unsupported(
+            "Write access is not yet supported."
+        ));
+        assert!(!zotero_local_write_unsupported(r#"{"failed":{}}"#));
+        let msg = zotero_write_error_message(400, "Endpoint does not support method");
+        assert!(msg.contains("只读"), "{msg}");
+        assert!(msg.contains("拖"), "{msg}");
+        let other = zotero_write_error_message(500, "internal boom");
+        assert!(other.contains("HTTP 500"), "{other}");
+        assert!(other.contains("internal boom"), "{other}");
+        let empty = zotero_write_error_message(201, "  ");
+        assert!(empty.contains("空响应"), "{empty}");
+    }
+
+    #[test]
+    fn parse_bbt_xpi_download_url_picks_versioned_asset() {
+        let body = r#"{
+          "tag_name":"v9.0.64",
+          "assets":[
+            {"name":"notes.md","browser_download_url":"https://github.com/retorquere/zotero-better-bibtex/releases/download/v9.0.64/notes.md"},
+            {"name":"zotero-better-bibtex-9.0.64.xpi","browser_download_url":"https://github.com/retorquere/zotero-better-bibtex/releases/download/v9.0.64/zotero-better-bibtex-9.0.64.xpi"}
+          ]
+        }"#;
+        assert_eq!(
+            parse_bbt_xpi_download_url(body).unwrap(),
+            "https://github.com/retorquere/zotero-better-bibtex/releases/download/v9.0.64/zotero-better-bibtex-9.0.64.xpi"
+        );
+        assert!(parse_bbt_xpi_download_url(r#"{"assets":[]}"#).is_err());
+        assert!(parse_bbt_xpi_download_url(
+            r#"{"assets":[{"name":"zotero-better-bibtex.xpi","browser_download_url":"https://evil.example/x.xpi"}]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn zotero_native_import_ext_allows_ris_bib_json() {
+        assert!(zotero_native_import_ext("ris"));
+        assert!(zotero_native_import_ext("bib"));
+        assert!(zotero_native_import_ext("json"));
+        assert!(!zotero_native_import_ext("pdf"));
+        assert!(!zotero_native_import_ext("xpi"));
+    }
+
+    #[test]
+    fn parse_profiles_ini_picks_default_relative_path() {
+        let ini = "[Profile0]\nName=old\nIsRelative=1\nPath=Profiles/aaaa.default\n\n[Profile1]\nName=default\nIsRelative=1\nPath=Profiles/bbbb.default\nDefault=1\n";
+        let dir = PathBuf::from("/tmp/Zotero");
+        let got = parse_profiles_ini(ini, &dir).unwrap();
+        assert_eq!(got, dir.join("Profiles/bbbb.default"));
+    }
+
+    #[test]
+    fn parse_profiles_ini_absolute_path() {
+        let ini = "[Profile0]\nIsRelative=0\nPath=/opt/zotero-profile\nDefault=1\n";
+        let got = parse_profiles_ini(ini, Path::new("/unused")).unwrap();
+        assert_eq!(got, PathBuf::from("/opt/zotero-profile"));
+    }
+
+    #[test]
+    fn bbt_id_from_manifest_accepts_official_only() {
+        let ok = r#"{"applications":{"zotero":{"id":"better-bibtex@iris-advies.com"}}}"#;
+        assert_eq!(bbt_id_from_manifest(ok).unwrap(), BBT_ADDON_ID);
+        let gecko =
+            r#"{"browser_specific_settings":{"gecko":{"id":"better-bibtex@iris-advies.com"}}}"#;
+        assert_eq!(bbt_id_from_manifest(gecko).unwrap(), BBT_ADDON_ID);
+        assert!(
+            bbt_id_from_manifest(r#"{"applications":{"zotero":{"id":"evil@example.com"}}}"#)
+                .is_err()
+        );
+        assert!(bbt_id_from_manifest("not json").is_err());
+    }
+
     fn item(title: &str, creators: &[&str], year: Option<&str>) -> ZoteroItemDto {
         ZoteroItemDto {
             key: "ABCD1234".into(),
@@ -800,6 +878,13 @@ pub struct ZoteroImportDto {
 // 用户意图）」，见 AGENTS.md / conventions/pipeline.md
 
 const ZOTERO_API: &str = "http://127.0.0.1:23119/api";
+const BBT_RPC: &str = "http://127.0.0.1:23119/better-bibtex/json-rpc";
+/// 官方 latest 的资产名带版本号（`zotero-better-bibtex-9.0.64.xpi`），
+/// `/releases/latest/download/better-bibtex.xpi` 会 404。先查 GitHub API 再下 xpi。
+const BBT_RELEASES_API: &str =
+    "https://api.github.com/repos/retorquere/zotero-better-bibtex/releases/latest";
+const BBT_ADDON_ID: &str = "better-bibtex@iris-advies.com";
+const BBT_XPI_MAX: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -822,6 +907,9 @@ pub struct ZoteroAttachResultDto {
     pub missing: Vec<String>,
     /// 有 PDF 但既无 DOI 可查、也建不了条目的
     pub unmatched: Vec<String>,
+    /// 单条同步失败（Zotero API 抖动等）——其余条目不受影响，失败的标原因可重试
+    #[serde(default)]
+    pub failed: Vec<String>,
 }
 
 fn zotero_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
@@ -854,6 +942,449 @@ async fn zotero_api_ready() -> Result<(), String> {
     }
 }
 
+/// Zotero 9（及 7.x 起的 local API）源码写明「Write access is not yet supported」：
+/// GET `/api/users/0/items` 通，POST 回纯文本 `Endpoint does not support method`。
+/// 旧实现对着正文 `.json()`，reqwest 就报 "error decoding response body"，像随机失败。
+const ZOTERO_WRITE_UNSUPPORTED: &str =
+    "当前 Zotero 本地接口只读，不能往库里挂 PDF。请把 papers/ 里的文件拖到 Zotero 对应条目上；还没有条目就先把 papers/to-fetch.ris 拖进 Zotero。";
+
+fn zotero_local_write_unsupported(body: &str) -> bool {
+    let t = body.trim();
+    t.contains("Endpoint does not support method")
+        || t.contains("Write access is not yet supported")
+}
+
+fn zotero_write_error_message(status: u16, body: &str) -> String {
+    if zotero_local_write_unsupported(body) {
+        return ZOTERO_WRITE_UNSUPPORTED.to_string();
+    }
+    if status == 401 || status == 403 {
+        return "Zotero 拒绝写入（可能需要授权）：Zotero 会弹出「允许应用写入」确认窗，点允许后重试；老版本可在设置里开本机通信".into();
+    }
+    let preview: String = body.trim().chars().take(160).collect();
+    if preview.is_empty() {
+        format!("Zotero 写入返回 HTTP {status}（空响应）")
+    } else {
+        format!("Zotero 写入返回 HTTP {status}：{preview}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoteroBbtStatusDto {
+    /// `/better-bibtex/json-rpc` 探活：200 = 已装。Zotero 没开或没装插件都是 false。
+    pub installed: bool,
+    pub xpi_url: String,
+}
+
+async fn bbt_rpc_installed() -> bool {
+    let Ok(client) = zotero_client(2) else {
+        return false;
+    };
+    let resp = client
+        .post(BBT_RPC)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "user.groups",
+            "params": [],
+            "id": 1
+        }))
+        .send()
+        .await;
+    matches!(resp, Ok(r) if r.status().is_success())
+}
+
+#[tauri::command]
+pub async fn zotero_bbt_status() -> ZoteroBbtStatusDto {
+    ZoteroBbtStatusDto {
+        installed: bbt_rpc_installed().await,
+        xpi_url: BBT_RELEASES_API.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoteroBbtInstallDto {
+    pub staged: bool,
+    pub message: String,
+}
+
+/// 解析 profiles.ini，取 Default=1，否则第一段有 Path 的。
+fn parse_profiles_ini(text: &str, ini_dir: &Path) -> Option<PathBuf> {
+    let mut default_path: Option<(bool, String)> = None;
+    let mut first_path: Option<(bool, String)> = None;
+    let mut rel = true;
+    let mut path: Option<String> = None;
+    let mut is_default = false;
+    let flush = |rel: bool,
+                 path: Option<String>,
+                 is_default: bool,
+                 default_path: &mut Option<(bool, String)>,
+                 first_path: &mut Option<(bool, String)>| {
+        let Some(p) = path else { return };
+        if first_path.is_none() {
+            *first_path = Some((rel, p.clone()));
+        }
+        if is_default {
+            *default_path = Some((rel, p));
+        }
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            flush(
+                rel,
+                path.take(),
+                is_default,
+                &mut default_path,
+                &mut first_path,
+            );
+            rel = true;
+            is_default = false;
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            match k.trim() {
+                "IsRelative" => rel = v.trim() != "0",
+                "Path" => path = Some(v.trim().to_string()),
+                "Default" => is_default = v.trim() == "1",
+                _ => {}
+            }
+        }
+    }
+    flush(
+        rel,
+        path.take(),
+        is_default,
+        &mut default_path,
+        &mut first_path,
+    );
+    let (rel, p) = default_path.or(first_path)?;
+    if rel {
+        Some(ini_dir.join(p))
+    } else {
+        Some(PathBuf::from(p))
+    }
+}
+
+fn parse_bbt_xpi_download_url(body: &str) -> Result<String, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| "GitHub 最新版信息无法解析")?;
+    let assets = v
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .ok_or("GitHub 最新版没有附件列表")?;
+    let url = assets
+        .iter()
+        .find_map(|a| {
+            let name = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let url = a
+                .get("browser_download_url")
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            if name.ends_with(".xpi") && name.contains("better-bibtex") && !name.contains("debug") {
+                Some(url)
+            } else {
+                None
+            }
+        })
+        .ok_or("GitHub 最新版里没有 Better BibTeX 的 .xpi")?;
+    if url.starts_with("https://github.com/retorquere/zotero-better-bibtex/releases/download/")
+        && url.ends_with(".xpi")
+    {
+        Ok(url.to_string())
+    } else {
+        Err("GitHub 给出的下载地址不是官方仓库".into())
+    }
+}
+
+fn bbt_id_from_manifest(text: &str) -> Result<String, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| "Better BibTeX 安装包 manifest 无法解析")?;
+    let id = v
+        .pointer("/applications/zotero/id")
+        .or_else(|| v.pointer("/browser_specific_settings/gecko/id"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    if id == BBT_ADDON_ID {
+        Ok(id.to_string())
+    } else {
+        Err(format!(
+            "安装包身份不是官方 Better BibTeX（得到 {id}），未写入 Zotero 目录"
+        ))
+    }
+}
+
+fn bbt_id_from_xpi(bytes: &[u8]) -> Result<String, String> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|e| format!("Better BibTeX 安装包不是有效 zip: {e}"))?;
+    let mut file = zip
+        .by_name("manifest.json")
+        .map_err(|_| "安装包里没有 manifest.json")?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|e| format!("读 manifest.json 失败: {e}"))?;
+    bbt_id_from_manifest(&text)
+}
+
+async fn download_bbt_xpi() -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .user_agent("Mesa zotero-bbt (https://github.com/hongtongzhou-design/ccode)")
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+    let meta = client
+        .get(BBT_RELEASES_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("查询 Better BibTeX 最新版失败（GitHub 可能较慢，请重试）: {e}"))?;
+    if !meta.status().is_success() {
+        return Err(format!(
+            "查询 Better BibTeX 最新版失败：HTTP {}",
+            meta.status()
+        ));
+    }
+    let meta_text = meta
+        .text()
+        .await
+        .map_err(|e| format!("读取 GitHub 最新版信息失败: {e}"))?;
+    let xpi_url = parse_bbt_xpi_download_url(&meta_text)?;
+    let resp = client
+        .get(&xpi_url)
+        .send()
+        .await
+        .map_err(|e| format!("下载 Better BibTeX 失败（GitHub 可能较慢，请重试）: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("下载 Better BibTeX 失败：HTTP {}", resp.status()));
+    }
+    if resp
+        .content_length()
+        .is_some_and(|n| n as usize > BBT_XPI_MAX)
+    {
+        return Err("Better BibTeX 安装包超过 64MB，已中止".into());
+    }
+    let bytes = crate::storage::response_bytes(resp, BBT_XPI_MAX)
+        .await
+        .map_err(|e| format!("下载 Better BibTeX 失败: {e}"))?;
+    if bytes.len() < 64 {
+        return Err("下载到的 Better BibTeX 安装包过小，已中止".into());
+    }
+    Ok(bytes)
+}
+
+/// 下载官方 xpi，校验身份后交给 Zotero 自己安装（弹出确认窗）。
+/// Zotero 9 不会自动认丢进 extensions/ 的文件，所以不走静默拷贝。
+#[tauri::command]
+pub async fn zotero_install_bbt() -> Result<ZoteroBbtInstallDto, String> {
+    if bbt_rpc_installed().await {
+        return Ok(ZoteroBbtInstallDto {
+            staged: true,
+            message: "Better BibTeX 已经在运行，不用再装".into(),
+        });
+    }
+    let bytes = download_bbt_xpi().await?;
+    let _id = bbt_id_from_xpi(&bytes)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = dirs::config_dir()
+            .ok_or("无法定位配置目录")?
+            .join("ccode")
+            .join("tmp");
+        fs::create_dir_all(&dir).map_err(|e| format!("无法创建临时目录: {e}"))?;
+        let dest = dir.join("better-bibtex.xpi");
+        crate::storage::atomic_write(&dest, &bytes, true)?;
+        tauri_plugin_opener::open_path(&dest, Some("Zotero")).or_else(|_| {
+            tauri_plugin_opener::open_path(&dest, None::<&str>)
+        }).map_err(|e| {
+            format!(
+                "已下载安装包，但没法交给 Zotero 打开：{e}。请在 Zotero「工具 → 插件 → 从文件安装」里选这份文件：{}",
+                dest.display()
+            )
+        })?;
+        Ok(ZoteroBbtInstallDto {
+            staged: true,
+            message: "已交给 Zotero，请在弹出的窗口里点安装。装好后完全退出再打开（macOS 用 ⌘Q）。拖 RIS 不需要这个插件。".into(),
+        })
+    })
+    .await
+    .map_err(|e| format!("打开 Zotero 安装窗口失败: {e}"))?
+}
+
+fn zotero_native_import_ext(ext: &str) -> bool {
+    matches!(ext, "ris" | "bib" | "json")
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoteroMatchDto {
+    /// 本地 GET 通。不通时 present=0，界面不拦导入（Zotero 可能随后被 opener 拉起）
+    pub reachable: bool,
+    pub present: usize,
+    pub missing: usize,
+    pub total: usize,
+}
+
+async fn library_doi_set(client: &reqwest::Client) -> Result<HashSet<String>, String> {
+    let mut out = HashSet::new();
+    let mut start = 0usize;
+    loop {
+        let resp = client
+            .get(format!("{ZOTERO_API}/users/0/items"))
+            .query(&[("limit", "100"), ("start", &start.to_string())])
+            .send()
+            .await
+            .map_err(|e| format!("查询 Zotero 条目失败: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("查询 Zotero 条目失败：HTTP {}", resp.status()));
+        }
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析 Zotero 响应失败: {e}"))?;
+        let items = items_of(&v);
+        if items.is_empty() {
+            break;
+        }
+        for it in &items {
+            if let Some(d) = it
+                .get("data")
+                .and_then(|d| d.get("DOI"))
+                .and_then(|d| d.as_str())
+            {
+                let n = doi_norm(d);
+                if n.starts_with("10.") {
+                    out.insert(n);
+                }
+            }
+        }
+        start += items.len();
+        if items.len() < 100 || start >= 2000 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// 清单 DOI 与库内条目对照。Zotero 没开时 reachable=false，不报错。
+#[tauri::command]
+pub async fn zotero_match_dois(dois: Vec<String>) -> Result<ZoteroMatchDto, String> {
+    let unique: HashSet<String> = dois
+        .iter()
+        .map(|d| doi_norm(d))
+        .filter(|d| d.starts_with("10."))
+        .collect();
+    let total = unique.len();
+    if total == 0 {
+        return Ok(ZoteroMatchDto {
+            reachable: true,
+            present: 0,
+            missing: 0,
+            total: 0,
+        });
+    }
+    if zotero_api_ready().await.is_err() {
+        return Ok(ZoteroMatchDto {
+            reachable: false,
+            present: 0,
+            missing: total,
+            total,
+        });
+    }
+    let client = zotero_client(8)?;
+    let lib = match library_doi_set(&client).await {
+        Ok(s) => s,
+        Err(_) => {
+            return Ok(ZoteroMatchDto {
+                reachable: false,
+                present: 0,
+                missing: total,
+                total,
+            });
+        }
+    };
+    let present = unique.iter().filter(|d| lib.contains(*d)).count();
+    Ok(ZoteroMatchDto {
+        reachable: true,
+        present,
+        missing: total.saturating_sub(present),
+        total,
+    })
+}
+
+/// 打开项目 papers/，方便把 PDF 拖进 Zotero。
+#[tauri::command]
+pub async fn zotero_open_papers(project_root: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = crate::projects::ensure_task_project_root(Path::new(
+            &crate::sessions::expand_tilde(&project_root),
+        ))?;
+        let papers = root.join("papers");
+        if !papers.is_dir() {
+            fs::create_dir_all(&papers).map_err(|e| format!("无法创建 papers/: {e}"))?;
+        }
+        let papers_c =
+            crate::paths::canonicalize_plain(&papers).map_err(|e| format!("papers/ 无效: {e}"))?;
+        if !crate::paths::path_within_path(&papers_c, &root) {
+            return Err("papers/ 不在项目目录内".into());
+        }
+        tauri_plugin_opener::open_path(&papers_c, None::<&str>)
+            .map_err(|e| format!("没法打开 papers/: {e}"))
+    })
+    .await
+    .map_err(|e| format!("{e}"))?
+}
+
+/// 用 Zotero 打开 RIS/BibTeX/CSL JSON（原生导入，不需要 Better BibTeX）。
+#[tauri::command]
+pub async fn zotero_open_import(path: String, root: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root_exp = crate::sessions::expand_tilde(&root);
+        let path_exp = crate::sessions::expand_tilde(&path);
+        let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&root_exp))
+            .map_err(|e| format!("目录无效: {e}"))?;
+        let path_c = crate::paths::canonicalize_plain(std::path::Path::new(&path_exp))
+            .map_err(|_| "找不到 to-fetch.ris（筛完检索后会生成）".to_string())?;
+        if !crate::paths::path_within_path(&path_c, &root_c) {
+            return Err("导入文件不在项目目录内".into());
+        }
+        let ext = path_c
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !zotero_native_import_ext(&ext) {
+            return Err("只打开 RIS / BibTeX / CSL JSON 给 Zotero 导入".into());
+        }
+        tauri_plugin_opener::open_path(&path_c, Some("Zotero"))
+            .or_else(|_| tauri_plugin_opener::open_path(&path_c, None::<&str>))
+            .map_err(|e| format!("没法交给 Zotero 打开: {e}"))?;
+        Ok(
+            "已交给 Zotero 导入。确认即可。PDF 直接拖进 Zotero，一般会按元数据对上已有条目。"
+                .into(),
+        )
+    })
+    .await
+    .map_err(|e| format!("{e}"))?
+}
+
+/// 探一次 POST：只读接口立刻停，避免 20 篇各报一遍解码失败。
+async fn ensure_zotero_writable(client: &reqwest::Client) -> Result<(), String> {
+    let resp = client
+        .post(format!("{ZOTERO_API}/users/0/items"))
+        .json(&serde_json::json!([]))
+        .send()
+        .await
+        .map_err(|e| format!("写入 Zotero 失败: {e}"))?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if zotero_local_write_unsupported(&body) {
+        return Err(ZOTERO_WRITE_UNSUPPORTED.to_string());
+    }
+    // 空数组本身可能 400（非法条目），只要不是「方法不支持」就当写入通道在
+    let _ = status;
+    Ok(())
+}
+
 /// DOI 归一比较：剥 doi:/https://doi.org/ 前缀、小写、去尾句读
 fn doi_norm(raw: &str) -> String {
     let t = raw.trim();
@@ -866,7 +1397,8 @@ fn doi_norm(raw: &str) -> String {
         .strip_prefix("https://doi.org/")
         .or_else(|| t.strip_prefix("http://doi.org/"))
         .unwrap_or(t);
-    t.trim_end_matches(['.', ',', ';', ')']).to_ascii_lowercase()
+    t.trim_end_matches(['.', ',', ';', ')'])
+        .to_ascii_lowercase()
 }
 
 fn is_doish(s: &str) -> bool {
@@ -910,9 +1442,7 @@ async fn find_key_by_doi(client: &reqwest::Client, doi: &str) -> Result<Option<S
         if !hit {
             return None;
         }
-        it.get("key")?
-            .as_str()
-            .map(str::to_string)
+        it.get("key")?.as_str().map(str::to_string)
     }))
 }
 
@@ -928,16 +1458,24 @@ async fn post_items(
         .await
         .map_err(|e| format!("写入 Zotero 失败: {e}"))?;
     let status = resp.status();
-    let v: serde_json::Value = resp
-        .json()
+    // 先读文本再解析：Zotero 9 POST 回 text/plain「Endpoint does not support method」，
+    // 对着 `.json()` 只会得到 reqwest 的 "error decoding response body"
+    let text = resp
+        .text()
         .await
-        .map_err(|e| format!("解析 Zotero 写入响应失败: {e}"))?;
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err("Zotero 拒绝写入（可能需要授权）：Zotero 会弹出「允许应用写入」确认窗，点允许后重试；老版本可在设置里开本机通信".into());
-    }
+        .map_err(|e| format!("读取 Zotero 写入响应失败: {e}"))?;
     if !status.is_success() {
-        return Err(format!("Zotero 写入返回 HTTP {status}"));
+        return Err(zotero_write_error_message(status.as_u16(), &text));
     }
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "解析 Zotero 写入响应失败: {e}；响应开头: {}",
+            text.chars().take(120).collect::<String>()
+        )
+    })?;
     let mut out = Vec::new();
     if let Some(failed) = v.get("failed").and_then(|f| f.as_object()) {
         if !failed.is_empty() {
@@ -972,7 +1510,11 @@ async fn post_items(
         return Ok(out);
     }
     for item in items_of(&v) {
-        let key = item.get("key").and_then(|k| k.as_str()).unwrap_or("").to_string();
+        let key = item
+            .get("key")
+            .and_then(|k| k.as_str())
+            .unwrap_or("")
+            .to_string();
         let title = item
             .get("data")
             .and_then(|d| d.get("title"))
@@ -1069,7 +1611,11 @@ fn handle_ris_line(
         }
         "PY" | "DA" => {
             // PY 常见 `2023` 或 `2023-05-01`：只取前 4 位年
-            let y: String = value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect();
+            let y: String = value
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .take(4)
+                .collect();
             if y.len() == 4 {
                 rec.year = Some(y);
             }
@@ -1126,6 +1672,7 @@ async fn attach_fulltexts_inner(
 ) -> Result<ZoteroAttachResultDto, String> {
     zotero_api_ready().await?;
     let client = zotero_client(20)?;
+    ensure_zotero_writable(&client).await?;
     let ris = ris_text.map(parse_ris_by_doi).unwrap_or_default();
     let papers = project_root.join("papers");
     let mut pdfs: Vec<PathBuf> = std::fs::read_dir(&papers)
@@ -1143,6 +1690,9 @@ async fn attach_fulltexts_inner(
         if want.is_empty() {
             continue;
         }
+        // 短边 ≥8 护栏（与 lit_watch.to_fetch_progress_inner 同款纪律）：
+        // 无护栏时 1 字符的 norm 会包含命中任何含它的文件名，短标题条目可能
+        // 错挂到别人的 PDF（2026-09-17 审计）
         let hit = pdfs.iter().position(|p| {
             let key = p.to_string_lossy().into_owned();
             if taken.contains(&key) {
@@ -1153,7 +1703,8 @@ async fn attach_fulltexts_inner(
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let have = crate::lit_watch::normalize_title(&stem);
-            !have.is_empty() && (have.contains(&want) || want.contains(&have))
+            let short = have.len().min(want.len());
+            !have.is_empty() && short >= 8 && (have.contains(&want) || want.contains(&have))
         });
         let Some(pos) = hit else {
             dto.missing.push(entry.title.clone());
@@ -1167,62 +1718,82 @@ async fn attach_fulltexts_inner(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let doi = doi_norm(&entry.url);
-        let key = if is_doish(&doi) {
-            match find_key_by_doi(&client, &doi).await? {
-                Some(k) => k,
-                // 条目不存在：按题录最小字段新建（journalArticle + DOI）
-                None => {
-                    // 有 RIS 题录（作者/年份/来源）就建全条目；没有回落最小条目（标题+DOI）
-                    let ris_rec = ris.get(&doi);
-                    let mut item = serde_json::json!({
-                        "itemType": "journalArticle",
-                        "title": entry.title,
-                        "DOI": doi,
-                    });
-                    if let Some(r) = ris_rec {
-                        if !r.authors.is_empty() {
-                            item["creators"] = ris_creators_json(&r.authors);
-                        }
-                        if let Some(y) = &r.year {
-                            item["date"] = serde_json::json!(y);
-                        }
-                        if let Some(p) = &r.publication {
-                            item["publicationTitle"] = serde_json::json!(p);
-                        }
-                    }
-                    let body = serde_json::json!([item]);
-                    let created = post_items(&client, body).await?;
-                    let Some((k, _)) = created.first() else {
-                        dto.unmatched.push(entry.title.clone());
-                        continue;
-                    };
-                    dto.created.push(entry.title.clone());
-                    k.clone()
-                }
-            }
-        } else {
-            // 没 DOI：无从可靠查重，不建重复条目（会话里 agent 可带全题录补建）
-            dto.unmatched.push(entry.title.clone());
-            continue;
-        };
-
-        if already_attached(&client, &key, &pdf_name, &pdf_path).await? {
-            dto.skipped.push(entry.title.clone());
+        // 单条失败只记账不冒泡（2026-09-17 审计：第 15 篇时 Zotero 本地 API 抖
+        // 一下，旧 `?` 把整个函数弹 Err，前 14 篇已挂上/已新建的结果全部丢失，
+        // 用户只见「同步失败」不知哪些已进 Zotero）
+        if let Err(e) = attach_entry(&client, &mut dto, entry, &ris, &pdf_name, &pdf_path).await {
+            dto.failed.push(format!("{}：{e}", entry.title));
             continue;
         }
-        let body = serde_json::json!([{
-            "itemType": "attachment",
-            "parentItem": key,
-            "linkMode": "linked_file",
-            "title": pdf_name,
-            "path": pdf_path,
-            "contentType": "application/pdf",
-        }]);
-        post_items(&client, body).await?;
-        dto.attached.push(entry.title.clone());
     }
     Ok(dto)
+}
+
+/// 单条挂附件（查/建条目 → 查重 → linked_file 附件）；dto 的 created/attached/
+/// skipped/unmatched 就地计入，Err 只代表这一条失败
+async fn attach_entry(
+    client: &reqwest::Client,
+    dto: &mut ZoteroAttachResultDto,
+    entry: &ToFetchEntryIn,
+    ris: &std::collections::HashMap<String, RisRecord>,
+    pdf_name: &str,
+    pdf_path: &str,
+) -> Result<(), String> {
+    let doi = doi_norm(&entry.url);
+    let key = if is_doish(&doi) {
+        match find_key_by_doi(client, &doi).await? {
+            Some(k) => k,
+            // 条目不存在：按题录最小字段新建（journalArticle + DOI）
+            None => {
+                // 有 RIS 题录（作者/年份/来源）就建全条目；没有回落最小条目（标题+DOI）
+                let ris_rec = ris.get(&doi);
+                let mut item = serde_json::json!({
+                    "itemType": "journalArticle",
+                    "title": entry.title,
+                    "DOI": doi,
+                });
+                if let Some(r) = ris_rec {
+                    if !r.authors.is_empty() {
+                        item["creators"] = ris_creators_json(&r.authors);
+                    }
+                    if let Some(y) = &r.year {
+                        item["date"] = serde_json::json!(y);
+                    }
+                    if let Some(p) = &r.publication {
+                        item["publicationTitle"] = serde_json::json!(p);
+                    }
+                }
+                let body = serde_json::json!([item]);
+                let created = post_items(client, body).await?;
+                let Some((k, _)) = created.first() else {
+                    dto.unmatched.push(entry.title.clone());
+                    return Ok(());
+                };
+                dto.created.push(entry.title.clone());
+                k.clone()
+            }
+        }
+    } else {
+        // 没 DOI：无从可靠查重，不建重复条目（会话里 agent 可带全题录补建）
+        dto.unmatched.push(entry.title.clone());
+        return Ok(());
+    };
+
+    if already_attached(client, &key, pdf_name, pdf_path).await? {
+        dto.skipped.push(entry.title.clone());
+        return Ok(());
+    }
+    let body = serde_json::json!([{
+        "itemType": "attachment",
+        "parentItem": key,
+        "linkMode": "linked_file",
+        "title": pdf_name,
+        "path": pdf_path,
+        "contentType": "application/pdf",
+    }]);
+    post_items(client, body).await?;
+    dto.attached.push(entry.title.clone());
+    Ok(())
 }
 
 #[tauri::command]

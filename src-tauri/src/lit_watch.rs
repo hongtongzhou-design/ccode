@@ -769,6 +769,92 @@ pub(crate) fn looks_like_pdf(bytes: &[u8]) -> bool {
     head.windows(5).any(|w| w == b"%PDF-")
 }
 
+/// 页上标题是否能当文件名：空、纯站名、Chrome PDF 阅读器的 paper / paper-5
+/// 都不算——否则入库成 paper-5.pdf，待获取清单短边 ≥8 对不上「已存」
+pub(crate) fn is_usable_paper_title(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let stem = t
+        .strip_suffix(".pdf")
+        .or_else(|| t.strip_suffix(".PDF"))
+        .unwrap_or(t)
+        .trim();
+    let lower = stem.to_ascii_lowercase();
+    let trimmed = lower.trim_end_matches(|c: char| c.is_ascii_digit() || c == '-' || c == '_');
+    const GENERIC: &[&str] = &[
+        "paper",
+        "fulltext",
+        "full text",
+        "download",
+        "pdf",
+        "untitled",
+        "document",
+        "article",
+        "main",
+        "file",
+        "sciencedirect",
+        "sciencedirect.com",
+        "wiley online library",
+        "springerlink",
+        "ieee xplore",
+        "about:blank",
+    ];
+    if GENERIC.iter().any(|g| trimmed == *g || lower == *g) {
+        return false;
+    }
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return false;
+    }
+    true
+}
+
+fn resolved_doi(doi: &str, url: &str) -> String {
+    let d = doi.trim();
+    if !d.is_empty() {
+        if let Some(x) = crate::inst_access::doi_from_url(d) {
+            return x;
+        }
+    }
+    if !url.trim().is_empty() {
+        if let Some(x) = crate::inst_access::doi_from_url(url) {
+            return x;
+        }
+    }
+    String::new()
+}
+
+/// 扩展落盘文件名挑选：页上正经标题 → Mesa「浏览器打开」记下的标题（同篇或
+/// 页上匿名）→ 页/语境 DOI。空串由 sanitize 回落 paper.pdf。
+pub(crate) fn pick_paper_name_hint(
+    page_title: &str,
+    page_doi: &str,
+    page_url: &str,
+    ctx_title: &str,
+    ctx_doi: &str,
+) -> String {
+    let page_doi_norm = resolved_doi(page_doi, page_url);
+    let ctx_doi_norm = resolved_doi(ctx_doi, "");
+    if is_usable_paper_title(page_title) {
+        return page_title.trim().to_string();
+    }
+    let same_paper = !page_doi_norm.is_empty()
+        && !ctx_doi_norm.is_empty()
+        && page_doi_norm.eq_ignore_ascii_case(&ctx_doi_norm);
+    let page_anonymous = page_doi_norm.is_empty();
+    if is_usable_paper_title(ctx_title) && (same_paper || page_anonymous) {
+        return ctx_title.trim().to_string();
+    }
+    if !page_doi_norm.is_empty() {
+        return page_doi_norm.replace(['/', ':'], "_");
+    }
+    if !ctx_doi_norm.is_empty() && page_anonymous {
+        return ctx_doi_norm.replace(['/', ':'], "_");
+    }
+    String::new()
+}
+
 /// 文件名 sanitize：去路径分隔符/控制字符/Windows 非法字符（三平台口径），
 /// 去首尾空白与点，主干限长，非 .pdf 结尾补 .pdf；清完为空回落 "paper.pdf"
 fn sanitize_pdf_name(hint: &str) -> String {
@@ -868,10 +954,21 @@ fn papers_dir(root: &Path) -> Result<PathBuf, String> {
     Ok(canon)
 }
 
-/// 把 papers/ 里已存在的 PDF 登记进 project.toml 的 [[resources]]（type="paper"，
-/// name 取文件 stem；path 存相对项目根、统一正斜杠，同 discover_resources 口径；
-/// 复用 projects 的读-改-原子写，已登记同路径不重复加）
-fn register_pdf(root: &Path, target: &Path) -> Result<DownloadedPaperDto, String> {
+fn doi_note(doi: &str) -> String {
+    crate::inst_access::doi_from_url(doi)
+        .map(|d| format!("doi:{d}"))
+        .unwrap_or_default()
+}
+
+/// 把 papers/ 里已存在的 PDF 登记进 project.toml 的 [[resources]]（type="paper"；
+/// path 存相对项目根。identity 是文献标题——文件名可以是 paper-5.pdf，清单靠
+/// name/note 认「已存」，不靠文件名）
+fn register_pdf(
+    root: &Path,
+    target: &Path,
+    identity: &str,
+    doi: &str,
+) -> Result<DownloadedPaperDto, String> {
     let file_name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -881,22 +978,65 @@ fn register_pdf(root: &Path, target: &Path) -> Result<DownloadedPaperDto, String
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| file_name.clone());
     let rel = format!("papers/{file_name}");
+    let display = if is_usable_paper_title(identity) {
+        identity.trim().to_string()
+    } else {
+        stem.clone()
+    };
+    let note = doi_note(doi);
     let mut cfg = crate::projects::read_config_at(root).config;
-    if !cfg.resources.iter().any(|r| r.path == rel) {
+    let mut changed = false;
+    if let Some(r) = cfg.resources.iter_mut().find(|r| r.path == rel) {
+        if is_usable_paper_title(identity) && !is_usable_paper_title(&r.name) {
+            r.name = display.clone();
+            changed = true;
+        }
+        if r.note.is_empty() && !note.is_empty() {
+            r.note = note.clone();
+            changed = true;
+        }
+    } else {
         cfg.resources.push(crate::projects::ResourceDto {
-            name: stem.clone(),
+            name: display.clone(),
             path: rel,
             kind: "paper".into(),
             readonly: false,
-            note: String::new(),
+            note,
         });
+        changed = true;
+    }
+    if changed {
         crate::projects::write_config_at(root, &cfg)?;
     }
     Ok(DownloadedPaperDto {
         path: target.to_string_lossy().into_owned(),
-        name: stem,
+        name: display,
         dedup: false,
     })
+}
+
+/// 扩展落盘后主程序回执监听调用：把打开那篇的标题/DOI 写到资源，通用文件名
+/// （paper-5.pdf）改成标题。返回最终文件名供清单立刻显示。
+pub(crate) fn stamp_paper_identity(
+    root: &str,
+    saved: &str,
+    title: &str,
+    doi: &str,
+) -> Option<String> {
+    if root.trim().is_empty() || saved.trim().is_empty() {
+        return None;
+    }
+    let root = Path::new(root);
+    let name = saved.trim();
+    let fname = if name.to_ascii_lowercase().ends_with(".pdf") {
+        name.to_string()
+    } else {
+        format!("{name}.pdf")
+    };
+    if !root.join("papers").join(&fname).is_file() {
+        return None;
+    }
+    Some(apply_title_filename(root, &fname, title, doi))
 }
 
 /// 字节级查重：同尺寸 + md5 相同即认同一份（先比尺寸省哈希；papers/ 文件量
@@ -908,9 +1048,7 @@ fn find_duplicate_pdf(papers: &Path, bytes: &[u8]) -> Option<PathBuf> {
     let rd = fs::read_dir(papers).ok()?;
     for entry in rd.flatten() {
         let p = entry.path();
-        let is_pdf = p
-            .extension()
-            .is_some_and(|x| x.eq_ignore_ascii_case("pdf"));
+        let is_pdf = p.extension().is_some_and(|x| x.eq_ignore_ascii_case("pdf"));
         if !is_pdf {
             continue;
         }
@@ -926,6 +1064,74 @@ fn find_duplicate_pdf(papers: &Path, bytes: &[u8]) -> Option<PathBuf> {
     None
 }
 
+fn paper_rel(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("papers/{name}")
+}
+
+/// 已有副本是 paper / paper-5 这种空标题名、这次有正经标题：改名让清单能对上已存
+fn rename_generic_duplicate(
+    root: &Path,
+    papers: &Path,
+    dup: &Path,
+    file_name_hint: &str,
+) -> Result<Option<PathBuf>, String> {
+    let dup_stem = dup
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if is_usable_paper_title(&dup_stem) || !is_usable_paper_title(file_name_hint) {
+        return Ok(None);
+    }
+    let name = sanitize_pdf_name(file_name_hint);
+    let target = unique_pdf_path(papers, &name);
+    if target == dup {
+        return Ok(None);
+    }
+    fs::rename(dup, &target).map_err(|e| format!("更正 PDF 文件名失败: {e}"))?;
+    let old_rel = paper_rel(dup);
+    let new_rel = paper_rel(&target);
+    let new_stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut cfg = crate::projects::read_config_at(root).config;
+    let mut changed = false;
+    for r in cfg.resources.iter_mut() {
+        if r.path == old_rel {
+            r.path = new_rel.clone();
+            r.name = new_stem.clone();
+            changed = true;
+        }
+    }
+    if changed {
+        crate::projects::write_config_at(root, &cfg)?;
+    }
+    Ok(Some(target))
+}
+
+/// 通用文件名（paper / paper-5）有了文献标题就改名；返回最终文件名
+fn apply_title_filename(root: &Path, filename: &str, title: &str, doi: &str) -> String {
+    let Ok(papers) = papers_dir(root) else {
+        return filename.to_string();
+    };
+    let path = papers.join(filename);
+    if !path.is_file() {
+        return filename.to_string();
+    }
+    let path = match rename_generic_duplicate(root, &papers, &path, title) {
+        Ok(Some(p)) => p,
+        _ => path,
+    };
+    let _ = register_pdf(root, &path, title, doi);
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| filename.to_string())
+}
+
 /// 落盘 + 资源登记（sync）：文件名清理 + 重名避让，写盘后登记；
 /// 字节级重复（同一篇重复下载/导入）不写第二份，直接登记并回指已有文件
 fn save_and_register_pdf(
@@ -935,14 +1141,15 @@ fn save_and_register_pdf(
 ) -> Result<DownloadedPaperDto, String> {
     let papers = papers_dir(root)?;
     if let Some(dup) = find_duplicate_pdf(&papers, bytes) {
-        let mut existing = register_pdf(root, &dup)?;
+        let path = rename_generic_duplicate(root, &papers, &dup, file_name_hint)?.unwrap_or(dup);
+        let mut existing = register_pdf(root, &path, file_name_hint, "")?;
         existing.dedup = true;
         return Ok(existing);
     }
     let name = sanitize_pdf_name(file_name_hint);
     let target = unique_pdf_path(&papers, &name);
     fs::write(&target, bytes).map_err(|e| format!("写入 PDF 失败: {e}"))?;
-    register_pdf(root, &target)
+    register_pdf(root, &target, file_name_hint, "")
 }
 
 // ===== 待获取清单进度（StepFlow 逐篇「已存 papers」状态）=====
@@ -985,54 +1192,174 @@ fn probe_doi_norm(raw: &str) -> String {
     s.trim_end_matches(['.', ',', ';']).to_string()
 }
 
+fn title_hits(want: &str, have: &str) -> bool {
+    let a = normalize_title(want);
+    let b = normalize_title(have);
+    let short = a.len().min(b.len());
+    !a.is_empty() && !b.is_empty() && short >= 8 && (a.contains(&b) || b.contains(&a))
+}
+
+fn doi_hits(doi: &str, haystack: &str) -> bool {
+    if doi.len() < 8 {
+        return false;
+    }
+    let lower = haystack.to_ascii_lowercase();
+    let suffix = doi.split_once('/').map(|(_, s)| s).unwrap_or_default();
+    lower.contains(doi)
+        || lower.contains(&doi.replace('/', "-"))
+        || lower.contains(&doi.replace('/', "_"))
+        || (suffix.len() >= 8 && lower.contains(suffix))
+}
+
+struct PdfFact {
+    filename: String,
+    aliases: Vec<String>,
+    mtime: std::time::SystemTime,
+}
+
+fn item_hits_pdf(it: &ToFetchProbe, pdf: &PdfFact) -> bool {
+    let doi = probe_doi_norm(&it.url);
+    pdf.aliases
+        .iter()
+        .any(|a| title_hits(&it.title, a) || doi_hits(&doi, a))
+}
+
 fn to_fetch_progress_inner(root: &Path, items: &[ToFetchProbe]) -> Vec<Option<String>> {
+    to_fetch_progress_with(root, items, &crate::download_inbox::catch_idents())
+}
+
+fn to_fetch_progress_with(
+    root: &Path,
+    items: &[ToFetchProbe],
+    catches: &[crate::download_inbox::CatchIdent],
+) -> Vec<Option<String>> {
     let papers = root.join("papers");
-    let mut pdfs: Vec<String> = std::fs::read_dir(&papers)
+    let cfg = crate::projects::read_config_at(root).config;
+    let mut pdfs: Vec<PdfFact> = std::fs::read_dir(&papers)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .map(|e| e.file_name().into_string().unwrap_or_default())
-                .filter(|n| n.to_ascii_lowercase().ends_with(".pdf"))
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    if !name.to_ascii_lowercase().ends_with(".pdf") {
+                        return None;
+                    }
+                    let stem = name.trim_end_matches(".pdf").trim_end_matches(".PDF");
+                    let rel = format!("papers/{name}");
+                    let mut aliases = vec![name.clone(), stem.to_string()];
+                    if let Some(r) = cfg.resources.iter().find(|r| r.path == rel) {
+                        if !r.name.is_empty() {
+                            aliases.push(r.name.clone());
+                        }
+                        if !r.note.is_empty() {
+                            aliases.push(r.note.clone());
+                        }
+                    }
+                    let mtime = e
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    Some(PdfFact {
+                        filename: name,
+                        aliases,
+                        mtime,
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
-    pdfs.sort();
+    pdfs.sort_by(|a, b| a.filename.cmp(&b.filename));
     let mut taken = std::collections::HashSet::new();
-    items
+    let mut out: Vec<Option<String>> = items
         .iter()
         .map(|it| {
-            let want = normalize_title(&it.title);
-            let doi = probe_doi_norm(&it.url);
-            let hit = pdfs.iter().position(|name| {
-                if name.is_empty() || taken.contains(name) {
-                    return false;
-                }
-                let stem = name.trim_end_matches(".pdf");
-                let have = normalize_title(stem);
-                let short = have.len().min(want.len());
-                if short >= 8 && (have.contains(&want) || want.contains(&have)) {
-                    return true;
-                }
-                // DOI 兜底：文件名里可能用 -/_ 替代了 DOI 的斜杠；也认只含
-                // DOI 尾段的命名（如 mrc.2017.101.pdf——12:52 窗口下载按服务端
-                // 建议名落盘，尾段本身已足够区分）
-                doi.len() >= 8 && {
-                    let lower = name.to_ascii_lowercase();
-                    let suffix = doi.split_once('/').map(|(_, s)| s).unwrap_or_default();
-                    lower.contains(&doi)
-                        || lower.contains(&doi.replace('/', "-"))
-                        || lower.contains(&doi.replace('/', "_"))
-                        || (suffix.len() >= 8 && lower.contains(suffix))
-                }
-            });
+            let hit = pdfs
+                .iter()
+                .position(|p| !taken.contains(&p.filename) && item_hits_pdf(it, p));
             match hit {
                 Some(pos) => {
-                    taken.insert(pdfs[pos].clone());
-                    Some(pdfs[pos].clone())
+                    taken.insert(pdfs[pos].filename.clone());
+                    Some(apply_title_filename(
+                        root,
+                        &pdfs[pos].filename,
+                        &it.title,
+                        &it.url,
+                    ))
                 }
                 None => None,
             }
         })
-        .collect()
+        .collect();
+    // 文件名是 paper-5 这类对不上标题：用「浏览器打开」登记把最近落下的 PDF 挂到那一行
+    let root_s = root.to_string_lossy();
+    let mine: Vec<&crate::download_inbox::CatchIdent> = catches
+        .iter()
+        .filter(|c| crate::paths::same_path(&c.project_root, root_s.as_ref()))
+        .collect();
+    if mine.is_empty() {
+        return out;
+    }
+    for (i, it) in items.iter().enumerate() {
+        if out[i].is_some() {
+            continue;
+        }
+        let doi = probe_doi_norm(&it.url);
+        let catch = mine.iter().copied().find(|c| {
+            title_hits(&it.title, &c.title)
+                || (!doi.is_empty()
+                    && !c.doi.is_empty()
+                    && (doi.eq_ignore_ascii_case(&c.doi)
+                        || doi.contains(&c.doi)
+                        || c.doi.contains(&doi)))
+        });
+        let Some(c) = catch else {
+            continue;
+        };
+        let floor = c
+            .opened_at
+            .checked_sub(std::time::Duration::from_secs(10))
+            .unwrap_or(c.opened_at);
+        let mut cands: Vec<&PdfFact> = pdfs
+            .iter()
+            .filter(|p| !taken.contains(&p.filename) && p.mtime >= floor)
+            .collect();
+        if cands.is_empty() {
+            // 文件已经在 papers/、人回头再点「浏览器」时打开时间晚于 mtime：
+            // 未对上的通用文件名只剩一份，挂到这篇
+            let generics: Vec<&PdfFact> = pdfs
+                .iter()
+                .filter(|p| {
+                    if taken.contains(&p.filename) {
+                        return false;
+                    }
+                    let stem = p.filename.trim_end_matches(".pdf").trim_end_matches(".PDF");
+                    !is_usable_paper_title(stem)
+                })
+                .collect();
+            if generics.len() == 1 {
+                cands = generics;
+            } else {
+                continue;
+            }
+        }
+        cands.sort_by_key(|p| p.mtime);
+        let pick = cands
+            .iter()
+            .rev()
+            .find(|p| {
+                let stem = p.filename.trim_end_matches(".pdf").trim_end_matches(".PDF");
+                !is_usable_paper_title(stem)
+            })
+            .copied()
+            .unwrap_or(*cands.last().unwrap());
+        taken.insert(pick.filename.clone());
+        out[i] = Some(apply_title_filename(
+            root,
+            &pick.filename,
+            &it.title,
+            &it.url,
+        ));
+    }
+    out
 }
 
 /// inst_access（窗口中继 PDF）共用的落盘入口：同一 papers/ + 登记口径
@@ -1042,6 +1369,32 @@ pub(crate) fn save_paper_bytes(
     bytes: &[u8],
 ) -> Result<DownloadedPaperDto, String> {
     save_and_register_pdf(root, file_name_hint, bytes)
+}
+
+/// 扩展入库：文件名 hint 可空/通用，identity/doi 是清单认「已存」的依据
+pub(crate) fn save_paper_bytes_ident(
+    root: &Path,
+    file_name_hint: &str,
+    identity: &str,
+    doi: &str,
+    bytes: &[u8],
+) -> Result<DownloadedPaperDto, String> {
+    let hint = if is_usable_paper_title(identity) {
+        identity
+    } else {
+        file_name_hint
+    };
+    let papers = papers_dir(root)?;
+    if let Some(dup) = find_duplicate_pdf(&papers, bytes) {
+        let path = rename_generic_duplicate(root, &papers, &dup, hint)?.unwrap_or(dup);
+        let mut existing = register_pdf(root, &path, identity, doi)?;
+        existing.dedup = true;
+        return Ok(existing);
+    }
+    let name = sanitize_pdf_name(hint);
+    let target = unique_pdf_path(&papers, &name);
+    fs::write(&target, bytes).map_err(|e| format!("写入 PDF 失败: {e}"))?;
+    register_pdf(root, &target, identity, doi)
 }
 
 /// 关联本地 PDF（sync）：用户手动下载的 PDF 复制进 papers/ 并按标题登记。
@@ -1081,7 +1434,7 @@ fn attach_pdf_at(
     let papers = papers_dir(root)?;
     let target = unique_pdf_path(&papers, &sanitize_pdf_name(title));
     fs::copy(&src, &target).map_err(|e| format!("复制 PDF 失败: {e}"))?;
-    register_pdf(root, &target)
+    register_pdf(root, &target, title, "")
 }
 
 // ===== 快筛解读缓存（.ccode/watch-explains.json） =====
@@ -1362,7 +1715,7 @@ async fn fetch_fulltext_bytes(raw_url: &str) -> Result<(Vec<u8>, &'static str), 
         return Err(crate::inst_access::institutional_failure_hint(&via_error));
     }
     Err(format!(
-        "开放直链不可用（{direct_err}），且未配置机构访问：到设置 → 网络 → 机构访问 配置学校图书馆前缀后重试，或手动下载后用「关联本地 PDF」导入"
+        "开放直链不可用（{direct_err}），且未配置机构访问：到设置 → 网络 → 学校图书馆 登录学校账号后重试，或手动下载后用「关联本地 PDF」导入"
     ))
 }
 
@@ -1446,6 +1799,56 @@ mod tests {
     }
 
     #[test]
+    fn save_paper_bytes_renames_generic_duplicate() {
+        let dir = tmpdir("rename-generic");
+        let bytes = b"%PDF-1.4 same bytes for rename";
+        let a = super::save_paper_bytes(&dir, "paper-5", bytes).unwrap();
+        assert!(a.name.contains("paper"), "{}", a.name);
+        let b = super::save_paper_bytes(
+            &dir,
+            "Development of a chloride-free dual-salt electrolyte",
+            bytes,
+        )
+        .unwrap();
+        assert!(b.dedup);
+        assert!(
+            b.name.contains("chloride-free"),
+            "应改成正经标题，实际 {}",
+            b.name
+        );
+        assert!(!dir.join("papers/paper-5.pdf").exists());
+        assert!(dir.join(format!("papers/{}.pdf", b.name)).exists());
+        let cfg = crate::projects::read_config_at(&dir).config;
+        assert!(
+            cfg.resources
+                .iter()
+                .any(|r| r.path.contains("chloride-free")),
+            "{:?}",
+            cfg.resources
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stamp_paper_identity_renames_generic_file() {
+        let dir = tmpdir("stamp-rename");
+        let papers = dir.join("papers");
+        fs::create_dir_all(&papers).unwrap();
+        fs::write(papers.join("paper-5.pdf"), b"%PDF-1.4 stub").unwrap();
+        let got = super::stamp_paper_identity(
+            dir.to_str().unwrap(),
+            "paper-5",
+            "Development of a chloride-free dual-salt electrolyte",
+            "10.1016/j.jallcom.2026.190140",
+        )
+        .unwrap();
+        assert!(got.contains("chloride-free"), "{got}");
+        assert!(!papers.join("paper-5.pdf").exists());
+        assert!(papers.join(&got).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn to_fetch_progress_matches_title_and_doi() {
         let dir = std::env::temp_dir().join(format!(
             "mesa-tofetch-{}-{}",
@@ -1490,6 +1893,89 @@ mod tests {
         assert!(r[1].as_deref().unwrap().contains("idm2.70075"));
         assert!(r[2].as_deref().unwrap().contains("mrc.2017.101"));
         assert!(r[3].is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn to_fetch_progress_matches_resource_name_not_filename() {
+        // 扩展常落成 paper-5.pdf：清单必须靠资源标题认，不靠文件名
+        let dir = tmpdir("tofetch-ident");
+        let papers = dir.join("papers");
+        fs::create_dir_all(&papers).unwrap();
+        let pdf = papers.join("paper-5.pdf");
+        fs::write(&pdf, b"%PDF-1.4 stub").unwrap();
+        super::register_pdf(
+            &dir,
+            &pdf,
+            "Development of a chloride-free dual-salt electrolyte",
+            "10.1016/j.jallcom.2026.190140",
+        )
+        .unwrap();
+        let r = super::to_fetch_progress_inner(
+            &dir,
+            &[super::ToFetchProbe {
+                title: "Development of a chloride-free dual-salt electrolyte for magnesium-sulfur batteries".into(),
+                url: "https://doi.org/10.1016/j.jallcom.2026.190140".into(),
+            }],
+        );
+        let got = r[0].as_deref().unwrap();
+        assert!(got.contains("chloride-free"), "{got}");
+        assert!(!dir.join("papers/paper-5.pdf").exists());
+        assert!(dir.join(format!("papers/{got}")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn to_fetch_progress_pending_fallback_generic_filename() {
+        let dir = tmpdir("tofetch-pending");
+        let papers = dir.join("papers");
+        fs::create_dir_all(&papers).unwrap();
+        fs::write(papers.join("paper-5.pdf"), b"%PDF-1.4 stub").unwrap();
+        let now = std::time::SystemTime::now();
+        let catches = vec![crate::download_inbox::CatchIdent {
+            project_root: dir.to_string_lossy().into_owned(),
+            title: "Development of a chloride-free dual-salt electrolyte".into(),
+            doi: "10.1016/j.jallcom.2026.190140".into(),
+            opened_at: now - std::time::Duration::from_secs(20),
+        }];
+        let r = super::to_fetch_progress_with(
+            &dir,
+            &[super::ToFetchProbe {
+                title: "Development of a chloride-free dual-salt electrolyte for magnesium".into(),
+                url: "10.1016/j.jallcom.2026.190140".into(),
+            }],
+            &catches,
+        );
+        let got = r[0].as_deref().unwrap();
+        assert!(got.contains("chloride-free"), "{got}");
+        assert!(!dir.join("papers/paper-5.pdf").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn to_fetch_progress_generic_file_still_matches_after_reopen() {
+        // 已落 paper-5、人回头再点浏览器：打开时间晚于文件 mtime，仍认这一份
+        let dir = tmpdir("tofetch-reopen");
+        let papers = dir.join("papers");
+        fs::create_dir_all(&papers).unwrap();
+        fs::write(papers.join("paper-5.pdf"), b"%PDF-1.4 stub").unwrap();
+        let catches = vec![crate::download_inbox::CatchIdent {
+            project_root: dir.to_string_lossy().into_owned(),
+            title: "Development of a chloride-free dual-salt electrolyte".into(),
+            doi: String::new(),
+            opened_at: std::time::SystemTime::now() + std::time::Duration::from_secs(60),
+        }];
+        let r = super::to_fetch_progress_with(
+            &dir,
+            &[super::ToFetchProbe {
+                title: "Development of a chloride-free dual-salt electrolyte for magnesium".into(),
+                url: "".into(),
+            }],
+            &catches,
+        );
+        let got = r[0].as_deref().unwrap();
+        assert!(got.contains("chloride-free"), "{got}");
+        assert!(!dir.join("papers/paper-5.pdf").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1926,6 +2412,54 @@ lone keyword
         assert!(looks_like_pdf(&v));
         assert!(!looks_like_pdf(b"<html>not a pdf</html>"));
         assert!(!looks_like_pdf(b""));
+    }
+
+    #[test]
+    fn pick_paper_name_hint_skips_generic_page_title() {
+        // PDF 阅读器常见空/站名/paper-5：用 Mesa 打开时记下的标题，清单才能对上已存
+        assert!(!is_usable_paper_title(""));
+        assert!(!is_usable_paper_title("paper"));
+        assert!(!is_usable_paper_title("paper-5"));
+        assert!(!is_usable_paper_title("paper-5.pdf"));
+        assert!(!is_usable_paper_title("ScienceDirect"));
+        assert!(!is_usable_paper_title(
+            "https://www.sciencedirect.com/science/article/pii/S1"
+        ));
+        assert!(is_usable_paper_title(
+            "Development of a chloride-free dual-salt electrolyte"
+        ));
+        assert_eq!(
+            pick_paper_name_hint(
+                "paper-5",
+                "",
+                "https://www.sciencedirect.com/science/article/pii/S092583882604209X/pdfft",
+                "Development of a chloride-free dual-salt electrolyte",
+                "10.1016/j.jallcom.2026.190140",
+            ),
+            "Development of a chloride-free dual-salt electrolyte"
+        );
+        // 页上有正经标题：不拿语境那篇顶替（用户可能另开了一篇）
+        assert_eq!(
+            pick_paper_name_hint(
+                "Another Real Article Title Here",
+                "10.1002/adma.202304268",
+                "",
+                "Development of a chloride-free dual-salt electrolyte",
+                "10.1016/j.jallcom.2026.190140",
+            ),
+            "Another Real Article Title Here"
+        );
+        // 页上没标题但 URL 带 DOI：用 DOI 当文件名（to_fetch_progress 认 DOI）
+        assert_eq!(
+            pick_paper_name_hint(
+                "ScienceDirect",
+                "",
+                "https://onlinelibrary.wiley.com/doi/pdf/10.1002/adma.202304268",
+                "",
+                "",
+            ),
+            "10.1002_adma.202304268"
+        );
     }
 
     #[test]

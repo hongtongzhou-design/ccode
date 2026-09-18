@@ -61,6 +61,15 @@ pub(crate) struct InstSessionStore {
     updated_at: String,
     /// 保存会话时的登录起始主机（展示用，非秘密）
     captured_from: String,
+    /// 会话可信度：至少一条 Cookie 命中前缀主机或出版商域（入口页一打开的
+    /// pre-auth Cookie 不算——旧口径立刻显示「已保存」并点亮获取按钮，真取时
+    /// 又报会话过期，两头骗人）。旧文件无此字段按 true 兼容（此前保存的都当已登录）
+    #[serde(default = "default_true")]
+    credible: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn session_path() -> Result<PathBuf, String> {
@@ -78,9 +87,8 @@ fn load_session() -> Result<Option<InstSessionStore>, String> {
         return Ok(None);
     }
     let text = fs::read_to_string(&path).map_err(|e| format!("读取机构会话失败: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| {
-        format!("机构会话文件已损坏（{}）: {e}", path.display())
-    })
+    serde_json::from_str(&text)
+        .map_err(|e| format!("机构会话文件已损坏（{}）: {e}", path.display()))
 }
 
 fn save_session(store: &InstSessionStore) -> Result<(), String> {
@@ -112,9 +120,11 @@ impl InstitutionalChannel {
         Self { prefix, session }
     }
 
-    /// 通道可用：有前缀（含校园 IP 经代理直通）或已有会话（校园 IP 直连模式）
+    /// 通道可用：有前缀（含校园 IP 经代理直通）或已有**可信**会话（校园 IP 直连
+    /// 模式）——只有入口页 pre-auth Cookie 的罐子不算可用（真取时只会报会话
+    /// 过期，2026-09-17 审计；旧文件 serde default true 不回归既有保存态）
     pub(crate) fn active(&self) -> bool {
-        self.prefix.is_some() || self.session.is_some()
+        self.prefix.is_some() || self.session.as_ref().is_some_and(|s| s.credible)
     }
 }
 
@@ -124,9 +134,15 @@ impl InstitutionalChannel {
 #[serde(rename_all = "camelCase")]
 pub struct InstSessionStatusDto {
     pub prefix_configured: bool,
+    /// 前缀填了但不是合法 http(s) URL——通道加载会静默丢弃它（与 load 同口径
+    /// 过滤），前端就地提示补 scheme，别让「已配置」按钮亮着空转
+    pub prefix_invalid: bool,
     pub prefix_host: String,
     pub login_url_saved: bool,
     pub session_present: bool,
+    pub session_credible: bool,
+    /// 保存会话时的登录起始主机（展示用，非秘密；兑现 captured_from 字段意图）
+    pub captured_from: String,
     pub updated_at: Option<String>,
     pub cookie_count: usize,
     /// 会话覆盖的域名清单（主机名，非秘密；展示「都拿到了哪些站的会话」）
@@ -140,28 +156,34 @@ fn status_inner() -> Result<InstSessionStatusDto, String> {
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty());
+    // 口径统一（2026-09-17 审计）：「已配置」必须是通道 load 也认的前缀——
+    // 缺 scheme 的前缀 load 侧会被 valid_http_url 过滤掉，status 再报已配置
+    // 就是两头矛盾；非法的前缀单列 prefix_invalid 供前端就地提示
+    let prefix_valid = prefix.is_some_and(|p| valid_http_url(p));
     let prefix_host = prefix
         .and_then(|p| reqwest::Url::parse(p).ok())
         .and_then(|u| u.host_str().map(str::to_string))
         .unwrap_or_default();
     let session = load_session()?;
-    let (present, updated_at, count, domains) = match &session {
-        None => (false, None, 0, Vec::new()),
+    let (present, credible, updated_at, count, domains, captured_from) = match &session {
+        None => (false, false, None, 0, Vec::new(), String::new()),
         Some(s) => {
-            let mut domains: Vec<String> =
-                s.cookies.iter().map(|c| c.domain.clone()).collect();
+            let mut domains: Vec<String> = s.cookies.iter().map(|c| c.domain.clone()).collect();
             domains.sort();
             domains.dedup();
             (
                 !s.cookies.is_empty(),
+                s.credible,
                 Some(s.updated_at.clone()),
                 s.cookies.len(),
                 domains,
+                s.captured_from.clone(),
             )
         }
     };
     Ok(InstSessionStatusDto {
-        prefix_configured: prefix.is_some(),
+        prefix_configured: prefix_valid,
+        prefix_invalid: prefix.is_some() && !prefix_valid,
         prefix_host,
         login_url_saved: settings
             .institutional_login_url
@@ -169,6 +191,8 @@ fn status_inner() -> Result<InstSessionStatusDto, String> {
             .map(str::trim)
             .is_some_and(|v| !v.is_empty()),
         session_present: present,
+        session_credible: credible,
+        captured_from,
         updated_at,
         cookie_count: count,
         domains,
@@ -202,14 +226,41 @@ fn encode_query_value(s: &str) -> String {
 }
 
 /// 代理前缀改写（EZproxy/OpenAthens 形态）：`prefix + ?url=<编码目标>`。
-/// 用户常直接粘贴书签样式前缀（已以 `url=` 结尾）——先剥掉再统一拼，避免 `?url=&url=`
+/// 用户常直接粘贴书签样式前缀（已以 `url=`/`qurl=` 结尾，大小写不限）——先剥掉
+/// 再统一拼，避免 `?url=&url=`；qurl 形态只认 url= 会剥出 `login?q&url=…` 坏链
+/// （部分学校的书签/指南链接即 qurl 形态，两条取全文链路全打不开）
 pub(crate) fn proxy_wrap(prefix: &str, target: &str) -> String {
     let base = prefix.trim_end();
-    let base = base.strip_suffix("url=").unwrap_or(base);
-    // 剥完 url= 后残留的 ? / & 一并清掉，统一按 base 是否含 ? 决定分隔符
+    let lower = base.to_ascii_lowercase();
+    let base = if lower.ends_with("qurl=") {
+        &base[..base.len() - "qurl=".len()]
+    } else if lower.ends_with("url=") {
+        &base[..base.len() - "url=".len()]
+    } else {
+        base
+    };
+    // 剥完参数尾巴后残留的 ? / & 一并清掉，统一按 base 是否含 ? 决定分隔符
     let base = base.trim_end_matches(['?', '&']);
     let sep = if base.contains('?') { '&' } else { '?' };
     format!("{base}{sep}url={}", encode_query_value(target))
+}
+
+/// 目标是否已是代理形态：host 等于前缀主机或其子域——用户从 EZproxy 会话里
+/// 复制的完整代理链（`login?url=…`）、通配 DNS 改写域（`www-sciencedirect-com.
+/// ezproxy.uni.edu`）都算。已是代理形态的不得再包一层（双重代理 404 / 重定向成环）
+pub(crate) fn target_already_proxied(target: &str, prefix: &str) -> bool {
+    let Some(prefix_host) = reqwest::Url::parse(prefix.trim())
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+    else {
+        return false;
+    };
+    match reqwest::Url::parse(target.trim()) {
+        Ok(u) => u
+            .host_str()
+            .is_some_and(|h| domain_matches(h, prefix_host.as_str())),
+        Err(_) => false,
+    }
 }
 
 /// 会话 Cookie 匹配（RFC 6265 宽松子集）：域名等于或点后缀命中、路径前缀命中、
@@ -328,41 +379,68 @@ fn html_unescape(s: &str) -> String {
         .replace("&#x27;", "'")
 }
 
-/// 落地页提取 PDF 候选链接：`citation_pdf_url` meta（Crossref 推荐标准，出版商覆盖最广）
-/// 优先，其次常见 PDF 链接形态的 `<a href>`。相对链接按 base 绝对化、去重、限 5 条
+/// 落地页提取 PDF 候选链接（不带本篇 DOI 的旧口径，单测沿用）
+#[allow(dead_code)]
 pub(crate) fn pdf_link_candidates(html: &str, base: &reqwest::Url) -> Vec<String> {
+    pdf_link_candidates_for(html, base, None)
+}
+
+/// 带「本篇 DOI」的候选提取（headless 阶梯口径，2026-09-17 审计补单篇归属判定）：
+/// `citation_pdf_url` meta（Crossref 推荐标准，出版商覆盖最广）最优先；锚链按
+/// 「含本篇 DOI 优先 → 主链 → 补充材料（mmc/suppl 形态降权）」排序；无 meta、
+/// 无 DOI 佐证的多条 pdfish 锚链（issue 目录/检索页形态）不猜——宁报「落到列表页」
+/// 也不把别人的 PDF 当本篇收（与注入脚本/扩展侧同款纪律）。相对链接按 base
+/// 绝对化、跨组去重、限 5 条
+pub(crate) fn pdf_link_candidates_for(
+    html: &str,
+    base: &reqwest::Url,
+    page_doi: Option<&str>,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let push = |raw: String, out: &mut Vec<String>| {
-        let href = html_unescape(raw.trim());
-        let lower = href.to_ascii_lowercase();
-        if lower.starts_with("javascript:")
-            || lower.starts_with("mailto:")
-            || href.starts_with('#')
-            || href.is_empty()
-        {
-            return;
-        }
-        if let Ok(abs) = base.join(&href) {
-            let s = abs.to_string();
-            if !out.contains(&s) {
-                out.push(s);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let push =
+        |raw: String, bucket: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
+            let href = html_unescape(raw.trim());
+            let lower = href.to_ascii_lowercase();
+            if lower.starts_with("javascript:")
+                || lower.starts_with("mailto:")
+                || href.starts_with('#')
+                || href.is_empty()
+            {
+                return;
             }
-        }
-    };
+            if let Ok(abs) = base.join(&href) {
+                let s = abs.to_string();
+                if seen.insert(s.clone()) {
+                    bucket.push(s);
+                }
+            }
+        };
     // meta citation_pdf_url：attribute 顺序两种都认
+    let mut meta: Vec<String> = Vec::new();
     for line in html.split('<') {
         let lower = line.to_ascii_lowercase();
         if !lower.starts_with("meta") || !lower.contains("citation_pdf_url") {
             continue;
         }
         if let Some(v) = extract_attr(line, "content") {
-            push(v, &mut out);
+            push(v, &mut meta, &mut seen);
         }
     }
-    // <a href> 常见 PDF 形态
+    let mut doi_hits: Vec<String> = Vec::new();
+    let mut mains: Vec<String> = Vec::new();
+    let mut extras: Vec<String> = Vec::new();
+    let doi_norm = page_doi
+        .map(|d| d.trim().to_ascii_lowercase())
+        .filter(|d| !d.is_empty());
+    // <a href> 常见 PDF 形态（含标签名后换行的形态——旧口径只认空格/制表符）
     for line in html.split('<') {
         let lower = line.to_ascii_lowercase();
-        if !lower.starts_with("a ") && !lower.starts_with("a\t") {
+        if !(lower.starts_with("a ")
+            || lower.starts_with("a\t")
+            || lower.starts_with("a\n")
+            || lower.starts_with("a\r"))
+        {
             continue;
         }
         let Some(href) = extract_attr(line, "href") else {
@@ -378,37 +456,112 @@ pub(crate) fn pdf_link_candidates(html: &str, base: &reqwest::Url) -> Vec<String
             || h.contains("articlepdf")
             || h.contains("epdf")
             || h.contains("stamp.jsp");
-        if pdfish {
-            push(href, &mut out);
+        if !pdfish {
+            continue;
         }
+        if doi_norm.as_deref().is_some_and(|d| h.contains(d)) {
+            push(href, &mut doi_hits, &mut seen);
+        } else if h.contains("mmc")
+            || h.contains("suppl")
+            || h.contains("/moesm")
+            || h.contains("/si/")
+            || h.contains("supporting-information")
+        {
+            push(href, &mut extras, &mut seen);
+        } else {
+            push(href, &mut mains, &mut seen);
+        }
+    }
+    if !meta.is_empty() {
+        out.extend(meta);
+        out.extend(doi_hits);
+        out.extend(mains);
+        out.extend(extras);
+    } else if !doi_hits.is_empty() {
+        // 页面能佐证本篇 DOI：DOI 命中链优先，主链次之；补充材料不进
+        // （错收比漏收难察觉——SD 页内唯一 pdfish 锚链常是补充材料）
+        out.extend(doi_hits);
+        out.extend(mains);
+    } else if mains.len() == 1 {
+        // 无 DOI 佐证：唯一一条主链才采用（多链 = issue 目录/检索页形态，不猜）
+        out.extend(mains);
     }
     out.truncate(5);
     out
 }
 
-/// 从单个标签文本里抽属性值：认 `name="v"` / `name='v'` / `name=v`（无引号到空白）
+/// 从单个标签文本里抽属性值：认 `name="v"` / `name='v'` / `name=v`（无引号到空白）。
+/// 按引号外空白切属性段再匹配属性名——`data-href=` 是另一个属性名不误当 href、
+/// 属性值里出现的 `href=` 字样（title="pdf href=1"）不会抢在真属性前面
+/// （2026-09-17 审计：旧裸子串 find 两个坑都踩）
 fn extract_attr(tag: &str, attr: &str) -> Option<String> {
-    let lower = tag.to_ascii_lowercase();
-    let needle = format!("{attr}=");
-    let idx = lower.find(&needle)?;
-    let rest = &tag[idx + needle.len()..];
-    let mut chars = rest.chars();
-    match chars.next() {
-        Some('"') => Some(rest[1..].split('"').next().unwrap_or("").to_string()),
-        Some('\'') => Some(rest[1..].split('\'').next().unwrap_or("").to_string()),
-        _ => Some(rest.split_whitespace().next().unwrap_or("").to_string()),
+    let mut segments: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for ch in tag.chars() {
+        match quote {
+            Some(q) => {
+                cur.push(ch);
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if ch == '"' || ch == '\'' {
+                    quote = Some(ch);
+                    cur.push(ch);
+                } else if ch.is_whitespace() || ch == '>' {
+                    // '>' 是标签结束符：html.split('<') 出来的片段带 `…>后续文本`，
+                    // 不切会把尾巴并进属性值（/a.pdf">PDF）
+                    if !cur.is_empty() {
+                        segments.push(std::mem::take(&mut cur));
+                    }
+                } else {
+                    cur.push(ch);
+                }
+            }
+        }
     }
+    if !cur.is_empty() {
+        segments.push(cur);
+    }
+    for seg in segments {
+        let Some((name, value)) = seg.split_once('=') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case(attr) {
+            continue;
+        }
+        let v = value.trim();
+        return Some(
+            v.trim_matches(|c| c == '"' || c == '\'')
+                // XHTML 自闭合（content="url"/>）：'>' 切段后值尾残留 '/'（终检）
+                .trim_end_matches('/')
+                .to_string(),
+        );
+    }
+    None
 }
 
-/// 登录页探测（宽进：命中即提示重新登录，不作为硬判定）
+/// 登录页探测（宽进：命中即提示重新登录，不作为硬判定——页脚登录挂件也会命中，
+/// 调用方应先提候选链接、提不出来时才把它当会话过期口径）
 pub(crate) fn html_needs_login(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
     lower.split('<').any(|line| {
         let l = line.trim_start();
         (l.starts_with("input") || l.starts_with("button"))
-            && extract_attr(l, "type")
-                .is_some_and(|t| t.trim().eq_ignore_ascii_case("password"))
+            && extract_attr(l, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("password"))
     })
+}
+
+/// SAML 中继页探测：隐藏的 SAMLRequest/SAMLResponse 自动提交表单（或 onload
+/// 自动提交的隐藏域）。EZproxy/OpenAthens 会话过期而学校 IdP 还在线时，重定向
+/// 链会停在这种中间页——没有 password 输入，html_needs_login 看不见它，
+/// 旧口径误报「不在订阅范围」
+pub(crate) fn saml_relay(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    (lower.contains("samlrequest") || lower.contains("samlresponse"))
+        && (lower.contains("<form") || lower.contains("<input"))
 }
 
 // ===== 网络件 =====
@@ -455,7 +608,10 @@ async fn fetch_via_session_ex(
                 req = req.header(reqwest::header::REFERER, r);
             }
         }
-        req = req.header(reqwest::header::ACCEPT, "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8");
+        req = req.header(
+            reqwest::header::ACCEPT,
+            "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        );
         let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
         let status = resp.status();
         if status.is_redirection() {
@@ -492,8 +648,9 @@ async fn fetch_via_session_ex(
     Err("重定向次数过多".into())
 }
 
-/// 机构通道取全文：经前缀改写（有配置时）取落地页/直链 → PDF 魔数过了即返回；
-/// HTML 则提取 PDF 候选逐个再取。调用方（lit_watch 阶梯）已保证 url 是 http(s)
+/// 机构通道取全文：经前缀改写（有配置且目标不是代理形态时）取落地页/直链 →
+/// PDF 魔数过了即返回；HTML 则按本篇 DOI 提取候选逐个再取。调用方（lit_watch
+/// 阶梯）已保证 url 是 http(s)
 pub(crate) async fn fetch_via_channel(
     target: &str,
     ch: &InstitutionalChannel,
@@ -506,33 +663,63 @@ pub(crate) async fn fetch_via_channel(
     let start = ch
         .prefix
         .as_deref()
-        .map(|p| proxy_wrap(p, target))
+        .map(|p| {
+            // 已是代理形态（用户粘贴 login?url=… 完整链 / 通配 DNS 改写域）不得
+            // 再包一层——双重代理 404 / 重定向成环（2026-09-17 审计）
+            if target_already_proxied(target, p) {
+                target.to_string()
+            } else {
+                proxy_wrap(p, target)
+            }
+        })
         .unwrap_or_else(|| target.to_string());
     let fetched = fetch_via_session(&start, ch.session.as_ref()).await?;
     if crate::lit_watch::looks_like_pdf(&fetched.bytes) {
         return Ok(fetched.bytes);
     }
     let html = String::from_utf8_lossy(&fetched.bytes).to_string();
-    let looks_html = fetched.content_type.to_ascii_lowercase().contains("text/html")
+    let looks_html = fetched
+        .content_type
+        .to_ascii_lowercase()
+        .contains("text/html")
         || html.to_ascii_lowercase().contains("<html")
         || html.contains("citation_pdf_url");
     if !looks_html {
         return Err("机构通道返回的不是 PDF 也不是落地页".into());
     }
-    if html_needs_login(&html) {
-        return Err("停在机构登录页——会话可能已过期，请到设置 → 网络 → 机构访问 重新登录".into());
-    }
-    let base = reqwest::Url::parse(&fetched.final_url)
-        .map_err(|e| format!("落地页地址无效: {e}"))?;
+    let base =
+        reqwest::Url::parse(&fetched.final_url).map_err(|e| format!("落地页地址无效: {e}"))?;
     let prefix_host = prefix_host.unwrap_or_default();
-    for cand in pdf_link_candidates(&html, &base).into_iter().take(3) {
-        // 前缀模式下候选链接已被 EZproxy 改写成代理域名（同主机）就不再包一层
+    let page_doi = doi_from_url(target);
+    let cands = pdf_link_candidates_for(&html, &base, page_doi.as_deref());
+    if cands.is_empty() {
+        // 候选提不出来才回落登录态判定（页脚登录挂件会让 password 探测误命中，
+        // 提前掐断本可解析的落地页——2026-09-17 审计双向失准修正）
+        if saml_relay(&html) {
+            return Err(
+                "停在机构身份认证中间页（SAML）——会话可能已过期，请到设置 → 网络 → 学校图书馆 重新登录"
+                    .into(),
+            );
+        }
+        if html_needs_login(&html) {
+            return Err(
+                "停在机构登录页——会话可能已过期，请到设置 → 网络 → 学校图书馆 重新登录".into(),
+            );
+        }
+        return Err(
+            "已到达落地页但没识别出本篇的 PDF 链接（可能是列表/检索页，或该文献不在订阅范围）"
+                .into(),
+        );
+    }
+    for cand in cands.into_iter().take(3) {
+        // 前缀模式下候选链接已被 EZproxy 改写成代理域（前缀主机或其子域，通配
+        // DNS 形态 host 不等于前缀主机但仍是代理形态）就不再包一层
         let cand_host = reqwest::Url::parse(&cand)
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default();
         let url_to_try = if !prefix_host.is_empty()
-            && cand_host != prefix_host
+            && !domain_matches(&cand_host, &prefix_host)
             && ch.prefix.is_some()
         {
             proxy_wrap(ch.prefix.as_deref().unwrap_or(""), &cand)
@@ -545,77 +732,109 @@ pub(crate) async fn fetch_via_channel(
             }
         }
     }
+    if html_needs_login(&html) {
+        return Err("停在机构登录页——会话可能已过期，请到设置 → 网络 → 学校图书馆 重新登录".into());
+    }
     Err("已到达落地页但没找到可下载的 PDF 链接（该文献可能不在订阅范围）".into())
 }
 
 /// DOI → 合法开放副本直链（绿 OA/预印本/仓储副本）：Unpaywall 优先，OpenAlex 回落。
-/// best-effort：任一环节失败返回 None，不阻塞后续机构通道
+/// best-effort：任一环节失败继续回落，全落空才返回 None，不阻塞后续机构通道
 pub(crate) async fn oa_pdf_url_for(doi: &str) -> Option<(String, &'static str)> {
     let client = reqwest::Client::builder()
         .timeout(OA_TIMEOUT)
         .user_agent(UA)
         .build()
         .ok()?;
-    // Unpaywall: best_oa_location.url_for_pdf（直链）优先；url 仅在长得像 PDF 时用
-    let upw: Option<serde_json::Value> = client
+    // Unpaywall 传输层失败（超时/DNS——国内访问 api.unpaywall.org 常见）只当「没查到」
+    // 继续回落 OpenAlex；旧 `.ok()?` 在这里把整个函数提前弹空，回落永远走不到
+    let upw: Option<serde_json::Value> = match client
         .get(format!(
             "https://api.unpaywall.org/v2/{}?email={OA_EMAIL}",
             encode_query_value(doi)
         ))
         .send()
         .await
-        .ok()?
-        .json()
-        .await
-        .ok();
-    if let Some(loc) = upw.as_ref().and_then(|v| v.get("best_oa_location")) {
-        if let Some(pdf) = loc.get("url_for_pdf").and_then(|v| v.as_str()) {
-            if !pdf.is_empty() {
-                return Some((pdf.to_string(), "unpaywall"));
-            }
-        }
-        if let Some(url) = loc.get("url").and_then(|v| v.as_str()) {
-            let lower = url.to_ascii_lowercase();
-            if lower.contains(".pdf") {
-                return Some((url.to_string(), "unpaywall"));
-            }
-        }
+    {
+        Ok(r) => r.json().await.ok(),
+        Err(_) => None,
+    };
+    if let Some(hit) = oa_pick_unpaywall(upw.as_ref()) {
+        return Some(hit);
     }
-    // OpenAlex: works/doi:<doi> 的 best_oa_location.pdf_url
-    let oax: Option<serde_json::Value> = client
+    // OpenAlex: works/doi:<doi>（mailto 进 polite pool，共享池被打满时限流更缓）
+    let oax: Option<serde_json::Value> = match client
         .get(format!(
-            "https://api.openalex.org/works/https://doi.org/{}",
+            "https://api.openalex.org/works/https://doi.org/{}?mailto={OA_EMAIL}",
             encode_query_value(doi)
         ))
         .send()
         .await
-        .ok()?
-        .json()
-        .await
-        .ok();
-    if let Some(pdf) = oax
-        .as_ref()
-        .and_then(|v| v.get("best_oa_location"))
-        .and_then(|l| l.get("pdf_url"))
-        .and_then(|v| v.as_str())
     {
-        if !pdf.is_empty() {
-            return Some((pdf.to_string(), "openalex"));
+        Ok(r) => r.json().await.ok(),
+        Err(_) => None,
+    };
+    oa_pick_openalex(oax.as_ref())
+}
+
+/// Unpaywall 选址（纯逻辑供单测）：best_oa_location 直链优先、url 仅在长得像 PDF
+/// 时用；best 之外线性扫 oa_locations——最优位置是仓储落地页（无直链）时，另一
+/// 位置的直链副本不该跟着陪葬
+fn oa_pick_unpaywall(v: Option<&serde_json::Value>) -> Option<(String, &'static str)> {
+    let v = v?;
+    let loc_pdf = |loc: &serde_json::Value| -> Option<String> {
+        if let Some(pdf) = loc
+            .get("url_for_pdf")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(pdf.to_string());
         }
+        loc.get("url")
+            .and_then(|x| x.as_str())
+            .filter(|u| u.to_ascii_lowercase().contains(".pdf"))
+            .map(str::to_string)
+    };
+    if let Some(hit) = v.get("best_oa_location").and_then(loc_pdf) {
+        return Some((hit, "unpaywall"));
     }
-    None
+    v.get("oa_locations")
+        .and_then(|arr| arr.as_array())
+        .and_then(|locs| {
+            locs.iter()
+                .find_map(|l| loc_pdf(l).map(|u| (u, "unpaywall")))
+        })
+}
+
+/// OpenAlex 选址（纯逻辑供单测）：best_oa_location.pdf_url 优先，locations[] 兜底
+fn oa_pick_openalex(v: Option<&serde_json::Value>) -> Option<(String, &'static str)> {
+    let v = v?;
+    let pdf = |l: &serde_json::Value| -> Option<String> {
+        l.get("pdf_url")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(hit) = v.get("best_oa_location").and_then(|l| pdf(l)) {
+        return Some((hit, "openalex"));
+    }
+    v.get("locations")
+        .and_then(|arr| arr.as_array())
+        .and_then(|locs| locs.iter().find_map(|l| pdf(l).map(|u| (u, "openalex"))))
 }
 
 /// 机构通道失败的分流提示：反爬墙（HTTP 403/429，Wiley/Elsevier 等对非浏览器客户端
-/// 一律拦截——2026-09-16 实证带全量会话+浏览器 UA 仍 403，与登录无关）给「在机构窗口
-/// 打开」出口；其余按会话过期/订阅范围口径
+/// 一律拦截——2026-09-16 实证带全量会话+浏览器 UA 仍 403，与登录无关）给「浏览器
+/// 打开」出口；其余按会话过期/订阅范围口径。文案对齐现行三按钮口径：自动获取 /
+/// 浏览器打开（90 秒收货）/ 关联本地 PDF（2026-09-17 审计——旧文案指向已下线的
+/// 「在机构窗口打开」按钮）
 pub(crate) fn institutional_failure_hint(err: &str) -> String {
     if err.contains("HTTP 403") || err.contains("HTTP 429") {
         return format!(
-            "出版商反爬墙拒绝了程序化下载（{err}）——Wiley/Elsevier 等出版商拦截一切非浏览器客户端，与登录状态无关。点这一篇的「在机构窗口打开」，在窗口里下载 PDF 后用「关联本地 PDF」导入"
+            "出版商反爬墙拒绝了程序化下载（{err}）——Wiley/Elsevier 等出版商拦截一切非浏览器客户端，与登录状态无关。点这一篇的「浏览器打开」，在浏览器里点站方下载，90 秒内落下的 PDF 会自动收进项目 papers/；没收到的用「关联本地 PDF」导入"
         );
     }
-    format!("机构通道未取到全文：{err}。可到设置 → 网络 → 机构访问 重新登录后重试，或手动下载后用「关联本地 PDF」导入")
+    format!("机构通道未取到全文：{err}。可到设置 → 网络 → 学校图书馆 重新登录后重试，或点「浏览器打开」在浏览器里下载（90 秒内自动收进 papers/），再不行用「关联本地 PDF」手动导入")
 }
 
 // ===== 登录窗 =====
@@ -877,6 +1096,13 @@ const LOGIN_INIT_SCRIPT: &str = r#"
   // 返回的是 HTML 包装页——SD pdfft 是 meta refresh 跳转、IEEE stamp.jsp 是
   // iframe 内嵌 ielx 直链、Elsevier 旧链有 #redirect-message。直接 a[download]
   // 会把网页存下来（19:02 实测 got-html），必须先 fetch 验明正身、HTML 里找真链
+  // 属性值里的 & 会被序列化成 &amp;：取出的 URL 必须先反转义，否则 query 参数
+  // 被拆坏（SD pdfft 的 md5/pid 少一个参数就回错误页，2026-09-17 审计）
+  function mesaUnescape(s) {
+    return s ? String(s)
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'") : s;
+  }
   // 中间页里找真 PDF 地址：meta refresh 的 CONTENT="0;URL=…"、
   // #redirect-message 里的 <a href>、iframe/embed/object 内嵌的 pdfish src/data
   function mesaIntermediaryNext(html) {
@@ -884,13 +1110,13 @@ const LOGIN_INIT_SCRIPT: &str = r#"
     if (mr) {
       var c = /content\s*=\s*["']?([^"'>]+)/i.exec(mr[0]);
       var mm = c && /\d+;\s*url=(.+)/i.exec(c[1]);
-      if (mm) return mm[1].replace(/["']/g, '');
+      if (mm) return mesaUnescape(mm[1].replace(/["']/g, ''));
     }
     var ra = html.match(/id="redirect-message"[\s\S]{0,600}?<a[^>]+href="([^"]+)"/i);
-    if (ra) return ra[1];
+    if (ra) return mesaUnescape(ra[1]);
     var em = html.match(/<(?:iframe|embed)[^>]+src\s*=\s*["']([^"']+)["'][^>]*>/i)
       || html.match(/<object[^>]+data\s*=\s*["']([^"']+)["'][^>]*>/i);
-    if (em && mesaPdfRe.test(em[1])) return em[1];
+    if (em && mesaPdfRe.test(em[1])) return mesaUnescape(em[1]);
     return null;
   }
   // 分片回传（2026-09-16 终局）：页内 fetch 是唯一能拿到 PDF 字节的通道（下载式
@@ -907,11 +1133,20 @@ const LOGIN_INIT_SCRIPT: &str = r#"
     return btoa(s);
   }
   async function mesaChunkRelay(bytes) {
-    var CHUNK = 65536;
+    // 61440 = 3 的倍数：非末块的 btoa 输出必带 == 填充，拼在一起后非对齐位置的
+    // = 是非法 base64（65536%3==1，>64KB 的 PDF 走分片必挂解码，2026-09-17 审计
+    // 实测 Invalid symbol 61）——块长取 3 的倍数让中间块零填充，Rust 侧另按
+    // 逐块解码兜底任意对齐
+    var CHUNK = 61440;
     var total = Math.max(1, Math.ceil(bytes.length / CHUNK));
     var a = document.createElement('a');
     a.style.display = 'none';
     (document.body || document.documentElement).appendChild(a);
+    // begin 握手：先声明「即将回传 total 块」，Rust 只收握手后 60s 内、块数吻合
+    // 的分片——窗内任意页面裸 location.href 塞 mesa-chunk:// 不再被无条件接收
+    a.href = 'mesa-chunk://b/' + total;
+    a.click();
+    await new Promise(function (r2) { setTimeout(r2, 60); });
     for (var i = 0; i < total; i++) {
       a.href = 'mesa-chunk://c/' + (i + 1) + '/' + total + '/' + mesaB64Chunk(bytes, i * CHUNK, CHUNK);
       a.click();
@@ -1236,9 +1471,54 @@ fn apply_stored_cookies(window: &tauri::WebviewWindow, cookies: &[&StoredCookie]
 /// 登录窗轮询线程的全局去重标记（多入口 open 时只跑一条轮询）
 static POLL_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// 最近一次接住的 PDF（单槽：路径 + 字节，入库读内存不依赖磁盘还在）
-static RELAY_SLOT: std::sync::Mutex<Option<(PathBuf, Vec<u8>, String)>> =
-    std::sync::Mutex::new(None);
+/// 接住的 PDF 队列（多槽：路径 + 字节，入库读内存不依赖磁盘还在）。旧单槽在
+/// 90 秒窗内连收两篇时后到者无条件覆盖前者的暂存——前端按 A 的 file_name_hint
+/// 把 B 的字节落盘，A 丢、B 错挂（2026-09-17 审计高危）。多槽按暂存路径对账，
+/// 收齐 4 份后丢最旧（连带删暂存文件）
+static RELAY_SLOT: std::sync::Mutex<Vec<RelaySlotEntry>> = std::sync::Mutex::new(Vec::new());
+static RELAY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) struct RelaySlotEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) at: String,
+}
+
+/// PDF 尾部完整性：末 2KB 内应有 %%EOF（标准写法；追加空白也在窗口内）。
+/// Safari 等边下边写的浏览器截到一半的文件头部魔数照样过——收编前必须验尾
+pub(crate) fn pdf_tail_complete(bytes: &[u8]) -> bool {
+    let tail = &bytes[bytes.len().saturating_sub(2048)..];
+    tail.windows(5).any(|w| w == b"%%EOF")
+}
+
+/// 0600 落盘（与 inst-session.json 同纪律——暂存的是付费墙全文，别的本地用户
+/// 不该能读；裸 fs::write 按 umask 落 0644）
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| format!("暂存 PDF 失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    f.write_all(bytes)
+        .map_err(|e| format!("暂存 PDF 失败: {e}"))
+}
+
+fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
 /// 刚入库成功的结果：StrictMode 双听 / 双拦截会立刻再调一次入库，
 /// 暂存文件已被删，返回同一 DTO 而不是 ENOENT
 static LAST_RELAY_SAVE: std::sync::Mutex<
@@ -1314,12 +1594,70 @@ fn parse_chunk_nav(u: &str) -> Option<(u32, u32, &str)> {
         .then_some((seq, total, b64))
 }
 
-/// on_navigation 收到分片：入缓冲；收齐后拼装解码 → 校验 → 入库链
+/// begin 握手解析（纯逻辑供单测）：`mesa-chunk://b/{total}`——页侧分片回传前的
+/// 一次声明，Rust 收到后武装接收窗（60s 内、块数吻合才收）
+fn parse_chunk_begin(u: &str) -> Option<u32> {
+    let rest = u.strip_prefix("mesa-chunk://b/")?;
+    let total = rest.parse::<u32>().ok()?;
+    (total > 0 && total <= CHUNK_MAX_TOTAL).then_some(total)
+}
+
+/// 分片接收武装位（begin 握手后 60s 内才收 c/ 分片；窗内任意页面不经握手裸塞
+/// mesa-chunk:// 导航不再被无条件接收——降不了定向攻击，但堵住零成本投递）
+static CHUNK_ARMED: std::sync::Mutex<Option<(u32, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+fn arm_chunk_relay(total: u32, now: std::time::Instant) {
+    if let Ok(mut g) = CHUNK_ARMED.lock() {
+        *g = Some((total, now));
+    }
+}
+
+/// 分片是否在武装窗内且块数吻合（纯逻辑供单测）
+fn chunk_relay_armed(
+    armed: &Option<(u32, std::time::Instant)>,
+    total: u32,
+    now: std::time::Instant,
+) -> bool {
+    armed
+        .as_ref()
+        .is_some_and(|(t, at)| *t == total && now.duration_since(*at) < Duration::from_secs(60))
+}
+
+/// 拼装解码：逐块独立解码再拼字节——每块是页侧独立 btoa 的合法 base64（自带
+/// 填充），拼接后整体解码会因中间块的 = 非法而挂（65536 块长时代的活 bug，
+/// 2026-09-17 审计实测 Invalid symbol 61）；逐块解码对任意块长都对
+fn decode_chunk_parts(parts: &std::collections::BTreeMap<u32, String>) -> Result<Vec<u8>, String> {
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut out = Vec::new();
+    for (seq, b64) in parts {
+        let mut buf = base64::Engine::decode(&engine, b64.as_bytes())
+            .map_err(|e| format!("第 {seq} 块解码失败: {e}"))?;
+        out.append(&mut buf);
+    }
+    Ok(out)
+}
+
+/// on_navigation 收到分片：入缓冲；收齐后逐块解码 → 校验 → 入库链
 fn handle_chunk_nav(app: &tauri::AppHandle, u: &str, now: std::time::Instant) {
     let Some((seq, total, b64)) = parse_chunk_nav(u) else {
         return;
     };
     if b64.len() > CHUNK_MAX_LEN {
+        return;
+    }
+    let armed_ok = CHUNK_ARMED
+        .lock()
+        .ok()
+        .and_then(|g| chunk_relay_armed(&g, total, now).then_some(()))
+        .is_some();
+    if !armed_ok {
+        crate::logbuf::record("warn", "inst-access", "未经 begin 握手的分片回传，拒绝");
+        let _ = app.get_webview_window(LOGIN_WINDOW_LABEL).map(|w| {
+            w.eval(
+                "window.__mesaStatusFailed && window.__mesaStatusFailed('未经发起的分片回传被拒绝')",
+            )
+        });
         return;
     }
     let Ok(mut guard) = CHUNK_RELAY_BUF.lock() else {
@@ -1338,19 +1676,28 @@ fn handle_chunk_nav(app: &tauri::AppHandle, u: &str, now: std::time::Instant) {
     };
     buf.at = now;
     buf.parts.insert(seq, b64.to_string());
+    // 分片到达即续武装窗（终检回归提示：60s 从 begin 起算不刷新，60MB≈1000 块
+    // 在慢机器上尾块会被拒）
+    if let Ok(mut armed) = CHUNK_ARMED.lock() {
+        if let Some((t, at)) = armed.as_mut() {
+            if *t == total {
+                *at = now;
+            }
+        }
+    }
     if buf.parts.len() != total as usize {
         return;
     }
     let parts = guard.take().expect("checked").parts;
     drop(guard);
-    let joined = parts.into_values().collect::<String>();
+    if let Ok(mut armed) = CHUNK_ARMED.lock() {
+        *armed = None; // 本次回传完成，重新武装需再握手
+    }
     let app = app.clone();
-    std::thread::spawn(move || match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        joined.as_bytes(),
-    ) {
+    std::thread::spawn(move || match decode_chunk_parts(&parts) {
         Ok(bytes) => {
-            if !crate::lit_watch::looks_like_pdf(&bytes) || bytes.len() > crate::lit_watch::DOWNLOAD_CAP
+            if !crate::lit_watch::looks_like_pdf(&bytes)
+                || bytes.len() > crate::lit_watch::DOWNLOAD_CAP
             {
                 crate::logbuf::record(
                     "warn",
@@ -1395,9 +1742,15 @@ pub(crate) fn stage_relayed_pdf(bytes: &[u8]) -> Result<StagedRelay, String> {
     let dir = dirs::config_dir()
         .ok_or("无法确定平台配置目录")?
         .join("ccode/tmp");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("inst-relay.pdf");
-    std::fs::write(&path, bytes).map_err(|e| format!("暂存 PDF 失败: {e}"))?;
+    ensure_private_dir(&dir)?;
+    // 唯一文件名：多槽并存的前提（固定 inst-relay.pdf 时后到者覆盖前者暂存）
+    let uid = RELAY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let path = dir.join(format!("inst-relay-{millis}-{uid}.pdf"));
+    write_private(&path, bytes)?;
     let ctx = RELAY_CONTEXT
         .lock()
         .map_err(|_| "中继状态锁中毒".to_string())?
@@ -1411,10 +1764,19 @@ pub(crate) fn stage_relayed_pdf(bytes: &[u8]) -> Result<StagedRelay, String> {
     if let Ok(mut last) = LAST_RELAY_SAVE.lock() {
         *last = None;
     }
-    *RELAY_SLOT
-        .lock()
-        .map_err(|_| "中继状态锁中毒".to_string())? =
-        Some((path.clone(), bytes.to_vec(), chrono::Utc::now().to_rfc3339()));
+    if let Ok(mut slot) = RELAY_SLOT.lock() {
+        slot.push(RelaySlotEntry {
+            path: path.clone(),
+            bytes: bytes.to_vec(),
+            at: chrono::Utc::now().to_rfc3339(),
+        });
+        while slot.len() > 4 {
+            if let Some(old) = slot.first().map(|e| e.path.clone()) {
+                let _ = std::fs::remove_file(&old);
+            }
+            slot.remove(0);
+        }
+    }
     Ok(StagedRelay {
         path,
         context: ctx.map(|c| (c.project_root, hint)),
@@ -1423,8 +1785,7 @@ pub(crate) fn stage_relayed_pdf(bytes: &[u8]) -> Result<StagedRelay, String> {
 
 fn file_hint_from_context(ctx: &Option<RelayContext>, source_url: &str) -> String {
     if let Some(c) = ctx {
-        if (source_url.is_empty() || same_paper_url(&c.open_url, source_url))
-            && !c.title.is_empty()
+        if (source_url.is_empty() || same_paper_url(&c.open_url, source_url)) && !c.title.is_empty()
         {
             return c.title.clone();
         }
@@ -1517,99 +1878,108 @@ fn ensure_login_window(
         None => {
             // 先开空白页（播种 Cookie 完成后再导航，避免第一跳就以无会话状态打出版商
             // 登录页）；建窗后立即画占位画面，消掉冷启动黑屏
-            let blank = reqwest::Url::parse("about:blank")
-                .map_err(|e| format!("空白页地址无效: {e}"))?;
+            let blank =
+                reqwest::Url::parse("about:blank").map_err(|e| format!("空白页地址无效: {e}"))?;
             let app_nw = app.clone();
             let app_dl = app.clone();
             let app_nav = app.clone();
-            let window = WebviewWindowBuilder::new(
-                app,
-                LOGIN_WINDOW_LABEL,
-                WebviewUrl::External(blank),
-            )
-            .title(title)
-            .inner_size(1120.0, 820.0)
-            // 窗口层浅底：about:blank 在系统深色下默认黑屏，webview 层 macOS 不生效
-            .background_color(tauri::utils::config::Color(0xf6, 0xf6, 0xf6, 0xff))
-            .initialization_script(LOGIN_INIT_SCRIPT)
-            // 下载漏斗（2026-09-16 终局）：窗内一切下载（页面自带按钮的 attachment
-            // 响应、⤓ 胶囊、导航拦截转下载）都经系统下载委托到这里——Requested 把
-            // 落点改写到受控暂存，Finished 校验入库。不再依赖 ~/Downloads 落点猜测
-            .on_download(move |webview, event| match event {
-                tauri::webview::DownloadEvent::Requested { url, destination } => {
-                    let suggested = destination
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "paper.pdf".into());
-                    let dest = download_staging_path(&suggested);
-                    *destination = dest.clone();
-                    if let Ok(mut active) = DL_ACTIVE.lock() {
-                        active.insert(url.to_string(), (dest.clone(), suggested.clone()));
-                    }
-                    let _ = webview
-                        .eval("window.__mesaDownloading && window.__mesaDownloading()");
-                    spawn_download_watchdog(app_dl.clone(), url.to_string(), dest, suggested);
-                    true
-                }
-                tauri::webview::DownloadEvent::Finished { url, success, .. } => {
-                    // macOS 完成回调不带落盘路径——按 Requested 记的 map 对账
-                    let app = app_dl.clone();
-                    let url = url.to_string();
-                    std::thread::spawn(move || {
-                        handle_download_finished(&app, &url, success);
-                    });
-                    true
-                }
-                _ => true,
-            })
-            // 高置信 PDF/epdf 主框架导航一律取消（防内联 PDF / 图片阅读器）。
-            // wry：a[download] 的 shouldPerformDownload 走 Download 策略，根本
-            // 不进这个回调。同 URL 10s 内第二次仍取消，只是不再重复 eval grab。
-            // 分片中继例外：mesa-chunk:// 是页侧字节回传，取消导航、页面不动
-            .on_navigation(move |url| {
-                let u = url.as_str();
-                if u.starts_with("mesa-chunk://") {
-                    handle_chunk_nav(&app_nav, u, std::time::Instant::now());
-                    return false;
-                }
-                if !u.starts_with("http") || !pdfish_url(u) {
-                    return true;
-                }
-                let already = NAV_SUPPRESS
-                    .lock()
-                    .map(|mut seen| {
-                        nav_suppress_should_allow(&mut seen, u, std::time::Instant::now())
+            let window =
+                WebviewWindowBuilder::new(app, LOGIN_WINDOW_LABEL, WebviewUrl::External(blank))
+                    .title(title)
+                    .inner_size(1120.0, 820.0)
+                    // 窗口层浅底：about:blank 在系统深色下默认黑屏，webview 层 macOS 不生效
+                    .background_color(tauri::utils::config::Color(0xf6, 0xf6, 0xf6, 0xff))
+                    .initialization_script(LOGIN_INIT_SCRIPT)
+                    // 下载漏斗（2026-09-16 终局）：窗内一切下载（页面自带按钮的 attachment
+                    // 响应、⤓ 胶囊、导航拦截转下载）都经系统下载委托到这里——Requested 把
+                    // 落点改写到受控暂存，Finished 校验入库。不再依赖 ~/Downloads 落点猜测
+                    .on_download(move |webview, event| match event {
+                        tauri::webview::DownloadEvent::Requested { url, destination } => {
+                            let suggested = destination
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "paper.pdf".into());
+                            let dest = download_staging_path(&suggested);
+                            *destination = dest.clone();
+                            if let Ok(mut active) = DL_ACTIVE.lock() {
+                                active.insert(url.to_string(), (dest.clone(), suggested.clone()));
+                            }
+                            let _ = webview
+                                .eval("window.__mesaDownloading && window.__mesaDownloading()");
+                            spawn_download_watchdog(
+                                app_dl.clone(),
+                                url.to_string(),
+                                dest,
+                                suggested,
+                            );
+                            true
+                        }
+                        tauri::webview::DownloadEvent::Finished { url, success, .. } => {
+                            // macOS 完成回调不带落盘路径——按 Requested 记的 map 对账
+                            let app = app_dl.clone();
+                            let url = url.to_string();
+                            std::thread::spawn(move || {
+                                handle_download_finished(&app, &url, success);
+                            });
+                            true
+                        }
+                        _ => true,
                     })
-                    .unwrap_or(false);
-                if already {
-                    return false;
-                }
-                spawn_intercepted_pdf_save(app_nav.clone(), u.to_string());
-                false
-            })
-            .on_new_window(move |url, _features| {
-                if url.scheme() != "http" && url.scheme() != "https" {
-                    return tauri::webview::NewWindowResponse::Allow;
-                }
-                let u = url.as_str().to_string();
-                let app = app_nw.clone();
-                if image_url(&u) {
-                    return tauri::webview::NewWindowResponse::Deny;
-                }
-                if pdfish_url(&u) {
-                    spawn_intercepted_pdf_save(app, u);
-                    return tauri::webview::NewWindowResponse::Deny;
-                }
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(50));
-                    if let Some(w) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
-                        let _ = w.navigate(url);
-                    }
-                });
-                tauri::webview::NewWindowResponse::Deny
-            })
-            .build()
-            .map_err(|e| format!("打开登录窗口失败: {e}"))?;
+                    // 高置信 PDF/epdf 主框架导航一律取消（防内联 PDF / 图片阅读器）。
+                    // wry：a[download] 的 shouldPerformDownload 走 Download 策略，根本
+                    // 不进这个回调。同 URL 10s 内第二次仍取消，只是不再重复 eval grab。
+                    // 分片中继例外：mesa-chunk:// 是页侧字节回传，取消导航、页面不动
+                    .on_navigation(move |url| {
+                        let u = url.as_str();
+                        if let Some(total) = u
+                            .strip_prefix("mesa-chunk://")
+                            .and_then(|_| parse_chunk_begin(u))
+                        {
+                            arm_chunk_relay(total, std::time::Instant::now());
+                            return false;
+                        }
+                        if u.starts_with("mesa-chunk://") {
+                            handle_chunk_nav(&app_nav, u, std::time::Instant::now());
+                            return false;
+                        }
+                        if !u.starts_with("http") || !pdfish_url(u) {
+                            return true;
+                        }
+                        let already = NAV_SUPPRESS
+                            .lock()
+                            .map(|mut seen| {
+                                nav_suppress_should_allow(&mut seen, u, std::time::Instant::now())
+                            })
+                            .unwrap_or(false);
+                        if already {
+                            return false;
+                        }
+                        spawn_intercepted_pdf_save(app_nav.clone(), u.to_string());
+                        false
+                    })
+                    .on_new_window(move |url, _features| {
+                        if url.scheme() != "http" && url.scheme() != "https" {
+                            return tauri::webview::NewWindowResponse::Allow;
+                        }
+                        let u = url.as_str().to_string();
+                        let app = app_nw.clone();
+                        if image_url(&u) {
+                            return tauri::webview::NewWindowResponse::Deny;
+                        }
+                        if pdfish_url(&u) {
+                            spawn_intercepted_pdf_save(app, u);
+                            return tauri::webview::NewWindowResponse::Deny;
+                        }
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(50));
+                            if let Some(w) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
+                                let _ = w.navigate(url);
+                            }
+                        });
+                        tauri::webview::NewWindowResponse::Deny
+                    })
+                    .build()
+                    .map_err(|e| format!("打开登录窗口失败: {e}"))?;
             let _ = window.eval(LOGIN_PLACEHOLDER_PAINT);
             // 开「双指左右轻扫后退/前进」：WKWebView 内联渲染的 PDF 视图没有
             // DOM、脚本全失效，窗口又没装工具栏——不开手势，点进「View PDF」
@@ -1655,29 +2025,116 @@ fn ensure_login_window(
     Ok(())
 }
 
-/// 会话指纹：域名+Cookie 名集合（值变化不重存——会话刷新不必打扰，域/名增减才算结构变化）
+/// 会话指纹：域名+Cookie 名+值哈希。只看 name@domain 时同名换值（重新登录/
+/// 会话轮换——EZproxy 的 JSESSIONID 刷新是最常见形态）指纹不变、永不落罐，
+/// 无头阶梯带着文件里的旧值反复报「会话已过期」，与注释宣称的「重新登录立即
+/// 落罐」直接矛盾（2026-09-17 审计）
 fn cookie_signature(cookies: &[StoredCookie]) -> String {
+    fn value_hash(v: &str) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::Hash;
+        use std::hash::Hasher;
+        v.hash(&mut h);
+        h.finish()
+    }
     let mut keys: Vec<String> = cookies
         .iter()
-        .map(|c| format!("{}@{}", c.name, c.domain))
+        .map(|c| format!("{}@{}#{:016x}", c.name, c.domain, value_hash(&c.value)))
         .collect();
     keys.sort();
     keys.dedup();
     keys.join("|")
 }
 
+/// 常见出版商域（「会话可信」判据用）：命中前缀主机或其中任一域的 Cookie 才算
+/// 真建立了机构访问；只剩 CARSI/IdP 入口页自己种的 pre-auth Cookie 时不算
+const PUBLISHER_DOMAINS: &[&str] = &[
+    "sciencedirect.com",
+    "elsevier.com",
+    "cell.com",
+    "thelancet.com",
+    "wiley.com",
+    "springer.com",
+    "nature.com",
+    "ieee.org",
+    "acs.org",
+    "rsc.org",
+    "aps.org",
+    "aip.org",
+    "tandfonline.com",
+    "sagepub.com",
+    "oup.com",
+    "jstor.org",
+    "cambridge.org",
+    "iop.org",
+    "mdpi.com",
+    "emerald.com",
+    "degruyter.com",
+    "science.org",
+    "pnas.org",
+    "plos.org",
+    "acm.org",
+    "worldscientific.com",
+    "spiedigitallibrary.org",
+    "optica.org",
+    "osapublishing.org",
+];
+
+/// 会话可信判据：至少一条 Cookie 的域命中前缀主机（EZproxy 会话即种在前缀域）
+/// 或常见出版商域。入口页一打开的 pre-auth Cookie 不满足——此前立刻「已保存」
+/// 并点亮获取按钮，真取时又报会话过期（2026-09-17 审计）
+fn credible_session(cookies: &[StoredCookie], prefix_host: &str) -> bool {
+    let named = cookies.iter().any(|c| {
+        let d = c.domain.trim_start_matches('.');
+        !d.is_empty()
+            && ((!prefix_host.is_empty() && domain_matches(d, prefix_host))
+                || PUBLISHER_DOMAINS.iter().any(|p| domain_matches(d, p)))
+    });
+    if named {
+        return true;
+    }
+    // 域清单盖不住的出版商（终检二轮：ACM/WorldScientific 等登录旅程会种 3+ 个
+    // 不同域的会话）——多个不同域并存本身即「点进过资源」的强信号，按可信放行
+    let mut domains: Vec<&str> = cookies
+        .iter()
+        .map(|c| c.domain.trim_start_matches('.'))
+        .filter(|d| !d.is_empty())
+        .collect();
+    domains.sort_unstable();
+    domains.dedup();
+    cookies.len() >= 5 && domains.len() >= 3
+}
+
+/// 用户刚清除会话的代际标记：轮询读到下一次窗内 Cookie 只重置基线、不落盘
+/// （否则窗内 cookie 结构一变，含已清除值的整罐又被写回磁盘「复活」）
+static SESSION_CLEAR_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn host_of_url(u: &str) -> String {
+    reqwest::Url::parse(u)
+        .ok()
+        .and_then(|x| x.host_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// 增量捕获轮询（独立线程——Windows cookie API 在主线程同步调用会死锁）：
-/// 每 3 秒读登录窗全部 Cookie，结构变化（新域名/新 Cookie）即落罐并发事件。
+/// 每 3 秒读登录窗全部 Cookie，指纹变化即落罐并发事件（带可信标记）。
 /// **不自动关窗**——CARSI 流程要在窗里继续点进出版商才会产生出版商会话，
 /// 过早关窗会让用户永远差最后一步；窗口被用户关掉即停
 fn spawn_capture_poll(app: tauri::AppHandle) {
-    if POLL_RUNNING
-        .swap(true, std::sync::atomic::Ordering::AcqRel)
-    {
+    if POLL_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
     std::thread::spawn(move || {
         let mut last_sig: Option<String> = None;
+        let prefix_host = crate::settings::read_current()
+            .institutional_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .and_then(|p| reqwest::Url::parse(p).ok())
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
         // 不设时长上限：窗口开着就一直增量捕获——重新登录（会话过期后）立即落罐，
         // 否则下次开窗播种的还是旧会话，用户被反复要求重新登录（2026-09-16 实测踩坑）
         loop {
@@ -1685,25 +2142,63 @@ fn spawn_capture_poll(app: tauri::AppHandle) {
             let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) else {
                 break; // 用户关掉了登录窗
             };
+            if SESSION_CLEAR_ARMED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                // 清除后第一次读到什么都是新基线，不落盘。空罐的指纹是空串——
+                // 存成 Some("") 会让下一拍的空罐分支把刚删掉的文件以空罐写回
+                // （复活），空罐一律归 None
+                let sig = window
+                    .cookies()
+                    .ok()
+                    .map(|all| cookie_signature(&collect_stored_cookies(all)))
+                    .filter(|s| !s.is_empty());
+                last_sig = sig;
+                continue;
+            }
             let Ok(all) = window.cookies() else {
                 continue;
             };
             let cookies = collect_stored_cookies(all);
             if cookies.is_empty() {
+                // 全量登出后窗内清空：空罐也要回写一次（旧 continue 让文件永远
+                // 留着旧会话，状态页一直显示「已保存 N 条」）
+                if last_sig.is_some() {
+                    let _ = save_session(&InstSessionStore {
+                        cookies: Vec::new(),
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                        captured_from: live_window_url(&app)
+                            .as_deref()
+                            .map(host_of_url)
+                            .unwrap_or_default(),
+                        credible: false,
+                    });
+                    last_sig = None;
+                    let _ = app.emit(
+                        "inst-session-captured",
+                        serde_json::json!({ "credible": false, "empty": true }),
+                    );
+                }
                 continue;
             }
             let sig = cookie_signature(&cookies);
             if last_sig.as_deref() == Some(sig.as_str()) {
                 continue;
             }
+            let credible = credible_session(&cookies, &prefix_host);
             match save_session(&InstSessionStore {
                 cookies,
                 updated_at: chrono::Utc::now().to_rfc3339(),
-                captured_from: String::new(),
+                captured_from: live_window_url(&app)
+                    .as_deref()
+                    .map(host_of_url)
+                    .unwrap_or_default(),
+                credible,
             }) {
                 Ok(()) => {
                     last_sig = Some(sig);
-                    let _ = app.emit("inst-session-captured", ());
+                    let _ = app.emit(
+                        "inst-session-captured",
+                        serde_json::json!({ "credible": credible }),
+                    );
                 }
                 Err(e) => crate::logbuf::record("error", "inst-access", &e),
             }
@@ -1736,7 +2231,7 @@ fn collect_stored_cookies(all: Vec<tauri::webview::Cookie<'_>>) -> Vec<StoredCoo
         .collect()
 }
 
-/// 手动捕获入口共用：读窗全量 Cookie 落罐（空罐报错）
+/// 手动捕获入口共用：读窗全量 Cookie 落罐（空罐报错）。可信判据与轮询同款
 fn capture_from_window(
     window: &tauri::WebviewWindow,
     captured_from: &str,
@@ -1748,11 +2243,21 @@ fn capture_from_window(
     if cookies.is_empty() {
         return Err("登录窗口里还没有可保存的会话".into());
     }
+    let prefix_host = crate::settings::read_current()
+        .institutional_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|p| reqwest::Url::parse(p).ok())
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let credible = credible_session(&cookies, &prefix_host);
     let count = cookies.len();
     save_session(&InstSessionStore {
         cookies,
         updated_at: chrono::Utc::now().to_rfc3339(),
         captured_from: captured_from.to_string(),
+        credible,
     })?;
     Ok(count)
 }
@@ -1802,9 +2307,7 @@ fn clear_dl_notice() {
 /// 终态重放线程：登录窗存活期间每 3s 把未过期终态 eval 进当前页面——
 /// 页面脚本 __mesaReplay 自带页级守卫，同一页只补播一次，换新页才有下一条
 fn spawn_notice_replay(app: tauri::AppHandle) {
-    if NOTICE_REPLAY_RUNNING
-        .swap(true, std::sync::atomic::Ordering::AcqRel)
-    {
+    if NOTICE_REPLAY_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
     std::thread::spawn(move || loop {
@@ -1812,14 +2315,10 @@ fn spawn_notice_replay(app: tauri::AppHandle) {
         if app.get_webview_window(LOGIN_WINDOW_LABEL).is_none() {
             break;
         }
-        let notice = LAST_DL_NOTICE
-            .lock()
-            .ok()
-            .and_then(|slot| {
-                slot.as_ref().and_then(|(msg, at)| {
-                    (at.elapsed() < NOTICE_TTL).then(|| msg.clone())
-                })
-            });
+        let notice = LAST_DL_NOTICE.lock().ok().and_then(|slot| {
+            slot.as_ref()
+                .and_then(|(msg, at)| (at.elapsed() < NOTICE_TTL).then(|| msg.clone()))
+        });
         let Some(msg) = notice else { continue };
         let js = format!(
             "window.__mesaReplay && window.__mesaReplay({})",
@@ -1830,14 +2329,15 @@ fn spawn_notice_replay(app: tauri::AppHandle) {
     NOTICE_REPLAY_RUNNING.store(false, std::sync::atomic::Ordering::Release);
 }
 
-/// 下载暂存目录（下载在途文件；入库或失败即删，超时残留由 sweep 清理）
+/// 下载暂存目录（下载在途文件；入库或失败即删，超时残留由 sweep 清理）。
+/// 0700 创建——里面是付费墙全文，Linux 多用户机器上别的本地用户不该能读
 fn download_staging_dir() -> Result<PathBuf, String> {
     let dir = dirs::config_dir()
         .ok_or("无法确定平台配置目录")?
         .join("ccode")
         .join("tmp")
         .join("inst-dl");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    ensure_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -1845,7 +2345,10 @@ fn download_staging_dir() -> Result<PathBuf, String> {
 fn download_staging_path(suggested: &str) -> PathBuf {
     let dir = download_staging_dir().unwrap_or_else(|e| {
         eprintln!("[inst-access] 下载暂存目录不可用: {e}");
-        std::env::temp_dir()
+        // 回落也用私有子目录，不再裸进 /tmp（全局可读，2026-09-17 审计）
+        let fallback = std::env::temp_dir().join("ccode-inst-dl");
+        let _ = ensure_private_dir(&fallback);
+        fallback
     });
     let name =
         crate::paths::sanitize_fs_name(suggested).unwrap_or_else(|_| "paper.pdf".to_string());
@@ -1916,42 +2419,69 @@ fn take_download_entry(url: &str) -> Option<(PathBuf, String)> {
     None
 }
 
-fn spawn_download_watchdog(
-    app: tauri::AppHandle,
-    url: String,
-    dest: PathBuf,
-    suggested: String,
-) {
+fn spawn_download_watchdog(app: tauri::AppHandle, url: String, dest: PathBuf, suggested: String) {
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(8));
-        let still = DL_ACTIVE
-            .lock()
-            .ok()
-            .map(|m| m.contains_key(&url) || m.values().any(|(p, _)| p == &dest))
-            .unwrap_or(false);
-        if still && dest.exists() {
-            if let Ok(bytes) = std::fs::read(&dest) {
-                if crate::lit_watch::looks_like_pdf(&bytes) {
-                    if take_download_entry(&url).is_some()
-                        || DL_ACTIVE
-                            .lock()
-                            .ok()
-                            .and_then(|mut m| {
-                                let key = m.iter().find(|(_, (p, _))| p == &dest).map(|(k, _)| k.clone());
-                                key.and_then(|k| m.remove(&k))
-                            })
-                            .is_some()
-                    {
-                        import_pdf_from_staging(&app, &dest, &suggested, &url);
+        // 等「写完的信号」再收（2026-09-17 审计修正：旧固定 8s 即读，把 >8s 传完的
+        // PDF 截断入库，Finished 回调随后到、对账表已被消费，完整版反被当残留清扫）：
+        // - Finished 先到（正常路径）会消费对账表 → 本线程直接退场；
+        // - 大小连续两轮稳定且（是完整 PDF 或压根不是 PDF——got-html 交给入库链
+        //   的回救分支）→ 按 watchdog 兜底收；
+        // - 120s 仍无终态 → 清对账表报超时。
+        let mut last_len: u64 = 0;
+        let mut stable = 0u32;
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_secs(3));
+            let still = DL_ACTIVE
+                .lock()
+                .ok()
+                .map(|m| m.contains_key(&url) || m.values().any(|(p, _)| p == &dest))
+                .unwrap_or(false);
+            if !still || !dest.exists() {
+                return; // Finished 已对账处理
+            }
+            let cur = match std::fs::metadata(&dest) {
+                Ok(m) => m.len(),
+                Err(_) => return,
+            };
+            if cur == last_len && cur > 0 {
+                stable += 1;
+            } else {
+                stable = 0;
+            }
+            last_len = cur;
+            if stable >= 2 {
+                if let Ok(bytes) = std::fs::read(&dest) {
+                    let complete =
+                        crate::lit_watch::looks_like_pdf(&bytes) && pdf_tail_complete(&bytes);
+                    let clearly_not_pdf = !crate::lit_watch::looks_like_pdf(&bytes);
+                    if complete || clearly_not_pdf {
+                        let consumed = take_download_entry(&url).is_some()
+                            || DL_ACTIVE
+                                .lock()
+                                .ok()
+                                .and_then(|mut m| {
+                                    let key = m
+                                        .iter()
+                                        .find(|(_, (p, _))| p == &dest)
+                                        .map(|(k, _)| k.clone());
+                                    key.and_then(|k| m.remove(&k))
+                                })
+                                .is_some();
+                        if consumed {
+                            import_pdf_from_staging(&app, &dest, &suggested, &url);
+                        }
                         return;
                     }
+                    // 是 PDF 但尾部没 %%EOF：仍在写（站点分段刷盘），继续等
                 }
             }
         }
-        std::thread::sleep(Duration::from_secs(12));
         let leftover = take_download_entry(&url).or_else(|| {
             DL_ACTIVE.lock().ok().and_then(|mut m| {
-                let key = m.iter().find(|(_, (p, _))| p == &dest).map(|(k, _)| k.clone());
+                let key = m
+                    .iter()
+                    .find(|(_, (p, _))| p == &dest)
+                    .map(|(k, _)| k.clone());
                 key.and_then(|k| m.remove(&k))
             })
         });
@@ -1993,7 +2523,12 @@ fn handle_download_finished(app: &tauri::AppHandle, url: &str, success: bool) {
 
 /// 暂存下载文件入库：校验 → 单槽暂存 → 事件（App 层 inst_save_relayed_pdf 落
 /// papers/）。非 PDF 内容（出版商回了网页）打开阅读页，不把人关在文章页干瞪眼
-fn import_pdf_from_staging(app: &tauri::AppHandle, path: &Path, fallback_hint: &str, source_url: &str) {
+fn import_pdf_from_staging(
+    app: &tauri::AppHandle,
+    path: &Path,
+    fallback_hint: &str,
+    source_url: &str,
+) {
     let result = std::fs::read(path)
         .map_err(|e| format!("读取下载暂存失败: {e}"))
         .and_then(|bytes| {
@@ -2083,10 +2618,15 @@ fn eval_open_pdf_viewer(app: &tauri::AppHandle, pdf_url: &str, why: &str) {
     eval_login_status(app, &js);
 }
 
-/// 清扫下载暂存目录里超过 1 小时的残留（失败/中断下载的兜底，不猜新文件）
+/// 清扫下载暂存目录里超过 1 小时的残留（失败/中断下载的兜底，不猜新文件）；
+/// 顺带清扫多槽中继暂存（inst-relay-*.pdf）里已不在槽内、无语境滞留的旧文件
 fn sweep_stale_staging() {
-    let Ok(dir) = download_staging_dir() else { return };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let Ok(dir) = download_staging_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     let active: Vec<PathBuf> = DL_ACTIVE
         .lock()
         .map(|active| active.values().map(|(p, _)| p.clone()).collect())
@@ -2104,6 +2644,35 @@ fn sweep_stale_staging() {
             .is_some_and(|age| age > Duration::from_secs(3600));
         if stale {
             let _ = std::fs::remove_file(&path);
+        }
+    }
+    // 多槽中继暂存的滞留清理（正常路径 inst_save_relayed_pdf 已删；这里兜
+    // 「入队后前端没来取/应用重启」的孤儿）
+    if let Some(tmp) = dirs::config_dir().map(|d| d.join("ccode").join("tmp")) {
+        let in_slot: Vec<PathBuf> = RELAY_SLOT
+            .lock()
+            .map(|q| q.iter().map(|e| e.path.clone()).collect())
+            .unwrap_or_default();
+        if let Ok(rd) = std::fs::read_dir(&tmp) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !name.starts_with("inst-relay-") || in_slot.contains(&path) {
+                    continue;
+                }
+                let stale = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > Duration::from_secs(3600));
+                if stale {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
         }
     }
 }
@@ -2166,22 +2735,19 @@ fn spawn_intercepted_pdf_save(app: tauri::AppHandle, target: String) {
         eval_login_status(&app, &js);
 
         let app_cookies = app.clone();
-        let cookies = tauri::async_runtime::spawn_blocking(move || live_window_cookies(&app_cookies))
-            .await
-            .unwrap_or_default();
+        let cookies =
+            tauri::async_runtime::spawn_blocking(move || live_window_cookies(&app_cookies))
+                .await
+                .unwrap_or_default();
         let referer = live_window_url(&app);
         let store = InstSessionStore {
             cookies,
             updated_at: String::new(),
             captured_from: String::new(),
+            credible: true, // 窗内实时 cookie，不经落盘判定
         };
-        let fetched = fetch_via_session_ex(
-            &target,
-            Some(&store),
-            WINDOW_UA,
-            referer.as_deref(),
-        )
-        .await;
+        let fetched =
+            fetch_via_session_ex(&target, Some(&store), WINDOW_UA, referer.as_deref()).await;
         match fetched {
             Ok(f) if crate::lit_watch::looks_like_pdf(&f.bytes) => {
                 match stage_relayed_pdf(&f.bytes) {
@@ -2300,7 +2866,8 @@ pub async fn inst_save_relayed_pdf(
         let mut slot = RELAY_SLOT
             .lock()
             .map_err(|_| "中继状态锁中毒".to_string())?;
-        if slot.is_none() {
+        let idx = slot.iter().position(|e| e.path.to_string_lossy() == path);
+        let Some(idx) = idx else {
             if let Ok(last) = LAST_RELAY_SAVE.lock() {
                 if let Some((at, dto)) = last.as_ref() {
                     if at.elapsed() < Duration::from_secs(3) {
@@ -2309,17 +2876,29 @@ pub async fn inst_save_relayed_pdf(
                 }
             }
             return Err("没有待入库的 PDF（可能已被处理或应用重启过）".into());
-        }
-        let (staged, bytes, at) = slot.take().expect("just checked");
-        if staged.to_string_lossy() != path {
-            *slot = Some((staged, bytes, at));
-            return Err("待入库文件不匹配，拒绝写入".into());
+        };
+        let entry = slot.remove(idx);
+        let (staged, bytes, _at) = (entry.path, entry.bytes, entry.at);
+        // 错误路径把条目插回**原位**而非队尾（终检二轮：push 到尾会破坏 FIFO——
+        // 槽满逐出队首时，会把另一条仍有效的暂存错杀掉）
+        macro_rules! restore {
+            ($b:expr) => {{
+                let pos = idx.min(slot.len());
+                slot.insert(
+                    pos,
+                    RelaySlotEntry {
+                        path: staged,
+                        bytes: $b,
+                        at: _at,
+                    },
+                );
+            }};
         }
         let bytes = if bytes.is_empty() {
             match std::fs::read(&staged) {
                 Ok(b) => b,
                 Err(e) => {
-                    *slot = Some((staged, Vec::new(), at));
+                    restore!(Vec::new());
                     return Err(format!("读取暂存 PDF 失败: {e}"));
                 }
             }
@@ -2327,18 +2906,18 @@ pub async fn inst_save_relayed_pdf(
             bytes
         };
         if bytes.len() > crate::lit_watch::DOWNLOAD_CAP {
-            *slot = Some((staged, bytes, at));
+            restore!(bytes);
             return Err("文件超过 60 MB 上限".into());
         }
         if !crate::lit_watch::looks_like_pdf(&bytes) {
-            *slot = Some((staged, bytes, at));
+            restore!(bytes);
             return Err("暂存内容不是有效的 PDF".into());
         }
         let root = crate::projects::ensure_task_project_root(Path::new(&project_root))?;
         let dto = match save_relayed_at(&root, &file_name_hint, &bytes) {
             Ok(d) => d,
             Err(e) => {
-                *slot = Some((staged, bytes, at));
+                restore!(bytes);
                 return Err(e);
             }
         };
@@ -2397,24 +2976,55 @@ fn save_relayed_at(
 /// 倒进 Mesa，供无头阶梯/调试）。浏览器通道无需保存——浏览器 profile 自己长期
 /// 有效；内嵌窗没开时按此口径解释，不引导用户做多余操作
 #[tauri::command]
-pub async fn inst_capture_session(
-    app: tauri::AppHandle,
-) -> Result<InstSessionStatusDto, String> {
+pub async fn inst_capture_session(app: tauri::AppHandle) -> Result<InstSessionStatusDto, String> {
     let window = app
         .get_webview_window(LOGIN_WINDOW_LABEL)
         .ok_or("在浏览器中登录的无需保存会话（浏览器里长期有效，直接去待获取清单点「浏览器打开」下载即可）。此按钮只用于内嵌登录窗——需要时先点「内嵌窗登录」")?;
-    capture_from_window(&window, "")
+    let host = window
+        .url()
+        .ok()
+        .as_ref()
+        .map(|u| u.as_str().to_string())
+        .and_then(|u| {
+            if u.starts_with("http") {
+                Some(host_of_url(&u))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    capture_from_window(&window, &host)
         .map_err(|e| format!("保存会话失败：{e}（确认已在内嵌窗里完成登录）"))?;
     status_inner()
 }
 
 #[tauri::command]
-pub async fn inst_clear_session() -> Result<InstSessionStatusDto, String> {
+pub async fn inst_clear_session(app: tauri::AppHandle) -> Result<InstSessionStatusDto, String> {
+    // 三步走（2026-09-17 审计：旧实现只删磁盘文件——登录窗 cookie store 还活着，
+    // 窗里继续下载仍带全部机构会话；窗内 cookie 结构一变轮询又把整罐写回「复活」）。
+    // 代际标记必须**最先**置位（终检二轮：删 cookie 数百 ms、关窗再置位的窗口期
+    // 里，轮询一拍就能把整罐写回刚删的文件）
+    SESSION_CLEAR_ARMED.store(true, std::sync::atomic::Ordering::Release);
     let path = session_path()?;
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("清除机构会话失败: {e}")),
+        Err(e) => {
+            SESSION_CLEAR_ARMED.store(false, std::sync::atomic::Ordering::Release);
+            return Err(format!("清除机构会话失败: {e}"));
+        }
+    }
+    if let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
+        let win = window.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            if let Ok(all) = win.cookies() {
+                for c in all {
+                    let _ = win.delete_cookie(c);
+                }
+            }
+        })
+        .await;
+        let _ = window.close();
     }
     status_inner()
 }
@@ -2478,8 +3088,14 @@ mod tests {
 
     #[test]
     fn doi_from_url_variants() {
-        assert_eq!(doi_from_url("10.1002/adma.202304268"), Some("10.1002/adma.202304268".into()));
-        assert_eq!(doi_from_url("doi: 10.1038/s41586-024-1"), Some("10.1038/s41586-024-1".into()));
+        assert_eq!(
+            doi_from_url("10.1002/adma.202304268"),
+            Some("10.1002/adma.202304268".into())
+        );
+        assert_eq!(
+            doi_from_url("doi: 10.1038/s41586-024-1"),
+            Some("10.1038/s41586-024-1".into())
+        );
         assert_eq!(
             doi_from_url("https://doi.org/10.1016/j.nano.2023.07.011."),
             Some("10.1016/j.nano.2023.07.011".into())
@@ -2545,7 +3161,8 @@ mod tests {
 
     #[test]
     fn pdf_link_candidates_prefers_citation_pdf_url() {
-        let base = reqwest::Url::parse("https://www.sciencedirect.com/science/article/pii/S1").unwrap();
+        let base =
+            reqwest::Url::parse("https://www.sciencedirect.com/science/article/pii/S1").unwrap();
         let html = r##"
         <html><head>
         <meta name="citation_pdf_url" content="https://www.sciencedirect.com/science/article/pii/S1/pdfft?md5=x&amp;pid=1">
@@ -2557,8 +3174,12 @@ mod tests {
         </body></html>"##;
         let out = pdf_link_candidates(html, &base);
         assert_eq!(out.len(), 2);
-        assert!(out[0].starts_with("https://www.sciencedirect.com/science/article/pii/S1/pdfft?md5=x&pid=1"));
-        assert_eq!(out[1], "https://www.sciencedirect.com/science/article/pii/S1/pdf");
+        assert!(out[0]
+            .starts_with("https://www.sciencedirect.com/science/article/pii/S1/pdfft?md5=x&pid=1"));
+        assert_eq!(
+            out[1],
+            "https://www.sciencedirect.com/science/article/pii/S1/pdf"
+        );
     }
 
     #[test]
@@ -2580,7 +3201,9 @@ mod tests {
 
     #[test]
     fn html_needs_login_detects_password_input() {
-        assert!(html_needs_login(r#"<form><input type="password" name="pass"></form>"#));
+        assert!(html_needs_login(
+            r#"<form><input type="password" name="pass"></form>"#
+        ));
         assert!(html_needs_login(r#"<INPUT TYPE='password'>"#));
         assert!(!html_needs_login("<html><body>article body</body></html>"));
     }
@@ -2588,17 +3211,24 @@ mod tests {
     #[test]
     fn failure_hint_splits_bot_wall_from_session_issues() {
         let walled = institutional_failure_hint("HTTP 403 Forbidden");
-        assert!(walled.contains("在机构窗口打开"), "{walled}");
-        assert!(!walled.contains("重新登录"));
+        assert!(walled.contains("浏览器打开"), "{walled}");
+        assert!(
+            !walled.contains("在机构窗口打开"),
+            "旧口径指向已下线的按钮: {walled}"
+        );
         let expired = institutional_failure_hint("停在机构登录页——会话可能已过期");
         assert!(expired.contains("重新登录"), "{expired}");
         assert!(!expired.contains("在机构窗口打开"));
+        assert!(expired.contains("关联本地 PDF"), "{expired}");
     }
 
     #[test]
     fn domain_matches_suffix_and_exact() {
         assert!(domain_matches("onlinelibrary.wiley.com", "wiley.com"));
-        assert!(domain_matches("onlinelibrary.wiley.com", ".onlinelibrary.wiley.com"));
+        assert!(domain_matches(
+            "onlinelibrary.wiley.com",
+            ".onlinelibrary.wiley.com"
+        ));
         assert!(domain_matches("wiley.com", "wiley.com"));
         assert!(!domain_matches("evil-wiley.com", "wiley.com"));
         assert!(!domain_matches("wiley.com", ""));
@@ -2626,14 +3256,26 @@ mod tests {
 
     #[test]
     fn pdfish_url_matches_pdf_files_not_epdf_viewers() {
-        assert!(pdfish_url("https://onlinelibrary.wiley.com/doi/pdf/10.1002/adma.202304268"));
-        assert!(pdfish_url("https://www.sciencedirect.com/science/article/pii/S1/pdfft?md5=x"));
+        assert!(pdfish_url(
+            "https://onlinelibrary.wiley.com/doi/pdf/10.1002/adma.202304268"
+        ));
+        assert!(pdfish_url(
+            "https://www.sciencedirect.com/science/article/pii/S1/pdfft?md5=x"
+        ));
         assert!(pdfish_url("https://arxiv.org/pdf/2401.12345v2"));
-        assert!(pdfish_url("https://example.com/path/file.pdf?download=true"));
+        assert!(pdfish_url(
+            "https://example.com/path/file.pdf?download=true"
+        ));
         // epdf 是 Wiley/ACS 阅读页：放行，点工具栏 PDF 才能打开
-        assert!(!pdfish_url("https://onlinelibrary.wiley.com/doi/epdf/10.1002/adma.202304268"));
-        assert!(!pdfish_url("https://pubs.acs.org/doi/epdf/10.1021/acs.1c00000"));
-        assert!(pdfish_url("https://pubs.acs.org/doi/pdf/10.1021/acs.1c00000?download=true"));
+        assert!(!pdfish_url(
+            "https://onlinelibrary.wiley.com/doi/epdf/10.1002/adma.202304268"
+        ));
+        assert!(!pdfish_url(
+            "https://pubs.acs.org/doi/epdf/10.1021/acs.1c00000"
+        ));
+        assert!(pdfish_url(
+            "https://pubs.acs.org/doi/pdf/10.1021/acs.1c00000?download=true"
+        ));
         assert!(pdfish_url(
             "https://pdf.sciencedirect.com/science/article/pii/S092583882600813X"
         ));
@@ -2641,7 +3283,9 @@ mod tests {
         assert!(pdfish_url(
             "https://mdpi-res.com/d_attachment/solids/solids-07-00007/article_deploy/solids-07-00007.pdf?version=1"
         ));
-        assert!(!pdfish_url("https://onlinelibrary.wiley.com/doi/10.1002/adma.202304268"));
+        assert!(!pdfish_url(
+            "https://onlinelibrary.wiley.com/doi/10.1002/adma.202304268"
+        ));
         assert!(!pdfish_url("https://www.mdpi.com/2673-6497/7/1/7"));
         assert!(!pdfish_url("https://www.carsi.edu.cn/resource/1"));
     }
@@ -2719,15 +3363,370 @@ mod tests {
     }
 
     #[test]
-    fn cookie_signature_tracks_structure_not_values() {
+    fn cookie_signature_tracks_value_rotation() {
         let a = vec![cookie("a.com", "/", false), cookie("b.com", "/", false)];
-        // 值变化（同名同域）不影响指纹
+        // 同名同域换值（重新登录/会话轮换——EZproxy JSESSIONID 刷新最常见）必须
+        // 算指纹变化：旧口径只看 name@domain，换值永不落罐，无头阶梯一直带旧值
         let mut b = a.clone();
         b[0].value = "changed".into();
-        assert_eq!(cookie_signature(&a), cookie_signature(&b));
+        assert_ne!(cookie_signature(&a), cookie_signature(&b));
         // 新域出现 = 结构变化
         b.push(cookie("c.com", "/", false));
         assert_ne!(cookie_signature(&a), cookie_signature(&b));
+        // 完全一致 = 指纹一致
+        assert_eq!(cookie_signature(&a), cookie_signature(&a.clone()));
+    }
+
+    #[test]
+    fn credible_session_requires_publisher_or_prefix_domain() {
+        let entry_only = vec![cookie("carsi.edu.cn", "/", false)];
+        assert!(!credible_session(&entry_only, "ezproxy.uni.edu"));
+        // 命中前缀主机（EZproxy 会话种在前缀域）
+        let via_prefix = vec![cookie("ezproxy.uni.edu", "/", false)];
+        assert!(credible_session(&via_prefix, "ezproxy.uni.edu"));
+        // 命中出版商域（CARSI 点进出版商后）
+        let via_pub = vec![
+            cookie("carsi.edu.cn", "/", false),
+            StoredCookie {
+                name: "sess".into(),
+                value: "x".into(),
+                domain: "onlinelibrary.wiley.com".into(),
+                path: "/".into(),
+                secure: true,
+                http_only: false,
+            },
+        ];
+        assert!(credible_session(&via_pub, ""));
+        // 通配 DNS 改写域不算（host 不以出版商域为点后缀）——种在前缀域的会话才算
+        assert!(!credible_session(&via_prefix, ""));
+    }
+
+    #[test]
+    fn saml_relay_detected_by_hidden_form() {
+        assert!(saml_relay(
+            r#"<form method="post" action="https://idp.edu.edu/idp/profile/SAML2/POST/SSO"><input type="hidden" name="SAMLRequest" value="x"/></form>"#
+        ));
+        assert!(saml_relay(
+            r#"<body onload="document.forms[0].submit()"><input type="hidden" name="SAMLResponse" value="y">"#
+        ));
+        assert!(!saml_relay("<html><body>article</body></html>"));
+        // 正文里偶然提到 SAMLRequest 一词、没有 form：不算
+        assert!(!saml_relay("<p>The SAMLRequest parameter is used by…</p>"));
+    }
+
+    #[test]
+    fn proxy_wrap_strips_qurl_and_case_insensitive() {
+        // qurl 形态：旧口径剥 url= 剩 login?q，拼出 login?q&url=… 坏链
+        assert_eq!(
+            proxy_wrap("https://proxy.uni.edu/login?qurl=", "https://a.com/x"),
+            "https://proxy.uni.edu/login?url=https%3A%2F%2Fa.com%2Fx"
+        );
+        assert_eq!(
+            proxy_wrap("https://proxy.uni.edu/login?URL=", "https://a.com/x"),
+            "https://proxy.uni.edu/login?url=https%3A%2F%2Fa.com%2Fx"
+        );
+        assert_eq!(
+            proxy_wrap("https://p.edu/login?qurl=", "https://a.com/y"),
+            "https://p.edu/login?url=https%3A%2F%2Fa.com%2Fy"
+        );
+    }
+
+    #[test]
+    fn target_already_proxied_matches_prefix_host_and_subdomains() {
+        let prefix = "https://ezproxy.uni.edu/login?url=";
+        // 用户从 EZproxy 会话复制的完整代理链
+        assert!(target_already_proxied(
+            "https://ezproxy.uni.edu/login?url=https%3A%2F%2Fwww.sciencedirect.com%2Fx",
+            prefix
+        ));
+        // 通配 DNS 改写域（前缀主机的子域）
+        assert!(target_already_proxied(
+            "https://www-sciencedirect-com.ezproxy.uni.edu/science/article/pii/S1",
+            prefix
+        ));
+        // 直连出版商：不是代理形态，需要包
+        assert!(!target_already_proxied(
+            "https://www.sciencedirect.com/science/article/pii/S1",
+            prefix
+        ));
+        assert!(!target_already_proxied("https://a.com/x", ""));
+    }
+
+    #[test]
+    fn oa_pick_unpaywall_falls_back_to_oa_locations() {
+        // best 是仓储落地页（无直链、url 不含 .pdf）但 oa_locations 里有直链副本
+        let v: serde_json::Value = serde_json::json!({
+            "best_oa_location": { "url_for_pdf": null, "url": "https://repo.edu/handle/1234" },
+            "oa_locations": [
+                { "url_for_pdf": "https://repo.edu/bitstream/1234/article.pdf", "url": "https://repo.edu/handle/1234" }
+            ]
+        });
+        assert_eq!(
+            oa_pick_unpaywall(Some(&v)),
+            Some((
+                "https://repo.edu/bitstream/1234/article.pdf".into(),
+                "unpaywall"
+            ))
+        );
+        // best 自带直链：最优先
+        let b: serde_json::Value = serde_json::json!({
+            "best_oa_location": { "url_for_pdf": "https://pub.com/x.pdf" }
+        });
+        assert_eq!(
+            oa_pick_unpaywall(Some(&b)),
+            Some(("https://pub.com/x.pdf".into(), "unpaywall"))
+        );
+        assert_eq!(oa_pick_unpaywall(None), None);
+    }
+
+    #[test]
+    fn oa_pick_openalex_scans_locations_array() {
+        let v: serde_json::Value = serde_json::json!({
+            "best_oa_location": { "landing_page_url": "https://repo.edu/x" },
+            "locations": [
+                { "landing_page_url": "https://a.edu/x" },
+                { "pdf_url": "https://a.edu/x/article.pdf" }
+            ]
+        });
+        assert_eq!(
+            oa_pick_openalex(Some(&v)),
+            Some(("https://a.edu/x/article.pdf".into(), "openalex"))
+        );
+        assert_eq!(oa_pick_openalex(None), None);
+    }
+
+    #[test]
+    fn pdf_link_candidates_for_requires_single_paper_attribution() {
+        let base = reqwest::Url::parse("https://www.sciencedirect.com").unwrap();
+        // 列表/检索页形态：多条不同 pdfish 锚链、无 meta 无 DOI → 不猜
+        let listy = r#"
+        <a href="/science/article/pii/S1/pdfft">1</a>
+        <a href="/science/article/pii/S2/pdfft">2</a>"#;
+        assert!(pdf_link_candidates_for(listy, &base, None).is_empty());
+        // 有本篇 DOI：含 DOI 的链优先于其它主链
+        let doi_page = r#"
+        <a href="/doi/pdf/10.1002/adma.202304268?download=true">PDF</a>
+        <a href="/doi/pdf/10.1002/adma.202304269">other</a>"#;
+        let out = pdf_link_candidates_for(doi_page, &base, Some("10.1002/adma.202304268"));
+        assert_eq!(out.len(), 2);
+        assert!(out[0].contains("adma.202304268?download=true"));
+        // 补充材料降权：有主链时 mmc 链排后；只剩补充材料链不采用（SD 误收形态）
+        let sd_like = r#"
+        <a href="/science/article/pii/S1/pdf/mmc1.pdf">supplement</a>"#;
+        assert!(pdf_link_candidates_for(sd_like, &base, Some("10.1016/j.x.1")).is_empty());
+    }
+
+    #[test]
+    fn extract_attr_requires_word_boundary() {
+        // data-href 内部的 href= 不得误当 href 取值
+        let tag = r#"<a data-href="/supp/mmc1.pdf" title="pdf href=1" href="/a.pdf">"#;
+        let line = tag.trim_start_matches('<');
+        assert_eq!(extract_attr(line, "href").as_deref(), Some("/a.pdf"));
+        assert_eq!(
+            extract_attr(line, "data-href").as_deref(),
+            Some("/supp/mmc1.pdf")
+        );
+        // 属性值里的字样（title="pdf href=1"）不得抢先命中
+        assert_eq!(extract_attr(line, "title").as_deref(), Some("pdf href=1"));
+    }
+
+    #[test]
+    fn decode_chunk_parts_handles_padded_mid_chunks() {
+        // 复现页侧分块：每块独立 btoa（自带填充）——65536 块长时代拼接整体解码
+        // 必挂（Invalid symbol 61），逐块解码对任意块长都对
+        let mut bytes = Vec::new();
+        for i in 0..200_000u32 {
+            bytes.push((i % 251) as u8);
+        }
+        let engine = base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let mut parts = std::collections::BTreeMap::new();
+        let chunk = 65536usize;
+        let total = bytes.len().div_ceil(chunk);
+        for (i, part) in bytes.chunks(chunk).enumerate() {
+            let mut s = String::new();
+            engine.encode_string(part, &mut s);
+            parts.insert((i + 1) as u32, s);
+        }
+        assert!(total >= 3, "样例必须跨多块");
+        let decoded = decode_chunk_parts(&parts).expect("逐块解码必须成功");
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn chunk_relay_requires_recent_begin_handshake() {
+        let t0 = std::time::Instant::now();
+        let total = 3;
+        assert!(chunk_relay_armed(
+            &Some((total, t0)),
+            total,
+            t0 + Duration::from_secs(30)
+        ));
+        // 块数不吻合：拒
+        assert!(!chunk_relay_armed(
+            &Some((total, t0)),
+            total + 1,
+            t0 + Duration::from_secs(30)
+        ));
+        // 超出 60s 武装窗：拒
+        assert!(!chunk_relay_armed(
+            &Some((total, t0)),
+            total,
+            t0 + Duration::from_secs(61)
+        ));
+        // 从未握手：拒
+        assert!(!chunk_relay_armed(&None, total, t0));
+    }
+
+    #[test]
+    fn pdf_tail_complete_detects_truncation() {
+        let mut full = b"%PDF-1.7 fake body\n%%EOF\n".to_vec();
+        assert!(pdf_tail_complete(&full));
+        // 头 1024 字节完整、尾部被截：旧魔数校验照样过，尾部校验拦下
+        let truncated: Vec<u8> = b"%PDF-1.7 "
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(b'A', 5000))
+            .collect();
+        assert!(!pdf_tail_complete(&truncated));
+        // %%EOF 后带少量空白（正常写法）仍在 2KB 窗口内
+        full.extend_from_slice(b"\n\n");
+        assert!(pdf_tail_complete(&full));
+    }
+
+    /// 本地 mock HTTP 上游：routes = (路径前缀, 响应) 逐请求匹配；accept_count 次
+    /// 后关闸。2026-09-17 审计：全仓没有一个异步测试，网络状态机（重定向/落地页
+    /// 候选/登录页分流）此前零覆盖
+    fn mock_http_server(routes: Vec<(String, String)>) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (path_prefix, body) in routes {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                assert!(
+                    req.contains(&path_prefix.to_ascii_lowercase()),
+                    "请求 {req:?} 应命中路由 {path_prefix:?}"
+                );
+                let _ = sock.write_all(body.as_bytes());
+                let _ = sock.shutdown(std::net::Shutdown::Write);
+            }
+        });
+        addr
+    }
+
+    fn http_resp(status_line: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let mut out = format!("HTTP/1.1 {status_line}\r\n");
+        for (k, v) in headers {
+            out.push_str(&format!("{k}: {v}\r\n"));
+        }
+        out.push_str("Connection: close\r\n\r\n");
+        out.push_str(body);
+        out
+    }
+
+    #[test]
+    fn fetch_via_channel_follows_redirect_to_pdf() {
+        let addr = mock_http_server(vec![
+            (
+                "get /start".into(),
+                http_resp("302 Found", &[("Location", "/pdf")], ""),
+            ),
+            (
+                "get /pdf".into(),
+                http_resp(
+                    "200 OK",
+                    &[("Content-Type", "application/pdf")],
+                    "%PDF-1.7 redirect target %%EOF\n",
+                ),
+            ),
+        ]);
+        let ch = InstitutionalChannel {
+            prefix: None,
+            session: None,
+        };
+        let bytes =
+            tauri::async_runtime::block_on(fetch_via_channel(&format!("http://{addr}/start"), &ch))
+                .expect("重定向到直链 PDF 必须取到");
+        assert!(crate::lit_watch::looks_like_pdf(&bytes));
+    }
+
+    #[test]
+    fn fetch_via_channel_landing_page_resolves_candidate() {
+        let landing = r#"<html><head>
+        <meta name="citation_pdf_url" content="/pdf?md5=a&amp;pid=1">
+        </head><body>article</body></html>"#;
+        let addr = mock_http_server(vec![
+            (
+                "get /page".into(),
+                http_resp("200 OK", &[("Content-Type", "text/html")], landing),
+            ),
+            (
+                "get /pdf".into(),
+                http_resp(
+                    "200 OK",
+                    &[("Content-Type", "application/pdf")],
+                    "%PDF-1.7 landing candidate %%EOF\n",
+                ),
+            ),
+        ]);
+        let ch = InstitutionalChannel {
+            prefix: None,
+            session: None,
+        };
+        let bytes =
+            tauri::async_runtime::block_on(fetch_via_channel(&format!("http://{addr}/page"), &ch))
+                .expect("落地页 citation_pdf_url 候选必须解析并取到");
+        assert!(crate::lit_watch::looks_like_pdf(&bytes));
+    }
+
+    #[test]
+    fn fetch_via_channel_list_page_and_login_page_error_kinds() {
+        // 列表/检索页：多条不同 pdfish 锚链、无 meta 无 DOI——不猜，报「没识别出本篇」
+        let listy = r#"<html><body>
+        <a href="/a1.pdf">1</a> <a href="/a2.pdf">2</a>
+        </body></html>"#;
+        let addr = mock_http_server(vec![(
+            "get /list".into(),
+            http_resp("200 OK", &[("Content-Type", "text/html")], listy),
+        )]);
+        let ch = InstitutionalChannel {
+            prefix: None,
+            session: None,
+        };
+        let err =
+            tauri::async_runtime::block_on(fetch_via_channel(&format!("http://{addr}/list"), &ch))
+                .unwrap_err();
+        assert!(err.contains("没识别出本篇"), "{err}");
+
+        // 登录页：提不出候选 + password 输入——报「停在机构登录页」
+        let login = r#"<html><body><form><input type="password" name="pass"></form></body></html>"#;
+        let addr2 = mock_http_server(vec![(
+            "get /login".into(),
+            http_resp("200 OK", &[("Content-Type", "text/html")], login),
+        )]);
+        let err2 = tauri::async_runtime::block_on(fetch_via_channel(
+            &format!("http://{addr2}/login"),
+            &ch,
+        ))
+        .unwrap_err();
+        assert!(err2.contains("停在机构登录页"), "{err2}");
+
+        // SAML 中继页：无 password、有 SAMLRequest 隐藏表单——报「身份认证中间页」
+        let saml = r#"<html><body onload="document.forms[0].submit()"><form method="post"><input type="hidden" name="SAMLRequest" value="x"></form></body></html>"#;
+        let addr3 = mock_http_server(vec![(
+            "get /saml".into(),
+            http_resp("200 OK", &[("Content-Type", "text/html")], saml),
+        )]);
+        let err3 =
+            tauri::async_runtime::block_on(fetch_via_channel(&format!("http://{addr3}/saml"), &ch))
+                .unwrap_err();
+        assert!(err3.contains("SAML"), "{err3}");
     }
 
     #[test]
@@ -2739,6 +3738,7 @@ mod tests {
             cookies: vec![cookie("proxy.uni.edu", "/", false)],
             updated_at: "2026-09-16T00:00:00Z".into(),
             captured_from: "proxy.uni.edu".into(),
+            credible: true,
         };
         let path = dir.join("inst-session.json");
         let body = serde_json::to_vec_pretty(&store).unwrap();

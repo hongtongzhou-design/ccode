@@ -1,17 +1,29 @@
 import { sanitizeDocumentHtml } from "../document-html";
-import { useRef, useState, useEffect, useMemo } from "react";
+import { useRef, useState, useEffect, useLayoutEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { marked } from "marked";
 import { renderMathInto } from "../md-math";
 import { useAppStore } from "../store";
+import { absoluteResourcePath } from "./ArtifactChecklist";
 import { confirmDialog } from "./ConfirmDialog";
-import { Checkbox, FoldMark } from "./PageFrame";
+import { Checkbox, FoldMark, ghostActionClass, inlineActionClass } from "./PageFrame";
 import {
   buildStepFlow,
   discussChatLabel,
+  doiFromToFetchUrl,
+  formatZoteroDuplicatePrompt,
+  isPaywallTaskTitle,
+  isPendingConfirmTaskTitle,
+  missingToFetchCount,
+  parseToFetchItems,
+  recalledToFetchDone,
+  rememberToFetchDone,
+  toFetchPaperRel,
+  toFetchSavedCount,
   type StepFlowNode,
+  type ToFetchItem,
 } from "../step-flow";
 import {
   RESEARCH_TOOL_FIELDS,
@@ -40,17 +52,10 @@ import {
   isAcademicMcpTaskTitle,
 } from "../academic-mcp";
 import {
-  countToFetchEntries,
-  isPaywallTaskTitle,
-  parseToFetchItems,
-  type ToFetchItem,
-} from "../step-flow";
-import {
-  canAttemptFulltext,
-  fulltextViaLabel,
   instOpenTarget,
   type FetchedFulltextDto,
 } from "../inst-access";
+import PendingConfirmList from "./PendingConfirmList";
 import type { ProjectStepDto, WorkspaceDto } from "../types";
 import type { StepRunStatus } from "../step-flow";
 
@@ -59,10 +64,87 @@ import type { StepRunStatus } from "../step-flow";
  *  回答三个问题：这一步谁先谁后（节点顺序）、现在轮到谁（当前节点）、轮到我时在哪操作（节点行就地）。 */
 /** 文献来源选项（值与后端 lit_source 对应）：zotero 与 folder 都属「我已有文献库」，
  *  区别只在进料方式，故并列三项而不是嵌套两层 */
-/** 付费墙任务的现行三步口径（2026-09-16 精简）：旧项目档案里存的是当年模板的老
- *  guidance，就地替换显示，不动数据；新模板 guidance 同步收敛到同一版 */
-const PAYWALL_SUMMARY =
-  "清单里逐条处理：点「获取全文」自动取（先查开放副本，再走机构通道）；取不到的（Wiley 等有反爬墙）点「窗口打开」，在窗口里点「⤓ 保存 PDF 到 Mesa」直接落进项目根 papers/。不想补的跳过即可——下一步 agent 会按摘要写笔记并标注「仅摘要」。";
+/** 付费墙任务的现行三步口径（2026-09-16 精简；2026-09-17 审计后文案对齐现行
+ *  按钮）：旧项目档案里存的是当年模板的老 guidance，就地替换显示，不动数据；
+ *  新模板 guidance 同步收敛到同一版 */
+/** 待获取清单展开状态的持久化（2026-09-17 用户实测：切去文件页再回来清单收起
+ *  了，还得重新点开找回刚才看的位置）——按项目记忆，localStorage 客户端偏好 */
+const paywallListOpenKey = (root: string) => `ccode.paywallListOpen:${root}`;
+function readPaywallListOpen(root: string): boolean {
+  try {
+    return localStorage.getItem(paywallListOpenKey(root)) === "1";
+  } catch {
+    return false;
+  }
+}
+function writePaywallListOpen(root: string, open: boolean): void {
+  try {
+    localStorage.setItem(paywallListOpenKey(root), open ? "1" : "0");
+  } catch {
+    /* 隐私模式写不进就只靠本次 */
+  }
+}
+
+/** 切去文件页会卸掉任务页：记住刚才那一行和清单滚动，回来对上。 */
+const toFetchFocusKey = (root: string) => `ccode.toFetchFocus:${root}`;
+const toFetchScrollKey = (root: string) => `ccode.toFetchScroll:${root}`;
+function readToFetchFocus(root: string): number | null {
+  try {
+    const n = Number(sessionStorage.getItem(toFetchFocusKey(root)));
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+function writeToFetchFocus(root: string, line: number | null): void {
+  try {
+    if (line == null) sessionStorage.removeItem(toFetchFocusKey(root));
+    else sessionStorage.setItem(toFetchFocusKey(root), String(line));
+  } catch {
+    /* 隐私模式写不进就只靠本次 */
+  }
+}
+function readToFetchScroll(root: string): number | null {
+  try {
+    const n = Number(sessionStorage.getItem(toFetchScrollKey(root)));
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+function writeToFetchScroll(root: string, top: number): void {
+  try {
+    sessionStorage.setItem(toFetchScrollKey(root), String(Math.round(top)));
+  } catch {
+    /* 隐私模式写不进就只靠本次 */
+  }
+}
+const toFetchPageScrollKey = (root: string) => `ccode.toFetchPageScroll:${root}`;
+function readToFetchPageScroll(root: string): number | null {
+  try {
+    const n = Number(sessionStorage.getItem(toFetchPageScrollKey(root)));
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+function writeToFetchPageScroll(root: string, top: number): void {
+  try {
+    sessionStorage.setItem(toFetchPageScrollKey(root), String(Math.round(top)));
+  } catch {
+    /* 隐私模式写不进就只靠本次 */
+  }
+}
+function rememberToFetchPlace(root: string, ul: HTMLUListElement | null): void {
+  if (!ul) return;
+  writeToFetchScroll(root, ul.scrollTop);
+  const pane = ul.closest("[data-project-main-scroll]");
+  if (pane instanceof HTMLElement) writeToFetchPageScroll(root, pane.scrollTop);
+}
+
+/** 按钮没说的那一句：可选/跳过的后果。做法进行内按钮 title。 */
+const PAYWALL_HINT = "跳过的篇目下一篇按摘要记。";
+const PENDING_HINT = "纳入且没有 PDF 的会进下面待获取。";
 
 const LIT_SOURCES: {
   id: string;
@@ -231,6 +313,7 @@ export default function StepFlow({
   const setPage = useAppStore((s) => s.setPage);
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
   const setPendingMcpPreset = useAppStore((s) => s.setPendingMcpPreset);
+  const setFilePreviewReq = useAppStore((s) => s.setFilePreviewReq);
 
   /** 已经有文献库的项目：落点在 papers/ 的事项不该再劝人把 PDF 往项目里塞——
    *  文献的唯一出处是那个库，往 papers/ 另放一份之后两边各自漂移。
@@ -314,19 +397,25 @@ export default function StepFlow({
   // 付费墙任务的待获取清单就地展开（papers/to-fetch.md，只读预览）：
   // 首次点开才读文件，收起不清缓存（agent 不会在展示期间改它）。
   // 位置口径：agent 的产出落在步骤工作区，评审合并后才进项目根——先读工作区再回落项目根
-  const [paywallListOpen, setPaywallListOpen] = useState(false);
+  const [pendingListOpen, setPendingListOpen] = useState(true);
+  const [paywallListOpen, setPaywallListOpen] = useState(() =>
+    readPaywallListOpen(projectPath),
+  );
   const [paywallList, setPaywallList] = useState<{
     text: string | null;
     error: string | null;
     from: string | null;
   }>({ text: null, error: null, from: null });
-  // 同一份 RIS（与 to-fetch.md 同目录同源）：「同步到 Zotero」建条目时带全题录
-  const [paywallRis, setPaywallRis] = useState<string | null>(null);
-  // 待获取清单的逐篇「获取全文」：机构通道可用态 + 行内进行/结果（key = 行号）
-  const [toFetchInstActive, setToFetchInstActive] = useState(false);
-  // 「同步到 Zotero」：papers/ 已拿到的全文按 DOI 挂附件（免 agent 会话，直连本地 API）
+  // 同源 to-fetch.ris：同步到 Zotero = 交给 Zotero 原生导入（RIS/BibTeX，不需要插件）
+  const [paywallRisFile, setPaywallRisFile] = useState<{
+    path: string;
+    root: string;
+  } | null>(null);
   const [zoteroSyncing, setZoteroSyncing] = useState(false);
-  const [zoteroSyncResult, setZoteroSyncResult] = useState<string | null>(null);
+  const [zoteroSyncResult, setZoteroSyncResult] = useState<{
+    line: string;
+    detail?: string;
+  } | null>(null);
   const [toFetchBusy, setToFetchBusy] = useState<
     Record<number, { status: "busy" | "ok" | "error"; note?: string }>
   >({});
@@ -336,12 +425,98 @@ export default function StepFlow({
   );
   // 清单逐篇「已存 papers」状态（to_fetch_progress 对照 papers/ 现算）：
   // 「哪些下载了」不再靠人记；机构窗口入库（inst-pdf-relayed）后自动翻新
-  const [toFetchDone, setToFetchDone] = useState<Record<number, string>>({});
+  const [toFetchDone, setToFetchDone] = useState<Record<number, string>>(() =>
+    recalledToFetchDone(projectPath),
+  );
+  const paywallSavedCount = useMemo(
+    () => toFetchSavedCount(toFetchItems, toFetchDone),
+    [toFetchItems, toFetchDone],
+  );
   const toFetchProbeRef = useRef<{ text: string | null; items: typeof toFetchItems }>({
     text: null,
     items: [],
   });
   toFetchProbeRef.current = { text: paywallList.text, items: toFetchItems };
+  // 「浏览器打开」进行中状态（2026-09-17 审计：旧口径点了之后按钮毫无变化，
+  // 90 秒窗从注册到过期全程零可见性，漏收也无从察觉）：打开后 95 秒内按钮显示
+  // 等待收货文案，到期回落；配套独立错误位（旧口径把报错写进 Zotero 结果槽，
+  // 渲染在滚动区最底部、语义也错位）
+  const [browserOpenedAt, setBrowserOpenedAt] = useState<Record<number, number>>({});
+  const [browserOpenErr, setBrowserOpenErr] = useState<string | null>(null);
+  const [, tickBrowserOpened] = useState(0);
+  // 点「浏览器」或已存标题后离开，回来要立刻找到刚才那行：主题强调色框，
+  // 点下一篇才换/消失（不按时间收）。行号进 sessionStorage——切文件页会卸任务页。
+  const [browserSpotlight, setBrowserSpotlight] = useState<number | null>(() =>
+    readToFetchFocus(projectPath),
+  );
+  const browserSpotlightAway = useRef(false);
+  const toFetchListRef = useRef<HTMLUListElement>(null);
+  function focusToFetchLine(line: number) {
+    browserSpotlightAway.current = false;
+    setBrowserSpotlight(line);
+    writeToFetchFocus(projectPath, line);
+    rememberToFetchPlace(projectPath, toFetchListRef.current);
+  }
+  useLayoutEffect(() => {
+    return () => rememberToFetchPlace(projectPath, toFetchListRef.current);
+  }, [projectPath]);
+  useEffect(() => {
+    if (!Object.keys(browserOpenedAt).length) return;
+    const t = window.setInterval(() => {
+      // 到期条目剪掉（终检二轮：只增不删会让秒级 interval 在组件存活期内永久
+      // 运转、整棵 StepFlow 每秒重渲染）；清空后 effect 守卫停表
+      const now = Date.now();
+      setBrowserOpenedAt((cur) => {
+        const next = Object.fromEntries(
+          Object.entries(cur).filter(([, at]) => now - at < 95000),
+        );
+        return Object.keys(next).length === Object.keys(cur).length ? cur : next;
+      });
+      tickBrowserOpened((v) => v + 1);
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [browserOpenedAt]);
+  useEffect(() => {
+    if (browserSpotlight == null) return;
+    const onHide = () => {
+      browserSpotlightAway.current = true;
+    };
+    const onBack = () => {
+      if (!browserSpotlightAway.current) return;
+      browserSpotlightAway.current = false;
+      const el = document.querySelector(
+        `[data-to-fetch-line="${browserSpotlight}"]`,
+      );
+      el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    };
+    const onVis = () => {
+      if (document.visibilityState === "hidden") onHide();
+      else onBack();
+    };
+    window.addEventListener("blur", onHide);
+    window.addEventListener("focus", onBack);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("blur", onHide);
+      window.removeEventListener("focus", onBack);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [browserSpotlight]);
+  // 切文件页再回来：清单重挂后只还原记下的滚动，不 scrollIntoView（会把整页拽到边上）。
+  useLayoutEffect(() => {
+    if (!paywallListOpen || toFetchItems.length === 0) return;
+    const ul = toFetchListRef.current;
+    if (!ul) return;
+    const top = readToFetchScroll(projectPath);
+    if (top != null) ul.scrollTop = top;
+    const pane = ul.closest("[data-project-main-scroll]");
+    const page = readToFetchPageScroll(projectPath);
+    if (pane instanceof HTMLElement && page != null) pane.scrollTop = page;
+  }, [paywallListOpen, paywallList.text, toFetchItems.length, projectPath]);
+  // 面板收起即清旧错误（终检二轮：错误位只靠再点一次清除，重开面板仍挂旧红字）
+  useEffect(() => {
+    if (!paywallListOpen) setBrowserOpenErr(null);
+  }, [paywallListOpen]);
   const refreshToFetchProgress = () => {
     const { text, items } = toFetchProbeRef.current;
     if (!text || !items.length) return;
@@ -355,7 +530,21 @@ export default function StepFlow({
           const it = items[i];
           if (n && it) map[it.line] = n;
         });
+        rememberToFetchDone(projectPath, map);
         setToFetchDone(map);
+        // 扩展/收货一旦对上 papers/，清掉「等待收货」——否则 95 秒窗内清单
+        // 已存了按钮还在等（通道 C 不经下载夹，前端计时器不知情）
+        setBrowserOpenedAt((cur) => {
+          let changed = false;
+          const next = { ...cur };
+          for (const it of items) {
+            if (map[it.line] && next[it.line]) {
+              delete next[it.line];
+              changed = true;
+            }
+          }
+          return changed ? next : cur;
+        });
       })
       .catch(() => {});
   };
@@ -363,6 +552,81 @@ export default function StepFlow({
     if (paywallListOpen && paywallList.text) refreshToFetchProgress();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paywallListOpen, paywallList.text]);
+  // 恢复展开（从持久化读回的 true）：清单内容也要加载回来
+  useEffect(() => {
+    if (paywallListOpen && paywallList.text == null && !paywallList.error) {
+      void loadPaywallList();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    // 扩展「存到 Mesa」经独立 helper 进程落盘——主程序回执监听广播
+    // inst-papers-changed（带 projectRoot），这里就地重拉进度，清单实时翻「已存」
+    const internals = (globalThis as { __TAURI_INTERNALS__?: { transformCallback?: unknown } })
+      .__TAURI_INTERNALS__;
+    if (!projectPath || !internals?.transformCallback) return;
+    let un: (() => void) | undefined;
+    void listen<{
+      projectRoot?: string;
+      title?: string;
+      doi?: string;
+      saved?: string;
+    }>("inst-papers-changed", (e) => {
+      if (!e.payload?.projectRoot || e.payload.projectRoot !== projectPath) return;
+      const title = (e.payload.title ?? "").trim();
+      const doi = (e.payload.doi ?? "").trim().toLowerCase();
+      const saved = (e.payload.saved ?? "").trim();
+      if (saved && (title || doi)) {
+        const { items } = toFetchProbeRef.current;
+        const add: Record<number, string> = {};
+        for (const it of items) {
+          const want = it.title.replace(/[^0-9a-z\u4e00-\u9fff]/gi, "").toLowerCase();
+          const have = title.replace(/[^0-9a-z\u4e00-\u9fff]/gi, "").toLowerCase();
+          const short = Math.min(want.length, have.length);
+          const titleHit =
+            short >= 8 && (want.includes(have) || have.includes(want));
+          const url = (it.url ?? "").toLowerCase();
+          const doiHit = doi.length >= 8 && url.includes(doi);
+          if (titleHit || doiHit) add[it.line] = saved.endsWith(".pdf") ? saved : `${saved}.pdf`;
+        }
+        if (Object.keys(add).length) {
+          setToFetchDone((cur) => {
+            const next = { ...cur, ...add };
+            rememberToFetchDone(projectPath, next);
+            return next;
+          });
+          setBrowserOpenedAt((cur) => {
+            let changed = false;
+            const next = { ...cur };
+            for (const line of Object.keys(add)) {
+              const k = Number(line);
+              if (next[k]) {
+                delete next[k];
+                changed = true;
+              }
+            }
+            return changed ? next : cur;
+          });
+        }
+      }
+      refreshToFetchProgress();
+    })
+      .then((u) => {
+        un = u;
+      })
+      .catch(() => {});
+    return () => un?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectPath]);
+  useEffect(() => {
+    // 扩展「存到 Mesa」经独立 helper 进程落盘，不发任何 Tauri 事件——清单
+    // 承诺「实时标出已存」却只有面板开合/事件两个刷新点，用扩展存的篇目要
+    // 收起再展开才亮（2026-09-17 审计）。面板开着时低频轮询补上
+    if (!paywallListOpen) return;
+    const t = window.setInterval(() => refreshToFetchProgress(), 2000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paywallListOpen]);
   useEffect(() => {
     // 组件测试环境没有 Tauri 事件通道（__TAURI_INTERNALS__.transformCallback），
     // 订阅直接跳过——进度刷新仍有面板开合与获取完成的触发点兜底
@@ -383,72 +647,58 @@ export default function StepFlow({
     return () => un?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectPath]);
-  useEffect(() => {
-    if (!paywallListOpen) return;
-    invoke<{ sessionPresent: boolean; prefixConfigured: boolean }>(
-      "inst_session_status",
-    )
-      .then((s) => setToFetchInstActive(s.sessionPresent || s.prefixConfigured))
-      .catch(() => setToFetchInstActive(false));
-  }, [paywallListOpen]);
-  /** 把 papers/ 已拿到的全文挂进 Zotero（按钮点击即用户意图，按 DOI 匹配；
-   *  linked_file 引用 papers/ 绝对路径，不复制进 Zotero 存储） */
+  /** 用 Zotero 打开 to-fetch.ris：原生支持 RIS/BibTeX。库里已有 DOI 则先确认。 */
   async function syncToZotero() {
-    const entries = toFetchItems
-      .filter((i) => !i.done && i.url)
-      .map((i) => ({ title: i.title, url: i.url }));
-    if (!entries.length) {
-      setZoteroSyncResult("清单里没有可同步的条目（要条目带 DOI 且未勾 ✓）");
+    if (!paywallRisFile) {
+      setZoteroSyncResult({
+        line: "还没有 to-fetch.ris，筛完检索后会生成；也可把已有 RIS/BibTeX 拖进 Zotero",
+      });
       return;
+    }
+    const dois = toFetchItems
+      .map((i) => doiFromToFetchUrl(i.url))
+      .filter((d): d is string => Boolean(d));
+    if (dois.length) {
+      try {
+        const match = await invoke<{
+          reachable: boolean;
+          present: number;
+          total: number;
+        }>("zotero_match_dois", { dois });
+        const prompt = formatZoteroDuplicatePrompt(match);
+        if (
+          prompt &&
+          !(await confirmDialog(prompt, {
+            confirmText: "仍要导入",
+            focusCancel: true,
+          }))
+        ) {
+          return;
+        }
+      } catch {
+        // 对照失败不挡导入
+      }
     }
     setZoteroSyncing(true);
     setZoteroSyncResult(null);
     try {
-      const r = await invoke<{
-        attached: string[];
-        created: string[];
-        skipped: string[];
-        missing: string[];
-        unmatched: string[];
-      }>("zotero_attach_fulltexts", {
-        projectRoot: projectPath,
-        entries,
-        risText: paywallRis ?? undefined,
+      const line = await invoke<string>("zotero_open_import", {
+        path: paywallRisFile.path,
+        root: paywallRisFile.root,
       });
-      const parts: string[] = [];
-      if (r.attached.length) parts.push(`挂上 ${r.attached.length} 篇`);
-      if (r.created.length) parts.push(`新建条目 ${r.created.length} 篇`);
-      if (r.skipped.length) parts.push(`已有附件跳过 ${r.skipped.length}`);
-      if (r.missing.length) parts.push(`还没拿到全文 ${r.missing.length}`);
-      if (r.unmatched.length) parts.push(`无 DOI 不同步 ${r.unmatched.length}`);
-      setZoteroSyncResult(parts.length ? `Zotero：${parts.join(" · ")}` : "Zotero：没有新东西可同步");
+      setZoteroSyncResult({ line });
     } catch (e) {
-      setZoteroSyncResult(`同步失败：${String(e)}`);
+      const line = String(e);
+      setZoteroSyncResult({ line, detail: line });
     } finally {
       setZoteroSyncing(false);
     }
   }
-
-  /** 逐篇获取（开放副本 → 机构通道）：PDF 落项目根 papers/ 并登记资源 */
-  async function fetchToFetchItem(item: ToFetchItem) {
-    if (!item.url) return;
-    setToFetchBusy((cur) => ({ ...cur, [item.line]: { status: "busy" } }));
+  async function openPapersDir() {
     try {
-      const res = await invoke<FetchedFulltextDto>("fetch_paper_fulltext", {
-        projectRoot: projectPath,
-        url: item.url,
-        fileNameHint: item.title,
-      });
-      setToFetchBusy((cur) => ({
-        ...cur,
-        [item.line]: { status: "ok", note: fulltextViaLabel(res.via) },
-      }));
-      refreshToFetchProgress();
+      await invoke("zotero_open_papers", { projectRoot: projectPath });
     } catch (e) {
-      setToFetchBusy((cur) => ({
-        ...cur,
-        [item.line]: { status: "error", note: String(e) },
-      }));
+      setZoteroSyncResult({ line: String(e), detail: String(e) });
     }
   }
 
@@ -483,7 +733,12 @@ export default function StepFlow({
   async function togglePaywallList() {
     const next = !paywallListOpen;
     setPaywallListOpen(next);
+    writePaywallListOpen(projectPath, next);
     if (!next || paywallList.text != null || paywallList.error) return;
+    await loadPaywallList();
+  }
+  /** 读 to-fetch.md（步骤工作区优先回落项目根）；恢复展开的挂载路径也走这里 */
+  async function loadPaywallList() {
     const candidates = ws
       ? [
           {
@@ -511,16 +766,31 @@ export default function StepFlow({
           root: c.root,
         });
         setPaywallList({ text: p.text, error: null, from: c.from });
-        // RIS 同源同目录（缺失不影响清单展开；同步到 Zotero 时有则建全题录条目）
-        try {
-          const risPath = c.path.replace(/to-fetch\.md$/, "to-fetch.ris");
-          const r = await invoke<{ text: string }>("read_file_preview", {
-            path: risPath,
-            root: c.root,
-          });
-          setPaywallRis(r.text);
-        } catch {
-          setPaywallRis(null);
+        {
+          const seen = new Set<string>();
+          const risTries = [
+            { path: `${projectPath}/papers/to-fetch.ris`, root: projectPath },
+            {
+              path: c.path.replace(/to-fetch\.md$/, "to-fetch.ris"),
+              root: c.root,
+            },
+          ];
+          let ris: { path: string; root: string } | null = null;
+          for (const t of risTries) {
+            if (seen.has(t.path)) continue;
+            seen.add(t.path);
+            try {
+              await invoke<{ text: string }>("read_file_preview", {
+                path: t.path,
+                root: t.root,
+              });
+              ris = t;
+              break;
+            } catch {
+              // 试下一份
+            }
+          }
+          setPaywallRisFile(ris);
         }
         return;
       } catch {
@@ -778,7 +1048,6 @@ export default function StepFlow({
   }
 
   function nodeActions(node: StepFlowNode) {
-    const isCurrent = node.key === flow.currentKey;
     switch (node.kind) {
       case "human": {
         const papersTarget = isPapersTarget(node.human!.target);
@@ -789,8 +1058,10 @@ export default function StepFlow({
         // 「还轮不到」由整行降透明度表达（见下方 li 的 dimmed）
         if (node.human!.timing === "after" && !afterReady(node.human!)) return null;
         // 文献类交付统一去「文献与数据」：那里三个进料口齐全（Zotero / 题录 / 扫目录），
-        // 在每个事项行再复制一套入口，等于把同一件事摆三个地方
+        // 在每个事项行再复制一套入口，等于把同一件事摆三个地方。
+        // 付费墙事项例外：清单行内获取/浏览器/关联才是入口，导入钮会抢右缘。
         if (papersTarget) {
+          if (isPaywallTaskTitle(node.human!.title) || isPendingConfirmTaskTitle(node.human!.title)) return null;
           return node.done ? null : (
             <button
               type="button"
@@ -892,7 +1163,7 @@ export default function StepFlow({
           </span>
         ) : null;
       case "review":
-        if (!isCurrent || !ws) return null;
+        if (!ws || runStatus === "pending" || runStatus === "done") return null;
         return (
           <button
             type="button"
@@ -1011,24 +1282,39 @@ export default function StepFlow({
             !node.done && (
             <span
               className="shrink-0 rounded-sm bg-raised px-1.5 py-0.5 text-micro text-l4"
-              title="可选：不做也能跑完这一步"
+              title={
+                isPaywallTaskTitle(node.human!.title)
+                  ? "可选：不做也能跑完这一步。跳过的篇目下一篇按摘要记"
+                  : "可选：不做也能跑完这一步"
+              }
             >
               可选
             </span>
           )}
 
-          {/* 落点命中计数（v3.97）：存在性检测的进度感——见到几个文件、清单共几篇。
-              显式取消后检测命中也照显示：进度感不随勾态消失（与 HumanTasksList 同文案） */}
-          {node.kind === "human" && node.human!.hitCount != null && (
-            <span
-              className="shrink-0 text-micro text-l4"
-            >
+          {/* 付费墙进度只认清单已存/总数，不拿 papers/ 里全部 PDF 当「已见到」——
+              那会把无关文件算进来，和清单「已存 21/89」对不上。 */}
+          {node.kind === "human" && isPendingConfirmTaskTitle(node.human!.title) ? null : node.kind === "human" && isPaywallTaskTitle(node.human!.title) ? (
+            toFetchItems.length > 0 ? (
+              <span
+                className="shrink-0 text-micro tabular-nums text-l4"
+                title={`已存 ${paywallSavedCount} 篇，清单共 ${toFetchItems.length} 篇`}
+              >
+                {paywallSavedCount}/{toFetchItems.length}
+              </span>
+            ) : node.human!.expectedCount != null ? (
+              <span className="shrink-0 text-micro tabular-nums text-l4">
+                清单 {node.human!.expectedCount}
+              </span>
+            ) : null
+          ) : node.kind === "human" && node.human!.hitCount != null ? (
+            <span className="shrink-0 text-micro text-l4">
               已见到 {node.human!.hitCount} 个文件
               {node.human!.expectedCount != null
                 ? ` / 清单共 ${node.human!.expectedCount} 篇`
                 : ""}
             </span>
-          )}
+          ) : null}
           {nodeActions(node)}
         </div>
         {/* 当前节点的引导与展开操作：种子 chips / 落点说明。
@@ -1412,8 +1698,8 @@ export default function StepFlow({
         {/* 说明只在当前节点显示：一屏同时摊开五段说明是这一页最大的噪音源。
             非当前节点的说明挂在行的 title 上（悬停可见），信息不丢。
             例外（v3.97）：可选的 after 档事项被设计成不抢「当前节点」，若死守 isCurrent，
-            「下载付费墙文献全文」的导入说明就只剩悬停可见（用户实测「没说清怎么导入」）——
-            就绪（afterReady）且未完成时就地展示摘要；长 guidance 的完整做法收进「怎么做」详情。
+            「下载付费墙文献全文」的清单入口就只剩悬停可见（用户实测「没说清怎么导入」）——
+            就绪（afterReady）且未完成时就地展示清单；做法进行内按钮 title，不写说明书。
             学术检索 MCP 同款：沉在可选区永远不是当前节点，必须就地给预设入口。 */}
         {node.kind === "human" &&
           isAcademicMcpTaskTitle(node.human!.title) &&
@@ -1461,17 +1747,59 @@ export default function StepFlow({
               </button>
             </div>
           )}
+        {node.kind === "human" &&
+          isPendingConfirmTaskTitle(node.human!.title) &&
+          !node.done &&
+          !dense && (
+            <div className="mt-1 pl-9 text-micro leading-5 text-l4">
+              <p>{PENDING_HINT}</p>
+              <div className="mt-1.5">
+                <button
+                  type="button"
+                  onClick={() => setPendingListOpen((open) => !open)}
+                  aria-expanded={pendingListOpen}
+                  className="flex items-center gap-1 text-xs text-l3 hover:text-l1"
+                  title="Agent 拿不准的篇目，点纳入或排除"
+                >
+                  <FoldMark open={pendingListOpen} />
+                  待确认清单
+                </button>
+                {pendingListOpen && (
+                  <div className="mt-1">
+                    <PendingConfirmList
+                      worktreePath={ws?.worktreePath}
+                      projectRoot={projectPath}
+                      onOpenPdf={(path) =>
+                        setFilePreviewReq({
+                          projectRoot: projectPath,
+                          path,
+                          token: Date.now(),
+                        })
+                      }
+                      onChanged={() => {
+                        onChanged?.();
+                        void loadPaywallList();
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         {!dense &&
           node.kind === "human" &&
           guidance &&
           !isAcademicMcpTaskTitle(node.human!.title) &&
+          !isPendingConfirmTaskTitle(node.human!.title) &&
           (isCurrent ||
             (!node.done &&
               node.human!.timing === "after" &&
               afterReady(node.human!))) && (
             <div className="mt-1 pl-9 text-micro leading-5 text-l4">
               {isPaywallTaskTitle(node.human!.title) ? (
-                <p className="whitespace-pre-wrap">{PAYWALL_SUMMARY}</p>
+                <p>{PAYWALL_HINT}</p>
+              ) : isPendingConfirmTaskTitle(node.human!.title) ? (
+                <p>{PENDING_HINT}</p>
               ) : (
                 <>
                   <p className="whitespace-pre-wrap">{guidanceShort}</p>
@@ -1487,23 +1815,26 @@ export default function StepFlow({
                   )}
                 </>
               )}
-              {/* 付费墙任务（2026-09-15 用户实测「不知道如何下手」）：第一步是看到
-                  「哪些文献缺全文」，清单就在 papers/to-fetch.md——就地展开，不必去文件页找 */}
+              {/* 付费墙：清单就是入口。折叠标题带缺篇数；做法进行内按钮 title，
+                  不再在清单上下各写一段说明书。 */}
               {isPaywallTaskTitle(node.human!.title) && !node.done && (
                 <div className="mt-1.5">
                   <button
                     type="button"
                     onClick={() => void togglePaywallList()}
-                    className="rounded-sm px-1 py-0.5 text-micro text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
-                    title="展开 papers/to-fetch.md——agent 筛完列出的缺全文清单"
+                    aria-expanded={paywallListOpen}
+                    className="flex items-center gap-1 text-xs text-l3 hover:text-l1"
+                    title="agent 筛完列出的缺全文清单"
                   >
-                    {paywallListOpen ? "收起待获取清单" : "查看待获取清单"}
-                    {paywallList.text && !paywallListOpen
-                      ? `（缺 ${countToFetchEntries(paywallList.text)} 篇）`
-                      : ""}
+                    <FoldMark open={paywallListOpen} />
+                    {paywallListOpen
+                      ? `待获取${paywallList.from ? ` · ${paywallList.from}` : ""}`
+                      : paywallList.text
+                        ? `待获取（还缺 ${missingToFetchCount(paywallList.text, toFetchDone)} 篇）`
+                        : "待获取"}
                   </button>
                   {paywallListOpen && (
-                    <div className="mt-1 rounded-sm ccode-well px-2 py-1.5">
+                    <div className="mt-1">
                       {paywallList.error ? (
                         <p className="text-micro text-l4">
                           {paywallList.error}
@@ -1512,104 +1843,160 @@ export default function StepFlow({
                         <p className="text-micro text-l4">加载中…</p>
                       ) : (
                         <>
-                          <p className="mb-1 text-micro text-l4">
-                            来自{paywallList.from} · papers/to-fetch.md · 已存{" "}
-                            {Object.keys(toFetchDone).length +
-                              toFetchItems.filter((i) => i.done && !toFetchDone[i.line]).length}
-                            /{toFetchItems.length} 篇
-                          </p>
+                          {browserOpenErr && (
+                            <p
+                              className="mb-1 break-words text-micro text-err-text"
+                              role="alert"
+                            >
+                              {browserOpenErr}
+                            </p>
+                          )}
                           {toFetchItems.length > 0 ? (
-                            <ul className="max-h-56 space-y-0.5 overflow-auto">
+                            <ul
+                              ref={toFetchListRef}
+                              className="max-h-72 space-y-0.5 overflow-auto px-0.5 py-px"
+                              onScroll={(e) =>
+                                writeToFetchScroll(
+                                  projectPath,
+                                  e.currentTarget.scrollTop,
+                                )
+                              }
+                            >
                               {toFetchItems.map((item) => {
                                 const st = toFetchBusy[item.line];
                                 const doneName = toFetchDone[item.line];
                                 const done = item.done || !!doneName;
-                                const can =
-                                  !done &&
-                                  !!item.url &&
-                                  canAttemptFulltext(item.url, toFetchInstActive);
+                                const waiting =
+                                  !!browserOpenedAt[item.line] &&
+                                  Date.now() - browserOpenedAt[item.line] < 95000;
+                                const spotlight = browserSpotlight === item.line;
                                 return (
                                   <li
                                     key={item.line}
-                                    className="flex min-w-0 items-center gap-2 text-micro leading-5"
+                                    data-to-fetch-line={item.line}
+                                    className={`flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 ${
+                                      spotlight
+                                        ? "bg-cta/10 ring-1 ring-inset ring-cta-bd"
+                                        : "hover:bg-hover"
+                                    }`}
                                   >
-                                    <span
-                                      className={`min-w-0 flex-1 truncate ${done ? "text-l4 line-through" : "text-l3"}`}
-                                      title={item.title}
+                                    <button
+                                      type="button"
+                                      className={`min-w-0 flex-1 truncate text-left text-xs ${
+                                        doneName
+                                          ? "text-l4 line-through hover:text-l2"
+                                          : "text-l2 hover:text-l1"
+                                      }`}
+                                      title={
+                                        doneName
+                                          ? `在文件页打开 papers/${doneName}`
+                                          : item.url
+                                            ? "打开来源网页"
+                                            : item.title
+                                      }
+                                      onClick={() => {
+                                        focusToFetchLine(item.line);
+                                        if (doneName) {
+                                          const rel = toFetchPaperRel(doneName);
+                                          if (!rel) return;
+                                          setFilePreviewReq({
+                                            projectRoot: projectPath,
+                                            path: absoluteResourcePath(
+                                              projectPath,
+                                              rel,
+                                            ),
+                                            token: Date.now(),
+                                          });
+                                          return;
+                                        }
+                                        if (!item.url) return;
+                                        setBrowserOpenErr(null);
+                                        invoke("inst_browser_open", {
+                                          url: instOpenTarget(item.url),
+                                          projectRoot: projectPath,
+                                          title: item.title,
+                                          doi: item.url,
+                                        })
+                                          .then(() => {
+                                            setBrowserOpenedAt((cur) => ({
+                                              ...cur,
+                                              [item.line]: Date.now(),
+                                            }));
+                                          })
+                                          .catch((e) => {
+                                            setBrowserOpenErr(
+                                              `打开失败：${String(e)}`,
+                                            );
+                                          });
+                                      }}
                                     >
                                       {item.title}
-                                    </span>
+                                    </button>
                                     {done ? (
-                                      doneName ? (
-                                        <span
-                                          className="shrink-0 text-ok-text"
-                                          title={`papers/${doneName}`}
-                                        >
-                                          ✓ 已存 papers/
-                                        </span>
-                                      ) : (
-                                        <span className="shrink-0 text-l4">✓ 已勾</span>
-                                      )
+                                      <span
+                                        className={`shrink-0 text-micro ${doneName ? "text-ok-text" : "text-l4"}`}
+                                        title={
+                                          doneName
+                                            ? `点标题打开 papers/${doneName}`
+                                            : undefined
+                                        }
+                                      >
+                                        {doneName ? "✓ 已存" : "✓ 已勾"}
+                                      </span>
                                     ) : (
-                                      <>
+                                      <span className="flex shrink-0 items-center">
                                         {item.url && (
                                           <button
                                             type="button"
-                                            className="shrink-0 rounded-sm px-1 py-0.5 text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1"
-                                            title="在系统浏览器里打开这一篇（真实浏览器会话，出版商不拦截）；浏览器里点站方下载，落下的 PDF 由 Mesa 自动收进本项目 papers/ 并登记"
+                                            className={`${inlineActionClass} shrink-0`}
+                                            title="在系统浏览器打开；点站方下载，90 秒内落下的 PDF 会收进 papers/。没收到用「关联」"
                                             onClick={() => {
+                                              setBrowserOpenErr(null);
                                               invoke("inst_browser_open", {
                                                 url: instOpenTarget(item.url),
                                                 projectRoot: projectPath,
                                                 title: item.title,
                                                 doi: item.url,
-                                              }).catch((e) => {
-                                                setZoteroSyncResult(`打开浏览器失败：${String(e)}`);
-                                              });
+                                              })
+                                                .then(() => {
+                                                  focusToFetchLine(item.line);
+                                                  setBrowserOpenedAt((cur) => ({
+                                                    ...cur,
+                                                    [item.line]: Date.now(),
+                                                  }));
+                                                })
+                                                .catch((e) => {
+                                                  setBrowserOpenErr(
+                                                    `打开浏览器失败：${String(e)}`,
+                                                  );
+                                                });
                                             }}
                                           >
-                                            浏览器打开
+                                            {waiting ? "等待收货…" : "浏览器"}
                                           </button>
                                         )}
                                         <button
                                           type="button"
-                                          className="shrink-0 rounded-sm px-1 py-0.5 text-l4 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l2 disabled:opacity-50"
+                                          className={`${ghostActionClass} shrink-0`}
                                           disabled={st?.status === "busy"}
-                                          title="选一个已下载的 PDF 文件，按本行标题复制进 papers/ 并登记（文件名随意，浏览器下载的 main(1).pdf 也能对上号）"
+                                          title="选一个已下载的 PDF，按本行标题复制进 papers/（文件名随意）"
                                           onClick={() => void attachToFetchItem(item)}
                                         >
-                                          {st?.status === "busy" ? "关联中…" : "关联本地 PDF"}
+                                          {st?.status === "busy" ? "关联中…" : "关联"}
                                         </button>
-                                        {can && (
-                                          <button
-                                            type="button"
-                                            className="shrink-0 rounded-sm px-1 py-0.5 text-l4 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l2 disabled:opacity-50"
-                                            disabled={st?.status === "busy"}
-                                            title="自动获取：先查合法开放副本（预印本/仓储），再走机构通道（设置 → 网络 → 机构访问）。硬反爬墙站点（Wiley/Elsevier 等）多半取不到——失败就用「窗口打开」人工取"
-                                            onClick={() => void fetchToFetchItem(item)}
-                                          >
-                                            {st?.status === "busy"
-                                              ? "获取中…"
-                                              : st?.status === "ok"
-                                                ? "再取一次"
-                                                : st?.status === "error"
-                                                  ? "重试自动获取"
-                                                  : "自动获取"}
-                                          </button>
-                                        )}
-                                      </>
+                                      </span>
                                     )}
                                     {!done && st?.status === "ok" && (
                                       <span
-                                        className="shrink-0 text-ok-text"
+                                        className="shrink-0 text-micro text-ok-text"
                                         title={st.note}
                                       >
-                                        ✓ 已落 papers/
+                                        ✓ 已存
                                       </span>
                                     )}
                                     {!done && st?.status === "error" && (
                                       <span
-                                        className="shrink-0 max-w-[50%] truncate text-err-text"
+                                        className="shrink-0 max-w-[12rem] truncate text-micro text-err-text"
                                         title={st.note ?? ""}
                                       >
                                         {st.note}
@@ -1620,29 +2007,37 @@ export default function StepFlow({
                               })}
                             </ul>
                           ) : (
-                            <pre className="max-h-56 overflow-auto whitespace-pre-wrap font-mono text-micro leading-5 text-l3">
+                            <pre className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-micro leading-5 text-l3">
                               {paywallList.text}
                             </pre>
                           )}
                         </>
                       )}
-                      <p className="mt-1 text-micro text-l4">
-                        窗口里下载的（页面自带按钮或「⤓ 取 PDF」）都会自动落 papers/ 并登记，
-                        本清单会实时标出已存的篇目；「自动获取」只对有合法开放副本或机构通道可达的
-                        条目有效，硬反爬墙站点用「窗口打开」
-                      </p>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <div className="mt-1 flex min-w-0 items-center gap-2">
                         <button
                           type="button"
                           onClick={() => void syncToZotero()}
                           disabled={zoteroSyncing}
-                          title="把 papers/ 已拿到的全文挂进 Zotero 对应条目（按 DOI 匹配，linked_file 引用不复制）。需要 Zotero 正在运行并允许本机通信；首次写入 Zotero 会弹授权确认"
-                          className="shrink-0 rounded-sm px-1 py-0.5 text-micro text-l3 underline decoration-dotted underline-offset-2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                          title="用 Zotero 打开 papers/to-fetch.ris（原生 RIS / BibTeX）。库里已有 DOI 会先问是否仍要导入"
+                          className={`${ghostActionClass} shrink-0`}
                         >
-                          {zoteroSyncing ? "同步中…" : "同步到 Zotero"}
+                          {zoteroSyncing ? "打开中…" : "同步到 Zotero"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void openPapersDir()}
+                          title="打开项目 papers/。把 PDF 直接拖进 Zotero，一般会自己对上已有条目；对不上再拖到那一条上"
+                          className={`${ghostActionClass} shrink-0`}
+                        >
+                          打开 papers/
                         </button>
                         {zoteroSyncResult && (
-                          <span className="text-micro text-l4">{zoteroSyncResult}</span>
+                          <span
+                            className={`min-w-0 truncate text-micro ${/失败|只读|连不上|未开启|打不开|无法/.test(zoteroSyncResult.line) ? "text-err-text" : "text-l4"}`}
+                            title={zoteroSyncResult.detail || zoteroSyncResult.line}
+                          >
+                            {zoteroSyncResult.line}
+                          </span>
                         )}
                       </div>
                     </div>

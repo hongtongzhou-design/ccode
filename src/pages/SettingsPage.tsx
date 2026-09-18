@@ -13,6 +13,7 @@ import {
   PageHeader,
   rowActionClass,
   Checkbox,
+  FoldMark,
   Toggle,
   secondaryActionClass,
 } from "../components/PageFrame";
@@ -52,7 +53,13 @@ import {
   resolvePaletteId,
 } from "../terminal-palettes";
 import { THEMES, isCustomThemeId, isLightTheme } from "../themes";
-import { instSessionLabel, type InstSessionStatus } from "../inst-access";
+import {
+  DEFAULT_INST_LOGIN_URL,
+  instOtherPanelDefaultOpen,
+  instPrefixPanelDefaultOpen,
+  instSessionLabel,
+  type InstSessionStatus,
+} from "../inst-access";
 import appCss from "../App.css?raw";
 import {
   parseThemeSwatchesFromCss,
@@ -231,9 +238,33 @@ const SETTING_NAV: { id: string; label: string; group: "basic" | "management" }[
   { id: "about", label: "关于", group: "management" },
 ];
 
-/** 机构登录窗的默认入口：CARSI 高校联盟（国内联邦登录，绝大多数高校接入）——
- *  登录选学校 → 在资源页点进一个数据库（出版商会话建立）即可，前缀都可不填 */
-const DEFAULT_INST_LOGIN_URL = "https://www.carsi.edu.cn/";
+/** 设置页低频折叠：校外前缀 / 其他方式。默认开闭由调用方按已填内容决定。 */
+function SettingsFold({
+  label,
+  open,
+  onToggle,
+  children,
+}: {
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="-ml-1 inline-flex items-center text-micro text-l4 hover:text-l2"
+      >
+        <FoldMark open={open} />
+        {label}
+      </button>
+      {open && <div className="mt-2 flex flex-col gap-2">{children}</div>}
+    </div>
+  );
+}
 
 /** 依赖体检指引文案的平台参数（installGuidance 显式传参，纯逻辑不读平台） */
 const DEP_PLATFORM: DepPlatform = IS_MAC ? "mac" : IS_WINDOWS ? "win" : "linux";
@@ -801,6 +832,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const [institutionalLoginUrl, setInstitutionalLoginUrl] = useState("");
   const [instStatus, setInstStatus] = useState<InstSessionStatus | null>(null);
   const [instBusy, setInstBusy] = useState<"login" | "capture" | "clear" | "bridge" | null>(null);
+  // null = 跟随默认（已填前缀 / 自定义入口 / 已有内嵌会话则展开）；人手点过之后不再抢
+  const [instPrefixOpen, setInstPrefixOpen] = useState<boolean | null>(null);
+  const [instOtherOpen, setInstOtherOpen] = useState<boolean | null>(null);
   // 出网代理自动检测：候选由后端读系统代理/环境变量/常见端口产出，点选才写入
   const [proxyDetecting, setProxyDetecting] = useState(false);
   const [proxyCandidates, setProxyCandidates] = useState<
@@ -1034,7 +1068,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       if (typed) await patch({ institutionalLoginUrl: typed });
       await invoke("inst_browser_open", { url });
       setNotice(
-        "已调起系统浏览器——选学校、完成账号登录后即可直接在浏览器里下载文献，Mesa 会自动收进项目 papers/（待获取清单点「浏览器打开」后 90 秒内落下的 PDF 自动归位）",
+        "已打开浏览器。选学校、完成登录后，待获取清单点「浏览器」下载，PDF 自动进项目",
       );
     } catch (e) {
       setError(String(e));
@@ -1529,6 +1563,22 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       toast(message, "warning");
     }
   }
+
+  const prefixDraftInvalid =
+    Boolean(institutionalPrefix.trim()) &&
+    !/^https?:\/\//i.test(institutionalPrefix.trim());
+  const prefixOpen =
+    instPrefixOpen ??
+    instPrefixPanelDefaultOpen(
+      institutionalPrefix,
+      instStatus?.prefixInvalid || prefixDraftInvalid,
+    );
+  const otherOpen =
+    instOtherOpen ??
+    instOtherPanelDefaultOpen(
+      institutionalLoginUrl,
+      Boolean(instStatus?.sessionPresent),
+    );
 
   return (
     <PageFrame width="fluid">
@@ -2538,51 +2588,70 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           />
         </Row>
         <Row
-          label="机构访问前缀"
-          hint="图书馆「校外访问」的 EZproxy / OpenAthens 前缀，形如 https://proxy.xxx.edu.cn/login?url=。留空 = 不使用（校园网直连可不填）。"
-        >
-          <input
-            className={`${fieldFixed} w-72 font-mono text-xs`}
-            placeholder="https://proxy.xxx.edu.cn/login?url="
-            value={institutionalPrefix}
-            onChange={(e) => {
-              draftDirty.current.add("institutionalPrefix");
-              setInstitutionalPrefix(e.target.value);
-            }}
-            onBlur={() => {
-              draftDirty.current.delete("institutionalPrefix");
-              const v = institutionalPrefix.trim();
-              // 非法即拒绝持久化（终检 #6 残留：缺 scheme 的前缀此前照样写进
-              // settings.json，只靠事后红字提示；现在保存口就拦）
-              if (v && !/^https?:\/\//i.test(v)) return;
-              void patch({ institutionalPrefix: v });
-            }}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter") return;
-              draftDirty.current.delete("institutionalPrefix");
-              const v = institutionalPrefix.trim();
-              if (v && !/^https?:\/\//i.test(v)) return;
-              void patch({ institutionalPrefix: v });
-            }}
-          />
-          {/* 口径分裂修正（2026-09-17 审计）：缺 scheme 的前缀会被通道加载静默
-              丢弃——以前状态页报「已配置」、按钮亮着，取全文却永远走不通 */}
-          {instStatus?.prefixInvalid && (
-            <p className="text-micro text-err-text">
-              前缀不是合法的 http(s) 地址——机构通道当前没有在使用它，请补全
-              scheme（如上例以 https:// 开头）
-            </p>
-          )}
-        </Row>
-        <Row
-          label="机构登录"
-          hint="点「在浏览器中登录」→ 选学校、完成登录（一次长期有效）。文献在浏览器里下载，Mesa 自动收进 papers/。不存账号密码、逐篇下载。"
+          label="学校图书馆"
+          hint="登录一次，之后待获取清单点「浏览器」下载，PDF 自动进项目。不存账号密码。"
         >
           <div className="flex max-w-[34rem] flex-col gap-2">
-            <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void openInstLogin()}
+              disabled={instBusy !== null}
+              className="h-8 w-fit shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+            >
+              {instBusy === "login" ? "打开中…" : "登录学校账号"}
+            </button>
+            <SettingsFold
+              label={
+                !prefixOpen && instStatus?.prefixHost
+                  ? `校外打不开全文时 · ${instStatus.prefixHost}`
+                  : "校外打不开全文时"
+              }
+              open={prefixOpen}
+              onToggle={() => setInstPrefixOpen(!prefixOpen)}
+            >
+              <p className="text-micro text-l4">
+                把图书馆「校外访问」链接贴这里，打开文献会走学校代理。校园网直连不用填。
+              </p>
               <input
-                className={`${fieldFixed} min-w-0 flex-1 font-mono text-xs`}
-                placeholder="https://www.carsi.edu.cn/"
+                className={`${fieldFixed} w-full font-mono text-xs`}
+                placeholder="https://proxy.xxx.edu.cn/login?url="
+                value={institutionalPrefix}
+                onChange={(e) => {
+                  draftDirty.current.add("institutionalPrefix");
+                  setInstitutionalPrefix(e.target.value);
+                }}
+                onBlur={() => {
+                  draftDirty.current.delete("institutionalPrefix");
+                  const v = institutionalPrefix.trim();
+                  if (v && !/^https?:\/\//i.test(v)) return;
+                  void patch({ institutionalPrefix: v });
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  draftDirty.current.delete("institutionalPrefix");
+                  const v = institutionalPrefix.trim();
+                  if (v && !/^https?:\/\//i.test(v)) return;
+                  void patch({ institutionalPrefix: v });
+                }}
+              />
+              {(prefixDraftInvalid || instStatus?.prefixInvalid) && (
+                <p className="text-micro text-err-text">
+                  前缀不是合法的 http(s) 地址——机构通道当前没有在使用它，请补全
+                  scheme（如上例以 https:// 开头）
+                </p>
+              )}
+            </SettingsFold>
+            <SettingsFold
+              label="其他方式"
+              open={otherOpen}
+              onToggle={() => setInstOtherOpen(!otherOpen)}
+            >
+              <p className="text-micro text-l4">
+                登录入口（空 = CARSI 高校联盟）
+              </p>
+              <input
+                className={`${fieldFixed} w-full font-mono text-xs`}
+                placeholder={DEFAULT_INST_LOGIN_URL}
                 value={institutionalLoginUrl}
                 onChange={(e) => {
                   draftDirty.current.add("institutionalLoginUrl");
@@ -2602,63 +2671,54 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   });
                 }}
               />
-              <button
-                type="button"
-                onClick={() => void openInstLogin()}
-                disabled={instBusy !== null}
-                className="h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
-              >
-                {instBusy === "login" ? "打开中…" : "在浏览器中登录"}
-              </button>
-            </div>
-            <p className="flex flex-wrap items-center gap-x-2 text-micro text-l4">
-              <span>
-                会话：{instSessionLabel(instStatus)}
-                {instStatus?.prefixConfigured ? ` · 前缀 ${instStatus.prefixHost}` : ""}
-                {instStatus?.capturedFrom ? ` · 入口 ${instStatus.capturedFrom}` : ""}
-              </span>
-              {instStatus?.sessionPresent && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                 <button
                   type="button"
-                  onClick={() => void clearInstSession()}
+                  onClick={() => void openInstLoginEmbedded()}
                   disabled={instBusy !== null}
-                  className="underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                  className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                  title="旧通道：内嵌登录窗，会话倒回 Mesa（无头阶梯/调试用，日常下载走浏览器）"
                 >
-                  {instBusy === "clear" ? "清除中…" : "清除会话"}
+                  内嵌窗登录
                 </button>
-              )}
-            </p>
-            {/* 次要操作一行收口（说明进悬停提示，不占版面）：内嵌窗会话与浏览器桥都是
-                一次性/调试动作，主路径只有上方的「在浏览器中登录」 */}
-            <div className="flex items-center gap-4 border-t border-hairline pt-2">
-              <button
-                type="button"
-                onClick={() => void openInstLoginEmbedded()}
-                disabled={instBusy !== null}
-                className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
-                title="旧通道：内嵌登录窗，会话倒回 Mesa（无头阶梯/调试用，日常下载走浏览器）"
-              >
-                内嵌窗登录
-              </button>
-              <button
-                type="button"
-                onClick={() => void captureInstSession()}
-                disabled={instBusy !== null}
-                className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
-                title="手动保存在内嵌窗里登录得到的会话（浏览器通道不需要这一步）"
-              >
-                {instBusy === "capture" ? "保存中…" : "我已登录，保存会话"}
-              </button>
-              <button
-                type="button"
-                onClick={() => void installBrowserBridge()}
-                disabled={instBusy !== null}
-                className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
-                title="实验功能：安装后到 Chrome/Edge 扩展页（开发者模式）「加载已解压的扩展程序」，选安装结果里给出的扩展目录（已自动就位到本机配置目录），文献页即有「存到 Mesa」一键落 papers/。日常用「浏览器打开」自动收货即可，不必依赖此按钮"
-              >
-                {instBusy === "bridge" ? "安装中…" : "安装浏览器桥（实验）"}
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={() => void captureInstSession()}
+                  disabled={instBusy !== null}
+                  className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                  title="手动保存在内嵌窗里登录得到的会话（浏览器通道不需要这一步）"
+                >
+                  {instBusy === "capture" ? "保存中…" : "我已登录，保存会话"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void installBrowserBridge()}
+                  disabled={instBusy !== null}
+                  className="text-micro text-l4 underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                  title="实验功能：安装后到 Chrome/Edge 扩展页（开发者模式）「加载已解压的扩展程序」，选安装结果里给出的扩展目录（已自动就位到本机配置目录），文献页即有「存到 Mesa」一键落 papers/。日常用「浏览器打开」自动收货即可，不必依赖此按钮"
+                >
+                  {instBusy === "bridge" ? "安装中…" : "安装浏览器桥"}
+                </button>
+              </div>
+              <p className="flex flex-wrap items-center gap-x-2 text-micro text-l4">
+                <span>
+                  内嵌会话：{instSessionLabel(instStatus)}
+                  {instStatus?.capturedFrom
+                    ? ` · 入口 ${instStatus.capturedFrom}`
+                    : ""}
+                </span>
+                {instStatus?.sessionPresent && (
+                  <button
+                    type="button"
+                    onClick={() => void clearInstSession()}
+                    disabled={instBusy !== null}
+                    className="underline decoration-dotted underline-offset-2 hover:text-l2 disabled:opacity-50"
+                  >
+                    {instBusy === "clear" ? "清除中…" : "退出"}
+                  </button>
+                )}
+              </p>
+            </SettingsFold>
           </div>
         </Row>
       </Section>

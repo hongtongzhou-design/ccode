@@ -22,12 +22,26 @@
 
   function pageDoi() {
     var m = document.querySelector('meta[name="citation_doi"], meta[name="dc.Identifier"]');
-    return m && m.content ? m.content.replace(/^doi:\s*/i, '').trim() : '';
+    var fromMeta = m && m.content ? m.content.replace(/^doi:\s*/i, '').trim() : '';
+    if (fromMeta) return fromMeta;
+    // PDF 阅读器页没有 citation_doi：从地址里抠（Wiley /doi/pdf/10.x/y 等）
+    var href = location.href || '';
+    var mm = href.match(/10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i);
+    return mm ? mm[0].replace(/[.,;]+$/, '') : '';
   }
 
   function pageTitle() {
-    var m = document.querySelector('meta[name="citation_title"]');
-    return (m && m.content) || document.title || '';
+    var sels = [
+      'meta[name="citation_title"]',
+      'meta[name="dc.Title"]',
+      'meta[name="DC.title"]',
+      'meta[property="og:title"]',
+    ];
+    for (var i = 0; i < sels.length; i++) {
+      var m = document.querySelector(sels[i]);
+      if (m && m.content && m.content.trim()) return m.content.trim();
+    }
+    return (document.title || '').trim();
   }
 
   function fixPdfUrl(u) {
@@ -82,12 +96,18 @@
     return /^\/science\/article\/(?:abs\/)?pii\/[^/?#]+/i.test(location.pathname);
   }
 
-  // 内嵌阅读器扫描（iframe/object/embed 里的 pdfish 地址）
+  // 内嵌阅读器扫描（iframe/object/embed 里的 pdfish 地址）。blob:/data: 形态
+  // （UUID 路径段永不命中 PDFISH）补一档：元素尺寸可观才算——页内 fetch 对
+  // blob:/data: 都拿得到字节（2026-09-17 审计：这类阅读器此前是取链盲区）
   function embeddedPdf() {
     var ems = document.querySelectorAll('iframe[src], object[data], embed[src]');
     for (var k = 0; k < ems.length; k++) {
-      var s = ems[k].src || ems[k].data || '';
-      if (s && PDFISH.test(s)) return fixPdfUrl(s);
+      var el = ems[k];
+      var s = el.src || el.data || '';
+      if (!s) continue;
+      if (PDFISH.test(s)) return fixPdfUrl(s);
+      if ((s.indexOf('blob:') === 0 || s.indexOf('data:') === 0)
+        && (el.offsetWidth > 200 || el.offsetHeight > 200)) return s;
     }
     return null;
   }
@@ -144,21 +164,39 @@
     setTimeout(function () { btn.textContent = '存到 Mesa'; btn.style.opacity = '1'; }, 4000);
   }
 
-  // 取字节：页内 fetch 优先（带真实会话，设计主路径）；跨源被 CORS 拦下时回退
-  // 请后台 service worker 代取——MV3 起内容脚本 fetch 受页面 CORS 约束，
-  // host_permissions 只豁免后台（Cookie 口径可能不同，尽力而为的兜底）
+  // 取字节：页内 fetch 优先（带真实会话，设计主路径），AbortController 45s 超时
+  // （出版商网关挂起时 fetch 数分钟不 settle，按钮会永久卡在「取 PDF 中…」且
+  // disabled 无从重试，2026-09-17 审计）。先看 Content-Length：>40MB 的直接走
+  // 改道（读 body 会被 45s 超时掐断——abort 同样作用于 arrayBuffer，终检提示）。
+  // 跨源被 CORS 拦下时回退请后台 service worker 代取（后台仅放行与发起页同源
+  // 的地址，见 background.js）——MV3 起内容脚本 fetch 受页面 CORS 约束，
+  // host_permissions 只豁免后台
+  var BIG_BYTES = 40 * 1024 * 1024;
   async function fetchBytes(u) {
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, 45000);
     try {
-      var r = await fetch(u, { credentials: 'include' });
+      var r = await fetch(u, { credentials: 'include', signal: ctl.signal });
       if (!r.ok) throw new Error('站点没给文件（HTTP ' + r.status + '）');
+      var declared = Number(r.headers.get('content-length') || 0);
+      if (declared > BIG_BYTES) {
+        // 大文件不读 body：清掉计时器，交 save() 的改道分支处理
+        clearTimeout(timer);
+        try { if (r.body && r.body.cancel) r.body.cancel(); } catch (_) {}
+        return null; // 「已知超限」哨兵——save() 按 declaredValue 传给改道
+      }
       return new Uint8Array(await r.arrayBuffer());
     } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('取文件超时（45 秒）');
       var sw = await chrome.runtime.sendMessage({ kind: 'mesa-fetch-url', url: u });
-      if (!sw || !sw.ok) throw e;
+      if (!sw) throw e;
+      if (!sw.ok) throw new Error(sw.error || '后台代取失败');
       var s = atob(sw.bytesB64 || '');
       var b = new Uint8Array(s.length);
       for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
       return b;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -171,6 +209,22 @@
       var u = pdfUrl();
       if (!u) { status('这页没检出 PDF 链接', false); return; }
       var bytes = await fetchBytes(u);
+      // null = Content-Length 已声明 >40MB（或读到的字节实测超限）：不进 base64
+      // 桥（Chrome 发往 native host 的单条消息限 64 MiB，base64 膨胀 ×4/3 后约
+      // 48MiB 即被拒发，2026-09-17 审计）。改道 background 的 downloads API：
+      // 跨源也能下（不是页内 a[download]——Chrome 对跨源 href 无视 download
+      // 属性，会把标签页导航走，终检提示），且下载 id 进 ownDownloads 跟踪、
+      // 完成后路径直报 Mesa，不受浏览器下载目录影响
+      if (bytes === null || bytes.length > BIG_BYTES) {
+        var mb = bytes ? Math.round(bytes.length / 1048576) : '';
+        var over60 = bytes ? bytes.length > 60 * 1024 * 1024 : false;
+        var dl = await chrome.runtime.sendMessage({ kind: 'mesa-big-download', url: u });
+        if (!dl || !dl.ok) { status('✗ 大文件转浏览器下载失败：' + ((dl && dl.error) || '未知'), false); return; }
+        status(over60
+          ? '文件超过 Mesa 60MB 收货上限——已转浏览器下载留在下载文件夹，请手动放进项目 papers/'
+          : '文件较大' + (mb ? '（' + mb + ' MB）' : '') + '，已转浏览器下载——Mesa 会自动收进（扩展直报路径，不受下载目录影响）', true);
+        return;
+      }
       if (!looksLikePdf(bytes)) { status('拿到的不是 PDF（未订阅？）', false); return; }
       btn.textContent = '传输中…（' + Math.round(bytes.length / 1024) + ' KB）';
       var reply = await chrome.runtime.sendMessage({
@@ -181,8 +235,15 @@
         bytesB64: b64(bytes)
       });
       if (reply && reply.ok) {
-        status('✓ 已存进 papers/：' + (reply.saved || '')
-          + (reply.project ? '（项目 ' + reply.project + '）' : ''), true);
+        // 字节级重复不再静默「成功」（2026-09-17 用户实测：再点一次没有任何
+        // 「已有一份」的提示，用户不知道到底存没存上）
+        if (reply.dedup) {
+          status('papers/ 已有同一份（' + (reply.saved || '') + '），未重复存入'
+            + (reply.project ? '（项目 ' + reply.project + '）' : ''), true);
+        } else {
+          status('✓ 已存进 papers/：' + (reply.saved || '')
+            + (reply.project ? '（项目 ' + reply.project + '）' : ''), true);
+        }
       } else {
         status('✗ ' + ((reply && reply.error) || 'Mesa 未响应'), false);
       }

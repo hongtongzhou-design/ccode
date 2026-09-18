@@ -486,7 +486,12 @@ fn gsettings_proxy() -> Vec<String> {
         if !out.status.success() {
             return None;
         }
-        Some(String::from_utf8_lossy(&out.stdout).trim().trim_matches('\'').to_string())
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .trim_matches('\'')
+                .to_string(),
+        )
     };
     if run("org.gnome.system.proxy", "mode").as_deref() != Some("manual") {
         return Vec::new();
@@ -508,10 +513,13 @@ fn gsettings_proxy() -> Vec<String> {
 
 fn detect_outbound_proxy_inner() -> Result<Vec<OutboundProxyCandidateDto>, String> {
     let mut urls: Vec<(String, String)> = Vec::new(); // (url, source)
-    // 1) 系统代理设置
+                                                      // 1) 系统代理设置
     #[cfg(target_os = "macos")]
     {
-        if let Ok(out) = crate::process::background_command("scutil").arg("--proxy").output() {
+        if let Ok(out) = crate::process::background_command("scutil")
+            .arg("--proxy")
+            .output()
+        {
             if out.status.success() {
                 for url in parse_scutil_proxy(&String::from_utf8_lossy(&out.stdout)) {
                     urls.push((url, "系统代理".into()));
@@ -541,7 +549,12 @@ fn detect_outbound_proxy_inner() -> Result<Vec<OutboundProxyCandidateDto>, Strin
     }
     // 2) 环境变量（GUI 启动常拿不到 shell 的，但终端里起 Mesa 的场景有值）
     for key in [
-        "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
     ] {
         if let Ok(v) = std::env::var(key) {
             let url = normalize_proxy_env_value(&v);
@@ -699,9 +712,7 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         outbound_proxy: s.outbound_proxy.filter(|v| !v.trim().is_empty()),
         outbound_no_proxy: s.outbound_no_proxy.filter(|v| !v.trim().is_empty()),
         institutional_prefix: s.institutional_prefix.filter(|v| !v.trim().is_empty()),
-        institutional_login_url: s
-            .institutional_login_url
-            .filter(|v| !v.trim().is_empty()),
+        institutional_login_url: s.institutional_login_url.filter(|v| !v.trim().is_empty()),
     }
 }
 
@@ -1087,13 +1098,17 @@ mod tests {
             vec!["https://127.0.0.1:7891".to_string()]
         );
         // 未启用：无产出
-        let off = "    ProxyEnable    REG_DWORD    0x0\n    ProxyServer    REG_SZ    127.0.0.1:7890\n";
+        let off =
+            "    ProxyEnable    REG_DWORD    0x0\n    ProxyServer    REG_SZ    127.0.0.1:7890\n";
         assert!(parse_windows_reg_proxy(off).is_empty());
     }
 
     #[test]
     fn proxy_env_value_normalizes_scheme() {
-        assert_eq!(normalize_proxy_env_value("127.0.0.1:7890"), "http://127.0.0.1:7890");
+        assert_eq!(
+            normalize_proxy_env_value("127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
         assert_eq!(
             normalize_proxy_env_value("socks5://127.0.0.1:1080"),
             "socks5://127.0.0.1:1080"

@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canAttemptFulltext,
+  DEFAULT_INST_LOGIN_URL,
   fulltextViaLabel,
   instActiveFrom,
   instOpenTarget,
+  instOtherPanelDefaultOpen,
+  instPrefixPanelDefaultOpen,
   instSessionLabel,
+  isCustomInstLoginUrl,
 } from "../src/inst-access.ts";
 
 test("instActiveFrom: 前缀或会话任一即通道可用", () => {
@@ -99,4 +103,73 @@ test("instSessionLabel: 未保存/已保存两态", () => {
   });
   assert.match(label, /已保存 4 条会话/);
   assert.match(label, /等 5 个域/);
+});
+
+
+test("instActiveFrom: 只有入口页会话（sessionCredible=false）不算通道可用（2026-09-17 审计）", () => {
+  const preAuth = {
+    prefixConfigured: false,
+    prefixHost: "",
+    loginUrlSaved: true,
+    sessionPresent: true,
+    sessionCredible: false,
+    updatedAt: "2026-09-17T00:00:00Z",
+    cookieCount: 3,
+    domains: ["carsi.edu.cn"],
+  };
+  assert.equal(instActiveFrom(preAuth), false);
+  assert.equal(instActiveFrom({ ...preAuth, sessionCredible: true }), true);
+  // 旧后端没有该字段：按可信处理（不回归既有保存态）
+  assert.equal(instActiveFrom({ ...preAuth, sessionCredible: undefined }), true);
+});
+
+test("instSessionLabel: 入口页会话如实标注「尚未确认机构登录」", () => {
+  const label = instSessionLabel({
+    prefixConfigured: false,
+    prefixHost: "",
+    loginUrlSaved: true,
+    sessionPresent: true,
+    sessionCredible: false,
+    updatedAt: "2026-09-17T08:30:00Z",
+    cookieCount: 3,
+    domains: ["carsi.edu.cn"],
+  });
+  assert.ok(label.includes("尚未确认机构登录"), label);
+  assert.ok(!label.startsWith("已保存"), label);
+  const credibleLabel = instSessionLabel({
+    prefixConfigured: false,
+    prefixHost: "",
+    loginUrlSaved: true,
+    sessionPresent: true,
+    sessionCredible: true,
+    updatedAt: "2026-09-17T08:30:00Z",
+    cookieCount: 9,
+    domains: ["wiley.com"],
+  });
+  assert.ok(credibleLabel.startsWith("已保存"), credibleLabel);
+});
+
+test("isCustomInstLoginUrl: 空和 CARSI 不算自定义", () => {
+  assert.equal(isCustomInstLoginUrl(""), false);
+  assert.equal(isCustomInstLoginUrl("  "), false);
+  assert.equal(isCustomInstLoginUrl(DEFAULT_INST_LOGIN_URL), false);
+  assert.equal(isCustomInstLoginUrl("https://www.carsi.edu.cn"), false);
+  assert.equal(isCustomInstLoginUrl("https://www.carsi.edu.cn/"), false);
+  assert.equal(isCustomInstLoginUrl("https://lib.uni.edu.cn/login"), true);
+});
+
+test("instPrefixPanelDefaultOpen: 已填或非法才默认展开", () => {
+  assert.equal(instPrefixPanelDefaultOpen(""), false);
+  assert.equal(instPrefixPanelDefaultOpen("  "), false);
+  assert.equal(instPrefixPanelDefaultOpen("https://proxy.uni.edu/login?url="), true);
+  assert.equal(instPrefixPanelDefaultOpen("", true), true);
+  assert.equal(instPrefixPanelDefaultOpen("proxy.uni.edu", true), true);
+});
+
+test("instOtherPanelDefaultOpen: 自定义入口或已有内嵌会话才默认展开", () => {
+  assert.equal(instOtherPanelDefaultOpen("", false), false);
+  assert.equal(instOtherPanelDefaultOpen(DEFAULT_INST_LOGIN_URL, false), false);
+  assert.equal(instOtherPanelDefaultOpen("https://lib.uni.edu.cn/", false), true);
+  assert.equal(instOtherPanelDefaultOpen("", true), true);
+  assert.equal(instOtherPanelDefaultOpen(DEFAULT_INST_LOGIN_URL, true), true);
 });

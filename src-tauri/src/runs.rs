@@ -4102,7 +4102,9 @@ mod tests {
         .unwrap();
         archive_goal_at(&conn, "t").unwrap();
         let archived: Option<String> = conn
-            .query_row("SELECT archived_at FROM tasks WHERE id='t'", [], |r| r.get(0))
+            .query_row("SELECT archived_at FROM tasks WHERE id='t'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(archived.is_some());
         conn.execute("UPDATE tasks SET archived_at=NULL, status='completed'", [])
@@ -4115,11 +4117,13 @@ mod tests {
         assert!(archive_goal_at(&conn, "t")
             .unwrap_err()
             .contains("副本清理"));
-        conn.execute("UPDATE tasks SET archived_at='now'", []).unwrap();
+        conn.execute("UPDATE tasks SET archived_at='now'", [])
+            .unwrap();
         assert!(unarchive_goal_at(&conn, "t")
             .unwrap_err()
             .contains("副本清理"));
-        conn.execute("DELETE FROM goal_storage_pending", []).unwrap();
+        conn.execute("DELETE FROM goal_storage_pending", [])
+            .unwrap();
         assert!(unarchive_goal_at(&conn, "t").unwrap().archived_at.is_none());
     }
 
@@ -4267,7 +4271,6 @@ mod tests {
         assert!(!target.join("node_modules").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
-
 
     #[test]
     fn list_output_changes_marks_added_and_modified() {

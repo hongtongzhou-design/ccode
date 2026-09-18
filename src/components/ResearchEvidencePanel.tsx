@@ -47,7 +47,7 @@ export default function ResearchEvidencePanel({ root, patterns, kind, refreshKey
       <h3 className="font-medium text-l1">{kind === "decision" ? "先看方案，再决定" : "验收摘要与未决项"}</h3>
       <button type="button" className="text-l3 hover:text-l1" onClick={() => setReload((n) => n + 1)}>刷新摘要</button>
     </div>
-    <p className="mb-2 break-all text-micro text-l4">{root} · 文件当前内容；状态为报告自述，未经系统质量认证。</p>
+    <p className="mb-2 text-micro text-l4">文件当前内容；状态为报告自述，未经系统质量认证。</p>
     {!value ? <p className="text-l3">正在读取报告…</p> : <>
       {!value.reports.length && <p className="text-l3">{kind === "decision" ? "未找到决策摘要或验收摘要。请先查看上游报告或让 Agent 补方案、证据、代价及等待边界；不会自动填入批准。" : "未找到验收摘要。文件已生成不代表通过，请查看原始报告及未决问题。"}</p>}
       {value.reports.map((report) => <article key={report.path} className="mb-3 last:mb-0">

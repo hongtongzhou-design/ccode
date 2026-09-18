@@ -289,6 +289,22 @@ test("只读审查技能的报告落点已进入步骤产物契约", () => {
   }
 });
 
+test("检索步先核对待确认，再下载已纳入全文，pending 不进 to-fetch", () => {
+  const searchSteps = PIPELINE_TEMPLATES.flatMap((t) => t.steps).filter(
+    (s) => s.workspaceName === "lit-search" || s.workspaceName === "lit-survey-search",
+  );
+  assert.ok(searchSteps.length >= 3);
+  for (const step of searchSteps) {
+    const titles = (step.humanTasks ?? []).filter((h) => h.timing === "after").map((h) => h.title);
+    const pendingAt = titles.indexOf("核对待确认篇目");
+    const paywallAt = titles.findIndex((t) => t.includes("付费"));
+    assert.ok(pendingAt >= 0, `${step.name} 缺核对待确认`);
+    assert.ok(paywallAt >= 0, `${step.name} 缺付费墙下载`);
+    assert.ok(pendingAt < paywallAt, `${step.name} 待确认必须排在下载全文之前`);
+    assert.match(step.brief, /禁止把 pending 写入 to-fetch/);
+  }
+});
+
 test("内置模板不再用空目录作为预期产物", () => {
   for (const template of PIPELINE_TEMPLATES) {
     const variants =

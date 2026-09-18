@@ -568,8 +568,9 @@ pub fn pty_spawn(
         if let Some(papers) = crate::workspaces::papers_dir_for_worktree(&cwd) {
             let escaped = papers.replace('\\', "\\\\");
             plan.args.push("-c".into());
-            plan.args
-                .push(format!(r#"sandbox_workspace_write.writable_roots=["{escaped}"]"#));
+            plan.args.push(format!(
+                r#"sandbox_workspace_write.writable_roots=["{escaped}"]"#
+            ));
         }
     }
     // 恢复模式：hint = 被恢复的会话；普通模式：claude/qwen 生成新 id 固定文件名

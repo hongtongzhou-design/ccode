@@ -604,6 +604,9 @@ interface AppState {
   /** 进项目页时切到指定页签（侧栏旧「定时巡检」→ 项目「定时任务」） */
   projectSurfaceReq: ProjectSurfaceTab | null;
   setProjectSurfaceReq: (tab: ProjectSurfaceTab | null) => void;
+  /** 待获取清单等：切到文件页并打开这篇 PDF */
+  filePreviewReq: { projectRoot: string; path: string; token: number } | null;
+  setFilePreviewReq: (req: AppState["filePreviewReq"]) => void;
   /** 收件箱人工请求「去查看」的一次性请求（项目根路径）：工作区页弹出该来源的完整请求内容层 */
   helpViewReq: string | null;
   setHelpViewReq: (path: string | null) => void;
@@ -854,6 +857,8 @@ export const useAppStore = create<AppState>((set, get) => {
   setProjectFocusReq: (req) => set({ projectFocusReq: req }),
   projectSurfaceReq: null,
   setProjectSurfaceReq: (tab) => set({ projectSurfaceReq: tab }),
+  filePreviewReq: null,
+  setFilePreviewReq: (req) => set({ filePreviewReq: req }),
   helpViewReq: null,
   setHelpViewReq: (path) => set({ helpViewReq: path }),
   setSelectProjectReq: (path) => set({ selectProjectReq: path }),

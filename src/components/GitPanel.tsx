@@ -769,13 +769,14 @@ function GitPanel({
   }
 
   // 增删整行铺语义底色（diff-add/del 令牌）：用户拍板「可以铺」，比细边更清晰；
-  // 深色主题深底浅字，浅色主题由 App.css 覆写为浅底深字（GitHub 式）
+  // 深色主题深底浅字，浅色主题由 App.css 覆写为浅底深字（GitHub 式）；
+  // 正文保持中性阅读色（text-l2），与审阅视图 DiffSide 同口径——整文件新增不染成绿字墙
   function diffLineClass(line: string): string {
     if (line.startsWith("@@")) return "bg-inset text-link";
     if (line.startsWith("+") && !line.startsWith("+++"))
-      return "bg-diff-add-bg text-diff-add-fg";
+      return "bg-diff-add-bg text-l2";
     if (line.startsWith("-") && !line.startsWith("---"))
-      return "bg-diff-del-bg text-diff-del-fg";
+      return "bg-diff-del-bg text-l2";
     if (
       line.startsWith("diff --git") ||
       line.startsWith("index ") ||

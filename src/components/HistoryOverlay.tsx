@@ -12,7 +12,7 @@ import type { HistoryEntryDto } from "../types";
 /**
  * 保存历史（全宽覆盖层，同 PipelineEditor 形态）：把 git log 翻译成白话时间线。
  * 只读视图；数据为当前分支 first-parent 主线（工作区分支的过程提交不单独列出，
- * 成果通过「✓ 验收合并」条目体现）。
+ * 成果通过「✓ 保存进项目」条目体现）。
  */
 export default function HistoryOverlay({
   projectName,
@@ -22,7 +22,7 @@ export default function HistoryOverlay({
 }: {
   projectName: string;
   repoPath: string;
-  /** 工作区名 → 步骤名（merge commit 的「验收合并」优先显示步骤名） */
+  /** 工作区名 → 步骤名（merge commit 的「保存进项目」优先显示步骤名） */
   wsSteps: WsStepMap;
   onClose: () => void;
 }) {

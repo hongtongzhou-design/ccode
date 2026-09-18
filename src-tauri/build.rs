@@ -1,6 +1,40 @@
 fn main() {
     placeholder_for_sidecar();
+    ensure_extension_src();
     tauri_build::build()
+}
+
+/// `bundle.resources` 的 extension-src/** 同样每次构建都校验（fresh clone 没有
+/// 这个目录直接报错）。dev 构建时从仓库根 extension/ 预拷贝（只在目标没有
+/// manifest.json 时拷，不反复覆盖）；没有源（极少数脱离仓库的构建）则落占位
+/// 文件保住 glob，打包前 stage-sidecar.mjs 会用真拷贝覆写
+fn ensure_extension_src() {
+    let dst = std::path::Path::new("extension-src");
+    if dst.join("manifest.json").exists() {
+        return;
+    }
+    let src = std::path::Path::new("../extension");
+    if src.join("manifest.json").is_file() {
+        let _ = copy_tree(src, dst);
+        return;
+    }
+    let _ = std::fs::create_dir_all(dst);
+    let _ = std::fs::write(dst.join(".placeholder"), b"");
+}
+
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// tauri-build 对 `bundle.externalBin` 做的是**每次 cargo build/test 都跑**的存在性

@@ -29,6 +29,7 @@ import ContextMenu from "../components/ContextMenu";
 import { confirmDialog } from "../components/ConfirmDialog";
 import ProjectGroup from "../components/ProjectGroup";
 import ArtifactChecklist from "../components/ArtifactChecklist";
+import { REVIEW_SAVE } from "../review-save-copy";
 import ProjectAgentsView from "../components/ProjectAgentsView";
 import ProjectFilesView from "../components/ProjectFilesView";
 import ProjectSurfaceTabs from "../components/ProjectSurfaceTabs";
@@ -662,22 +663,22 @@ function workspaceState(
       label: "可评审",
       dotClass: "bg-ok-text",
       textClass: "text-l2",
-      details: ["已有待合并提交，可在评审中完成本地合并。"],
+      details: [REVIEW_SAVE.workspaceReady],
     };
   }
   if (isMerged(workspace, health)) {
     return {
-      label: "已合并",
+      label: REVIEW_SAVE.done,
       dotClass: "bg-ok-text",
       textClass: "text-ok-text",
-      details: [`已合并进 ${workspace.baseBranch}；有新提交后可再次评审。`],
+      details: [REVIEW_SAVE.workspaceDone],
     };
   }
   return {
     label: "进行中",
     dotClass: "bg-ok-text",
     textClass: "text-l3",
-    details: ["当前没有待提交或待合并的改动。"],
+    details: [REVIEW_SAVE.workspaceIdle],
   };
 }
 
@@ -1358,6 +1359,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
   }
   const projectSurfaceReq = useAppStore((s) => s.projectSurfaceReq);
   const setProjectSurfaceReq = useAppStore((s) => s.setProjectSurfaceReq);
+  const filePreviewReq = useAppStore((s) => s.filePreviewReq);
+  const setFilePreviewReq = useAppStore((s) => s.setFilePreviewReq);
   useEffect(() => {
     if (!projectSurfaceReq || !selectedProjectPath) return;
     try {
@@ -1386,6 +1389,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       [selectedProjectPath]: tab,
     }));
   }
+  useEffect(() => {
+    if (!filePreviewReq || !selectedProjectPath) return;
+    if (!samePath(filePreviewReq.projectRoot, selectedProjectPath)) return;
+    selectProjectSurface("files");
+  }, [filePreviewReq, selectedProjectPath]);
   // 顶栏上下文镜像（v3.88）：本页是唯一写入方，顶栏跨页只读消费，不新增任何请求
   const setContextLabel = useAppStore((s) => s.setContextLabel);
   const contextProject = selectedGroup
@@ -2277,7 +2285,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         )}
       </aside>
 
-      <div className="min-w-0 flex-1 overflow-auto">
+      <div data-project-main-scroll className="min-w-0 flex-1 overflow-auto">
         <PageFrame width="fluid" surface="workspace">
       {selectedGroup && (
         <ProjectIdentityHeader
@@ -2422,6 +2430,19 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                 : undefined
             }
             onError={setError}
+            focusPath={
+              filePreviewReq &&
+              samePath(filePreviewReq.projectRoot, selectedGroup.repoPath)
+                ? filePreviewReq.path
+                : null
+            }
+            focusToken={
+              filePreviewReq &&
+              samePath(filePreviewReq.projectRoot, selectedGroup.repoPath)
+                ? filePreviewReq.token
+                : null
+            }
+            onFocusHandled={() => setFilePreviewReq(null)}
           />
         ) : selectedGroup.project && selectedSurfaceTab === "agents" ? (
           <ProjectAgentsView
@@ -2572,11 +2593,11 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             {workspace.name}
                           </span>
                           {merged ? (
-                            // 「已合并」是终态提示：行内小字 + ok 色小点，不占按钮位；
+                            // 「已保存进项目」是终态提示：行内小字 + ok 色小点，不占按钮位；
                             // 有新提交（ahead > 0）后恢复状态 pill 与评审入口
                             <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-l4">
                               <span className="size-2 rounded-full bg-ok-text" />
-                              已合并
+                              {REVIEW_SAVE.done}
                             </span>
                           ) : (
                           <button
@@ -2700,7 +2721,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                               ? selectedGroup.repoPath
                               : workspace.worktreePath
                           }
-                          rootLabel={merged ? "主文件夹（已合并）" : "工作区"}
+                          rootLabel={merged ? REVIEW_SAVE.artifactRootMerged : "工作区"}
                         />
                       )}
                   </li>

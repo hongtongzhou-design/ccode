@@ -246,9 +246,7 @@ fn env_name_looks_like_secret(name: &str) -> bool {
         return true;
     }
     let n = name.trim();
-    n.len() >= 16
-        && n.starts_with("ak_")
-        && n[3..].chars().all(|c| c.is_ascii_alphanumeric())
+    n.len() >= 16 && n.starts_with("ak_") && n[3..].chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn validate_mcp_secret_name(name: &str) -> Result<(), String> {
@@ -271,10 +269,7 @@ fn secret_hint(value: &str) -> String {
     if chars.len() < 4 {
         return "已保存".into();
     }
-    format!(
-        "···{}",
-        chars[chars.len() - 4..].iter().collect::<String>()
-    )
+    format!("···{}", chars[chars.len() - 4..].iter().collect::<String>())
 }
 
 /// 引用里误把密钥当变量名：Consensus 的 Authorization Bearer 自动改回
@@ -3524,10 +3519,7 @@ done
             )
             .contains("OAuth")
         );
-        assert!(
-            remote_auth_error("HTTP 401 Unauthorized", "")
-                .contains("密钥未设置")
-        );
+        assert!(remote_auth_error("HTTP 401 Unauthorized", "").contains("密钥未设置"));
     }
 
     #[test]

@@ -93,6 +93,17 @@ async function renderSettings(options: { request?: string; update?: boolean; vis
         }
         if (command === "plugin:app|version") return "1.0.0";
         if (command === "plugin:opener|reveal_item_in_dir") return;
+        if (command === "inst_session_status") {
+          return {
+            prefixConfigured: false,
+            prefixHost: "",
+            loginUrlSaved: false,
+            sessionPresent: false,
+            updatedAt: null,
+            cookieCount: 0,
+            domains: [],
+          };
+        }
         throw new Error(`Unexpected IPC: ${command}`);
       },
     },
@@ -225,6 +236,20 @@ test("设置保存与错误反馈保持原逻辑；网络输入仍按 Enter 提�
     await view.act(async () => proxy.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     assert.match(view.host.querySelector('[role="alert"]')!.textContent!, /保存被拒绝/);
     assert.equal(view.patches.length, 1);
+
+    assert.match(view.content().textContent!, /学校图书馆/);
+    assert.ok(view.button("登录学校账号", view.content()));
+    assert.equal(view.content().querySelector('input[placeholder="https://proxy.xxx.edu.cn/login?url="]'), null);
+    assert.equal(
+      Array.from(view.content().querySelectorAll("button")).some((b) => b.textContent?.trim() === "内嵌窗登录"),
+      false,
+    );
+    await view.act(async () => view.button("校外打不开全文时", view.content()).click());
+    assert.ok(view.content().querySelector('input[placeholder="https://proxy.xxx.edu.cn/login?url="]'));
+    await view.act(async () => view.button("其他方式", view.content()).click());
+    assert.ok(
+      Array.from(view.content().querySelectorAll("button")).some((b) => b.textContent?.trim() === "内嵌窗登录"),
+    );
   } finally { await view.close(); }
   const storage = await renderSettings({ request: "storage", storageError: true });
   try {

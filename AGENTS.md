@@ -4,7 +4,7 @@
 > `docs/conventions/*.md` 主题文件，以及 `docs/architecture.md` §10 决策记录。**不记操作流水账**——代码和 git 历史本身就是
 > 操作记录，这里只留"以后必须遵守什么"。
 >
-> **文档同步（用户指令）**：功能增改时必须同步更新 `docs/user-guide.md`（用户操作手册）；发版本时同步更新 `CHANGELOG.md`（版本更新日志）。
+> **文档同步（用户指令）**：`docs/user-guide.md` 是面向使用者的**产品说明书**。只要改了入口、步骤、按钮文案或默认行为，必须改对应章节。写法（2026-09-18 用户拍板，否决无小标题长文）：写给干活的人；对「你」说话；保留小标题（如「安装时可能碰到的唯一拦路虎（Mac）」）；每节尽量同一口气——解决什么问题、打开会看见什么、一步一步怎么点、怎样才算做成、常见卡在哪；内部词第一次出现用白话带过。不要功能清单，不要文首流水账，不要把步骤揉进没有小标题的长段落。文中 `【配图】` / `【配视频】` 是后补素材位，改用法时同步改说明。版本叙事写 `CHANGELOG.md`（发版本时更新）。
 
 > **跨平台换行约定**：仓库文本文件统一以 LF 形式存储，规则见 `.gitattributes`。Windows 本地可保留
 > `core.autocrlf=true`，但提交前不得把换行转换造成的全文件差异带入变更。
@@ -320,13 +320,16 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   dep-check.ts               # 依赖体检前端镜像：DTO 判定与 DOM/Tauri 解耦（tests 同名）
   gateway-draft.ts           # 网关库槽位纯逻辑：effectiveSlotUrl 主输入跟随/脱离、slotsFollowMaster、firstProbeableSlot
   goal-review.ts             # 目标验收弹层分组与文案：科研按文献/笔记/数据/论文、工作按文档/表格/幻灯（tests/goal-review.test.ts）
-  history-view.ts            # 历史时间线白话翻译层（✓验收合并/⚙自动保存/◔保存，hash/分支名降为二级）
+  history-view.ts            # 历史时间线白话翻译层（✓保存进项目/⚙自动保存/◔保存，hash/分支名降为二级）
+  step-review.ts             # 科研步骤评审档案闭集 screening/acceptance/default；一张审阅壳按类型拼区块（tests/step-review.test.ts）
+  review-save-copy.ts        # 科研保存链白话：保存进项目；不是编程合进基准、不是科研验收决定
   kickoff-inputs.ts          # 开步确认弹层「上一步接到的输入」芯片（纯展示）
   lit-list.ts                # 无流程科研文献/笔记列表：展示名、编号、状态与过滤纯逻辑
   model-switch.ts            # 各 CLI 多模型注入能力表 + 启动栏提示纯逻辑（对应 agent_specs.model_switch）
   nav-capsule.ts             # 侧栏可配置胶囊入口（恢复侧栏始终保留，不在此列）
   project-context-load.ts    # 启动环境说明拼装：读档案卡和顶层目录，失败仍返回能用的短包
   research-report.ts         # 研究报告节抽取/相对路径解析（只认显式报告节，不认 TASK 指令或推断结论）
+  screening-review.ts        # 检索/筛选评审主面：计数/待拍板/筛选决定、表默认 pending、文件分组；included.md/json 不与表并列摊 diff（tests/screening-review.test.ts）
   research-tools.ts          # 科研工具注入 withResearchTools；旧「文献主来源」设置键写回时剥除——来源只认 lit_source
   academic-mcp.ts            # 检索步「配置学术检索 MCP」：预设名、登录注入（tests/academic-mcp.test.ts）
   session-filter.ts          # 对话页筛选纯逻辑（tests/session-filter.test.ts）
@@ -561,7 +564,7 @@ src-tauri/src/
                              #   登录窗轮询走独立线程（Windows cookie API 在主线程同步调用会死锁）。
                              #   窗内 PDF 落盘走**单一下载漏斗**（2026-09-16 终局，勿再加拦截层/页→本机回传）：
                              #   builder 注册 on_download（Requested 把落点改写 <config>/ccode/tmp/inst-dl/、
-                             #   Finished 按 url→落点 map 对账读文件 → %PDF- 魔数校验 → 单槽暂存 →
+                             #   Finished 按 url→落点 map 对账读文件 → %PDF- 魔数校验 → 多槽暂存（唯一文件名，
                              #   inst-pdf-relayed → App 层 inst_save_relayed_pdf 落 papers/）；页侧 LOGIN_INIT_SCRIPT
                              #   常驻 ⤓ 胶囊（2s 周期重检直链）+ __mesaGrab（a[download] 按钮 → 合成
                              #   a[download] 走 WKDownload → fetch 魔数校验）；点 /doi/pdf/ 拦住改保存
@@ -577,7 +580,9 @@ src-tauri/src/
                              #   （a[download]/WKDownload action）被回 HTML、普通导航被 wry 内联渲染白屏
                              #   （wry navigation_policy_response 只看 canShowMIMEType、无视 Content-Disposition）、
                              #   blob 下载 Finished 挂起——唯一通道 = 页内 fetch 取字节 + mesaChunkRelay
-                             #   分片回传（base64 64KB/片，mesa-chunk://c/{seq}/{total}/{b64} 合成锚点导航，
+                             #   分片回传（块长 61440=3 的倍数——65536 时非末块 btoa 自带 == 填充、拼接
+                             #   解码必挂；先 mesa-chunk://b/{total} begin 握手、Rust 只收握手后 60s 内
+                             #   块数吻合的分片，逐块解码；mesa-chunk://c/{seq}/{total}/{b64} 合成锚点导航，
                              #   Rust on_navigation 收片取消导航，不受 CSP/混合内容限制；收齐解码校验走既有
                              #   inst-pdf-relayed 入库链；Zotero Connector 页内取字节带外送回的 webview 等价物）；
                              #   胶囊创建即上文案（空胶囊=黑圈）；View PDF 命中后 closest('a[href]') 沿祖先找
@@ -599,10 +604,15 @@ src-tauri/src/
                              #   收尾逐一回归各型——细则见 pipeline.md「机构访问通道」⑦。
                              #   收货通道 A/B/C（同日深夜用户定稿「让真实浏览器干浏览器的事」，Mesa 只收货）：
                              #   A download_inbox.rs 监听 ~/Downloads 收 PDF（inst_browser_open 调起系统浏览器
-                             #   + 登记归属，六层过滤链收货进既有入库链，收完进回收站）；B 浏览器会话复用
-                             #   （设置页「在浏览器中登录」，内嵌窗留回落）；C extension/（MV3，ID 固定
+                             #   + 登记归属，六层过滤链收货进既有入库链——高置信命中收完进回收站、
+                             #   兜底关联（文件名没对上号）原件留在下载夹并弹 inst-pdf-attention 横幅；
+                             #   终端只印启动/失败/收货结果，不去重跳过刷屏——macOS 一次落盘连发多条
+                             #   FSEvent）；B 浏览器会话复用
+                             #   （设置页「学校图书馆」主路径「登录学校账号」，内嵌窗留回落）；C extension/（MV3，ID 固定
                              #   dmjplopfhbdamkihimfllomdmkfainnn）+ bin/mesa_helper.rs（native messaging，读 helper-context.json
-                             #   当前项目调 ccode_lib::helper_ingest）+ browser_bridge.rs（装 NativeMessagingHosts
+                             #   当前项目+打开篇标题/DOI 调 ccode_lib::helper_ingest；PDF 阅读器空标题不得落 paper-5.pdf；
+                             #   工具栏图标优先走页内「存到 Mesa」，chrome.downloads 只作无 content script 末路）
+                             #   + browser_bridge.rs（装 NativeMessagingHosts
                              #   清单）。内嵌窗漏斗保留为过渡，通道 C 稳定后退役——细则见 pipeline.md ⑧
   fonts.rs                   # 终端字体打包与 brew 一键安装（Maple/Sarasa/Iosevka）
   ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报/评审沉淀起草生成；
@@ -774,7 +784,7 @@ src-tauri/src/
   对话步骤化（步骤名 badge/分组/搜索）、RX3b 技能新建/编辑/◈ 优化 + 步骤挂载技能；RX4a docx 预览 + export-docx；笔记对话式
   批改（选段「◈ 讨论/改写此段」）；界面白话双层 + 工作区页/列表精简
 - **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅、历史时间线视图 ✅（first-parent
-  主线 + 白话翻译：✓ 验收合并/⚙ 自动保存/◔ 保存）、**hooks 精确注意力标记 ✅**（设置页按 agent 显式开关，
+  主线 + 白话翻译：✓ 保存进项目/⚙ 自动保存/◔ 保存）、**hooks 精确注意力标记 ✅**（设置页按 agent 显式开关，
   hooks.rs 七家桥接；v3.32 Claude 首发，v3.99 推广到七家，见架构 v3.32/v3.99）、**内置技能种子 ✅**（当前 18 个内置技能，include_str! 播种、不覆盖不复活，
   六套流水线模板按步骤挂载）、**定时雷达 ✅**（v3.75：scheduler.rs 每日/每周无头巡检 + lit-watch 多源精选升级，
   约定见 conventions/pipeline.md「定时雷达」）、**模板重设计与接壤 ✅**（v3.78：六套模板内容重设计（种子对准拍板点/技能挂载核对/

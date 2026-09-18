@@ -167,7 +167,7 @@ export default function ArtifactChecklist({
   workspaceName: string;
   /** 产物定位根目录（工作树或项目根） */
   root: string;
-  /** 根来源小字：「工作区」/「主文件夹（已合并）」 */
+  /** 根来源小字：「工作区」/「主文件夹（已保存进项目）」 */
   rootLabel: string;
 }) {
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);

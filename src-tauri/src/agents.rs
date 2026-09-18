@@ -553,6 +553,21 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
         }
         return plan;
     }
+    // grok 未显式选模型时用绑定清单第一个兜底（2026-09-17 实测）：grok 按 id 路由，
+    // 不注 GROK_DEFAULT_MODEL / -m 会回落 ~/.grok/config.toml 的 [models].default——
+    // 通常是第一方 grok-* 模型，第一方 id 绕过网关直连 xAI 代理，失败形态是
+    // 「连接超时」而非「模型不存在」，极易误诊成网关不通。其他 CLI 未选模型同样
+    // 回落自家默认，但请求仍发往所选网关、报错可读，不做兜底。
+    let model = model.or_else(|| {
+        if profile.agent != "grok" {
+            return None;
+        }
+        profile
+            .models
+            .iter()
+            .find(|m| !m.trim().is_empty())
+            .map(String::as_str)
+    });
     if let Some(spec) = agent_spec(&profile.agent) {
         match &spec.launch {
             LaunchSpec::Env(env) => {
@@ -3472,6 +3487,41 @@ mod tests {
         let empty = profile("grok", Some("https://relay.example.com/v1"));
         let plan = launch_plan(&empty, Some("xai-secret".into()), None);
         assert!(!plan.env.iter().any(|(k, _)| k == "GROK_CONFIG"));
+    }
+
+    #[test]
+    fn grok_plan_falls_back_to_first_binding_model() {
+        // 未选模型时用绑定清单第一个兜底：防回落 config.toml 第一方默认直连 xAI 代理
+        let mut p = profile("grok", Some("https://open.bigmodel.cn/api/paas/v4"));
+        p.models = vec!["glm-5.3".into(), "glm-5.2".into()];
+        let plan = launch_plan(&p, Some("k".into()), None);
+        assert!(plan
+            .env
+            .contains(&("GROK_DEFAULT_MODEL".into(), "glm-5.3".into())));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-m" && pair[1] == "glm-5.3"));
+    }
+
+    #[test]
+    fn grok_model_fallback_scoped_to_grok() {
+        // 空模型清单不兜底（维持原行为）
+        let empty = profile("grok", Some("https://relay.example.com/v1"));
+        let plan = launch_plan(&empty, Some("k".into()), None);
+        assert!(!plan.env.iter().any(|(k, _)| k == "GROK_DEFAULT_MODEL"));
+        assert!(!plan.args.iter().any(|a| a == "-m"));
+
+        // 显式选模永远优先于兜底（不被清单第一个覆盖）
+        let mut p = profile("grok", Some("https://open.bigmodel.cn/api/paas/v4"));
+        p.models = vec!["glm-5.3".into(), "glm-5.2".into()];
+        let plan = launch_plan(&p, Some("k".into()), Some("glm-5.2"));
+        assert!(plan
+            .env
+            .contains(&("GROK_DEFAULT_MODEL".into(), "glm-5.2".into())));
+        assert!(!plan
+            .env
+            .contains(&("GROK_DEFAULT_MODEL".into(), "glm-5.3".into())));
     }
 
     #[test]

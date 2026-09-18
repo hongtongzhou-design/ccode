@@ -108,6 +108,81 @@ async function fireScheduleNotification(
   sendNotification({ title, body, actionTypeId: "ccode.schedule", extra });
 }
 
+/** 收货反馈横幅（2026-09-17 审计）：收货成功/失败/需注意的应用内通道——OS 通知
+ *  权限被拒（macOS 一次拒绝永久静默）时不再全静默；「文件名没对上号的兜底关联」
+ *  「下载晚了错过 90 秒窗」在这里给出补救入口 */
+type RelayToast = {
+  id: number;
+  kind: "ok" | "err" | "attention";
+  text: string;
+  detail?: string;
+  /** attention 专属：一键把留在下载夹的文件收进项目（attach_paper_pdf 复制语义） */
+  collect?: { projectRoot: string; path: string; title: string };
+  /** 开了多篇对不上号：列出候选让人点 */
+  choices?: { projectRoot: string; path: string; title: string }[];
+};
+
+function RelayToasts(props: {
+  toasts: RelayToast[];
+  onDismiss: (id: number) => void;
+  onCollect: (t: RelayToast) => void;
+}) {
+  if (!props.toasts.length) return null;
+  return (
+    <div className="pointer-events-none fixed bottom-16 right-4 z-50 flex w-80 flex-col gap-2">
+      {props.toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`pointer-events-auto rounded-md border px-3 py-2 text-xs leading-5 shadow-lg ${
+            t.kind === "err"
+              ? "border-err-text/40 bg-rail text-err-text"
+              : t.kind === "attention"
+                ? "border-cta-bd bg-rail text-l2"
+                : "border-hairline bg-rail text-l2"
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            <span className="min-w-0 flex-1 whitespace-pre-wrap">
+              {t.text}
+              {t.detail ? <span className="block text-micro text-l4">{t.detail}</span> : null}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 text-l4 hover:text-l1"
+              aria-label="关闭"
+              onClick={() => props.onDismiss(t.id)}
+            >
+              ×
+            </button>
+          </div>
+          {t.choices && t.choices.length > 0 ? (
+            <div className="mt-1 flex flex-col gap-1">
+              {t.choices.map((c, i) => (
+                <button
+                  key={`${c.title}-${i}`}
+                  type="button"
+                  className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-left text-micro text-cta-text hover:brightness-110"
+                  onClick={() => props.onCollect({ ...t, collect: c })}
+                >
+                  收进「{c.title.slice(0, 28)}」
+                </button>
+              ))}
+            </div>
+          ) : t.collect ? (
+            <button
+              type="button"
+              className="mt-1 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
+              onClick={() => props.onCollect(t)}
+            >
+              收进「{t.collect.title.slice(0, 24)}」
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** 页切顺序/逐页绑定/默认值的单一出处在 hotkeys.ts PAGE_HOTKEY_DEFS（与侧栏顺序一致） */
 
 function App() {
@@ -128,6 +203,51 @@ function App() {
     y: number;
     sessions: SessionMetaDto[];
   } | null>(null);
+  // 收货反馈横幅（成功 8s 自动消失；失败/需注意常驻直到处理）
+  const [relayToasts, setRelayToasts] = useState<RelayToast[]>([]);
+  const relayToastId = useRef(0);
+  const pushRelayToast = (t: Omit<RelayToast, "id">, autoDismissMs?: number) => {
+    const id = ++relayToastId.current;
+    setRelayToasts((cur) => {
+      // 满员先挤最旧的自动消失类（ok）；attention/err 是「常驻直到处理」的补救
+      // 入口，只在全是非常驻时才挤最旧一条（终检二轮：一刀切 slice 会静默丢掉
+      // 带一键收进按钮的横幅）
+      let next = [...cur];
+      if (next.length >= 4) {
+        const disposable = next.findIndex((x) => x.kind === "ok");
+        if (disposable >= 0) next.splice(disposable, 1);
+        else next = next.slice(-3);
+      }
+      return [...next, { ...t, id }];
+    });
+    if (autoDismissMs) {
+      window.setTimeout(
+        () => setRelayToasts((cur) => cur.filter((x) => x.id !== id)),
+        autoDismissMs,
+      );
+    }
+  };
+  const dismissRelayToast = (id: number) =>
+    setRelayToasts((cur) => cur.filter((x) => x.id !== id));
+  const collectRelayToast = (t: RelayToast) => {
+    if (!t.collect) return;
+    const { projectRoot, path, title } = t.collect;
+    void invoke<{ name: string }>("attach_paper_pdf", {
+      projectRoot,
+      sourcePath: path,
+      title,
+    })
+      .then((res) => {
+        pushRelayToast(
+          { kind: "ok", text: `已收进 papers/：${res.name}` },
+          8000,
+        );
+      })
+      .catch((e) => {
+        pushRelayToast({ kind: "err", text: "收进失败", detail: String(e) });
+      });
+    dismissRelayToast(t.id);
+  };
   function openQuickChatMenu(e: React.MouseEvent) {
     e.preventDefault();
     const { clientX: x, clientY: y } = e;
@@ -382,7 +502,9 @@ function App() {
 
   // 机构窗口「⤓ 保存 PDF 到 Mesa」→ 自动入库（inst_access 中继）。带落盘语境的
   // （从清单/雷达「窗口打开」进入）直接写进对应项目 papers/ 并登记资源；无语境的
-  // 只暂存，提示回项目手动「关联本地 PDF」。
+  // 只暂存，提示回项目手动「关联本地 PDF」。反馈双通道：OS 通知（锦上添花）+
+  // 应用内横幅（权限被拒时不静默，2026-09-17 审计）；失败必须可见——原文件已
+  // 进回收站，用户得知道去哪儿找回
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
@@ -396,6 +518,14 @@ function App() {
             "回到项目页用「关联本地 PDF」选中导入这份文件",
             {},
           );
+          pushRelayToast(
+            {
+              kind: "attention",
+              text: "PDF 已在 Mesa 暂存",
+              detail: "回到项目页用「关联本地 PDF」选中导入这份文件",
+            },
+            15000,
+          );
           return;
         }
         void invoke<{ name: string }>("inst_save_relayed_pdf", {
@@ -403,18 +533,85 @@ function App() {
           path,
           fileNameHint: fileNameHint || "paper",
         })
-          .then((res) =>
+          .then((res) => {
             fireScheduleNotification(
               `已存进 papers/：${res.name}`,
               "文献全文已落盘并登记进项目资源",
               { projectRoot },
-            ),
-          )
-          .catch((err) =>
-            fireScheduleNotification("PDF 入库失败", String(err), { projectRoot }),
-          );
+            );
+            pushRelayToast(
+              { kind: "ok", text: `已存进 papers/：${res.name}` },
+              8000,
+            );
+          })
+          .catch((err) => {
+            fireScheduleNotification("PDF 入库失败", String(err), { projectRoot });
+            pushRelayToast({
+              kind: "err",
+              text: "PDF 入库失败",
+              detail: `${String(err)}——原文件在回收站（收货通道）或下载文件夹，可用「关联本地 PDF」重新导入`,
+            });
+          });
       },
     )
+      .then((u) => {
+        if (cancelled) {
+          u();
+          return;
+        }
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 收货需人知道的事：文件名没对上号的兜底关联（原件留在下载夹）、下载晚了
+  // 错过 90 秒窗——横幅给「一键收进」/指引，不再零反馈（2026-09-17 审计）
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{
+      reason: string;
+      path: string;
+      projectRoot: string;
+      title: string;
+      fileName: string;
+      candidates?: { title: string; projectRoot: string }[];
+    }>("inst-pdf-attention", (e) => {
+      const { reason, path, projectRoot, title, fileName, candidates } = e.payload;
+      if (reason === "fallback") {
+        pushRelayToast(
+          {
+            kind: "attention",
+            text: `窗内只开了这一篇，已收进「${title.slice(0, 30)}」`,
+            detail: `文件名 ${fileName} 与清单没对上号（原件保留在下载文件夹）；收错了就删掉 papers/ 里这份，再用「关联本地 PDF」按正确篇目导入`,
+          },
+          30000,
+        );
+      } else if (reason === "ambiguous") {
+        const picks = (candidates ?? []).slice(0, 6);
+        pushRelayToast({
+          kind: "attention",
+          text: `收到 ${fileName}，刚才开了多篇，挂到哪篇？`,
+          detail: "文件还在下载文件夹，点一篇才收进；不对就关掉用行上「关联」",
+          choices: picks.map((c) => ({
+            projectRoot: c.projectRoot,
+            path,
+            title: c.title,
+          })),
+        });
+      } else {
+        pushRelayToast({
+          kind: "attention",
+          text: `下载晚了，${fileName} 没被自动收进（90 秒窗已过）`,
+          detail: "文件还在下载文件夹；确认无误可一键收进，或到清单行用「关联本地 PDF」",
+          collect: { projectRoot, path, title },
+        });
+      }
+    })
       .then((u) => {
         if (cancelled) {
           u();
@@ -551,6 +748,12 @@ function App() {
   return (
     <ErrorBoundary>
       <div className="ccode-app-shell relative flex h-full flex-col overflow-hidden bg-rail text-l2">
+        {/* 收货反馈横幅：成功自动消失，失败/需注意常驻可处理（见 RelayToasts 注释） */}
+        <RelayToasts
+          toasts={relayToasts}
+          onDismiss={dismissRelayToast}
+          onCollect={collectRelayToast}
+        />
         {/* macOS 自绘标题栏（titleBarStyle: Overlay + hiddenTitle）：纯拖拽区 +
             Ghostty 式标题栏收件箱（按类别拆胶囊，点胶囊向下展开该类明细，遮罩/Esc/再点关闭）。
             窗口标题不在界面渲染（用户拍板删除，标题字符串仍保留在 tauri 配置里供自动化定位窗口）。

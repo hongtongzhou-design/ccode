@@ -118,6 +118,24 @@ fn model_list_cache_key(
     )
 }
 
+/// URL/路径末段是否为版本段（`v1` / `v1beta` / `v3` / `v4` …：v 后跟数字开头的
+/// 小写字母数字）。这类 base 视为已自带版本号，拼资源名时直接挂在版本段下、
+/// 不再补协议默认版本段——GLM 的 `/api/paas/v4` 若补 `/v1` 会拼出
+/// `/api/paas/v4/v1/chat/completions`（GLM 404，2026-09-17 实测）。
+pub(crate) fn ends_with_version_segment(input: &str) -> bool {
+    let last = input.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let Some(rest) = last.strip_prefix('v') else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_digit() => {
+            chars.all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
+        }
+        _ => false,
+    }
+}
+
 /// fetch_models 的返回：模型列表 + 是否命中缓存 + 拉取时间（前端展示「缓存 · HH:MM」）
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,15 +214,19 @@ pub async fn fetch_models(
             });
         }
     }
-    // 候选地址：已含 /v1 直接拼 /models；否则先试 /v1/models 再试 /models
+    // 候选地址：末段是版本段（/v1、/v1beta、/v4 …）直接拼 /models；
+    // 否则先试 /v1/models 再试 /models。v3/v4 等非常规版本段（GLM /api/paas/v4）
+    // 资源直接挂版本段下为主选，保留 /v1/models 作次选兜底
     let candidates: Vec<String> = if gemini {
-        if base.ends_with("/v1beta") || base.ends_with("/v1") {
+        if ends_with_version_segment(base) {
             vec![format!("{base}/models")]
         } else {
             vec![format!("{base}/v1beta/models"), format!("{base}/models")]
         }
     } else if base.ends_with("/v1") {
         vec![format!("{base}/models")]
+    } else if ends_with_version_segment(base) {
+        vec![format!("{base}/models"), format!("{base}/v1/models")]
     } else {
         vec![format!("{base}/v1/models"), format!("{base}/models")]
     };
@@ -343,7 +365,8 @@ fn push_unique(out: &mut Vec<String>, s: &str) {
     }
 }
 
-/// 兼容三种常见返回：OpenAI/Anthropic 的 `data[].id`、Gemini 的 `models[].name`、裸字符串数组
+/// 兼容常见返回：OpenAI/Anthropic 的 `data[].id`、Gemini 的 `models[].name`、
+/// GLM codex 目录的 `models[].slug`（/api/v1/models，2026-09-17 实测）、裸字符串数组
 fn parse_model_ids(v: &serde_json::Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
@@ -361,6 +384,9 @@ fn parse_model_ids(v: &serde_json::Value) -> Vec<String> {
                 if let Some(name) = item.get("name").and_then(|i| i.as_str()) {
                     // Gemini 风格的 name 形如 "models/gemini-pro"，去掉前缀
                     push_unique(&mut out, name.strip_prefix("models/").unwrap_or(name));
+                } else if let Some(slug) = item.get("slug").and_then(|i| i.as_str()) {
+                    // GLM codex 目录风格的条目键
+                    push_unique(&mut out, slug);
                 } else if let Some(s) = item.as_str() {
                     push_unique(&mut out, s);
                 }
@@ -454,6 +480,35 @@ pub async fn fetch_gateway_catalog(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_glm_codex_slug_catalog() {
+        // GLM 的 codex 目录（/api/v1/models）：models[].slug + 元数据字段
+        let v = json!({"models": [
+            {"slug": "glm-5.3", "context_window": 1048576, "display_name": "GLM-5.3"},
+            {"slug": "glm-5.3-flash"}
+        ]});
+        assert_eq!(parse_model_ids(&v), vec!["glm-5.3", "glm-5.3-flash"]);
+    }
+
+    #[test]
+    fn version_segment_detection() {
+        // 版本段：v 后跟数字开头的小写字母数字
+        assert!(ends_with_version_segment(
+            "https://open.bigmodel.cn/api/paas/v4"
+        ));
+        assert!(ends_with_version_segment("/v1"));
+        assert!(ends_with_version_segment("/v1beta"));
+        assert!(ends_with_version_segment("https://relay.example.com/v3"));
+        assert!(ends_with_version_segment("https://x.cn/v4/"));
+        // 非版本段：不误判
+        assert!(!ends_with_version_segment("/api/anthropic"));
+        assert!(!ends_with_version_segment("/models"));
+        assert!(!ends_with_version_segment(""));
+        assert!(!ends_with_version_segment("/v"));
+        assert!(!ends_with_version_segment("/vX1"));
+        assert!(!ends_with_version_segment("https://api.deepseek.com"));
+    }
 
     #[test]
     fn catalog_slot_walk_puts_prefer_first() {

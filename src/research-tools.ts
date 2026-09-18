@@ -135,7 +135,7 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
   const illustration = stepTakesIllustration(step);
   const lit = litSource.trim();
   if ((lit === "zotero" && reading) || (tools.libraryExport === "zotero" && bibliography)) {
-    mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：优先读取已登记题录/PDF，API 先探测版本及读写权限。交付选择不是批量写库授权：展示条目/collection/新增与变更，获得本批明确确认后才写。已有主 bib 键不改，不复制/改名库内附件；离线可用文件继续，写库未完成如实报告。");
+    mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：进库用清单「同步到 Zotero」或拖 to-fetch.ris（原生 RIS/BibTeX）。本地 API 只读，不要 POST 假装写库。PDF 直接拖进 Zotero，一般会按元数据对上已有条目。出库用「从 Zotero 导入」。已有主 bib 键不改。");
   }
   if (tools.libraryExport === "endnote" && bibliography) {
     mount("endnote-bridge", ["papers/endnote-report.json"], "EndNote：来源 XML/RIS 先归一成候选并列差异，确认后才合并 references.bib，已有键不改。要求出库时交付 papers/endnote-import.xml 与 papers/endnote-report.json；Word 原件/域不被 Markdown 往返覆盖。", "人工核对 EndNote 导入与 Word 引用插件");

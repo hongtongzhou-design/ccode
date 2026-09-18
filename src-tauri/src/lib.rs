@@ -22,11 +22,44 @@ mod handoff;
 mod hooks;
 
 /// 浏览器桥 helper（bin/mesa_helper.rs）的入库公共接口：同一套落盘口径
-/// （注册项目根校验 + papers/ + 资源登记）。hint 用文献标题（回落 DOI）
-pub fn helper_ingest(project_root: &str, hint: &str, bytes: &[u8]) -> Result<String, String> {
+/// （注册项目根校验 + papers/ + 资源登记）。hint 用文献标题（回落 DOI）；
+/// 返回 (落盘文件名, 是否字节级去重命中——扩展侧据此提示「已有同一份」)
+pub fn helper_ingest(
+    project_root: &str,
+    hint: &str,
+    bytes: &[u8],
+) -> Result<(String, bool), String> {
+    helper_ingest_ident(project_root, hint, hint, "", bytes)
+}
+
+/// 扩展入库：identity/doi 写进资源登记，待获取清单按标题认「已存」，不靠文件名
+pub fn helper_ingest_ident(
+    project_root: &str,
+    file_hint: &str,
+    identity: &str,
+    doi: &str,
+    bytes: &[u8],
+) -> Result<(String, bool), String> {
     let root = projects::ensure_task_project_root(std::path::Path::new(project_root))?;
-    let dto = lit_watch::save_paper_bytes(&root, hint, bytes)?;
-    Ok(dto.name)
+    let dto = lit_watch::save_paper_bytes_ident(&root, file_hint, identity, doi, bytes)?;
+    Ok((dto.name, dto.dedup))
+}
+
+/// 扩展落盘文件名：页上标题优先；PDF 阅读器/站名等空标题回落 Mesa
+/// 「浏览器打开」记下的那篇，再回落 DOI。空串则入库层用 paper.pdf。
+pub fn helper_paper_name_hint(
+    page_title: &str,
+    page_doi: &str,
+    page_url: &str,
+    ctx_title: &str,
+    ctx_doi: &str,
+) -> String {
+    lit_watch::pick_paper_name_hint(page_title, page_doi, page_url, ctx_title, ctx_doi)
+}
+
+/// 扩展按页上 DOI 找回「浏览器打开」登记的那篇（标题, DOI, 项目根）
+pub fn helper_pending_for_doi(doi: &str) -> Option<(String, String, String)> {
+    download_inbox::pending_for_doi(doi).map(|p| (p.title, p.doi, p.project_root))
 }
 
 mod browser_bridge;
@@ -107,6 +140,16 @@ pub fn run() {
             scheduler::start_scheduler(app.handle().clone());
             // 收货监听：启动即恢复（盘上登记在重启前留下的也要有人接）
             download_inbox::ensure_watcher_at_startup(app.handle());
+            // 浏览器桥自愈：清单写死的是安装当时的 helper 绝对路径，应用被移动
+            // （DMG → /Applications）后 path 失效——启动时发现不一致就重写；
+            // 扩展目录同步就位到 <config>/ccode/extension（打包用户可点的路径）
+            browser_bridge::selfheal_bridge_manifests();
+            if let Err(e) = browser_bridge::stage_extension_files() {
+                logbuf::record("warn", "browser-bridge", &format!("扩展目录就位失败: {e}"));
+            }
+            // 扩展「存到 Mesa」的回执监听：helper 是独立进程不发 Tauri 事件，
+            // 这里把收货回执变成 inst-papers-changed 广播给清单/雷达
+            browser_bridge::spawn_receipts_watch(app.handle().clone());
             if let Err(e) = tray::setup(app.handle()) {
                 logbuf::record("warn", "tray", &format!("托盘初始化失败: {e}"));
             }
@@ -392,6 +435,11 @@ pub fn run() {
             zotero::zotero_items,
             zotero::zotero_import,
             zotero::zotero_attach_fulltexts,
+            zotero::zotero_bbt_status,
+            zotero::zotero_install_bbt,
+            zotero::zotero_open_import,
+            zotero::zotero_match_dois,
+            zotero::zotero_open_papers,
             projects::pdf_owner_project,
             projects::append_workspace_inbox,
             projects::list_pipeline_templates,

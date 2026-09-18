@@ -183,7 +183,12 @@ mod tests {
 
     #[test]
     fn tool_check_serializes_camel_case_for_frontend() {
-        let c = check("Origin 执行环境", "unsupported", "需要授权的 Windows 本机", true);
+        let c = check(
+            "Origin 执行环境",
+            "unsupported",
+            "需要授权的 Windows 本机",
+            true,
+        );
         let json = serde_json::to_value(&c).unwrap();
         assert_eq!(json["name"], "Origin 执行环境");
         assert_eq!(json["status"], "unsupported");

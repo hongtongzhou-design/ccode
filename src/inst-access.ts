@@ -1,21 +1,60 @@
 /** 机构访问（高校/研究所）通道前端纯逻辑：状态镜像、获取按钮可见性、渠道文案。
- *  后端见 src-tauri/src/inst_access.rs（会话 Cookie 0600 不出站，这里只拿到统计态）。 */
+ *  后端见 src-tauri/src/inst_access.rs（会话 Cookie 0600 不出站，这里只拿到统计态）。
+ *  设置页信息架构（2026-09-17）：「学校图书馆」只留登录一条主路径；前缀与内嵌/桥按需折叠。 */
+
+/** 机构登录的默认入口：CARSI 高校联盟（国内绝大多数高校接入）。
+ *  设置页主路径不摆地址框，空登录页即走这里。 */
+export const DEFAULT_INST_LOGIN_URL = "https://www.carsi.edu.cn/";
+
+function normalizeLoginUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+/** 填了且不是默认 CARSI → 算自定义入口（「其他方式」默认展开）。空 = 走默认。 */
+export function isCustomInstLoginUrl(url: string): boolean {
+  const a = normalizeLoginUrl(url);
+  return Boolean(a) && a !== normalizeLoginUrl(DEFAULT_INST_LOGIN_URL);
+}
+
+/** 「校外打不开全文时」默认展开：已填前缀或前缀不合法，进来就能看见。 */
+export function instPrefixPanelDefaultOpen(
+  prefix: string,
+  prefixInvalid?: boolean,
+): boolean {
+  return Boolean(prefix.trim()) || Boolean(prefixInvalid);
+}
+
+/** 「其他方式」默认展开：自定义登录入口或已有内嵌窗会话。 */
+export function instOtherPanelDefaultOpen(
+  loginUrl: string,
+  sessionPresent: boolean,
+): boolean {
+  return isCustomInstLoginUrl(loginUrl) || sessionPresent;
+}
 
 /** inst_session_status 的返回（无任何秘密值） */
 export interface InstSessionStatus {
   prefixConfigured: boolean;
+  /** 前缀填了但不是合法 http(s) URL——通道不会用它，就地提示补 scheme */
+  prefixInvalid?: boolean;
   prefixHost: string;
   loginUrlSaved: boolean;
   sessionPresent: boolean;
+  /** 会话可信：至少一条 Cookie 命中前缀主机或出版商域（入口页一打开的
+   *  pre-auth Cookie 不算——真取时只会报会话过期，按钮不该亮） */
+  sessionCredible?: boolean;
+  /** 保存会话时的登录起始主机（展示用，非秘密） */
+  capturedFrom?: string;
   updatedAt: string | null;
   cookieCount: number;
   domains: string[];
 }
 
-/** 通道可用：配了前缀（含校园 IP 经代理）或已有登录会话（校园 IP 直连） */
+/** 通道可用：配了有效前缀（含校园 IP 经代理）或已有**可信**登录会话（校园 IP
+ *  直连）——会话存在但只有入口页 Cookie 时不算可用（2026-09-17 审计） */
 export function instActiveFrom(status: InstSessionStatus | null): boolean {
   if (!status) return false;
-  return status.prefixConfigured || status.sessionPresent;
+  return status.prefixConfigured || (status.sessionPresent && status.sessionCredible !== false);
 }
 
 /** 「获取全文」按钮可见性（不摆装死钮原则）：
@@ -38,7 +77,8 @@ export function fulltextViaLabel(via: string): string {
   return "已下载：";
 }
 
-/** 会话状态行的白话摘要（设置页/雷达卡共用） */
+/** 会话状态行的白话摘要（设置页/雷达卡共用）。只有入口页 Cookie 的罐子如实
+ *  标注「尚未确认机构登录」——用户没真登录时不说「已保存可取全文」 */
 export function instSessionLabel(status: InstSessionStatus | null): string {
   if (!status?.sessionPresent) return "未保存会话";
   const when = status.updatedAt ? new Date(status.updatedAt) : null;
@@ -48,6 +88,9 @@ export function instSessionLabel(status: InstSessionStatus | null): string {
   const domains = status.domains.length
     ? status.domains.slice(0, 3).join("、") + (status.domains.length > 3 ? ` 等 ${status.domains.length} 个域` : "")
     : "";
+  if (status.sessionCredible === false) {
+    return `入口页会话 ${status.cookieCount} 条（尚未确认机构登录——登录完成后会自动更新）· ${time}`;
+  }
   return `已保存 ${status.cookieCount} 条会话（${domains}）· ${time}`;
 }
 
@@ -60,7 +103,7 @@ export interface FetchedFulltextDto {
   dedup?: boolean;
 }
 
-/** 「在机构窗口打开」的目标地址：裸 DOI 补成 doi.org 落地，http(s) 原样 */
+/** 「浏览器打开」的目标地址：裸 DOI 补成 doi.org 落地，http(s) 原样 */
 export function instOpenTarget(rawUrl: string): string {
   const u = rawUrl.trim().replace(/^doi:\s*/i, "");
   if (/^10\.\d{4,9}\/\S+$/i.test(u)) return `https://doi.org/${u}`;

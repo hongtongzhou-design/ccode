@@ -706,6 +706,9 @@ fn cli_check(profile: &Profile, key: Option<&str>, injected: bool) -> Validation
 enum ApiKind {
     OpenAi,
     Anthropic,
+    /// OpenAI Responses 线格式（POST {base}/responses、input 单字符串、
+    /// reasoning.effort）——codex 与 grok 的 responses 后端实际流量形状
+    Responses,
     Gemini,
 }
 
@@ -714,9 +717,13 @@ fn api_kind(profile: &Profile) -> ApiKind {
         // codebuddy 协议 Anthropic 兼容（docs 有 DeepSeek Anthropic 端点对接示例）
         "claude-code" | "codebuddy" => ApiKind::Anthropic,
         "gemini" => ApiKind::Gemini,
+        // codex 走 Responses 线格式：chat/completions 形状探针会被 GLM 这类
+        // Responses-only 网关拒掉（实测 403 model_access_denied），却放行 /responses
+        "codex" => ApiKind::Responses,
         "qwen" | "kimi" if profile.protocol.as_deref() == Some("anthropic") => ApiKind::Anthropic,
         // grok 绑定声明了 messages 后端（仅设为全局写入生效）→ 探针走 Anthropic 形状
         "grok" if profile.api_backend.as_deref() == Some("messages") => ApiKind::Anthropic,
+        "grok" if profile.api_backend.as_deref() == Some("responses") => ApiKind::Responses,
         _ => ApiKind::OpenAi,
     }
 }
@@ -746,18 +753,21 @@ fn default_base(profile: &Profile, kind: ApiKind) -> &'static str {
         ApiKind::Gemini => "https://generativelanguage.googleapis.com/v1beta",
         ApiKind::OpenAi if profile.agent == "kimi" => "https://api.moonshot.cn/v1",
         ApiKind::OpenAi if profile.agent == "grok" => "https://api.x.ai/v1",
-        ApiKind::OpenAi => "https://api.openai.com/v1",
+        ApiKind::OpenAi | ApiKind::Responses => "https://api.openai.com/v1",
     }
 }
 
 fn models_url(base: &str, kind: ApiKind) -> Result<reqwest::Url, String> {
     let mut url = reqwest::Url::parse(base).map_err(|e| format!("API 地址格式错误: {e}"))?;
     let path = url.path().trim_end_matches('/');
-    let suffix = match kind {
-        ApiKind::Gemini if path.ends_with("/v1beta") || path.ends_with("/v1") => "models",
-        ApiKind::Gemini => "v1beta/models",
-        _ if path.ends_with("/v1") => "models",
-        _ => "v1/models",
+    // 与 chat_url 同口径：版本段结尾直接拼 models，否则补协议默认版本段
+    let suffix = if crate::models::ends_with_version_segment(path) {
+        "models"
+    } else {
+        match kind {
+            ApiKind::Gemini => "v1beta/models",
+            _ => "v1/models",
+        }
     };
     let next = if path.is_empty() {
         format!("/{suffix}")
@@ -773,6 +783,12 @@ fn models_url(base: &str, kind: ApiKind) -> Result<reqwest::Url, String> {
 fn model_ids(value: &serde_json::Value, kind: ApiKind) -> Vec<String> {
     let entries = match kind {
         ApiKind::Gemini => value.get("models"),
+        // Responses 形状目录：OpenAI 官方回 data[].id；GLM 的 codex 目录回
+        // models[].slug（实测 2026-09-17，条目带 context_window/display_name）
+        ApiKind::Responses => value
+            .get("models")
+            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+            .or_else(|| value.get("data")),
         _ => value.get("data"),
     };
     entries
@@ -780,10 +796,10 @@ fn model_ids(value: &serde_json::Value, kind: ApiKind) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|item| {
-            let key = if matches!(kind, ApiKind::Gemini) {
-                "name"
-            } else {
-                "id"
+            let key = match kind {
+                ApiKind::Gemini => "name",
+                ApiKind::Responses if item.get("slug").is_some() => "slug",
+                _ => "id",
             };
             item.get(key)
                 .and_then(|value| value.as_str())
@@ -823,7 +839,7 @@ async fn api_check(profile: &Profile, key: Option<&str>) -> ValidationCheckDto {
             .map_err(|e| format!("创建 API 客户端失败: {e}"))?;
         let mut request = client.get(url.clone());
         match kind {
-            ApiKind::OpenAi => {
+            ApiKind::OpenAi | ApiKind::Responses => {
                 request = request.bearer_auth(key);
             }
             ApiKind::Anthropic => {
@@ -892,8 +908,8 @@ pub struct GatewayProbeDto {
     pub checks: Vec<ValidationCheckDto>,
 }
 
-/// 对话端点 URL：与 models_url 同口径——base 已含 /v1（gemini /v1beta）直接拼资源名，
-/// 否则补协议默认版本段
+/// 对话端点 URL：与 models_url 同口径——base 末段是版本段（/v1、/v1beta、/v4 …）
+/// 直接拼资源名；否则补协议默认版本段。GLM 的 /api/paas/v4 属于前者（补 /v1 会 404）
 fn chat_url(base: &str, kind: ApiKind) -> Result<reqwest::Url, String> {
     let mut url = reqwest::Url::parse(base).map_err(|e| format!("API 地址格式错误: {e}"))?;
     let path = url.path().trim_end_matches('/');
@@ -906,9 +922,10 @@ fn chat_url(base: &str, kind: ApiKind) -> Result<reqwest::Url, String> {
     let (version, resource) = match kind {
         ApiKind::Anthropic => ("v1", "messages"),
         ApiKind::OpenAi => ("v1", "chat/completions"),
+        ApiKind::Responses => ("v1", "responses"),
         ApiKind::Gemini => return Err("Gemini 协议暂不支持探针".into()),
     };
-    let next = if path.ends_with("/v1") || path.ends_with("/v1beta") {
+    let next = if crate::models::ends_with_version_segment(path) {
         format!("{path}/{resource}")
     } else if path.is_empty() {
         format!("/{version}/{resource}")
@@ -922,6 +939,7 @@ fn chat_url(base: &str, kind: ApiKind) -> Result<reqwest::Url, String> {
 /// 探针请求体：stream 控制流式。思考档与采样必须分开发，避免一个字段失败株连另一个。
 /// anthropic 的 effort 没有线协议字段，CLI 内部翻译成 thinking 块——探针同样翻译成
 /// thinking.enabled（budget 1024，max_tokens 同步抬到 2048 满足 > budget 的协议要求）
+/// Responses 的 effort 用规范字段 reasoning.effort（GLM 实测接受，2026-09-17）
 fn probe_body(
     kind: ApiKind,
     model: &str,
@@ -930,6 +948,32 @@ fn probe_body(
     include_sampling: bool,
     stream: bool,
 ) -> serde_json::Value {
+    if matches!(kind, ApiKind::Responses) {
+        // OpenAI Responses 线格式：input 单字符串 + max_output_tokens，
+        // 与 codex/grok-responses 的实际流量同形
+        let mut body = serde_json::json!({
+            "model": model,
+            "input": "ping",
+            "stream": stream,
+        });
+        body["max_output_tokens"] = serde_json::json!(16u64);
+        if include_sampling {
+            if let Some(v) = policy.temperature {
+                body["temperature"] = serde_json::json!(v);
+            }
+            if let Some(v) = policy.top_p {
+                body["top_p"] = serde_json::json!(v);
+            }
+        }
+        if include_effort {
+            if let Some(effort) = policy.reasoning_effort.as_deref() {
+                body["reasoning"] = serde_json::json!({ "effort": effort });
+                // effort 档下 16 个输出额度可能全被 reasoning 吃掉，抬到 64
+                body["max_output_tokens"] = serde_json::json!(64u64);
+            }
+        }
+        return body;
+    }
     let mut body = serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": "ping" }],
@@ -1670,6 +1714,61 @@ mod tests {
     }
 
     #[test]
+    fn responses_kind_probe_matches_codex_traffic_shape() {
+        // codex / grok-responses → Responses 线格式，与 CLI 实际流量同形：
+        // chat/completions 形状会被 GLM 这类 Responses-only 网关拒（403 实测）
+        assert!(matches!(api_kind(&profile("codex")), ApiKind::Responses));
+        let mut grok = profile("grok");
+        grok.api_backend = Some("responses".into());
+        assert!(matches!(api_kind(&grok), ApiKind::Responses));
+
+        assert_eq!(
+            chat_url("https://open.bigmodel.cn/api/v1", ApiKind::Responses)
+                .unwrap()
+                .path(),
+            "/api/v1/responses"
+        );
+        assert_eq!(
+            chat_url("https://api.openai.com/v1", ApiKind::Responses)
+                .unwrap()
+                .path(),
+            "/v1/responses"
+        );
+        assert_eq!(
+            models_url("https://open.bigmodel.cn/api/v1", ApiKind::Responses)
+                .unwrap()
+                .path(),
+            "/api/v1/models"
+        );
+
+        // 请求体：input 单字符串 + max_output_tokens，不出现 messages
+        let policy = crate::profiles::RequestPolicy::default();
+        let body = probe_body(ApiKind::Responses, "glm-5.3", &policy, false, false, false);
+        assert_eq!(body["input"], serde_json::json!("ping"));
+        assert_eq!(body["max_output_tokens"], serde_json::json!(16));
+        assert!(body.get("messages").is_none());
+        // effort 走规范字段 reasoning.effort（GLM 实测接受）
+        let mut policy = crate::profiles::RequestPolicy::default();
+        policy.reasoning_effort = Some("low".into());
+        let body = probe_body(ApiKind::Responses, "glm-5.3", &policy, true, false, false);
+        assert_eq!(body["reasoning"], serde_json::json!({ "effort": "low" }));
+        assert!(body.get("reasoning_effort").is_none());
+
+        // 目录解析：GLM codex 目录 models[].slug；OpenAI 官方 data[].id
+        let glm_catalog =
+            serde_json::json!({"models": [{"slug": "glm-5.3"}, {"slug": "glm-5.3-flash"}]});
+        assert_eq!(
+            model_ids(&glm_catalog, ApiKind::Responses),
+            vec!["glm-5.3", "glm-5.3-flash"]
+        );
+        let openai_catalog = serde_json::json!({"data": [{"id": "gpt-5.3"}]});
+        assert_eq!(
+            model_ids(&openai_catalog, ApiKind::Responses),
+            vec!["gpt-5.3"]
+        );
+    }
+
+    #[test]
     fn probe_body_splits_effort_and_sampling() {
         let mut policy = crate::profiles::RequestPolicy::default();
         policy.temperature = Some(0.4);
@@ -1700,6 +1799,49 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://relay.example.com/gemini/v1beta/models"
+        );
+    }
+
+    #[test]
+    fn chat_and_models_urls_treat_version_segments_as_versioned() {
+        // GLM /api/paas/v4：末段是版本段 → 资源直接挂版本段下，不再补 /v1
+        // （补 /v1 会拼出 /paas/v4/v1/chat/completions，GLM 实测 404 误报体检失败）
+        assert_eq!(
+            chat_url("https://open.bigmodel.cn/api/paas/v4", ApiKind::OpenAi)
+                .unwrap()
+                .path(),
+            "/api/paas/v4/chat/completions"
+        );
+        assert_eq!(
+            models_url("https://open.bigmodel.cn/api/paas/v4", ApiKind::OpenAi)
+                .unwrap()
+                .path(),
+            "/api/paas/v4/models"
+        );
+        // 常规形态不回归：/v1 结尾、无路径、非版本段前缀
+        assert_eq!(
+            chat_url("https://api.openai.com/v1", ApiKind::OpenAi)
+                .unwrap()
+                .path(),
+            "/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://relay.example.com", ApiKind::OpenAi)
+                .unwrap()
+                .path(),
+            "/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://open.bigmodel.cn/api/anthropic", ApiKind::Anthropic)
+                .unwrap()
+                .path(),
+            "/api/anthropic/v1/messages"
+        );
+        assert_eq!(
+            models_url("https://relay.example.com/gemini", ApiKind::Gemini)
+                .unwrap()
+                .path(),
+            "/gemini/v1beta/models"
         );
     }
 

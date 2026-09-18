@@ -3685,9 +3685,7 @@ pub fn scan_sessions() -> ScanResult {
         // archived 标记不进缓存值：目录固定（sessions/ vs archived_sessions/），
         // 按路径直读即可，同一路径不会跨目录漂移
         let codex_metas = cached_chained(active_files, chained, |f| {
-            let archived = f
-                .components()
-                .any(|c| c.as_os_str() == "archived_sessions");
+            let archived = f.components().any(|c| c.as_os_str() == "archived_sessions");
             codex_file_meta(f, true, archived)
         });
         let (reps, members) = merge_codex_chains(codex_metas);
@@ -3921,8 +3919,12 @@ pub fn scan_sessions() -> ScanResult {
                 .map(|d| d.join("summary.json"))
                 .and_then(|p| file_sig(&p));
             let key = format!("grok|{}", f.display());
-            let hit = chained.get(&key).is_some_and(|(old_sig, _, _)| *old_sig == sig)
-                && grok_summary.get(&key).is_some_and(|old| *old == summary_sig);
+            let hit = chained
+                .get(&key)
+                .is_some_and(|(old_sig, _, _)| *old_sig == sig)
+                && grok_summary
+                    .get(&key)
+                    .is_some_and(|old| *old == summary_sig);
             let pair = if hit {
                 let (m, parent) = chained.get(&key).map(|(_, m, p)| (m, p)).unwrap();
                 (m.clone(), parent.clone())
@@ -6828,12 +6830,20 @@ mod tests {
         fs::write(&f, br#"{"type":"session_meta","payload":{"id":"c1","cwd":"/tmp/p","forked_from_id":"root0"}}"#).unwrap();
 
         let mut cache: HashMap<String, (FileSig, SessionMetaDto, Option<String>)> = HashMap::new();
-        let first = cached_chained(vec![f.clone()], &mut cache, |p| codex_file_meta(p, true, false));
+        let first = cached_chained(vec![f.clone()], &mut cache, |p| {
+            codex_file_meta(p, true, false)
+        });
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].1.as_deref(), Some("root0"));
 
-        let second = cached_chained(vec![f.clone()], &mut cache, |p| codex_file_meta(p, true, false));
-        assert_eq!(second[0].1.as_deref(), Some("root0"), "链父 id 命中缓存不丢");
+        let second = cached_chained(vec![f.clone()], &mut cache, |p| {
+            codex_file_meta(p, true, false)
+        });
+        assert_eq!(
+            second[0].1.as_deref(),
+            Some("root0"),
+            "链父 id 命中缓存不丢"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -7324,10 +7334,7 @@ mod tests {
         // İ/ß 这类字符 to_ascii_lowercase 后长度会变：旧实现用小写串下标切原串必 panic，
         // ASCII 逐字节比较返回的原串下标在任何多字节文本旁都安全。
         assert_eq!(unwrap_prompt_tags("İ<USER_QUERY>ß好</USER_QUERY>"), "İß好");
-        assert_eq!(
-            unwrap_prompt_tags("ẞ<turn_aborted>x</TURN_ABORTED>ß"),
-            "ẞß"
-        );
+        assert_eq!(unwrap_prompt_tags("ẞ<turn_aborted>x</TURN_ABORTED>ß"), "ẞß");
     }
 
     #[test]
@@ -8727,7 +8734,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let mut stale = live_meta("codex", Some(&iso_from_unix(now.saturating_sub(3600))), true);
+        let mut stale = live_meta(
+            "codex",
+            Some(&iso_from_unix(now.saturating_sub(3600))),
+            true,
+        );
         refresh_live_flag(&mut stale);
         assert!(!stale.live, "一小时前的 updated_at 不得继续亮绿点");
 

@@ -22,14 +22,14 @@ function entry(partial: Partial<HistoryEntryDto>): HistoryEntryDto {
   };
 }
 
-test("ccode 工作区 merge commit → 验收合并：步骤名优先，匹配不到用工作区名", () => {
+test("ccode 工作区 merge commit → 保存进项目：步骤名优先，匹配不到用工作区名", () => {
   const steps = { "lit-notes": "文献笔记" };
   assert.deepEqual(
     translateHistoryEntry(
       entry({ merge: true, mergedBranch: "ccode/lit-notes", message: "Merge branch 'ccode/lit-notes'" }),
       steps,
     ),
-    { kind: "merge", icon: "✓", title: "验收合并：文献笔记", stats: "" },
+    { kind: "merge", icon: "✓", title: "保存进项目：文献笔记", stats: "" },
   );
   // 步骤改名/删除后匹配不到：回落工作区名
   assert.equal(
@@ -37,7 +37,7 @@ test("ccode 工作区 merge commit → 验收合并：步骤名优先，匹配�
       entry({ merge: true, mergedBranch: "ccode/old-ws", message: "Merge branch 'ccode/old-ws'" }),
       steps,
     ).title,
-    "验收合并：old-ws",
+    "保存进项目：old-ws",
   );
 });
 

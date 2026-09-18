@@ -45,11 +45,15 @@
 
 - 开工确认在已有产物/输入区之后显示「先看方案，再决定」与「你的决定」。从当前步骤声明的必需/可选/任一输入报告读取明确的决策摘要/方案比较/待决事项，写作等步骤没有决策摘要时可展示上游原有验收摘要；不把 TASK.md 指令或代码块示例当结果。决定状态与说明分开：批准指定范围／仅允许准备／待补证据／不批准。硬暂停只在「批准」时允许正式开工，「仅允许准备」需二次确认后只做无依赖准备；待补、不批准、未选状态、旧纯文本均不能开工。清空就撤回该项；确认开工才由既有任务书链落盘，读取失败不代填批准。旧纯文本不得自动迁移为已批准。
 - 评审按科研工作区绑定步骤的 `expectedArtifacts` 显示验收摘要、质量状态/未决事项、复算与验证。来源路径/行号、原文入口、缺失/截断/错误可见；没有识别到标题的已读报告仍可打开原文。不解释自然语言为机器通过。只读 Run/定时历史不套当前工作区复现操作。
+- **检索步先拍 pending 再下载全文**：Agent 筛完后 `to-fetch` 与开放获取只针对 `decision=included`；pending 禁止进待获取。人工事项顺序为「核对待确认篇目」先于「下载付费墙文献全文」。有 pending 时写入 help-wanted，未回复不把 pending 当已纳入。已有项目不静默改档案卡，需在流程编辑器补该事项或本次评审先拍 pending。
+- **检索/筛选步骤例外**（`workspaceName` 为 `lit-search` / `lit-survey-search`，或产物同时含 `papers/screening.md` 与纳入清单）：待确认与待获取在步骤卡决策。审阅在基础检查旁切换整页：清单（二次确认）／过程／文件。默认文件整页；过程里 Agent 未决不挡保存。可选收尾事项不计入审阅「待做」。付费全文和库授权放「稍后」。表在筛选决定之前；决定表单有 pending 时默认收起，不预填「退回」。改动对照不占主面底下，从右侧拉出对照窗（文件列表 + 原文 diff）。保存进项目不等于接受清单。
 - `research-report.ts` 提取纯文本章节，`research-report-load.ts` 有界只读加载（最多32个声明路径/40文件，精确文件优先，目录只展开一层）。默认不轮询，仅打开或人刷新读取；旧异步响应不得覆盖切换后的项目。HTML 和命令仅文本显示，不执行、不自动转为批准。
 - 自动报告读取在 `read_file_preview` 指定 `requireWithinRoot=true`，目录列举在 `list_dir` 指定 `root`；后端 canonicalize 校验并拒绝根外 symlink。原手动文件预览的根外 symlink 只读能力不变，省略新可选参数的旧调用保持兼容。
 - 复现运行读取脚本明确约定（`MESA_REPRODUCE` 行或 `reproduce` 子命令合同）：可执行入口、参数、工作目录=输入项目、独立输出目录、结果文件。不从报告正文抽命令，也不把输出默认写进项目内。确认后由 `research_run_reproduce` 实际执行，输出落 `~/ccode/reproductions/<工作区>/<运行id>/`，并记录命令、入口版本、退出码与本次输出清单。项目 run 配置里的脚本仍只作为声明列出，不冒充这条闭环。
 - 界面分开三层状态：运行结束、计算检查（脚本自己的 verification）、人工科研验收。零退出码、文件存在、报告自述均不等于科研通过。结果只读本次运行目录，不读项目内任意路径冒充本次结果。
-- 科研验收决定单独记在 `.ccode/research-acceptance.json`：接受／有条件接受／退回，绑定文件版本、结论范围、未关闭阻塞项、可选运行 id。Git 提交/合并仍是保存工作，不因未验收而禁止。文件版本变化后标「需要重新确认」，不要求所有阶段全部重来。
+- 科研验收决定单独记在 `.ccode/research-acceptance.json`：接受／有条件接受／退回，绑定文件版本、结论范围、未关闭阻塞项、可选运行 id。Git 提交/保存进项目仍是保存工作，不因未验收而禁止。文件版本变化后标「需要重新确认」，不要求所有阶段全部重来。
+- **评审壳按步骤类型拼区块**（闭集 `screening` / `acceptance` / `default`，`step-review.ts`）：一张 `WorkspaceReviewView`，档案声明证据主面、验收表单、文件分组与默认 diff。禁止每步一张独立评审页。检索步走 screening 档案，不是 fork。
+- **科研保存链白话**（`review-save-copy.ts`）：按钮「提交并保存进项目 / 保存进项目 / 已保存进项目」，时间线「✓ 保存进项目」，步骤卡「你核对后，保存进项目」。不是编程「合进基准」，也不是科研验收决定。
 - 新组件：`ResearchEvidencePanel` 共用摘要/原文预览，`ResearchDecisionFields` 编辑状态+说明，`ResearchReproductionPanel` 执行并回看本次结果，`ResearchAcceptancePanel` 记科研验收；不另建质量仪表盘，不自动路由/合并/改变模板。
 
 ### 决策持久化与机械对账
@@ -398,6 +402,9 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   （声明了 Zotero/folder 且登记过 PDF 就算交付），但那条事项在同一批里被删掉了。
   剩下的 `papers/` 落点只有「下载付费墙文献全文」——**有没有文献库与拿没拿到付费全文毫无关系**，
   留着就是无条件强制打勾。**教训：放宽检测口径必须绑定具体事项，事项没了口径要一起收回。**
+  该事项的 to-fetch 清单**不摆「获取」**：这批本是检索筛剩的硬墙（Wiley/Elsevier 等反爬），
+  自动获取（开放副本/机构通道）对绝大多数条目失败；主动作是「浏览器」打开站方下载、
+  落下收进 papers/，漏收用「关联」。雷达待办仍可试「获取全文」（那边混有 OA）。
 - **人工事项落点检测根 = 项目根 + 绑定的活跃工作树**（`human_detection_roots`），任一命中即完成。
 
 ## 接力与提炼接力
@@ -575,7 +582,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   **after 档人工事项一律进主干（v3.97 拍板）**：「补充付费墙文献」这类收尾项就是流程主干的倒数第二步
   （评审之前），沉到可选分隔线下会让用户以为它不存在；optional 的仍带「可选」徽标、且**不参与
   currentKey 判定**（不抢当前节点、不卡流程指示）。评审节点 hint 写清怎么验收（逐文件核对改动 →
-  对照预期产物 → 提交并合并；不满意回终端让 AI 继续改）。
+  对照预期产物 → 提交并保存进项目；不满意回终端让 AI 继续改）。
   **after 档入口的就绪口径（v3.97 放宽）**：原来死等 git 待评审（agentProduced = review/done）才给
   操作入口——agent 跑完但没提交时步骤停在「进行中」，入口永远不出现（用户实测「没看见补充入口」）。
   现放宽为三选一：待评审/已合并 ∥ 会话尾部判定 done（agent 跑完在等你）∥ 该事项的 expectedCount
@@ -748,7 +755,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     sanitize、落 papers/ 重名 -2/-3、自动登记 project.toml `[[resources]]` type="paper"；非直链（出版商页）前端
     禁用并提示手动下载，付费墙文献仍走 watch-followup.md「待人工下载」。
   - **机构访问通道（2026-09-16，fetch_paper_fulltext 逐篇获取阶梯）**：形态是**人登录一次、系统复用会话**——
-    用户在设置 → 网络的「机构访问」里配 EZproxy/OpenAthens 前缀（非密，settings.json）并在独立登录窗完成学校
+    用户在设置 → 网络「学校图书馆」点「登录学校账号」（默认 CARSI，不摆地址框）完成学校
     SSO（含 MFA），后端 `inst_access.rs` 读取登录窗 Cookie 落 0600 `inst-session.json`（与 keys.json 同纪律，
     值绝不出站）。获取入口三处：检索步付费墙事项的 to-fetch 清单条目、雷达卡「来源」态命中行、watch-followup
     待办行；按钮按 `canAttemptFulltext`（裸 DOI/doi.org 恒可试开放副本查证，其余落地页仅通道可用才摆）。
@@ -764,12 +771,14 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     重写规则不泛化（留二期）。失败文案区分「会话过期重登」与「不在订阅范围」。
     2026-09-16 二轮实测修订：① 登录窗注入 initialization_script 改写 `target=_blank` /
     window.open（CARSI 资源页等在新窗口语义下内嵌 WebView 点不动——「点击不进去」的
-    根因）；② 登录窗**不自动关**，轮询按「域名+Cookie 名」指纹增量落罐（CARSI 要在窗里
-    继续点进出版商才有出版商会话，过早关窗永远差一步）；③ **出版商反爬墙现实**：Wiley
+    根因）；② 登录窗**不自动关**，轮询按「域名+Cookie 名+值哈希」指纹增量落罐（CARSI 要在窗里
+    继续点进出版商才有出版商会话，过早关窗永远差一步；2026-09-17 审计：值入指纹——
+    同名换值/会话轮换不算结构变化会让重新登录永不落罐）；③ **出版商反爬墙现实**：Wiley
     等对一切非浏览器客户端返回 403（带全量会话+浏览器 UA 亦然，Akamai TLS 指纹拦截，
-    与登录无关）——`institutional_failure_hint` 分流提示走「在机构窗口打开」
-    （`inst_open_url`：把该篇开进机构登录窗，共享会话与真浏览器引擎，人手下载后
-    「关联本地 PDF」导入）；雷达/清单的「打开来源」在会话态同路径。④ **PDF 中继（同日三轮，已废弃）**：
+    与登录无关）——`institutional_failure_hint` 分流提示走「浏览器打开」
+    （`inst_browser_open`：调起系统浏览器，人手下载 90 秒收货；2026-09-17 审计后文案
+    与现行口径对齐——付费墙 to-fetch 清单主动作是浏览器打开（这批本是筛剩的硬墙，不摆自动获取；雷达待办仍可试开放副本/机构通道），漏收用关联本地 PDF；界面简称浏览器/关联，完整说明进 title）；雷达/清单的「打开来源」
+    （含 ⋯ 菜单，同一条链）在会话态同路径。④ **PDF 中继（同日三轮，已废弃）**：
     登录窗 initialization_script 注入「⤓ 保存 PDF 到 Mesa」浮动钮，页面上下文 fetch PDF 后
     POST 给本机 127.0.0.1 中继。**教训（勿走回头路）**：https 页面向 127.0.0.1 的回传
     会被 WebKit 拦（实测无声挂起）；占位符全量替换两次把注入脚本替出非法语法
@@ -921,36 +930,89 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
       登记 PendingCatch + 写 helper-context.json 当前项目）→ 用户在真浏览器里点
       站方下载落 ~/Downloads → notify 监听按**六层过滤链**收货（.pdf 扩展 /
       **应用启动即恢复监听**——盘上登记在重启后也要有人接，此前等下一次
-      「浏览器打开」才启动、重启后的下载全漏；**决策全程诊断双落点**
-      （终端 + logbuf，每个跳过分支都有痕迹——2026-09-17 排障期加，勿删）；
+      「浏览器打开」才启动、重启后的下载全漏；**终端只印启动/失败/收货结果**
+      （去重、快照、无 pending 的无关 PDF 不刷屏——macOS 一次落盘会连发
+      Create+Modify+隔离属性+Spotlight，排障期把每次去重都 eprintln 会让人以为
+      点了很多次；logbuf 仍收首次归属判定，漏收有痕迹）；
       大小稳定检测上限 30s（Safari 边下边写，6s 会截半截文件）；
       启动快照排除既有文件 / 1.2s 大小稳定检测 / 5s 同文件去重 / %PDF- 魔数+60MB /
-      归属匹配：±90s 时间窗 + normalize_title 互相包含；名字对不上时兜底取**最近
-      打开**的那条（LIFO，2026-09-17 用户拍板「打开哪个就关联哪个」——错挂可回收
-      站找回 + 行内「关联本地 PDF」改正，漏收更难受）；**MDPI 编号归一**：文件名
+      归属匹配：±90s 时间窗（**从文件出现那刻算**——settle 检测最多耗 30s，用判定
+      时刻对窗会把排队在后面的下载推出窗）+ normalize_title 互相包含（**短边 ≥8
+      字符护栏**，与 to_fetch_progress 同款——1 字符的短 norm 会截胡别的 pending）；
+      名字对不上时兜底取**最近打开**的那条（LIFO，2026-09-17 用户拍板「打开哪个就
+      关联哪个」——漏收更难受）；**MDPI 编号归一**：文件名
       reactions-07-00016 与标题永远对不上，但与
       DOI 10.3390/reactions7010016 同源——DOI 后缀=刊名+卷+期(2位)+编号(末4位)、
       文件名=刊名-卷-编号(5位)，两边归一成「刊名+卷整数+编号整数」比较（仅
       10.3390 前缀启用）；**命中即消费**（登记出队落盘，不占后续下载窗口名额）；
-      同一篇重复「浏览器打开」刷新时间戳不追加）→ `set_relay_context`（语境跟命中
-      的那篇走）→ 既有 stage_relayed_pdf → inst-pdf-relayed 入库链 → 原文件挪
-      回收站可反悔。无 pending 且 10 分钟无
+      同一篇重复「浏览器打开」刷新时间戳不追加（去重键含 project_root——同篇
+      不同项目并存两条，收进各自项目）→ `set_relay_context`（语境跟命中
+      的那篇走）→ 既有 stage_relayed_pdf → inst-pdf-relayed 入库链。**归属（2026-09-17 夜）**：
+      文件名/DOI/MDPI 对得上 = Hit 自动收并挪回收站；窗内只开一篇也对不上 = Fallback
+      收进这篇、原件留下载夹并横幅说明；**开了多篇对不上不猜**，发
+      `inst-pdf-attention` reason=ambiguous 让人点挂到哪篇。旧口径「一律最近打开」已废。
+      稳定检测
+      25 轮耗尽或尾部无 `%%EOF` 一律放手等下一次 Modify 事件（Safari 边下边写的
+      截断文件头部魔数照样过）。无 pending 且 10 分钟无
       事件自动停 watcher，不常驻。**登记持久化**（download-pending.json，opened_at
       用 SystemTime 跨进程判窗）：dev 热重启/应用重启不丢登记——2026-09-17 实测
       重启把内存登记洗掉、用户下完 PDF 无人收。
-    - **通道 B（浏览器会话复用）**：设置 → 机构访问 → 「在浏览器中登录」（同
-      `inst_browser_open`，无项目语境）；浏览器 profile 一次登录持续有效，Mesa
-      不再倒 Cookie。内嵌窗登录保留作回落（`inst_open_login`，供无头阶梯
+    - **通道 B（浏览器会话复用）**：设置 → 网络「学校图书馆」→ 「登录学校账号」（同
+      `inst_browser_open`，无项目语境，默认 CARSI）；浏览器 profile 一次登录持续有效，Mesa
+      不再倒 Cookie。设置页主路径只留这一颗按钮；EZproxy/OpenAthens 前缀收进「校外打不开全文时」
+      （已填或非法则默认展开），内嵌窗登录 / 保存会话 / 浏览器桥收进「其他方式」
+      （自定义登录入口或已有内嵌会话则默认展开）。内嵌窗登录保留作回落（`inst_open_login`，供无头阶梯
       fetch_via_channel 与 EZproxy 调试）。
     - **通道 C（浏览器扩展 + native messaging，`extension/` + `bin/mesa_helper.rs`
       + `browser_bridge.rs`）**：扩展（MV3，ID 固定 `dmjplopfhbdamkihimfllomdmkfainnn`，manifest
       内置 key）在文献页（有 citation_doi）插「存到 Mesa」——页内 fetch
-      （citation_pdf_url → 唯一 pdfish 链 → pdfish 内嵌）取字节验魔数 → base64 →
+      （citation_pdf_url → 唯一 pdfish 链 → pdfish 内嵌；>40MB 改道浏览器下载栈
+      交给通道 A——Chrome 发往 native host 的单条消息上限 64MiB，base64 膨胀后
+      约 48MiB 即被拒发；跨源代取仅限与发起页同源的地址）取字节验魔数 → base64 →
       service worker connectNative(`dev.ccode.mesa`) → helper 读 4 字节帧、按
-      helper-context.json 的当前项目调 `ccode_lib::helper_ingest`（同一落盘口径）
-      → 回 `{ok, saved}`。「安装浏览器桥」写 NativeMessagingHosts 清单（macOS/
+      helper-context.json 的当前项目调 `ccode_lib::helper_ingest`（同一落盘口径；
+      语境带这篇的 **title/doi**——PDF 阅读器页没有 citation_title 时用它起文件名，
+      禁止再落 `paper.pdf` / `paper-5.pdf`（清单短边 ≥8 对不上「已存」）；
+      `pick_paper_name_hint`：页上正经标题 → 同篇/匿名时的语境标题 → DOI；
+      **待获取清单认「已存」不靠文件名**（paper-5.pdf 照样认）：资源 name/note 写打开
+      那篇的标题/DOI，回执监听 `stamp_paper_identity` **并把通用文件名改成标题**；
+      对不上文件名时用 pending/helper-context 把最近落下的 PDF 挂到那一行并改名。
+      回执监听 **250ms**（旧 2s 让扩展「已存」明显慢于直接下载）。
+      待获取点「浏览器」的行加主题强调框（行内 `ring-inset ring-cta-bd`，避免
+      overflow 裁左右），框留到点下一篇才换。
+      语境 **24 小时过期**——过期回执要求先在 Mesa 里点一次「浏览器打开」；每次
+      收货追加 helper-receipts.jsonl 0600 回执日志，主程序消费对应 pending 并广播
+      `inst-papers-changed`（带 title/doi/saved），待获取清单对上即清「等待收货」）→ 回 `{ok, saved, project}`。
+      **工具栏图标优先走页内「存到 Mesa」**（与右下角按钮同一条 fetch）；出版商对
+      `chrome.downloads` 下载式请求常回 HTML（SD 型），旧口径会删掉垃圾文件让用户
+      看见「已删除」。downloads 只在没有 content script 时作末路。
+      「安装浏览器桥」写 NativeMessagingHosts 清单（macOS/
       Linux 各浏览器目录、Windows 清单+注册表经 background_command），allowed_
-      origins 只锁扩展 ID。出版商看到的是真实登录用户的正常请求，零分型适配。
+      origins 只锁扩展 ID；**启动时自愈**（清单里写死的 helper 绝对路径与应用
+      移动/重装后不一致就幂等重写）；扩展目录随打包资源就位到
+      `<config>/ccode/extension`（打包用户可点的稳定路径，安装结果里带实际路径）。
+      出版商看到的是真实登录用户的正常请求，零分型适配。
+    - **2026-09-17 审计修复摘要**（全链 45 条，详见提交）：会话指纹含值哈希
+      （重新登录立即落罐）；清除会话三步走（删文件 + 清登录窗 cookie store +
+      关窗 + 轮询代际防复活）；会话「可信」判据（入口页 pre-auth Cookie 不点亮
+      获取按钮，DTO 带 sessionCredible）；前缀口径统一（status 只报 valid 前缀，
+      prefixInvalid 就地提示）；OA 查证回落修复（Unpaywall 传输失败不再提前弹空，
+      扫 oa_locations/locations）；URL 改写防双包（已是代理形态不再包一层，qurl/
+      大写前缀变体兼容）；中间页实体反转义；候选提取带单篇归属判定（列表页/
+      补充材料不猜）；html_needs_login 只在提不出候选时定性 + SAML 中继页识别；
+      中继多槽（90 秒窗连收两篇不串台，错误路径按原位回插不破 FIFO 逐出）；分片块长
+      61440 + begin 握手门禁（武装窗随分片到达续期）+ 逐块解码（>64KB PDF 不再
+      静默丢失）；暂存 0600/0700；helper 占位文件校验；图标点击失败反馈；收货
+      90 秒窗前端可见性（按钮进行中态 + 漏收/兜底横幅 + 不依赖 OS 通知权限的
+      应用内反馈通道）。
+      终检二轮补丁：清除会话先置代际标记再动文件（删 cookie 数百 ms 的窗口期
+      不再复活）；扩展对**自己触发的下载**（图标点击/大文件改道）经
+      `mesa-report-download` 把最终落盘路径直报 helper → `dl-reports.jsonl`
+      （持久化游标 dl-reports.cursor，重启不重放历史行）→ 收货链增量消费——
+      浏览器下载目录不在系统 Downloads 时不再零反馈；>40MB 大文件改道 background
+      的 downloads API（跨源 a[download] 无效且 Content-Length 预检先于读 body）；
+      Fallback 命中同样消费 pending（一个窗口最多错收一次）；>60MB 超限发
+      oversize 提示不再静默；启动快照按全路径键控（不再误杀跨目录上报）。
     - **迁移**：内嵌窗 inst_open_url + 全部分型件保留为过渡回落（SD 用户已习惯
       View PDF）；通道 C 稳定后整体退役。inst-session.json 继续供无头阶梯。
 
@@ -979,7 +1041,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 - 步骤 `decision_mode` 取 `auto_continue`、`soft_pause`、`hard_pause`；硬暂停仅阻止未回答的结构化 decisions，不把开放讨论种子误判为已拍板。
 - 输入/产物通配统一按 `*` 匹配，末段通配代表目录下直接文件；空文件不算已产出。Quarto PDF/DOCX 与 LaTeX PDF 统一写入 `output/`，源稿保留在 `manuscript/`。
 - **技能报告也是步骤产物**：步骤挂载 `bib-check`、`stats-check` 等只读审查技能时，必须在 `expected_artifacts` 声明报告路径，并在简报中写明报告落点；跨轮次或同一项目内可能重复执行的报告使用步骤/轮次专属文件名，避免后一次运行覆盖前一轮证据。技能允许调用方覆写默认 `outputs` 路径，但 TASK.md 与验收清单必须采用覆写后的真实路径。
-- **工作区提交与项目历史分层**：工作区改动面板的提交写入 `ccode/<name>` 任务分支；项目「历史」只读主仓库当前分支的 first-parent 主线，工作区过程提交要到合并后才以「验收合并」进入项目时间线。UI 不得把任务分支提交写成已经进入项目主线历史。
+- **工作区提交与项目历史分层**：工作区改动面板的提交写入 `ccode/<name>` 任务分支；项目「历史」只读主仓库当前分支的 first-parent 主线，工作区过程提交要到保存进项目后才以「✓ 保存进项目」进入项目时间线。UI 不得把任务分支提交写成已经进入项目主线历史。
 
 - **科研语义只进模板/数据/技能包**：流水线步骤、任务简报、技能包都是可编辑预设；引擎保持通用，不在逻辑里写死「文献/数据/
   论文」概念。
@@ -997,7 +1059,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 - 保留六套模板/原阶段数；工具是项目选择，不增设独立编排系统，不自动路由或自动并行。选择保存在 settings 的闭集 `科研工具/<key>：<value>`（`libraryExport` / `plotting` / `illustration` / `manuscript`），由 `research-tools.ts` 在应用/编辑步骤时补全技能、必需子集、交付、人工事项。**文献从哪来只认 `config.lit_source`**（流程线「确定文献来源」），不再写 `科研工具/literature`；切换来源时重应用合同，选 Zotero 才给检索/精读步挂 `zotero-sync`。外部库**交付**仍走 `libraryExport`，与来源分开；只认一份主 references.bib。交付问在精读（纳入清单 + `references.bib` 齐了）；没有精读步才问在期刊格式适配。创建项目时设定屏只填全局设定。稿件载体问在会换正式稿的步骤（期刊格式适配 / 返修 / 投稿材料）；文献库交付、Origin、Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。答案仍是项目级 `科研工具/*`，所有匹配步骤（含以后追加）一起补。不挡在模板列表前面。
 - 自动补入项以简报中的 `mesa-research-tools` 记录，反复应用幂等；撤销只移除本机制加入项。原生稿件替换字段若被手改，拒绝静默覆盖。更新旧步骤必须逐项预览、载入编辑草稿；不改旧 TASK.md 或产物。
 - Zotero 用只读 SQLite 在线备份到内存取得一致快照；不再顺序复制主库/WAL，不产生明文临时数据库。首次 bib、增量唯一候选、条目映射与 PDF 资源可追溯；来源与资源同次配置写回，不得前端回写旧 cfg。链接附件基目录须由人显式选择；读库绝不写个人库。
-- Zotero 导出的新键来自 library/item 稳定身份；已有主库键必须通过 DOI/条目差异人工保留，不自动换键。题录候选按 reference 资源登记；已登记只读外部 PDF 精确放行阅读/建笔记，不放行目录、不复制改名附件。2026-09-16 补：to-fetch 清单有「同步到 Zotero」按钮（zotero_attach_fulltexts，免 agent 会话）——papers/ 已拿到的全文按 DOI 匹配挂 linked_file 附件（引用 papers/ 绝对路径、不复制进 Zotero 存储），条目不存在时优先用同源 to-fetch.ris 的全题录新建（作者/年份/来源；RIS 缺失回落标题+DOI 最小条目）；无 DOI 的不同步（避免重复建条）。前提 Zotero 运行中 + 「允许其他应用与本机通信」+ 首次写入授权。写库规则放宽：技能或 UI 显式动作皆算用户意图。
+- Zotero 导出的新键来自 library/item 稳定身份；已有主库键必须通过 DOI/条目差异人工保留，不自动换键。题录候选按 reference 资源登记；已登记只读外部 PDF 精确放行阅读/建笔记，不放行目录、不复制改名附件。2026-09-16 补：to-fetch 清单有「同步到 Zotero」按钮（zotero_attach_fulltexts，免 agent 会话）——papers/ 已拿到的全文按 DOI 匹配挂 linked_file 附件（引用 papers/ 绝对路径、不复制进 Zotero 存储），条目不存在时优先用同源 to-fetch.ris 的全题录新建（作者/年份/来源；RIS 缺失回落标题+DOI 最小条目）；无 DOI 的不同步（避免重复建条）。前提 Zotero 运行中 + 「允许其他应用与本机通信」+ 首次写入授权。写库规则放宽：技能或 UI 显式动作皆算用户意图。**2026-09-17 实机（Zotero 9.0.6）**：官方 local API（`/api/users/0/items`）只读——源码写明 Write access is not yet supported，POST 回纯文本 `Endpoint does not support method`；对着 `.json()` 会变成 reqwest「error decoding response body」。现先探一次写入，只读则停并提示把 papers/ PDF 拖到对应条目（没有条目先拖 to-fetch.ris）。Connector `/connector/saveItems` 能建条目但不能给已有条目挂 linked_file，不走那条以免复制/重复建条。「同步到 Zotero」打开 `to-fetch.ris`（优先项目根）；导入前 GET 对照 DOI，库里已有则确认防重复。PDF 直接拖进 Zotero，客户端一般按元数据对上已有条目。`zotero-sync` 技能只交 RIS/报告，禁止 POST 只读 `/api/`。
 - `origin-plot` 仅 Windows 有许可证本机，`endnote-bridge` 仅离线格式桥/人工插件，`blender-research` 仅用户指定的科研示意。随包脚本与 SKILL.md 一同播种/更新，执行前核对参数；转换/示意成功不能作为科学真实性证明。Blender MCP 不在 worktree 沙箱内，交互只面向受控工程；最后保存脚本+场景并后台重建。
 - 开工检测以所选 Agent 的实际技能目录摘要为准，必需技能缺失/漂移不可启动；可选技能缺失只报告。Zotero 通道离线可继续已导入文件；读取可用不等于写入授权；不得把模板选择当成批量写库批准。
 - 原生 LaTeX/Word 投稿、返修合同声明真实输入和正式 PDF/源件，不运行 Markdown 说明文档的 Quarto 脚本冒充成稿；Word 引用域与插件刷新仍由人确认。LaTeX 模板日志统一 `output/compile.log`，latexmk 检测 ctex/fontspec 时用 XeLaTeX；实际引擎/宏包兼容仍需真实编译。

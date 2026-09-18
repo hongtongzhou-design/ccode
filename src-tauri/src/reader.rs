@@ -1187,10 +1187,7 @@ mod tests {
         assert!(Path::new(&note.path).starts_with(&root));
         let paired = pdf_for_note_sync(&root.to_string_lossy(), &note.path).unwrap();
         assert!(
-            crate::paths::same_path(
-                paired.as_deref().unwrap_or(""),
-                &pdf.to_string_lossy()
-            ),
+            crate::paths::same_path(paired.as_deref().unwrap_or(""), &pdf.to_string_lossy()),
             "{paired:?} vs {pdf:?}"
         );
         assert!(

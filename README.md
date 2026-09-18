@@ -72,7 +72,7 @@
 
 ## 文档
 
-- [docs/user-guide.md](docs/user-guide.md) — 使用手册（完整操作流程）
+- [docs/user-guide.md](docs/user-guide.md) — 产品说明书（是什么 / 怎么用；需要后补的图和视频已标位）
 - [CHANGELOG.md](CHANGELOG.md) — 版本更新日志
 - [docs/architecture.md](docs/architecture.md) — 架构设计与决策记录
 - [docs/agent-integration-matrix.md](docs/agent-integration-matrix.md) — 九个 CLI 的 env / 配置 / 会话格式调研

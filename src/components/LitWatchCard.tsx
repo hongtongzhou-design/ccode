@@ -10,7 +10,6 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bookmark,
@@ -43,6 +42,7 @@ import { LIST_PREVIEW_CAP } from "../lit-list";
 import {
   canAttemptFulltext,
   fulltextViaLabel,
+  instActiveFrom,
   instOpenTarget,
   type FetchedFulltextDto,
 } from "../inst-access";
@@ -122,12 +122,6 @@ function HeadIcon({
   );
 }
 
-function sourceUrl(url: string): string {
-  const trimmed = url.trim();
-  if (/^10\.\d{4,9}\/\S+$/i.test(trimmed)) return `https://doi.org/${trimmed}`;
-  if (/^doi:\s*10\.\d{4,9}\/\S+$/i.test(trimmed)) return `https://doi.org/${trimmed.replace(/^doi:\s*/i, "")}`;
-  return trimmed;
-}
 
 /** 近 8 周命中迷你趋势（手绘 SVG 柱，不引图表库）；悬停出 HoverTip（禁原生 title） */
 function TrendChart({ trend }: { trend: ReturnType<typeof weeklyTrend> }) {
@@ -376,7 +370,7 @@ function WatchEntryRow({
                 title={
                   downloading
                     ? "获取中…"
-                    : "获取全文：先查合法开放副本（预印本/仓储），再走机构通道（设置 → 机构访问）"
+                    : "获取全文：先查合法开放副本（预印本/仓储），再走机构通道（设置 → 网络 → 学校图书馆）"
                 }
                 aria-label={downloading ? "获取中" : "获取全文"}
                 onClick={onFetch}
@@ -388,7 +382,7 @@ function WatchEntryRow({
               <button
                 type="button"
                 className={iconActionClass}
-                title="打开来源页面（有机构会话时在机构窗口打开，带登录能看全文）"
+                title="在系统浏览器里打开来源（有机构前缀时自动改写带代理）；浏览器里点站方下载，90 秒内落下的 PDF 由 Mesa 自动收进 papers/"
                 aria-label="打开来源"
                 onClick={onOpenSource}
               >
@@ -493,7 +487,9 @@ function WatchEntryRow({
               label: "打开来源",
               disabled: !entry.url.trim(),
               title: entry.url.trim() ? entry.url : "这条命中没有链接",
-              onSelect: () => void openUrl(sourceUrl(entry.url)),
+              // 与工具栏同一条链（2026-09-17 审计：旧口径直开 URL，绕过收货
+              // 登记与机构前缀改写——菜单打开后下载的 PDF 不会被收进 papers/）
+              onSelect: onOpenSource,
             },
             {
               label: "关联本地 PDF…",
@@ -933,6 +929,9 @@ export default function LitWatchCard({
   const [filterOpen, setFilterOpen] = useState(false);
   const [showFilteredOut, setShowFilteredOut] = useState(false);
   const [followupsOpen, setFollowupsOpen] = useState(false);
+  const [browserOpenedAt, setBrowserOpenedAt] = useState<Record<string, number>>({});
+  const [browserSpotlight, setBrowserSpotlight] = useState<string | null>(null);
+  const browserSpotlightAway = useRef(false);
   const [running, setRunning] = useState(false);
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
   /** 解读展开态与结果缓存分离：收起不丢缓存，再展开直接复用（不重复调 AI） */
@@ -961,7 +960,9 @@ export default function LitWatchCard({
     invoke<{ sessionPresent: boolean; prefixConfigured: boolean }>(
       "inst_session_status",
     )
-      .then((s) => setInstActive(s.sessionPresent || s.prefixConfigured))
+      .then((s: { sessionPresent: boolean; prefixConfigured: boolean; sessionCredible?: boolean }) =>
+        setInstActive(instActiveFrom(s as never)),
+      )
       .catch(() => setInstActive(false));
   }, []);
 
@@ -1070,10 +1071,21 @@ export default function LitWatchCard({
     })
       .then((u) => (unlistenAdopt = u))
       .catch(() => {});
+    // 扩展「存到 Mesa」经 helper 落盘后的广播（主程序回执监听发出）：命中行
+    // 「✓ 已有全文」/待办状态要跟着 papers/ 变化翻新，不再等下次巡检
+    let unlistenPapers: (() => void) | undefined;
+    listen<{ projectRoot?: string }>("inst-papers-changed", (e) => {
+      if (e.payload?.projectRoot && e.payload.projectRoot !== projectRoot) return;
+      setBrowserOpenedAt({});
+      reload();
+    })
+      .then((u) => (unlistenPapers = u))
+      .catch(() => {});
     return () => {
       stale = true;
       unlisten?.();
       unlistenAdopt?.();
+      unlistenPapers?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot]);
@@ -1240,6 +1252,51 @@ export default function LitWatchCard({
   /** 打开来源页：在系统浏览器里打开（真实浏览器会话，出版商不拦截）——浏览器里
    *  点站方下载，落下的 PDF 由 Mesa 收货通道自动收进本项目 papers/（时间窗+标题
    *  归属匹配）；内嵌机构窗保留作回落 */
+  /** 「浏览器打开」进行中状态（90 秒窗可见性，终检补：toast 之外待办行按钮
+   *  也要有等待态——StepFlow 同款口径） */
+  const [, tickBrowserOpened] = useState(0);
+  useEffect(() => {
+    if (!Object.keys(browserOpenedAt).length) return;
+    const t = window.setInterval(() => {
+      // 到期剪掉（终检二轮：只增不删会让雷达卡每秒全量重渲染直至卸载）
+      const now = Date.now();
+      setBrowserOpenedAt((cur) => {
+        const next = Object.fromEntries(
+          Object.entries(cur).filter(([, at]) => now - at < 95000),
+        );
+        return Object.keys(next).length === Object.keys(cur).length ? cur : next;
+      });
+      tickBrowserOpened((v) => v + 1);
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [browserOpenedAt]);
+  useEffect(() => {
+    if (browserSpotlight == null) return;
+    const onHide = () => {
+      browserSpotlightAway.current = true;
+    };
+    const onBack = () => {
+      if (!browserSpotlightAway.current) return;
+      browserSpotlightAway.current = false;
+      const el = document.querySelector(
+        `[data-lit-open-url="${CSS.escape(browserSpotlight)}"]`,
+      );
+      el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    };
+    const onVis = () => {
+      if (document.visibilityState === "hidden") onHide();
+      else onBack();
+    };
+    window.addEventListener("blur", onHide);
+    window.addEventListener("focus", onBack);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("blur", onHide);
+      window.removeEventListener("focus", onBack);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [browserSpotlight]);
+
   function openWithSession(rawUrl: string, title?: string) {
     if (!rawUrl.trim()) return;
     invoke("inst_browser_open", {
@@ -1247,7 +1304,16 @@ export default function LitWatchCard({
       projectRoot,
       title: title ?? rawUrl.trim().slice(0, 60),
       doi: rawUrl,
-    }).catch((e) => setError(`打开浏览器失败：${String(e)}`));
+    })
+      .then(() => {
+        // 90 秒窗可见性（2026-09-17 审计）：打开后给一句交代，用户才知道
+        // 「接下来在浏览器里点下载就行，Mesa 会自动接住」
+        browserSpotlightAway.current = false;
+        setBrowserSpotlight(rawUrl.trim());
+        setBrowserOpenedAt((cur) => ({ ...cur, [rawUrl.trim()]: Date.now() }));
+        showToast("已打开浏览器——在里面点站方下载，90 秒内落下的 PDF 会自动收进 papers/");
+      })
+      .catch((e) => setError(`打开浏览器失败：${String(e)}`));
   }
 
   /** 关联本地 PDF（命中条目 / 精读条目共用 ⋯ 菜单）：文件对话框选 PDF，
@@ -1631,13 +1697,18 @@ export default function LitWatchCard({
                       待人工下载（{followups.length}）
                     </button>
                     {followupsOpen && (
-                      <ul className="mt-1 space-y-0.5">
+                      <ul className="mt-1 space-y-0.5 px-0.5 py-px">
                         {followups.map((f, i) => {
                           const fkey = `${f.title}-${i}`;
                           return (
                           <li
                             key={fkey}
-                            className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 hover:bg-hover"
+                            data-lit-open-url={f.url.trim()}
+                            className={`flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 ${
+                              browserSpotlight === f.url.trim()
+                                ? "bg-cta/10 ring-1 ring-inset ring-cta-bd"
+                                : "hover:bg-hover"
+                            }`}
                           >
                             <span className="min-w-0 flex-1 truncate text-xs text-l2">
                               {f.title}
@@ -1652,16 +1723,21 @@ export default function LitWatchCard({
                                 type="button"
                                 className={`${ghostActionClass} shrink-0`}
                                 disabled={downloading.has(fkey)}
-                                title="逐篇获取全文：开放副本 → 机构通道（设置 → 机构访问）"
+                                title="逐篇获取全文：开放副本 → 机构通道（设置 → 网络 → 学校图书馆）"
                                 onClick={() => {
                                   void fetchFulltext(
                                     fkey,
                                     f.url,
                                     f.title,
-                                  ).then(() => {
-                                    setFetchedFollowups((cur) =>
-                                      new Set(cur).add(fkey),
-                                    );
+                                  ).then((ok) => {
+                                    // 只在真成功时打勾（2026-09-17 审计：旧 .then(()
+                                    // => add) 忽略布尔返回值，失败也翻「✓ 已获取」，
+                                    // 卡片顶部红错与行内成功勾自相矛盾）
+                                    if (ok) {
+                                      setFetchedFollowups((cur) =>
+                                        new Set(cur).add(fkey),
+                                      );
+                                    }
                                   });
                                 }}
                               >
@@ -1676,16 +1752,23 @@ export default function LitWatchCard({
                               <button
                                 type="button"
                                 className={`${ghostActionClass} shrink-0`}
-                                title={
-                                  instActive
-                                    ? "在机构登录窗打开（带登录会话，能看全文并下载 PDF）"
-                                    : "打开来源页面"
-                                }
+                                title="在系统浏览器里打开（真实浏览器会话）；浏览器里点站方下载，90 秒内落下的 PDF 由 Mesa 自动收进本项目 papers/（没收到的会有提示，旁边「关联本地 PDF」可补）"
                                 onClick={() => openWithSession(f.url, f.title)}
                               >
-                                打开来源
+                                {browserOpenedAt[f.url.trim()] &&
+                                Date.now() - browserOpenedAt[f.url.trim()] < 95000
+                                  ? "已打开，等浏览器下载…"
+                                  : "打开来源"}
                               </button>
                             )}
+                            <button
+                              type="button"
+                              className={`${ghostActionClass} shrink-0`}
+                              title="已手动下载全文？选中文件，自动复制进 papers/ 并登记（90 秒窗漏收的补救口，2026-09-17 审计：该入口此前只有命中行有）"
+                              onClick={() => void attachPdf(f.title)}
+                            >
+                              关联本地 PDF
+                            </button>
                           </li>
                           );
                         })}

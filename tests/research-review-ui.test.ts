@@ -16,7 +16,7 @@ test("实际评审页接入本步骤摘要/未决项和复现；只读历史不�
   }}]});
   const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost',pretendToBeVisual:true});
   const restore:Array<[string,PropertyDescriptor|undefined]>=[];
-  for(const[key,value]of Object.entries({window:dom.window,document:dom.window.document,navigator:dom.window.navigator,HTMLElement:dom.window.HTMLElement,localStorage:dom.window.localStorage,sessionStorage:dom.window.sessionStorage,IS_REACT_ACT_ENVIRONMENT:true,__reviewStore:{setPage(){},setSelectProjectReq(){},setPendingTerminal(){throw new Error('no run expected');},runningScripts:{}}})){
+  for(const[key,value]of Object.entries({window:dom.window,document:dom.window.document,navigator:dom.window.navigator,HTMLElement:dom.window.HTMLElement,localStorage:dom.window.localStorage,sessionStorage:dom.window.sessionStorage,IS_REACT_ACT_ENVIRONMENT:true,__reviewStore:{setPage(){},setSelectProjectReq(){},setFilePreviewReq(){},setPendingTerminal(){throw new Error('no run expected');},runningScripts:{}}})){
     restore.push([key,Object.getOwnPropertyDescriptor(globalThis,key)]);Object.defineProperty(globalThis,key,{value,configurable:true,writable:true});
   }
   let reviewOnly=false;
@@ -54,13 +54,13 @@ test("实际评审页接入本步骤摘要/未决项和复现；只读历史不�
     assert.match(host.textContent!,/复现运行/);assert.match(host.textContent!,/科研验收决定/);
     assert.match(host.textContent!,/非 Git 产物/);
     assert.match(host.textContent!,/papers\/result.pdf/);
-    assert.ok(!calls.some(c=>['shell_spawn','pty_write','merge_workspace'].includes(c)), '打开评审不会执行代码或合并');
+    assert.ok(!calls.some(c=>['shell_spawn','pty_write','merge_workspace'].includes(c)), '打开评审不会执行代码或保存进项目');
     reviewOnly=true;
     await act(async()=>root.render(h(Review,{key:'history',worktreePath:'/history',onClose(){}})));
     assert.doesNotMatch(host.textContent!,/复现运行/);
     reviewOnly=false;canMerge=true;
     await act(async()=>root.render(h(Review,{key:'merge',worktreePath:'/tree',onClose(){}})));
-    const merge=Array.from(host.querySelectorAll('button')).find(b=>b.textContent==='合并');
+    const merge=Array.from(host.querySelectorAll('button')).find(b=>b.textContent==='保存进项目');
     assert.ok(merge && !merge.disabled);
     await act(async()=>merge.click());
     assert.equal(mergedArgs.expectDeliveryToken,'frozen-files');

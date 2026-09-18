@@ -1,3 +1,4 @@
+import { parentDir, pathWithin, samePath } from "./path-utils.ts";
 import { officeDocKind, type OfficeDocKind } from "./work-mode.ts";
 
 /** 项目文件页就地预览形态：与运行页右栏同一套分流。 */
@@ -35,6 +36,26 @@ export function flattenVisibleFiles<T extends { path: string; isDir: boolean }>(
     }
   };
   walk(root);
+  return out;
+}
+
+/** 从项目根到文件父目录、需要展开的目录链（不含根）。路径不在根内则空。 */
+export function ancestorDirsToReveal(
+  root: string,
+  filePath: string,
+  isWindows = false,
+): string[] {
+  if (!pathWithin(filePath, root, isWindows)) return [];
+  const out: string[] = [];
+  let cur = parentDir(filePath);
+  while (
+    cur &&
+    pathWithin(cur, root, isWindows) &&
+    !samePath(cur, root, isWindows)
+  ) {
+    out.unshift(cur);
+    cur = parentDir(cur);
+  }
   return out;
 }
 

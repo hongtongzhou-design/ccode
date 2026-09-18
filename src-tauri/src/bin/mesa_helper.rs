@@ -23,29 +23,89 @@ fn read_frame(stdin: &mut impl Read) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn write_frame(stdout: &mut impl Write, obj: &serde_json::Value) {
+/// 写回执；管道断开返回 Err——调用方应退出循环（旧实现吞错继续空转读 stdin，
+/// 浏览器侧只见 60s 超时，实际早已无人接收，2026-09-17 审计）
+fn write_frame(stdout: &mut impl Write, obj: &serde_json::Value) -> std::io::Result<()> {
     let body = serde_json::to_vec(obj).unwrap_or_default();
     let len = (body.len() as u32).to_le_bytes();
-    let _ = stdout.write_all(&len);
-    let _ = stdout.write_all(&body);
-    let _ = stdout.flush();
+    stdout.write_all(&len)?;
+    stdout.write_all(&body)?;
+    stdout.flush()
 }
 
 fn helper_context_path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("ccode").join("helper-context.json"))
 }
 
-fn active_project_root() -> Result<String, String> {
+/// 收货回执日志（追加式 JSONL，0600）：helper 是独立进程、stderr 被 Chrome 吞掉，
+/// 「点存到 Mesa 没反应」时双方都无据可查——落一条最小回执供报障归因
+fn append_receipt(entry: &serde_json::Value) {
+    let Some(dir) = dirs::config_dir().map(|d| d.join("ccode")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("helper-receipts.jsonl");
+    let mut line = entry.to_string();
+    line.push('\n');
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+struct HelperCtx {
+    project_root: String,
+    title: String,
+    doi: String,
+}
+
+fn load_helper_ctx() -> Result<HelperCtx, String> {
     let path = helper_context_path().ok_or("无法确定配置目录")?;
-    let text = std::fs::read_to_string(&path)
-        .map_err(|_| "Mesa 里还没有「当前项目」——先在待获取清单点一次「在浏览器打开」".to_string())?;
+    let text = std::fs::read_to_string(&path).map_err(|_| {
+        "Mesa 里还没有「当前项目」——先在待获取清单点一次「在浏览器打开」".to_string()
+    })?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("helper 语境损坏: {e}"))?;
-    v.get("projectRoot")
+    // 语境有效期（2026-09-17 审计）：helper-context 是「最近一次浏览器打开」留下
+    // 的，永不过期时用户隔几天点扩展，PDF 静默落进旧项目、Mesa 侧零痕迹
+    if let Some(at) = v
+        .get("updatedAt")
+        .and_then(|x| x.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    {
+        let age = chrono::Utc::now().signed_duration_since(at);
+        if age > chrono::Duration::hours(24) {
+            return Err("上次「浏览器打开」已超过 24 小时——先在 Mesa 里对目标项目点一次「浏览器打开」，再回来存这篇".into());
+        }
+    }
+    let project_root = v
+        .get("projectRoot")
         .and_then(|x| x.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| "Mesa 里还没有「当前项目」".to_string())
+        .ok_or_else(|| "Mesa 里还没有「当前项目」".to_string())?;
+    Ok(HelperCtx {
+        project_root,
+        title: v
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        doi: v
+            .get("doi")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
 }
 
 fn main() {
@@ -55,25 +115,103 @@ fn main() {
         let msg: serde_json::Value = match serde_json::from_slice(&frame) {
             Ok(v) => v,
             Err(_) => {
-                write_frame(&mut stdout, &serde_json::json!({"ok": false, "error": "消息解析失败"}));
+                if write_frame(
+                    &mut stdout,
+                    &serde_json::json!({"ok": false, "error": "消息解析失败"}),
+                )
+                .is_err()
+                {
+                    break;
+                }
                 continue;
             }
         };
+        if msg.get("kind").and_then(|k| k.as_str()) == Some("mesa-report-download") {
+            // 扩展上报自己触发的下载的最终落盘路径（浏览器下载位置不在系统
+            // Downloads 时目录监听看不见——路径直报绕过目录假定，2026-09-17 审计 #17）。
+            // 只追加到 dl-reports.jsonl 由主程序收货链消费，helper 自己不动文件
+            let reply = handle_report_download(&msg);
+            let receipt = serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "kind": "report-download",
+                "ok": reply.get("ok").cloned().unwrap_or(serde_json::json!(false)),
+            });
+            append_receipt(&receipt);
+            if write_frame(&mut stdout, &reply).is_err() {
+                break;
+            }
+            continue;
+        }
         if msg.get("kind").and_then(|k| k.as_str()) != Some("mesa-save-pdf") {
-            write_frame(&mut stdout, &serde_json::json!({"ok": false, "error": "未知消息类型"}));
+            if write_frame(
+                &mut stdout,
+                &serde_json::json!({"ok": false, "error": "未知消息类型"}),
+            )
+            .is_err()
+            {
+                break;
+            }
             continue;
         }
         let reply = handle(&msg);
-        write_frame(&mut stdout, &reply);
+        let receipt = serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "title": reply.get("title").or(msg.get("title")).and_then(|v| v.as_str()).unwrap_or(""),
+            "doi": reply.get("doi").cloned().unwrap_or(serde_json::json!("")),
+            "ok": reply.get("ok").cloned().unwrap_or(serde_json::json!(false)),
+            "saved": reply.get("saved").cloned().unwrap_or(serde_json::json!("")),
+            "note": reply.get("error").or(reply.get("saved")).cloned().unwrap_or(serde_json::json!(null)),
+            "projectRoot": reply.get("projectRoot").cloned().unwrap_or(serde_json::json!("")),
+        });
+        append_receipt(&receipt);
+        if write_frame(&mut stdout, &reply).is_err() {
+            break;
+        }
     }
+}
+
+/// 扩展上报的下载路径 → `<config>/ccode/dl-reports.jsonl`（主程序收货链增量消费，
+/// 见 download_inbox::drain_dl_reports）。文件保序追加，超 400 行截尾防无限增长
+fn handle_report_download(msg: &serde_json::Value) -> serde_json::Value {
+    let Some(path) = msg
+        .get("path")
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.is_empty())
+    else {
+        return serde_json::json!({"ok": false, "error": "缺 path"});
+    };
+    let Some(dir) = dirs::config_dir().map(|d| d.join("ccode")) else {
+        return serde_json::json!({"ok": false, "error": "无法确定配置目录"});
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("dl-reports.jsonl");
+    let mut line =
+        serde_json::json!({ "at": chrono::Utc::now().to_rfc3339(), "path": path }).to_string();
+    line.push('\n');
+    use std::io::Write;
+    let wrote = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if wrote.is_err() {
+        return serde_json::json!({"ok": false, "error": "写入 dl-reports 失败"});
+    }
+    // 截尾：超过 400 行时保留后半（低频动作，简单粗暴即可）
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() > 400 {
+            let kept = lines[lines.len() - 200..].join("\n");
+            let _ = std::fs::write(&file, format!("{kept}\n"));
+        }
+    }
+    serde_json::json!({"ok": true})
 }
 
 fn handle(msg: &serde_json::Value) -> serde_json::Value {
     let bytes_b64 = msg.get("bytesB64").and_then(|v| v.as_str()).unwrap_or("");
-    let bytes = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        bytes_b64,
-    ) {
+    let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, bytes_b64)
+    {
         Ok(b) => b,
         Err(e) => return serde_json::json!({"ok": false, "error": format!("解码失败: {e}")}),
     };
@@ -83,22 +221,58 @@ fn handle(msg: &serde_json::Value) -> serde_json::Value {
     if !bytes.starts_with(b"%PDF-") {
         return serde_json::json!({"ok": false, "error": "内容不是有效 PDF"});
     }
-    let root = match active_project_root() {
-        Ok(r) => r,
+    let ctx = match load_helper_ctx() {
+        Ok(c) => c,
         Err(e) => return serde_json::json!({"ok": false, "error": e}),
     };
-    let title = msg.get("title").and_then(|v| v.as_str()).unwrap_or("");
-    let doi = msg.get("doi").and_then(|v| v.as_str()).unwrap_or("");
-    let hint = if !title.trim().is_empty() { title } else { doi };
-    match ccode_lib::helper_ingest(&root, hint, &bytes) {
-        Ok(saved) => {
+    let page_title = msg.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let page_doi = msg.get("doi").and_then(|v| v.as_str()).unwrap_or("");
+    let page_url = msg.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    // PDF 阅读器页常没有 citation_title，旧口径会落成 paper.pdf / paper-5.pdf，
+    // 待获取清单短边 ≥8 对不上「已存」。用 Mesa 打开时记下的标题/DOI。
+    let doi_key = if !page_doi.trim().is_empty() {
+        page_doi
+    } else {
+        page_url
+    };
+    let pending = ccode_lib::helper_pending_for_doi(doi_key);
+    let ident_title;
+    let ident_doi;
+    let root;
+    if let Some((t, d, r)) = pending {
+        ident_title = t;
+        ident_doi = d;
+        root = r;
+    } else {
+        ident_title =
+            ccode_lib::helper_paper_name_hint(page_title, page_doi, page_url, &ctx.title, &ctx.doi);
+        ident_doi = if !page_doi.trim().is_empty() {
+            page_doi.to_string()
+        } else {
+            ctx.doi.clone()
+        };
+        root = ctx.project_root.clone();
+    }
+    let hint = ident_title.as_str();
+    match ccode_lib::helper_ingest_ident(&root, hint, hint, &ident_doi, &bytes) {
+        Ok((saved, dedup)) => {
             // 回执带项目名（2026-09-17）：helper-context 是上次「在浏览器打开」留下的
-            // 语境，可能已过期——入库落进哪个项目必须当场可见，错存能立刻发现
+            // 语境，可能已过期——入库落进哪个项目必须当场可见，错存能立刻发现。
+            // dedup 一并带回（字节级重复不再静默「成功」），projectRoot 供主程序
+            // 的回执监听把 papers/ 变化广播给清单/雷达
             let project = std::path::Path::new(&root)
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            serde_json::json!({"ok": true, "saved": saved, "project": project})
+            serde_json::json!({
+                "ok": true,
+                "saved": saved,
+                "dedup": dedup,
+                "project": project,
+                "projectRoot": root,
+                "title": if ident_title.is_empty() { page_title } else { ident_title.as_str() },
+                "doi": ident_doi,
+            })
         }
         Err(e) => serde_json::json!({"ok": false, "error": e}),
     }

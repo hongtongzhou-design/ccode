@@ -44,6 +44,13 @@ test("LOGIN_INIT_SCRIPT 是合法 JS，且下载漏斗关键件齐全", () => {
   assert.ok(js.includes("mesaVerifiedGrab") === false && js.includes("mesaFetchPdfRelay"), "分片回传式抓取（fetch 取字节，不再对同 URL 二次下载）");
   assert.ok(js.includes("mesaChunkRelay"), "字节经 mesa-chunk:// 分片导航回传（blob 下载 macOS 挂死）");
   assert.ok(js.includes("mesa-chunk://c/"), "分片 URL 形态与 Rust parse_chunk_nav 同口径");
+  // 分片对齐（2026-09-17 审计）：CHUNK 必须是 3 的倍数——65536%3==1 时非末块
+  // btoa 自带 == 填充，Rust 拼接整体解码必挂（>64KB PDF 全部静默丢失）
+  assert.ok(js.includes("var CHUNK = 61440"), "分片块长必须是 3 的倍数（61440）");
+  // begin 握手：先 mesa-chunk://b/{total} 声明，Rust 只收握手后 60s 内、块数
+  // 吻合的分片（窗内任意页面裸塞 mesa-chunk:// 不再被无条件接收）
+  assert.ok(js.includes("mesa-chunk://b/"), "分片回传前必须发 begin 握手");
+  assert.ok(js.includes("mesaUnescape"), "属性值反转义助手（中间页 &amp; 修正）");
   assert.ok(js.includes("Mesa · 未检出直链"), "未检出直链时胶囊置灰常驻给指引");
   assert.ok(js.includes("__mesaReplay"), "终态跨页重放钩子（页面跳转后补播）");
   assert.ok(js.includes("mesaFallbackDownload(u)"), "合成 a[download] 走 WKDownload");
@@ -184,12 +191,12 @@ test("mesaSdPdfUrl：pdfLink/JSON/PII 三级优先、期刊页不构造", () => 
   );
 });
 
-/** 从注入脚本里切出 mesaIntermediaryNext（中间页跳转解析纯函数）在 vm 里跑 */
+/** 从注入脚本里切出 mesaUnescape + mesaIntermediaryNext（中间页跳转解析纯函数）在 vm 里跑 */
 function runIntermediary(html: string): unknown {
   const js = extract("LOGIN_INIT_SCRIPT");
-  const start = js.indexOf("function mesaIntermediaryNext");
+  const start = js.indexOf("function mesaUnescape");
   const end = js.indexOf("function mesaB64Chunk");
-  assert.ok(start > 0 && end > start, "mesaIntermediaryNext 函数边界没找到");
+  assert.ok(start > 0 && end > start, "mesaUnescape/mesaIntermediaryNext 函数边界没找到");
   const reLine = js.match(/var mesaPdfRe = [^\n]+;/);
   assert.ok(reLine, "mesaPdfRe 声明没找到");
   return vm.runInNewContext(
@@ -241,6 +248,28 @@ test("mesaIntermediaryNext：meta refresh / redirect / iframe 内嵌三种中间
   assert.equal(
     runIntermediary(`<html><body><h1>Article</h1><p>full text</p></body></html>`),
     null,
+  );
+});
+
+test("mesaIntermediaryNext：属性值里的 &amp; 必须反转义（2026-09-17 审计）", () => {
+  // SD pdfft 跳转页形态：meta refresh 的 content 里 & 序列化成 &amp;——
+  // 不反转义会把 amp;pid 当独立参数，服务端校验 md5+pid 时 pid 缺失回错误页
+  assert.equal(
+    runIntermediary(
+      `<meta http-equiv="Refresh" CONTENT="0;URL=https://pdf.sciencedirect.com/x/paper.pdf?md5=a1b2&amp;pid=1-s2.0-main.pdf">`,
+    ),
+    "https://pdf.sciencedirect.com/x/paper.pdf?md5=a1b2&pid=1-s2.0-main.pdf",
+  );
+  // redirect-message 与 iframe src 同款处理
+  assert.equal(
+    runIntermediary(
+      `<div id="redirect-message"><a href="https://a.edu/p.pdf?x=1&amp;y=2">here</a></div>`,
+    ),
+    "https://a.edu/p.pdf?x=1&y=2",
+  );
+  assert.equal(
+    runIntermediary(`<iframe src="/ielx/1/2/p.pdf?tp=&amp;arnumber=9"></iframe>`),
+    "/ielx/1/2/p.pdf?tp=&arnumber=9",
   );
 });
 

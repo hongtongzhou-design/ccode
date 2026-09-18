@@ -1066,7 +1066,9 @@ fn workspace_env_impl(conn: &Connection, worktree_path: &str) -> Vec<(String, St
     // 只有 active 工作区占用端口段；creating/archived 不下发端口 env
     let Ok(w) = query_workspaces(conn).and_then(|rows| {
         rows.into_iter()
-            .find(|w| crate::paths::same_path(&w.worktree_path, &worktree_path) && w.status == "active")
+            .find(|w| {
+                crate::paths::same_path(&w.worktree_path, &worktree_path) && w.status == "active"
+            })
             .ok_or_else(|| "工作区不存在或未激活".to_string())
     }) else {
         return Vec::new();
@@ -1083,13 +1085,11 @@ pub(crate) fn papers_dir_for_worktree(worktree: &str) -> Option<String> {
     papers_dir_for_worktree_at(&conn, worktree)
 }
 
-pub(crate) fn papers_dir_for_worktree_at(
-    conn: &Connection,
-    worktree: &str,
-) -> Option<String> {
-    let w = query_workspaces(conn).ok()?.into_iter().find(|w| {
-        w.status == "active" && crate::paths::same_path(&w.worktree_path, worktree)
-    })?;
+pub(crate) fn papers_dir_for_worktree_at(conn: &Connection, worktree: &str) -> Option<String> {
+    let w = query_workspaces(conn)
+        .ok()?
+        .into_iter()
+        .find(|w| w.status == "active" && crate::paths::same_path(&w.worktree_path, worktree))?;
     Some(
         Path::new(&w.repo_path)
             .join("papers")
@@ -5209,7 +5209,10 @@ mod tests {
         let got = papers_dir_for_worktree_at(&fx.conn, &w.worktree_path).unwrap();
         assert!(Path::new(&got).ends_with("myrepo/papers"), "got {got}");
         // 非工作区路径（如讨论会话在项目根本身）不映射
-        assert_eq!(papers_dir_for_worktree_at(&fx.conn, fx.repo.to_str().unwrap()), None);
+        assert_eq!(
+            papers_dir_for_worktree_at(&fx.conn, fx.repo.to_str().unwrap()),
+            None
+        );
     }
 
     #[test]

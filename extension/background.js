@@ -26,6 +26,69 @@ function badge(tabId, text, color) {
   } catch (_) {}
 }
 
+// 后台代取的同源门禁（纯函数，tests/extension.test.ts 直测）：只允许代取与
+// 发起页同源的地址——页面可伪造 citation_pdf_url 指向内网/第三方需登录接口，
+// 跨源代取等于用浏览器凭据替页面发起它自己（受 CORS）发不了的请求
+function allowedFetchTarget(targetUrl, senderUrl) {
+  try {
+    var target = new URL(targetUrl);
+    var page = senderUrl ? new URL(senderUrl) : null;
+    return !!page && target.origin === page.origin;
+  } catch (_) {
+    return false;
+  }
+}
+
+// 本扩展自己触发的下载（图标点击等）：完成后把最终落盘路径上报 helper——
+// 浏览器下载位置不在系统 Downloads 时，通道 A 的目录监听根本看不见这个文件
+// （2026-09-17 审计 #17），路径直报后收货链绕过目录假定
+const ownDownloads = new Map(); // id -> true
+function watchOwnDownload(downloadId) {
+  ownDownloads.set(downloadId, true);
+  if (ownDownloads.size > 32) {
+    ownDownloads.delete(ownDownloads.keys().next().value);
+  }
+}
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!delta || delta.state == null || delta.state.current !== 'complete') return;
+  const id = delta.id;
+  if (!ownDownloads.delete(id)) return;
+  try {
+    chrome.downloads.search({ id }, (items) => {
+      const item = items && items[0];
+      if (!item) return;
+      // 站方对「下载式请求」回网页（SD 型反爬，2026-09-17 用户实测：点图标得到
+      // 一个 html）：删掉这个垃圾文件并指路页内按钮——它有完整会话上下文
+      const mime = (item.mime || '').toLowerCase();
+      if (mime.indexOf('html') >= 0) {
+        try { void chrome.downloads.removeFile(id); } catch (_) {}
+        notifyFailure('站方给了网页而不是 PDF（下载被拦）——回到文章页点右下角「存到 Mesa」，或用浏览器菜单手动另存');
+        return;
+      }
+      // DownloadItem 的绝对本地路径字段是 filename（finalPath 不存在——终检
+      // 抓出：取错字段导致上报链静默空转）
+      const path = item.filename;
+      if (!path) return;
+      let port;
+      try {
+        port = chrome.runtime.connectNative(HOST);
+      } catch (_) {
+        return;
+      }
+      const finish = () => { try { port.disconnect(); } catch (_) {} };
+      port.onMessage.addListener(finish);
+      port.onDisconnect.addListener(finish);
+      try {
+        port.postMessage({ kind: 'mesa-report-download', path });
+      } catch (_) {
+        finish();
+        return;
+      }
+      setTimeout(finish, 5000);
+    });
+  } catch (_) {}
+});
+
 // 观察型 webRequest（MV3 允许非阻塞监听）：识别主框架 PDF 响应 → 图标亮角标
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
@@ -53,26 +116,61 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   pdfTabs.delete(tabId);
 });
 
-// 工具栏图标点击：PDF 页 → 触发浏览器下载（通道 A 收货）；文章页 → 让页内按钮逻辑跑一次。
+// 图标点击失败的临时角标 + 系统通知（2026-09-17 审计：content 精心构造的
+// {ok:false,error} 回包被 await 后丢弃，用户在无 citation_doi 的文章页反复点
+// 图标零反应，只会认为按钮坏了）
+function notifyFailure(text) {
+  try {
+    chrome.notifications.create({
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title: '存到 Mesa',
+      message: text || '这页没检出可保存的文献',
+    });
+  } catch (_) {}
+}
+
+// 工具栏图标点击：有页内按钮就走同一条「存到 Mesa」（页内 fetch 带真实会话）。
+// 旧口径 PDF 页先 chrome.downloads——出版商对下载式请求常回 HTML（SD 型），
+// 完成后又按 mime 删掉，用户只看见「已删除」。downloads 只在没有 content
+// script 时作末路（Chrome 内置 PDF 查看器不注内容脚本）。
 // 全防御：个别环境下 API/权限未生效时点图标静默无效，不允许 worker 崩
 chrome.action.onClicked.addListener(async (tab) => {
   try {
     if (!tab || tab.id == null) return;
+    if (chrome.tabs && chrome.tabs.sendMessage) {
+      let resp = null;
+      try {
+        resp = await chrome.tabs.sendMessage(tab.id, { kind: 'mesa-save-from-icon' });
+      } catch (_) {
+        /* 页面没有 content script（如纯 PDF 查看器/blob: 页） */
+      }
+      if (resp && resp.ok === true) return;
+      if (resp && resp.ok === false) {
+        badge(tab.id, '!', '#b3261e');
+        setTimeout(() => { if (!pdfTabs.has(tab.id)) badge(tab.id, ''); }, 6000);
+        notifyFailure(resp.error);
+        return;
+      }
+    }
     const pdfUrl = pdfTabs.get(tab.id);
     if (pdfUrl && chrome.downloads && chrome.downloads.download) {
       try {
-        await chrome.downloads.download({ url: pdfUrl });
+        const dlId = await chrome.downloads.download({ url: pdfUrl });
+        if (dlId != null) watchOwnDownload(dlId);
       } catch (_) {
-        // 用户取消另存对话框 / 下载被浏览器拦下：尊重用户意图，不回退页内
-        // 路径（2026-09-17 修正——旧代码取消后意外触发页内取字节）
+        // 用户取消另存对话框 / 下载被浏览器拦下：尊重用户意图
       }
       return;
     }
-    if (chrome.tabs && chrome.tabs.sendMessage) {
-      await chrome.tabs.sendMessage(tab.id, { kind: 'mesa-save-from-icon' });
+    const isHttp = tab.url && /^https?:/i.test(tab.url);
+    if (isHttp) {
+      badge(tab.id, '!', '#b3261e');
+      setTimeout(() => { if (!pdfTabs.has(tab.id)) badge(tab.id, ''); }, 6000);
+      notifyFailure('这页没有 Mesa 的保存按钮（PDF 查看器/blob 页）——用页面自带下载，Mesa 会自动收进');
     }
   } catch (_) {
-    /* 页面没有 content script（如纯 PDF 查看器）则静默 */
+    /* 全防御：不允许 worker 崩 */
   }
 });
 
@@ -85,11 +183,47 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   // 内容脚本跨源 fetch 被 CORS 拦下时的回退：后台 service worker 受
-  // host_permissions 豁免可代取字节（Cookie 口径可能不同，尽力而为）
+  // host_permissions 豁免可代取字节（Cookie 口径可能不同，尽力而为）。
+  // 仅放行与发起页同源的地址（2026-09-17 审计）：页面可伪造 citation_pdf_url
+  // 指向内网/第三方需登录接口——跨源代取等于用浏览器凭据替页面发起它自己
+  // （受 CORS）发不了的请求，字节再经 %PDF 校验落盘
+  // 大文件改道（终检二轮补）：content 侧 >40MB 的 PDF 不走 base64 桥（Chrome
+  // 单条 native 消息限 64MiB），改由这里用 downloads API 下载——跨源也能下
+  // （页内 a[download] 对跨源 href 无效）、下载 id 进 ownDownloads、完成后路径
+  // 直报 Mesa，不受浏览器下载目录影响
+  if (msg && msg.kind === 'mesa-big-download' && msg.url) {
+    (async () => {
+      try {
+        if (!chrome.downloads || !chrome.downloads.download) {
+          sendResponse({ ok: false, error: '此浏览器不支持 downloads API' });
+          return;
+        }
+        const dlId = await chrome.downloads.download({ url: msg.url });
+        if (dlId != null) watchOwnDownload(dlId);
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: e && e.message ? e.message : String(e) });
+      }
+    })();
+    return true;
+  }
   if (msg && msg.kind === 'mesa-fetch-url' && msg.url) {
     (async () => {
       try {
-        const r = await fetch(msg.url, { credentials: 'include' });
+        const originUrl = (sender.tab && sender.tab.url) || sender.url || '';
+        if (!allowedFetchTarget(msg.url, originUrl)) {
+          sendResponse({ ok: false, error: '跨源地址不代取' });
+          return;
+        }
+        // AbortSignal.timeout 需 Chrome 103+（终检提示：88–102 上该 API 不存在、
+        // 属性求值抛错会打死整条代取兜底）——能力检测，老浏览器退化为不设超时
+        const timeoutSignal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+          ? AbortSignal.timeout(45000)
+          : undefined;
+        const r = await fetch(msg.url, {
+          credentials: 'include',
+          ...(timeoutSignal ? { signal: timeoutSignal } : {}),
+        });
         if (!r.ok) { sendResponse({ ok: false, error: 'HTTP ' + r.status }); return; }
         const bytes = new Uint8Array(await r.arrayBuffer());
         sendResponse({ ok: true, bytesB64: b64(bytes) });
@@ -122,8 +256,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       finish({ ok: false, error: (last && last.message) || 'Mesa helper 已断开' });
     });
     port.postMessage(msg);
-    // 兜底超时（60s：大 PDF 传输 + 入库）
-    setTimeout(() => finish({ ok: false, error: 'Mesa helper 超时' }), 60000);
+    // 兜底超时（150s：helper 侧 60MB PDF 解码 + papers/ 全量 md5 查重可超 60s——
+    // 旧 60s 会在 helper 实际还在干活时先向用户报失败，2026-09-17 审计）
+    setTimeout(() => finish({ ok: false, error: 'Mesa helper 超时' }), 150000);
   })();
   return true; // 异步 sendResponse
 });

@@ -10,12 +10,12 @@
 //! 事件过滤链（全过才收，防误捞用户无关下载）：
 //! ① .pdf 扩展名；② 监听启动快照里的既有文件不收（只记不处理）；③ 改名稳定
 //! 检测（1.2s 后大小不变才算写完，Chrome 大文件分片写）；④ 同一文件 5s 去重
-//! （macOS notify 发 Create+Modify 两条）；⑤ %PDF- 魔数 + ≤60MB；
+//! （macOS 一次落盘连发 Create+Modify+隔离属性+Spotlight，远不止两条——去重
+//! 静默，不把每次跳过印到热更新终端）；⑤ %PDF- 魔数 + ≤60MB；
 //! ⑥ 归属匹配：与「浏览器打开」登记的 PendingCatch（时间窗 ±90s + 文件名与标题
-//! normalize_title 互相包含 / MDPI 编号归一）命中才收；名字对不上时兜底取**最近
-//! 打开**的那条（用户期望「打开哪个就关联哪个」，2026-09-17 拍板；跨标签回头
-//! 下载更早打开的篇目时可能挂错名——回收站可找回、行内「关联本地 PDF」可改正，
-//! 比漏收好）。命中即消费（登记出队落盘）。
+//! normalize_title 互相包含 / 文件名含 DOI / MDPI 编号归一）命中才自动收。
+//! 名字对不上时：**窗内只有一篇**才按这篇收（Fallback）；**开了多篇就不猜**，
+//! 文件留在下载夹并发 ambiguous 横幅让人点挂到哪篇。命中即消费（登记出队落盘）。
 //!
 //! 登记持久化（download-pending.json，opened_at 用 SystemTime 跨进程判窗）：
 //! dev 热重启/应用重启不丢——2026-09-17 实测重启把内存登记洗掉、用户下完无人收。
@@ -25,10 +25,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
+use tauri::Emitter;
 
 /// 与「窗口打开」联动的时间窗：用户在浏览器里点下载通常在打开后几十秒内
 const CATCH_WINDOW: Duration = Duration::from_secs(90);
-/// 同一文件的去重窗（notify 在 macOS 对同一次落盘发 Create+Modify）
+/// 同一文件的去重窗（macOS 一次落盘会连发 Create+写入+隔离属性+Spotlight）
 const DEDUP_WINDOW: Duration = Duration::from_secs(5);
 /// 大小稳定检测间隔（Chrome 分片写大文件）
 const SETTLE_DELAY: Duration = Duration::from_millis(1200);
@@ -51,19 +52,97 @@ struct PendingCatch {
 }
 
 static PENDING: Mutex<Vec<PendingCatch>> = Mutex::new(Vec::new());
-/// 监听启动时的 ~/Downloads 既有 PDF 快照（OsString 文件名 → 大小），
-/// 只记不处理——防把用户的历史下载全收走
-static DL_FINGERPRINT: Mutex<Option<HashMap<std::ffi::OsString, u64>>> = Mutex::new(None);
+/// 监听启动时的 ~/Downloads 既有 PDF 快照（全路径 → 大小），只记不处理——
+/// 防把用户的历史下载全收走。键用全路径（终检二轮：按文件名键会误杀扩展上报
+/// 的跨目录下载——自定义下载位置重下同名同大小文件被当快照旧物跳过）
+static DL_FINGERPRINT: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
 /// 同一文件最近一次处理时间（5s 去重）
 static LAST_SEEN: std::sync::LazyLock<Mutex<HashMap<PathBuf, std::time::Instant>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 /// watcher 是否在跑（单实例）
 static WATCHER_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// 收货决策诊断：终端 + logbuf 双落点（2026-09-17 排障：三次漏收无痕迹）
+/// 收货决策：终端只印启动 / 失败 / 收货结果。去重、快照、无 pending 的无关 PDF
+/// 不刷热更新窗口（2026-09-17 排障期每个跳过都 eprintln，一次下载看起来像点了
+/// 七八次）。logbuf 另收首次归属判定，漏收仍有痕迹。
 fn dinbox_log(msg: &str) {
     eprintln!("[download-inbox] {msg}");
     crate::logbuf::record("info", "download-inbox", msg);
+}
+
+fn dinbox_logbuf(msg: &str) {
+    crate::logbuf::record("info", "download-inbox", msg);
+}
+
+/// Access / 纯元数据（隔离属性、Spotlight）不是新落盘，不必进过滤链。
+/// macOS FSEvents 分不清时会给 Any / Modify(Any)，那些仍放行。
+fn event_worth_considering(kind: &notify::EventKind) -> bool {
+    use notify::event::ModifyKind;
+    use notify::EventKind;
+    match kind {
+        EventKind::Access(_) | EventKind::Remove(_) => false,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        _ => true,
+    }
+}
+
+/// 收货需要人知道的事（不依赖 OS 通知权限的应用内反馈通道）：文件名没对上号的
+/// 兜底关联（说明归属依据，原件留在下载夹）、下载晚了错过 90 秒窗（给「关联本地
+/// PDF」补救指引）。App 层监听后以横幅展示并可一键收进
+fn emit_attention(
+    app: &tauri::AppHandle,
+    reason: &str,
+    path: &Path,
+    project_root: &str,
+    title: &str,
+) {
+    emit_attention_with(app, reason, path, project_root, title, &[]);
+}
+
+fn emit_attention_with(
+    app: &tauri::AppHandle,
+    reason: &str,
+    path: &Path,
+    project_root: &str,
+    title: &str,
+    candidates: &[PendingCatch],
+) {
+    #[derive(serde::Serialize, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct Candidate {
+        title: String,
+        project_root: String,
+    }
+    #[derive(serde::Serialize, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct Payload {
+        reason: String,
+        path: String,
+        project_root: String,
+        title: String,
+        file_name: String,
+        candidates: Vec<Candidate>,
+    }
+    let _ = app.emit(
+        "inst-pdf-attention",
+        Payload {
+            reason: reason.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            project_root: project_root.to_string(),
+            title: title.to_string(),
+            file_name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            candidates: candidates
+                .iter()
+                .map(|p| Candidate {
+                    title: p.title.clone(),
+                    project_root: p.project_root.clone(),
+                })
+                .collect(),
+        },
+    );
 }
 
 fn downloads_dir() -> Result<PathBuf, String> {
@@ -78,7 +157,9 @@ fn pending_store_path() -> Result<PathBuf, String> {
 }
 
 fn save_pendings(q: &[PendingCatch]) {
-    let Ok(path) = pending_store_path() else { return };
+    let Ok(path) = pending_store_path() else {
+        return;
+    };
     if let Ok(body) = serde_json::to_vec(q) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -88,22 +169,153 @@ fn save_pendings(q: &[PendingCatch]) {
 }
 
 fn load_pendings() -> Vec<PendingCatch> {
-    let Ok(path) = pending_store_path() else { return Vec::new() };
+    let Ok(path) = pending_store_path() else {
+        return Vec::new();
+    };
     std::fs::read(&path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
+/// 待获取清单认「已存」用：最近打开的那篇（pending + helper-context），
+/// 文件名是 paper-5 时仍能挂到对应行
+#[derive(Debug, Clone)]
+pub(crate) struct CatchIdent {
+    pub project_root: String,
+    pub title: String,
+    pub doi: String,
+    pub opened_at: std::time::SystemTime,
+}
+
+pub(crate) fn catch_idents() -> Vec<CatchIdent> {
+    let mut out: Vec<CatchIdent> = Vec::new();
+    let mut push = |p: CatchIdent| {
+        if out.iter().any(|x| {
+            crate::paths::same_path(&x.project_root, &p.project_root)
+                && x.title == p.title
+                && x.doi == p.doi
+        }) {
+            return;
+        }
+        out.push(p);
+    };
+    if let Ok(q) = PENDING.lock() {
+        for p in q.iter() {
+            push(CatchIdent {
+                project_root: p.project_root.clone(),
+                title: p.title.clone(),
+                doi: p.doi.clone(),
+                opened_at: p.opened_at,
+            });
+        }
+    }
+    for p in load_pendings() {
+        push(CatchIdent {
+            project_root: p.project_root,
+            title: p.title,
+            doi: p.doi,
+            opened_at: p.opened_at,
+        });
+    }
+    if let Some(ctx) = helper_context_ident() {
+        push(ctx);
+    }
+    out
+}
+
+/// 扩展「存到 Mesa」：页上 DOI 对上 pending 时用那篇的标题/项目，不拿最后一次打开的
+pub(crate) struct PendingIdent {
+    pub title: String,
+    pub doi: String,
+    pub project_root: String,
+}
+
+pub(crate) fn pending_for_doi(doi: &str) -> Option<PendingIdent> {
+    let doi_n = crate::inst_access::doi_from_url(doi)?.to_ascii_lowercase();
+    if doi_n.len() < 8 {
+        return None;
+    }
+    let now = std::time::SystemTime::now();
+    load_pendings()
+        .into_iter()
+        .filter(|p| {
+            now.duration_since(p.opened_at)
+                .map(|d| d <= PENDING_TTL)
+                .unwrap_or(false)
+        })
+        .find(|p| {
+            crate::inst_access::doi_from_url(&p.doi)
+                .map(|d| d.eq_ignore_ascii_case(&doi_n))
+                .unwrap_or(false)
+        })
+        .map(|p| PendingIdent {
+            title: p.title,
+            doi: p.doi,
+            project_root: p.project_root,
+        })
+}
+
+fn helper_context_ident() -> Option<CatchIdent> {
+    let path = dirs::config_dir()?
+        .join("ccode")
+        .join("helper-context.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let project_root = v.get("projectRoot")?.as_str()?.trim().to_string();
+    if project_root.is_empty() {
+        return None;
+    }
+    let title = v
+        .get("title")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let doi = v
+        .get("doi")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if title.is_empty() && doi.is_empty() {
+        return None;
+    }
+    let opened_at = v
+        .get("updatedAt")
+        .and_then(|x| x.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| {
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(t.timestamp().max(0) as u64)
+        })
+        .unwrap_or_else(std::time::SystemTime::now);
+    Some(CatchIdent {
+        project_root,
+        title,
+        doi,
+        opened_at,
+    })
+}
+
+/// 归属匹配结果：Hit = 高置信（标题/DOI/MDPI 编号对上，自动收并挪走原件）；
+/// Fallback = 窗内只开了一篇且文件名对不上（收，原件留在下载夹）；
+/// None + 窗内多篇 = 不猜，横幅让人点
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PendingMatch {
+    Hit(usize),
+    Fallback(usize),
+}
+
 /// 归属匹配（纯逻辑供单测）：按时间窗 + 标题互相包含挑出 PDF 属于哪条 pending；
 /// MDPI 编号归一（文件名 reactions-07-00016 ↔ DOI 10.3390/reactions7010016）；
-/// 名字对不上时兜底取**最近打开**的一条（LIFO，2026-09-17 用户拍板「打开哪个就
-/// 关联哪个」——漏收比错挂难受；错挂可回收站找回 + 行内关联本地 PDF 改正）
+/// 名字对不上时：**窗内只有一篇**才 Fallback；多篇返回 None（调用方弹横幅让人点）。
+/// 包含匹配带「短边 ≥8 字符」护栏（与 lit_watch.to_fetch_progress_inner 同款纪律）
 fn match_pending(
     pendings: &[PendingCatch],
     file_stem: &str,
     now: std::time::SystemTime,
-) -> Option<usize> {
+) -> Option<PendingMatch> {
     let file_norm = crate::lit_watch::normalize_title(file_stem);
     let in_window: Vec<usize> = pendings
         .iter()
@@ -121,34 +333,70 @@ fn match_pending(
     if in_window.is_empty() {
         return None;
     }
-    for &i in &in_window {
-        let t = &pendings[i].title_norm;
-        if !t.is_empty()
-            && !file_norm.is_empty()
-            && (t.contains(&file_norm) || file_norm.contains(t))
-        {
-            return Some(i);
-        }
+    // 标题互相包含（多条命中取最近打开的——旧口径取队首第一条，短 norm 先入队者截胡）
+    let title_hit = in_window
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let t = &pendings[i].title_norm;
+            let short = t.len().min(file_norm.len());
+            !t.is_empty()
+                && !file_norm.is_empty()
+                && short >= 8
+                && (t.contains(&file_norm) || file_norm.contains(t))
+        })
+        .max_by_key(|&i| pendings[i].opened_at);
+    if let Some(i) = title_hit {
+        return Some(PendingMatch::Hit(i));
     }
     // MDPI 编号归一（2026-09-17 实测漏收场景）：文件名 reactions-07-00016 与标题
     // 永远对不上，但与 DOI 10.3390/reactions7010016 是同一组数——DOI 后缀 =
     // 刊名+卷+期(2位)+编号(末4位)，文件名 = 刊名-卷(2位)-编号(5位)。两边都归一
     // 成「刊名+卷整数+编号整数」比较；仅 10.3390 前缀启用（分型纪律：最窄分支）
     if let Some(fkey) = mdpi_file_key(file_stem) {
-        for &i in &in_window {
-            if mdpi_doi_key(&pendings[i].doi).as_deref() == Some(fkey.as_str()) {
-                return Some(i);
-            }
+        let mdpi_hit = in_window
+            .iter()
+            .copied()
+            .find(|&i| mdpi_doi_key(&pendings[i].doi).as_deref() == Some(fkey.as_str()));
+        if let Some(i) = mdpi_hit {
+            return Some(PendingMatch::Hit(i));
         }
     }
-    // 兜底：最近打开的那条（多数流程是「打开 → 立刻下载」）
-    in_window.into_iter().max_by_key(|&i| pendings[i].opened_at)
+    // 文件名里带 DOI（10.1002_adma.xxx / 斜杠改成 -_）
+    let doi_hit = in_window
+        .iter()
+        .copied()
+        .find(|&i| doi_in_stem(&pendings[i].doi, file_stem));
+    if let Some(i) = doi_hit {
+        return Some(PendingMatch::Hit(i));
+    }
+    // 窗内只开了一篇：文件名对不上也按这篇收。开了多篇不猜。
+    if in_window.len() == 1 {
+        return Some(PendingMatch::Fallback(in_window[0]));
+    }
+    None
+}
+
+fn doi_in_stem(doi: &str, stem: &str) -> bool {
+    let doi = doi.trim().to_ascii_lowercase();
+    if doi.len() < 8 {
+        return false;
+    }
+    let lower = stem.to_ascii_lowercase();
+    let suffix = doi.split_once('/').map(|(_, s)| s).unwrap_or("");
+    lower.contains(&doi)
+        || lower.contains(&doi.replace('/', "-"))
+        || lower.contains(&doi.replace('/', "_"))
+        || (suffix.len() >= 8 && lower.contains(suffix))
 }
 
 /// MDPI DOI → 刊名+卷+编号 整数键（10.3390/reactions7010016 → "reactions7a16"）
 fn mdpi_doi_key(doi: &str) -> Option<String> {
     let suffix = doi.trim().strip_prefix("10.3390/")?;
-    let letters_len = suffix.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+    let letters_len = suffix
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .count();
     let letters = &suffix[..letters_len];
     let digits = &suffix[letters_len..];
     if letters.is_empty() || digits.len() < 7 || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -170,6 +418,95 @@ fn mdpi_file_key(stem: &str) -> Option<String> {
     Some(format!("{}{vol}a{art}", parts[0]))
 }
 
+/// 扩展「存到 Mesa」成功后消费对应 pending：通道 C 不经下载夹，90 秒窗里
+/// 这条登记还占着，后续无关 PDF 会被兜底挂上。纯逻辑供单测。
+fn consume_pending_index(
+    pendings: &[PendingCatch],
+    project_root: &str,
+    doi: &str,
+    title: &str,
+    now: std::time::SystemTime,
+) -> Option<usize> {
+    if project_root.trim().is_empty() {
+        return None;
+    }
+    let in_proj: Vec<usize> = pendings
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            crate::paths::same_path(&p.project_root, project_root)
+                && now
+                    .duration_since(p.opened_at)
+                    .map(|d| d <= PENDING_TTL)
+                    .unwrap_or(false)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if in_proj.is_empty() {
+        return None;
+    }
+    let doi_n = crate::inst_access::doi_from_url(doi)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let title_n = crate::lit_watch::normalize_title(title);
+    let doi_hit = in_proj.iter().copied().find(|&i| {
+        if doi_n.is_empty() || pendings[i].doi.is_empty() {
+            return false;
+        }
+        let pdoi = pendings[i].doi.to_ascii_lowercase();
+        pdoi == doi_n || pdoi.contains(&doi_n) || doi_n.contains(&pdoi)
+    });
+    if doi_hit.is_some() {
+        return doi_hit;
+    }
+    let title_hit = in_proj.iter().copied().find(|&i| {
+        let t = &pendings[i].title_norm;
+        let short = t.len().min(title_n.len());
+        !t.is_empty()
+            && !title_n.is_empty()
+            && short >= 8
+            && (t.contains(&title_n) || title_n.contains(t))
+    });
+    if title_hit.is_some() {
+        return title_hit;
+    }
+    // 该项目 90 秒窗内只有一条：就是刚打开的这篇
+    let in_window: Vec<usize> = in_proj
+        .into_iter()
+        .filter(|&i| {
+            now.duration_since(pendings[i].opened_at)
+                .map(|d| d <= CATCH_WINDOW)
+                .unwrap_or(false)
+        })
+        .collect();
+    if in_window.len() == 1 {
+        Some(in_window[0])
+    } else {
+        None
+    }
+}
+
+/// 通道 C 入库成功：主程序回执监听调用，出队落盘（helper 是另一进程，动不了
+/// 本进程 PENDING 内存）
+pub(crate) fn consume_pending_after_helper(project_root: &str, doi: &str, title: &str) {
+    let Ok(mut q) = PENDING.lock() else {
+        return;
+    };
+    let disk = load_pendings();
+    for p in disk {
+        if !q.iter().any(|x| {
+            x.open_url == p.open_url && x.title == p.title && x.project_root == p.project_root
+        }) {
+            q.push(p);
+        }
+    }
+    let now = std::time::SystemTime::now();
+    if let Some(i) = consume_pending_index(&q, project_root, doi, title, now) {
+        q.remove(i);
+        save_pendings(&q);
+    }
+}
+
 /// 「在浏览器打开」：登记收货语境（有项目根时）→ 确保监听在跑 → 调起系统浏览器。
 /// EZproxy/OpenAthens 前缀在打开前改写（浏览器里完成代理登录，同一 profile 持续有效）
 #[tauri::command]
@@ -184,7 +521,7 @@ pub async fn inst_browser_open(
     if !crate::inst_access::valid_http_url_pub(&target) {
         return Err("地址须是 http(s):// 开头的完整 URL".into());
     }
-    // 前缀改写与内嵌窗同一口径（fetch_via_channel 的 proxy_wrap）
+    // 前缀改写与内嵌窗同一口径（fetch_via_channel 的 proxy_wrap + 已代理判定）
     let settings = crate::settings::read_current();
     let open_target = settings
         .institutional_prefix
@@ -192,7 +529,13 @@ pub async fn inst_browser_open(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .filter(|v| crate::inst_access::valid_http_url_pub(v))
-        .map(|p| crate::inst_access::proxy_wrap_pub(p, &target))
+        .map(|p| {
+            if crate::inst_access::target_already_proxied(&target, p) {
+                target.clone()
+            } else {
+                crate::inst_access::proxy_wrap_pub(p, &target)
+            }
+        })
         .unwrap_or(target.clone());
     let root = project_root
         .as_deref()
@@ -203,13 +546,27 @@ pub async fn inst_browser_open(
                 .map(|p| p.to_string_lossy().into_owned())
         })
         .transpose()?;
-    // 「当前项目」语境：浏览器桥 helper（扩展「存到 Mesa」）落盘用
+    // 「当前项目」语境：浏览器桥 helper（扩展「存到 Mesa」）落盘用。
+    // 带上这篇的标题/DOI：PDF 阅读器页没有 citation_title 时 helper 用它起文件名，
+    // 待获取清单才能对上「已存」（空标题会落成 paper.pdf / paper-5.pdf）
+    let ctx_title = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let ctx_doi = doi.as_deref().and_then(crate::inst_access::doi_from_url);
     if let Some(root) = root.as_ref() {
         if let Some(cfg) = dirs::config_dir() {
-            let ctx = serde_json::json!({
+            let mut ctx = serde_json::json!({
                 "projectRoot": root,
                 "updatedAt": chrono::Utc::now().to_rfc3339(),
             });
+            if let Some(t) = ctx_title.as_deref() {
+                ctx["title"] = serde_json::Value::String(t.to_string());
+            }
+            if let Some(d) = ctx_doi.as_deref() {
+                ctx["doi"] = serde_json::Value::String(d.to_string());
+            }
             let path = cfg.join("ccode").join("helper-context.json");
             let _ = std::fs::create_dir_all(path.parent().expect("has parent"));
             let _ = crate::storage::atomic_write(&path, ctx.to_string().as_bytes(), false);
@@ -222,7 +579,11 @@ pub async fn inst_browser_open(
                 // 并入上次进程留下的登记（SystemTime 可跨进程判定窗口）
                 let disk = load_pendings();
                 for p in disk {
-                    if !q.iter().any(|x| x.open_url == p.open_url && x.title == p.title) {
+                    if !q.iter().any(|x| {
+                        x.open_url == p.open_url
+                            && x.title == p.title
+                            && x.project_root == p.project_root
+                    }) {
                         q.push(p);
                     }
                 }
@@ -232,12 +593,14 @@ pub async fn inst_browser_open(
                         .map(|d| d < PENDING_TTL)
                         .unwrap_or(false)
                 });
-                // 同一篇重复「浏览器打开」：刷新时间戳，不追加（防窗口内出现
-                // 同 URL 多条、白占多条名额）
+                // 同一项目里同一篇重复「浏览器打开」：刷新时间戳，不追加（防窗口内
+                // 出现同 URL 多条、白占多条名额）；**同篇不同项目并存两条**——
+                // 旧键不含 project_root 时后打开的项目被吞，下载收进先打开的项目，
+                // 用户在后一个项目里永远等不到（2026-09-17 审计）
                 let now = std::time::SystemTime::now();
                 if let Some(existing) = q
                     .iter_mut()
-                    .find(|p| p.open_url == target && p.title == title)
+                    .find(|p| p.open_url == target && p.title == title && p.project_root == *root)
                 {
                     existing.opened_at = now;
                 } else {
@@ -247,10 +610,7 @@ pub async fn inst_browser_open(
                         title: title.to_string(),
                         // 前端给到的可能是 doi.org 链接 / doi: 前缀 / 带句读——归一成
                         // 裸 DOI 再存（MDPI 编号归一按 10.3390/ 前缀剥，喂 URL 永不命中）
-                        doi: doi
-                            .as_deref()
-                            .and_then(crate::inst_access::doi_from_url)
-                            .unwrap_or_default(),
+                        doi: ctx_doi.clone().unwrap_or_default(),
                         open_url: target.clone(),
                         opened_at: now,
                     });
@@ -278,9 +638,7 @@ pub fn ensure_watcher_at_startup(app: &tauri::AppHandle) {
 
 /// 确保收货监听在跑（单实例；启动时快照既有 PDF，只记不处理）
 fn ensure_watcher(app: &tauri::AppHandle) -> Result<(), String> {
-    if WATCHER_RUNNING
-        .swap(true, std::sync::atomic::Ordering::AcqRel)
-    {
+    if WATCHER_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return Ok(());
     }
     // 闩锁纪律（2026-09-17 修正）：swap 置 true 之后任何提前返回都必须复位，
@@ -294,15 +652,13 @@ fn ensure_watcher(app: &tauri::AppHandle) -> Result<(), String> {
         }
     };
     // 快照既有 PDF：后续事件里命中快照的一律跳过
-    let mut snap: HashMap<std::ffi::OsString, u64> = HashMap::new();
+    let mut snap: HashMap<PathBuf, u64> = HashMap::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let p = e.path();
             if is_pdf_path(&p) {
                 if let Ok(m) = e.metadata() {
-                    if let Some(name) = p.file_name() {
-                        snap.insert(name.to_os_string(), m.len());
-                    }
+                    snap.insert(p.clone(), m.len());
                 }
             }
         }
@@ -338,6 +694,129 @@ fn is_pdf_path(p: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
+/// dl-reports 游标（持久化到 dl-reports.cursor——进程内偏移重启归零会把全部
+/// 历史上报行当「新下载」重放，旧 PDF 被兜底归属误收进刚打开的篇目，终检二轮
+/// 高危）。helper 截尾（文件变短）时跳到当前末尾：截尾保留的都是旧行。
+static DL_REPORT_OFFSET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DL_CURSOR_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 只消费「进程启动之后」写入的上报行：cursor 缺失/损坏时兜底，避免全量重放
+static PROCESS_STARTED_AT: std::sync::LazyLock<std::time::SystemTime> =
+    std::sync::LazyLock::new(std::time::SystemTime::now);
+
+fn dl_report_paths() -> Option<(PathBuf, PathBuf)> {
+    dirs::config_dir().map(|d| (d.join("dl-reports.jsonl"), d.join("dl-reports.cursor")))
+}
+
+/// 近期已处理过的文件（notify 与 dl-report 双通道去重 + 同文件重复上报去重）
+static RECENT_CONSIDERED: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<PathBuf, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn already_considered(path: &Path) -> bool {
+    RECENT_CONSIDERED
+        .lock()
+        .ok()
+        .and_then(|m| {
+            m.get(path)
+                .map(|at| at.elapsed() < Duration::from_secs(600))
+        })
+        .unwrap_or(false)
+}
+
+fn mark_considered(path: &Path) {
+    if let Ok(mut m) = RECENT_CONSIDERED.lock() {
+        if m.len() > 64 {
+            m.retain(|_, at| at.elapsed() < Duration::from_secs(600));
+        }
+        m.insert(path.to_path_buf(), std::time::Instant::now());
+    }
+}
+
+/// 消费扩展上报的下载路径（helper 写 `<config>/ccode/dl-reports.jsonl`，每行
+/// {at, path}）：新行里的 PDF 直接送 consider_file——绕过「监听目录 == 系统
+/// Downloads」的假定（Chrome 改过下载位置/每下载询问时，notify 侧零事件）
+fn drain_dl_reports(app: &tauri::AppHandle) {
+    let Some((file, cursor_file)) = dl_report_paths() else {
+        return;
+    };
+    if !DL_CURSOR_LOADED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let saved = std::fs::read_to_string(&cursor_file)
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok());
+        // cursor 缺失/损坏：从文件当前末尾起步（历史行不再重放——丢失的只是
+        // Mesa 关闭期间的上报，那段时间本也没有 pending 在等）
+        let start =
+            saved.unwrap_or_else(|| std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0) as u64);
+        DL_REPORT_OFFSET.store(start, std::sync::atomic::Ordering::Relaxed);
+    }
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return;
+    };
+    let mut offset = DL_REPORT_OFFSET.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    if text.len() < offset {
+        // helper 截尾过：跳到末尾（保留行是旧记录）
+        offset = text.len();
+    }
+    if text.len() <= offset {
+        return;
+    }
+    // 只处理完整行（末尾残行等下一次）；对齐字符边界（截尾重写瞬间可能切在
+    // 多字节字符中间——String 切片越界会 panic，终检二轮高危）
+    let end = fresh_end(text.as_bytes(), offset);
+    if end <= offset {
+        return;
+    }
+    let complete = &text[offset..end];
+    for line in complete.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        // 行时间戳早于进程启动的旧记录不消费（截尾重放兜底）
+        let started_secs = PROCESS_STARTED_AT
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let fresh_line = v
+            .get("at")
+            .and_then(|a| a.as_str())
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.timestamp() > started_secs as i64)
+            .unwrap_or(false);
+        if !fresh_line {
+            continue;
+        }
+        let Some(path) = v.get("path").and_then(|p| p.as_str()).map(str::to_string) else {
+            continue;
+        };
+        let p = PathBuf::from(&path);
+        if !p.is_absolute() || !is_pdf_path(&p) || !p.exists() || already_considered(&p) {
+            continue;
+        }
+        dinbox_log(&format!("扩展上报下载: {path}"));
+        consider_file(app, &p);
+    }
+    DL_REPORT_OFFSET.store(end as u64, std::sync::atomic::Ordering::Relaxed);
+    let _ = std::fs::write(&cursor_file, end.to_string());
+}
+
+/// 从 offset 起取末尾为完整行的长度（对齐 UTF-8 字符边界与最后一个换行）
+fn fresh_end(bytes: &[u8], offset: usize) -> usize {
+    let mut end = bytes.len();
+    if bytes.last() != Some(&b'\n') {
+        end = bytes[..end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(offset);
+    }
+    // 回退到字符边界（offset 起点的边界由「offset 总在 \n 后或文件尾」保证，
+    // 截尾竞态下仍可能落在多字节中间——保守回退）
+    while end > offset && end < bytes.len() && (bytes[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    end
+}
+
 fn watcher_loop(app: tauri::AppHandle, dir: PathBuf) {
     use notify::{RecursiveMode, Watcher};
     let (tx, rx) = std::sync::mpsc::channel();
@@ -357,6 +836,10 @@ fn watcher_loop(app: tauri::AppHandle, dir: PathBuf) {
     }
     let mut last_event = std::time::Instant::now();
     loop {
+        // 扩展上报的下载（浏览器下载位置不在系统 Downloads 时目录监听看不见，
+        // 2026-09-17 审计 #17）：helper 落 dl-reports.jsonl，这里增量消费——
+        // 路径直接走 consider_file，不受监听目录限定
+        drain_dl_reports(&app);
         // 无 pending 且静默满 IDLE_STOP → 退出（watcher 随之 drop）
         let pending_empty = PENDING
             .lock()
@@ -380,6 +863,9 @@ fn watcher_loop(app: tauri::AppHandle, dir: PathBuf) {
         match rx.recv_timeout(Duration::from_secs(15)) {
             Ok(Ok(event)) => {
                 last_event = std::time::Instant::now();
+                if !event_worth_considering(&event.kind) {
+                    continue;
+                }
                 let touched: Vec<PathBuf> = event
                     .paths
                     .iter()
@@ -400,29 +886,34 @@ fn watcher_loop(app: tauri::AppHandle, dir: PathBuf) {
     WATCHER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
 }
 
-/// 事件过滤链主体：去重 → 既有快照排除 → 稳定检测 → 魔数/大小 → 归属 → 入库+回收
+/// 事件过滤链主体：去重 → 既有快照排除 → 稳定检测（写不完就放手等 Modify）→
+/// 魔数/尾部完整性 → 归属（Hit 自动收+挪走；Fallback 收但原件留在下载夹）→ 入库
 fn consider_file(app: &tauri::AppHandle, path: &Path) {
     let Some(name) = path.file_name().map(|n| n.to_os_string()) else {
         return;
     };
+    if already_considered(path) {
+        return;
+    }
+    // 窗口从**文件出现那刻**算（2026-09-17 审计：稳定检测最多耗 30s，用判定时刻
+    // 对窗会把「排队在上一篇 settle 后面」的下载推出 90 秒窗白白漏收）
+    let first_seen = std::time::SystemTime::now();
     let now = std::time::Instant::now();
-    // ④ 5s 去重（Create+Modify 双事件）
+    // ④ 5s 去重（一次落盘连发多条事件）——静默，不刷终端
     if let Ok(mut seen) = LAST_SEEN.lock() {
         if seen
             .get(path)
             .is_some_and(|at| now.duration_since(*at) < DEDUP_WINDOW)
         {
-            dinbox_log(&format!("去重跳过: {}", path.display()));
             return;
         }
         seen.insert(path.to_path_buf(), now);
     }
     // ② 监听启动快照里的既有文件（大小也没变）不收
     if let Ok(g) = DL_FINGERPRINT.lock() {
-        if let Some(old_len) = g.as_ref().and_then(|m| m.get(&name)) {
+        if let Some(old_len) = g.as_ref().and_then(|m| m.get(path)) {
             if let Ok(m) = std::fs::metadata(path) {
                 if m.len() == *old_len {
-                    dinbox_log(&format!("快照既有文件跳过: {}", path.display()));
                     return;
                 }
             }
@@ -434,6 +925,7 @@ fn consider_file(app: &tauri::AppHandle, path: &Path) {
         Ok(m) => m.len(),
         Err(_) => return,
     };
+    let mut settled = false;
     for _ in 0..25 {
         std::thread::sleep(SETTLE_DELAY);
         let cur = match std::fs::metadata(path) {
@@ -441,12 +933,40 @@ fn consider_file(app: &tauri::AppHandle, path: &Path) {
             Err(_) => return, // 写到一半被挪走/删除
         };
         if cur == len {
+            settled = true;
             break;
         }
         len = cur;
     }
-    // ⑤ 魔数 + 上限（下载内容可能是「另存网页」的 HTML）
-    if len == 0 || len > crate::lit_watch::DOWNLOAD_CAP as u64 {
+    // 25 轮耗尽仍不稳定：放弃本轮（2026-09-17 审计：旧口径无论稳不稳定都往下
+    // 读——Safari 慢速大 PDF 30 秒读半截，头部魔数照样过，截断文件被收编且原件
+    // 进回收站，完整版永远收不进）；后续 Modify 事件会重走稳定检测
+    if !settled {
+        dinbox_log(&format!("仍在写入，放手等下一次事件: {}", path.display()));
+        return;
+    }
+    // ⑤ 魔数 + 上限（下载内容可能是「另存网页」的 HTML）。超 60MB 不再静默
+    // （终检二轮：>40MB 改道已承诺自动收，超限静默丢弃变成无痕丢失归属）——
+    // TTL 内有 pending 时发 oversize 提示，没有 pending 的无关大文件保持安静
+    if len == 0 {
+        return;
+    }
+    if len > crate::lit_watch::DOWNLOAD_CAP as u64 {
+        let near = PENDING.lock().ok().and_then(|q| {
+            q.iter()
+                .filter(|p| {
+                    first_seen
+                        .duration_since(p.opened_at)
+                        .map(|d| d <= PENDING_TTL)
+                        .unwrap_or(false)
+                })
+                .max_by_key(|p| p.opened_at)
+                .cloned()
+        });
+        if let Some(p) = near {
+            emit_attention(app, "oversize", path, &p.project_root, &p.title);
+            mark_considered(path);
+        }
         return;
     }
     let bytes = match std::fs::read(path) {
@@ -454,76 +974,147 @@ fn consider_file(app: &tauri::AppHandle, path: &Path) {
         Err(_) => return,
     };
     if !crate::lit_watch::looks_like_pdf(&bytes) {
-        dinbox_log(&format!("非 PDF 跳过: {}", path.display()));
-        crate::logbuf::record(
-            "info",
-            "download-inbox",
-            &format!("跳过非 PDF 下载：{}", name.to_string_lossy()),
-        );
+        dinbox_logbuf(&format!("非 PDF 跳过：{}", name.to_string_lossy()));
         return;
     }
-    // ⑥ 归属匹配；命中即消费（出队落盘，同一登记不占后续下载的窗口名额）
+    // 尾部 %%EOF：魔数只看头 1024 字节，截断文件照样过（2026-09-17 审计；
+    // 标准写法末尾必有 %%EOF，追加空白也在 2KB 窗口内）
+    if !crate::inst_access::pdf_tail_complete(&bytes) {
+        dinbox_log(&format!(
+            "尾部无 %%EOF（可能仍在写入），等下一次事件: {}",
+            path.display()
+        ));
+        return;
+    }
+    // ⑥ 归属匹配；Hit 即消费（出队落盘，同一登记不占后续下载的窗口名额），
+    // Fallback 只收不消费（窗口名额留着，归属依据交代给用户）
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let matched = PENDING
-        .lock()
-        .ok()
-        .and_then(|mut q| {
-            dinbox_log(&format!(
-                "归属判定: stem={stem:?} 窗内登记 {} 条",
-                q.iter()
-                    .filter(|p| {
-                        std::time::SystemTime::now()
-                            .duration_since(p.opened_at)
-                            .map(|d| d <= CATCH_WINDOW)
-                            .unwrap_or(false)
-                    })
-                    .count()
-            ));
-            let hit = match_pending(&q, &stem, std::time::SystemTime::now());
-            hit.map(|i| {
+    let matched = PENDING.lock().ok().and_then(|mut q| {
+        dinbox_logbuf(&format!(
+            "归属判定: stem={stem:?} 窗内登记 {} 条",
+            q.iter()
+                .filter(|p| {
+                    first_seen
+                        .duration_since(p.opened_at)
+                        .map(|d| d <= CATCH_WINDOW)
+                        .unwrap_or(false)
+                })
+                .count()
+        ));
+        match match_pending(&q, &stem, first_seen) {
+            Some(PendingMatch::Hit(i)) => {
                 let p = q.get(i).cloned();
                 if let Some(kept) = q.get(i) {
                     let url = kept.open_url.clone();
                     let title = kept.title.clone();
-                    q.retain(|x| !(x.open_url == url && x.title == title));
+                    let root = kept.project_root.clone();
+                    q.retain(|x| {
+                        !(x.open_url == url && x.title == title && x.project_root == root)
+                    });
                 }
                 save_pendings(&q);
-                p
-            })
-        })
-        .flatten();
-    let Some(p) = matched else {
-        dinbox_log(&format!("无归属跳过: {}", path.display()));
+                p.map(|p| (p, true))
+            }
+            Some(PendingMatch::Fallback(i)) => {
+                // Fallback 同样消费（终检二轮：不消费时 90 秒窗内每个无关 PDF
+                // 都各走一遍兜底入库、误收面放大；消费后最多错一次，原件保留
+                // 在下载夹 + 横幅交代归属依据，可用「关联本地 PDF」改正）
+                let p = q.get(i).cloned();
+                if let Some(kept) = q.get(i) {
+                    let url = kept.open_url.clone();
+                    let title = kept.title.clone();
+                    let root = kept.project_root.clone();
+                    q.retain(|x| {
+                        !(x.open_url == url && x.title == title && x.project_root == root)
+                    });
+                }
+                save_pendings(&q);
+                p.map(|p| (p, false))
+            }
+            None => {
+                let mut in_window: Vec<PendingCatch> = q
+                    .iter()
+                    .filter(|p| {
+                        first_seen
+                            .duration_since(p.opened_at)
+                            .map(|d| d <= CATCH_WINDOW)
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                if in_window.len() >= 2 {
+                    // 开了多篇、文件名对不上：不猜，横幅让人点挂到哪篇
+                    in_window.sort_by_key(|p| std::cmp::Reverse(p.opened_at));
+                    let first = in_window[0].clone();
+                    emit_attention_with(
+                        app,
+                        "ambiguous",
+                        path,
+                        &first.project_root,
+                        &first.title,
+                        &in_window,
+                    );
+                    mark_considered(path);
+                } else {
+                    // 窗内没登记但 TTL 内有旧的（下载晚了错过 90 秒窗）→ 提示补救
+                    let late = q
+                        .iter()
+                        .filter(|p| {
+                            first_seen
+                                .duration_since(p.opened_at)
+                                .map(|d| d <= PENDING_TTL)
+                                .unwrap_or(false)
+                        })
+                        .max_by_key(|p| p.opened_at)
+                        .cloned();
+                    if let Some(p) = late {
+                        emit_attention(app, "late", path, &p.project_root, &p.title);
+                        mark_considered(path);
+                    }
+                }
+                None
+            }
+        }
+    });
+    let Some((p, confident)) = matched else {
+        // 窗内 0 条登记：下载夹里无关/旧 PDF 被 Spotlight 摸了一下，不刷终端
         return;
     };
+    mark_considered(path);
     // 语境跟实际命中的那篇走（多项目并行打开时不得沿用最后一次打开的）
     crate::inst_access::set_relay_context(&p.project_root, &p.title, &p.open_url);
     match crate::inst_access::stage_relayed_pdf(&bytes) {
         Ok(staged) => {
             crate::inst_access::emit_relayed_pdf(app, &staged, bytes.len());
-            // 收完挪回收站（可反悔）；入库链读内存槽，不依赖原文件
-            let _ = trash::delete(path);
-            crate::logbuf::record(
-                "info",
-                "download-inbox",
-                &format!(
-                    "已收进 {}：{}{}",
-                    p.project_root,
-                    p.title,
-                    if p.doi.is_empty() {
-                        String::new()
-                    } else {
-                        format!("（{}）", p.doi)
-                    }
-                ),
-            );
+            if confident {
+                // 高置信（文件名与标题/MDPI 编号对上）：收完挪回收站（可反悔）；
+                // 入库链读内存槽，不依赖原文件
+                let _ = trash::delete(path);
+            } else {
+                // 窗内只开了一篇、文件名对不上：原文件留在下载夹
+                emit_attention(app, "fallback", path, &p.project_root, &p.title);
+            }
+            dinbox_log(&format!(
+                "已收进 {}{}：{}{}",
+                p.project_root,
+                if confident {
+                    ""
+                } else {
+                    "（窗内只开了一篇，原件留在下载夹）"
+                },
+                p.title,
+                if p.doi.is_empty() {
+                    String::new()
+                } else {
+                    format!("（{}）", p.doi)
+                }
+            ));
         }
         Err(e) => {
             dinbox_log(&format!("收货入库失败: {e}"));
-            crate::logbuf::record("warn", "download-inbox", &format!("收货入库失败: {e}"));
         }
     }
 }
@@ -549,34 +1140,81 @@ mod tests {
             "Development of a chloride-free dual-salt electrolyte",
             Duration::from_secs(10),
         )];
-        let stem = "Development of a chloride-free dual-salt electrolyte for magnesium-sulfur batteries";
+        let stem =
+            "Development of a chloride-free dual-salt electrolyte for magnesium-sulfur batteries";
         assert_eq!(
             match_pending(&q, stem, std::time::SystemTime::now()),
-            Some(0)
+            Some(PendingMatch::Hit(0))
         );
     }
 
     #[test]
     fn match_single_pending_relaxed_without_title_hit() {
-        // 窗内只有一条 pending：文件名对不上也收（放宽防漏——收错可从回收站找回）
+        // 窗内只有一条 pending：文件名对不上也收（放宽防漏），但走 Fallback 语义
+        // ——原件留在下载夹、应用内横幅交代归属依据（2026-09-17 审计改口径）
         let q = vec![pending("Some Paper", Duration::from_secs(30))];
         assert_eq!(
             match_pending(&q, "unrelated download", std::time::SystemTime::now()),
-            Some(0)
+            Some(PendingMatch::Fallback(0))
         );
     }
 
     #[test]
-    fn multiple_pendings_fall_back_to_most_recent() {
-        // 名字对不上时取最近打开的那条（LIFO）：Paper A 10 秒前打开、Paper B 20 秒前
-        // → 收给 A（用户期望「打开哪个就关联哪个」，2026-09-17 拍板）
+    fn multiple_pendings_unmatched_does_not_guess() {
+        // 开了两篇、文件名对不上：不猜最近打开的
         let q = vec![
-            pending("Paper A", Duration::from_secs(10)),
-            pending("Paper B", Duration::from_secs(20)),
+            pending("Paper A long enough title here", Duration::from_secs(10)),
+            pending("Paper B another distinct title", Duration::from_secs(20)),
         ];
         assert_eq!(
             match_pending(&q, "unrelated", std::time::SystemTime::now()),
-            Some(0)
+            None
+        );
+    }
+
+    #[test]
+    fn filename_doi_is_high_confidence_hit() {
+        let mut a = pending("Paper A long enough title here", Duration::from_secs(10));
+        a.doi = "10.1002/adma.202304268".into();
+        let mut b = pending("Paper B another distinct title", Duration::from_secs(20));
+        b.doi = "10.1016/j.jallcom.2026.190140".into();
+        let q = vec![a, b];
+        assert_eq!(
+            match_pending(&q, "10.1002_adma.202304268", std::time::SystemTime::now()),
+            Some(PendingMatch::Hit(0))
+        );
+    }
+
+    #[test]
+    fn short_title_norm_does_not_hijack_other_pending() {
+        // 短边 ≥8 护栏（2026-09-17 审计）：「Magnetic materials」（norm 17 字符有效）
+        // 与更长的 B 篇——下载 B 的 PDF（文件名含 B 全题，也包含 A 的 norm）时
+        // 不得被先入队的 A 截胡；A 的 norm 不足 8 字符时直接不算命中
+        let mut a = pending("Magnetic", Duration::from_secs(30));
+        a.title = "Magnetic".into();
+        a.title_norm = crate::lit_watch::normalize_title("Magnetic");
+        let b = pending(
+            "Magnetic materials based sensors for battery systems",
+            Duration::from_secs(10),
+        );
+        let q = vec![a, b];
+        let stem = "Magnetic materials based sensors for battery systems";
+        // A 的 norm（8 字符）虽达护栏，但多条包含命中取最近打开 → B
+        assert_eq!(
+            match_pending(&q, stem, std::time::SystemTime::now()),
+            Some(PendingMatch::Hit(1))
+        );
+        // 超短 norm（2 字符）永不构成命中：只剩 Fallback
+        let mut tiny = pending("Mg", Duration::from_secs(30));
+        tiny.title = "Mg".into();
+        tiny.title_norm = crate::lit_watch::normalize_title("Mg");
+        assert_eq!(
+            match_pending(
+                &[tiny],
+                "Magnetic materials based sensors",
+                std::time::SystemTime::now()
+            ),
+            Some(PendingMatch::Fallback(0))
         );
     }
 
@@ -639,12 +1277,70 @@ mod tests {
         let q = vec![a, b];
         assert_eq!(
             match_pending(&q, "reactions-07-00016", std::time::SystemTime::now()),
-            Some(1)
+            Some(PendingMatch::Hit(1))
         );
-        // 非 MDPI 文件名：两条在窗无命中 → 兜底给最近打开的（b，20 秒前）
+        // 非 MDPI 文件名、窗内两篇：不猜
         assert_eq!(
             match_pending(&q, "main (1)", std::time::SystemTime::now()),
+            None
+        );
+    }
+
+    #[test]
+    fn consume_pending_matches_doi_or_lone_window() {
+        let mut a = pending("Paper A long enough title", Duration::from_secs(10));
+        a.doi = "10.1016/j.jallcom.2026.190140".into();
+        let mut b = pending("Paper B another distinct title", Duration::from_secs(20));
+        b.doi = "10.1002/adma.202304268".into();
+        let q = vec![a.clone(), b];
+        let now = std::time::SystemTime::now();
+        assert_eq!(
+            consume_pending_index(
+                &q,
+                "/proj",
+                "10.1016/j.jallcom.2026.190140",
+                "unrelated",
+                now
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            consume_pending_index(&q, "/proj", "", "Paper B another distinct title here", now),
             Some(1)
         );
+        // 别的项目不动
+        assert_eq!(
+            consume_pending_index(&q, "/other", "10.1016/j.jallcom.2026.190140", "", now),
+            None
+        );
+        // 窗内只一条、没 DOI/标题：仍消费（通道 C 刚打开就存）
+        assert_eq!(
+            consume_pending_index(&[a], "/proj", "", "paper-5", now),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn metadata_and_access_events_are_ignored() {
+        use notify::event::{
+            AccessKind, CreateKind, DataChange, EventKind, MetadataKind, ModifyKind, RemoveKind,
+        };
+        assert!(!event_worth_considering(&EventKind::Access(
+            AccessKind::Any
+        )));
+        assert!(!event_worth_considering(&EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Any)
+        )));
+        assert!(!event_worth_considering(&EventKind::Remove(
+            RemoveKind::Any
+        )));
+        assert!(event_worth_considering(&EventKind::Create(
+            CreateKind::File
+        )));
+        assert!(event_worth_considering(&EventKind::Modify(
+            ModifyKind::Data(DataChange::Content)
+        )));
+        assert!(event_worth_considering(&EventKind::Any));
+        assert!(event_worth_considering(&EventKind::Modify(ModifyKind::Any)));
     }
 }

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Mesa 终端顶部 · 现状 vs 方案</title>
+<style>
+  :root{
+    --rail:#0a0b0e; --canvas:#101218; --strip:#1a1d26; --inset:#1e222c;
+    --raised:#262a35; --seg-sel:#313643; --hairline:#2c3039; --field:#40454f;
+    --l1:#e9e6e2; --l2:#bdbab4; --l3:#97948e; --l4:#6f6d68;
+    --cta:#faa8d4; --cta-text:#2a1220; --cta-bd:#b06a8e;
+    --warn-text:#f0c010;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#07080b;color:var(--l2);font:13px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;padding:36px 40px 60px;display:flex;flex-direction:column;align-items:center;gap:14px}
+  h1{font-size:17px;color:var(--l1);font-weight:600;letter-spacing:.3px}
+  .sub{color:var(--l4);font-size:12px;margin-top:-10px}
+  .panel{width:900px;background:var(--canvas);border:1px solid var(--hairline);border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  .cap{width:900px;display:flex;align-items:baseline;gap:10px;margin-top:18px}
+  .cap .tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
+  .tag.cur{background:#2b2430;color:#e8a0b8;border:1px solid #4a3a46}
+  .tag.plan{background:#20301f;color:#a8d8a0;border:1px solid #3a5238}
+  .cap b{color:var(--l1);font-size:13px}
+  .cap span{color:var(--l4);font-size:12px}
+  .note{width:900px;font-size:11.5px;color:var(--warn-text);background:rgba(240,192,16,.06);border:1px dashed rgba(240,192,16,.35);border-radius:8px;padding:6px 10px;margin-top:6px}
+
+  /* ===== 标签条（所有面板一致：冻结区，方案不动） ===== */
+  .tabbar{display:flex;align-items:center;height:36px;padding:0 8px;gap:4px}
+  .rail-ico{width:28px;height:28px;border-radius:8px;background:var(--raised);display:flex;align-items:center;justify-content:center;color:var(--l2);font-size:12px;font-family:ui-monospace,monospace;margin-right:2px;flex:none}
+  .tabs{display:flex;flex:1;min-width:0;align-items:center}
+  .tab{display:flex;align-items:center;gap:6px;height:32px;min-width:72px;flex:1 1 0;border-radius:999px;padding:0 10px;font-size:12px;cursor:default}
+  .tab.active{border:1px solid var(--field);background:var(--raised);color:var(--l1)}
+  .tab .tt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tab .x{color:var(--l4);font-size:14px;flex:none}
+  .spin{width:11px;height:11px;flex:none;border-radius:50%;border:2px dotted var(--l3);animation:sp 1.6s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .plus{width:32px;height:32px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--l4);font-size:15px;flex:none}
+  .vsep{width:1px;height:16px;background:var(--hairline);margin:0 6px;flex:none}
+  .icobtn{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--l4);flex:none}
+  .icobtn svg{width:14px;height:14px}
+  .icobtn.on{background:var(--seg-sel);color:var(--l1)}
+  .rightgrp{margin-left:auto;display:flex;align-items:center;gap:2px;flex:none}
+
+  /* ===== 启动栏 ===== */
+  .launchrow{display:flex;align-items:center;gap:6px;padding:0 8px 6px}
+  .pill{display:flex;align-items:center;gap:0;background:var(--inset);border:1px solid var(--field);border-radius:8px;padding:2px;flex:none}
+  .pill.fill{flex:1;min-width:0}
+  .seg{display:flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:6px;font-size:12px;color:var(--l2);white-space:nowrap}
+  .seg .cv{color:var(--l4);font-size:9px;transform:translateY(1px)}
+  .seg.sel{color:var(--l1)}
+  .pdiv{width:1px;height:16px;background:var(--field);margin:0 2px;flex:none}
+  .mseg{flex:1;min-width:120px;color:var(--l4)}
+  .dead{opacity:.45}
+  .run{height:32px;padding:0 18px;border-radius:8px;background:var(--cta);color:var(--cta-text);border:1px solid var(--cta-bd);font-size:12.5px;font-weight:600;flex:none}
+  .dots{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--l3);font-size:14px;flex:none}
+  .blank{flex:1;border-top:1px dashed rgba(250,168,212,.30);position:relative;height:0;margin:0 4px}
+  .blank i{position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-style:normal;font-size:10.5px;color:#c98cb4;white-space:nowrap}
+
+  /* ===== 方案 A 身份条 ===== */
+  .idrow{display:flex;align-items:center;gap:8px;height:28px;padding:0 10px 4px;font-size:11.5px;color:var(--l3)}
+  .idrow b{color:var(--l2);font-weight:500}
+  .idrow .dots{margin-left:auto;width:28px;height:24px}
+
+  /* ===== 终端区 ===== */
+  .term{margin:0 8px 8px;background:#0c0e13;border:1px solid var(--hairline);border-radius:8px;padding:12px 14px;font:12px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--l3);height:96px}
+  .term .p{color:#8ab4a0}
+  .term .dim{color:var(--l4)}
+  .ghost{border:1px dashed rgba(168,216,160,.35);border-radius:6px;color:#8fb88a;font-size:10.5px;display:flex;align-items:center;justify-content:center;height:26px;margin:0 8px 8px;background:rgba(138,180,160,.04)}
+  footer{color:var(--l4);font-size:11.5px;margin-top:10px;text-align:center}
+</style>
+</head>
+<body>
+
+<h1>Mesa 终端顶部 · 现状 vs 方案 A+B</h1>
+<p class="sub">标签条四个状态完全一致（2026-09-13 定稿冻结，方案不动）；差别只在第二层「启动配置行」</p>
+
+<!-- ═══ 1. 现状 · 运行中 ═══ -->
+<div class="cap"><span class="tag cur">现状</span><b>运行中（你截图的状态）</b><span>三个选择器全部禁用成死表单，中部大段空白，只剩 ⋯ 孤悬</span></div>
+<div class="panel">
+  <div class="tabbar">
+    <div class="rail-ico">&gt;_</div>
+    <div class="tabs">
+      <div class="tab active"><span class="spin"></span><span class="tt">Claude Code · GLM</span><span class="x">×</span></div>
+    </div>
+    <div class="plus">＋</div>
+    <div class="vsep"></div>
+    <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+    <div class="rightgrp">
+      <div class="icobtn on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg></div>
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div>
+    </div>
+  </div>
+  <div class="launchrow">
+    <div class="pill dead">
+      <div class="seg sel">Claude Code <span class="cv">▾</span></div><div class="pdiv"></div>
+      <div class="seg">GLM <span class="cv">▾</span></div><div class="pdiv"></div>
+      <div class="seg" style="width:210px">模型（可选可输）</div>
+    </div>
+    <div class="blank"><i>◄── 空白 ──►</i></div>
+    <div class="dots">⋯</div>
+  </div>
+  <div class="term"><span class="p">$</span> grok<br><span class="dim">● 思考中…</span><br></div>
+</div>
+
+<!-- ═══ 2. 现状 · 未启动 ═══ -->
+<div class="cap"><span class="tag cur">现状</span><b>未启动</b><span>胶囊定宽 w-fit，中部同样空白；模型输入框挤在 clamp 宽度里</span></div>
+<div class="panel">
+  <div class="tabbar">
+    <div class="rail-ico">&gt;_</div>
+    <div class="tabs">
+      <div class="tab active"><span class="tt">Claude Code · GLM</span><span class="x">×</span></div>
+    </div>
+    <div class="plus">＋</div>
+    <div class="vsep"></div>
+    <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+    <div class="rightgrp">
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg></div>
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div>
+    </div>
+  </div>
+  <div class="launchrow">
+    <div class="pill">
+      <div class="seg sel">Claude Code <span class="cv">▾</span></div><div class="pdiv"></div>
+      <div class="seg">GLM <span class="cv">▾</span></div><div class="pdiv"></div>
+      <div class="seg" style="width:210px">模型（可选可输）</div>
+    </div>
+    <div class="blank"><i>◄── 空白 ──►</i></div>
+    <div class="run">运行</div>
+    <div class="dots">⋯</div>
+  </div>
+  <div class="term"><span class="p">$</span> <span class="dim">等待启动…</span></div>
+</div>
+
+<!-- ═══ 3. 方案 B · 未启动 ═══ -->
+<div class="cap"><span class="tag plan">方案 B</span><b>未启动：胶囊拉满整行</b><span>模型段（输入框）吃掉剩余宽度，长模型名看得全；动作组自然靠右，中部空白消失</span></div>
+<div class="panel">
+  <div class="tabbar">
+    <div class="rail-ico">&gt;_</div>
+    <div class="tabs">
+      <div class="tab active"><span class="tt">Claude Code · GLM</span><span class="x">×</span></div>
+    </div>
+    <div class="plus">＋</div>
+    <div class="vsep"></div>
+    <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+    <div class="rightgrp">
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg></div>
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div>
+    </div>
+  </div>
+  <div class="launchrow">
+    <div class="pill fill">
+      <div class="seg sel">Claude Code <span class="cv">▾</span></div><div class="pdiv"></div>
+      <div class="seg">GLM <span class="cv">▾</span></div><div class="pdiv"></div>
+      <div class="seg mseg">glm-4.7-flash-1109-preview</div>
+    </div>
+    <div class="run">运行</div>
+    <div class="dots">⋯</div>
+  </div>
+  <div class="term"><span class="p">$</span> <span class="dim">等待启动…</span></div>
+</div>
+
+<!-- ═══ 4. 方案 A · 运行中 ═══ -->
+<div class="cap"><span class="tag plan">方案 A</span><b>运行中：死表单降级为身份条</b><span>一行小字说清「谁在跑」，⋯ 保留；不再渲染三段禁用表单</span></div>
+<div class="panel">
+  <div class="tabbar">
+    <div class="rail-ico">&gt;_</div>
+    <div class="tabs">
+      <div class="tab active"><span class="spin"></span><span class="tt">Claude Code · GLM</span><span class="x">×</span></div>
+    </div>
+    <div class="plus">＋</div>
+    <div class="vsep"></div>
+    <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+    <div class="rightgrp">
+      <div class="icobtn on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg></div>
+      <div class="icobtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div>
+    </div>
+  </div>
+  <div class="idrow">运行中&nbsp;·&nbsp;<b>Claude Code</b>&nbsp;·&nbsp;<b>GLM</b>&nbsp;·&nbsp;glm-5.3<div class="dots">⋯</div></div>
+  <div class="ghost">原禁用表单位置整行省去，终端直接上移、视野更干净</div>
+  <div class="term" style="height:118px"><span class="p">$</span> grok<br><span class="dim">● 思考中…</span><br></div>
+</div>
+
+<div class="note">标签条按 2026-09-13 定稿维持原视觉（含均分宽度），本方案只动第二层「启动配置行」；shell 回落模式不算运行中，表单照常展示。</div>
+<footer>示意图 · 颜色取自 Mesa 默认主题令牌（canvas #101218 / raised #262a35 / CTA #faa8d4）</footer>
+
+</body>
+</html>

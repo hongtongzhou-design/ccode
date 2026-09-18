@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  ancestorDirsToReveal,
   fileMatchesProjectFilter,
   flattenVisibleFiles,
   neighborFile,
@@ -54,4 +55,14 @@ test("neighborFile steps to previous and next, and stops at ends", () => {
   assert.equal(neighborFile(files, "a", -1), null);
   assert.equal(neighborFile(files, "c", 1), null);
   assert.equal(neighborFile(files, null, 1)?.path, "a");
+});
+
+test("ancestorDirsToReveal：展开到文件所在目录，不含根", () => {
+  assert.deepEqual(ancestorDirsToReveal("/p", "/p/papers/a.pdf"), ["/p/papers"]);
+  assert.deepEqual(ancestorDirsToReveal("/p", "/p/a.pdf"), []);
+  assert.deepEqual(ancestorDirsToReveal("/p", "/other/a.pdf"), []);
+  assert.deepEqual(
+    ancestorDirsToReveal("C:\\p", "C:\\p\\papers\\a.pdf", true),
+    ["C:\\p\\papers"],
+  );
 });

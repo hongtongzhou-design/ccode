@@ -6479,10 +6479,7 @@ resources = ["ghost.pdf"]
         );
         let p3 = create_demo_at(&base, &conn).unwrap();
         assert_eq!(p3.path, p.path);
-        assert!(
-            root.join("references.bib").exists(),
-            "缺的演示文件应补回"
-        );
+        assert!(root.join("references.bib").exists(), "缺的演示文件应补回");
         assert_eq!(
             fs::read_to_string(root.join("README.md")).unwrap(),
             "user edit",
@@ -6493,11 +6490,7 @@ resources = ["ghost.pdf"]
         assert_eq!(config.steps.len(), canon.steps.len());
         assert_eq!(config.steps[0].brief, canon.steps[0].brief);
         assert!(config.steps[0].seed_complete);
-        assert_eq!(
-            task_cards_at(&root).len(),
-            1,
-            "已有演示卡片不得重复播种"
-        );
+        assert_eq!(task_cards_at(&root).len(), 1, "已有演示卡片不得重复播种");
         std::fs::remove_dir_all(&dir).ok();
     }
 

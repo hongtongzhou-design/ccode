@@ -184,6 +184,8 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 
 **作废**：该槽 URL 变更、网关密钥变更（含从有到无 / 轮换）、`noAuth` 翻转。作废 = 回到 `never`，不把旧失败带到新端点。
 
+**探针线格式按目标协议定，不是一律 chat/completions**（2026-09-17 起）：anthropic 槽走 `/v1/messages`（thinking 块）；openai 槽走 `/v1/chat/completions`；responses 槽（codex、grok 的 responses 后端）走 **OpenAI Responses 线格式**——`POST {base}/responses`、`input` 单字符串、`max_output_tokens`、思考档用规范字段 `reasoning.effort`。原因：GLM 这类 Responses-only 网关对 chat/completions 形状回 403 `model_access_denied`、对 `/responses` 放行，用错形状会把能用的槽误报成失败。目录解析同理：Responses 形状目录除 OpenAI 的 `data[].id` 外还认 GLM codex 目录的 `models[].slug`。URL 拼接的版本段规则见 `models.rs::ends_with_version_segment`（`/v1`、`/v4` 等版本段结尾直接拼资源名，不再补 `/v1`）。
+
 **求交**：
 
 | 体检 | 控件 |

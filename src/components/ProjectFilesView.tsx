@@ -30,8 +30,9 @@ import {
 } from "./PageFrame";
 import FileKindFilters from "./FileKindFilters";
 import { IS_WINDOWS } from "../hotkeys";
-import { pathWithin } from "../path-utils";
+import { pathWithin, samePath } from "../path-utils";
 import {
+  ancestorDirsToReveal,
   fileMatchesProjectFilter,
   flattenVisibleFiles,
   neighborFile,
@@ -74,12 +75,19 @@ export default function ProjectFilesView({
   preferredAgent,
   preferredProfile,
   onError,
+  focusPath,
+  focusToken,
+  onFocusHandled,
 }: {
   projectPath: string;
   workMode?: string | null;
   preferredAgent?: string | null;
   preferredProfile?: string | null;
   onError: (message: string) => void;
+  /** 从待获取清单跳过来：展开父目录并打开这篇 */
+  focusPath?: string | null;
+  focusToken?: number | null;
+  onFocusHandled?: () => void;
 }) {
   const setPage = useAppStore((s) => s.setPage);
   const setReaderReq = useAppStore((s) => s.setReaderReq);
@@ -106,8 +114,10 @@ export default function ProjectFilesView({
         showHidden: false,
       });
       setCache((current) => ({ ...current, [path]: entries }));
+      return entries;
     } catch (reason) {
       onError(`读取项目文件失败：${String(reason)}`);
+      return [] as DirEntryDto[];
     }
   }, [onError]);
 
@@ -164,6 +174,60 @@ export default function ProjectFilesView({
         .catch(() => setGoalMarks([]));
     }
   }, [load, projectPath, workMode]);
+
+  const cacheRef = useRef(cache);
+  cacheRef.current = cache;
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const onFocusHandledRef = useRef(onFocusHandled);
+  onFocusHandledRef.current = onFocusHandled;
+
+  useEffect(() => {
+    if (!focusPath || focusToken == null || loading) return;
+    let cancelled = false;
+    void (async () => {
+      const dirs = ancestorDirsToReveal(projectPath, focusPath, IS_WINDOWS);
+      const nextExpanded = new Set(expandedRef.current);
+      let listing = cacheRef.current[projectPath] ?? [];
+      for (const dir of dirs) {
+        if (cancelled) return;
+        const name = dir.split(/[\\/]/).pop() ?? dir;
+        const hit = listing.find(
+          (entry) =>
+            entry.isDir &&
+            (samePath(entry.path, dir, IS_WINDOWS) || entry.name === name),
+        );
+        const dirPath = hit?.path ?? dir;
+        nextExpanded.add(dirPath);
+        listing = cacheRef.current[dirPath] ?? (await load(dirPath));
+      }
+      if (cancelled) return;
+      setExpanded(nextExpanded);
+      const fileName = focusPath.split(/[\\/]/).pop() ?? focusPath;
+      const file = listing.find(
+        (entry) =>
+          !entry.isDir &&
+          (samePath(entry.path, focusPath, IS_WINDOWS) ||
+            entry.name === fileName),
+      );
+      if (file) setPreview(file);
+      else openPath(focusPath);
+      setFilter("all");
+      setQuery("");
+      setWindowed(false);
+      requestAnimationFrame(() => {
+        const target = file?.path ?? focusPath;
+        const el = listRef.current?.querySelector(
+          `[data-file-path="${CSS.escape(target)}"]`,
+        );
+        el?.scrollIntoView({ block: "nearest" });
+      });
+      onFocusHandledRef.current?.();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [focusPath, focusToken, loading, projectPath, load]);
 
   useEffect(() => {
     const q = query.trim();

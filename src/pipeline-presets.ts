@@ -96,18 +96,41 @@ function mcpLitSearchTask(): HumanTaskDto {
   };
 }
 
+function pendingConfirmTask(): HumanTaskDto {
+  return {
+    title: "核对待确认篇目",
+    guidance:
+      "展开清单逐篇纳入或排除。纳入且没有 PDF 的会进下面的待获取。没有待确认可跳过。",
+    target: "",
+    timing: "after",
+    optional: true,
+    completion: "manual",
+  };
+}
+
 function paywallPdfTask(timing: "after" | "during" = "after"): HumanTaskDto {
   return {
     title: "下载付费墙文献全文",
     // 首句动作导向（2026-09-15 用户实测原首句「拿到全文后…」让人不知从哪下手）：
-    // 第一步是看清单，入口就挂在本行（StepFlow 的「查看待获取清单」就地展开）
+    // 第一步是看清单，入口就挂在本行（StepFlow 的「待获取」折叠就地展开）
     guidance:
-      "点「查看待获取清单」展开缺全文列表（附 to-fetch.ris，拖进 Zotero 自动建成待获取列表）。逐条处理：「自动获取」先查开放副本；取不到的（Wiley 等有反爬墙）点「浏览器打开」→ 在浏览器里点站方下载，Mesa 自动收进 papers/；手动拿到的 PDF 点行内「关联本地 PDF」选定或拷进项目根 papers/（文件名随意，下一步 agent 统一改名）。不想补的跳过——agent 会按摘要写笔记并标注「仅摘要」。",
+      "只补已纳入、缺 PDF 的篇目，落到项目根 papers/。待确认先拍板，不要先下。不想补可跳过——下一篇按摘要记。",
     target: "papers/*.pdf",
     timing,
     optional: true,
   };
 }
+
+function litSearchHumanTasks(): HumanTaskDto[] {
+  return [mcpLitSearchTask(), pendingConfirmTask(), paywallPdfTask("after")];
+}
+
+/** 检索步：pending 必须先经人确认，才能进 to-fetch / 下载全文。 */
+const LIT_PENDING_BEFORE_FETCH =
+  "全文获取只针对 decision=included：开放获取下载到项目根 papers/；付费墙写入 to-fetch.md / to-fetch.ris。" +
+  "**禁止把 pending 写入 to-fetch.md，也不得下载其全文。**" +
+  "若 included.json 仍有 pending：把待确认篇目（标题+理由）写入 .ccode/help-wanted.md 请人逐篇纳入或排除" +
+  "（未回复不把 pending 当已纳入、不进待获取），只推进已纳入篇目的全文获取。pending 经人改成 included 后才允许补进 to-fetch。";
 
 /** 英文综述（review）：文献检索 → 精读笔记 → 大纲 → 初稿 → 润色定稿。
  *  示例课题直接用这份模板（src-tauri/resources/pipeline-review.json）。
@@ -127,7 +150,8 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "3. 检索候选文献：OpenAlex / Semantic Scholar / arXiv / Crossref 官方 API 免 key 直连（WebFetch/curl），每个库的检索式、检索日期与命中数记入 papers/screening.md；人工事项若已配 Consensus/Undermind MCP 可直接调用；WoS/SerpAPI 等付费 key 一律用 $VAR 环境变量引用，禁止写进任何文件；末尾写覆盖缺口声明（哪些库没检）；\n" +
       "4. 按标准逐条筛选，每篇给出纳入/排除及理由；拿不准相关性的一律保留为 pending 候选并标注「待确认」，不冒充已决纳入，不允许自行裁掉；\n" +
       "5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI），并同步写入 papers/included.json（每篇一条，至少含稳定唯一字符串 id、title、decision（included/pending）、reason；与 md 记录一一对应）；\n" +
-      "6. 全文获取分两类：开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（编号清单，见 lit-search 产出格式）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR，TI 标题、AU 作者每位一行、PY 四位年份、T2 来源、DO、UR——筛选记录里已有的字段一律写入，只给 TI/DO/UR 会让 Zotero 里作者/年份/出版物全空；确无数据才留空，不编造），供用户导入 Zotero 建成题录完整的待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n" +
+      "6. " + LIT_PENDING_BEFORE_FETCH +
+      "开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（编号清单，见 lit-search 产出格式）等用户提供全文，同时把 to-fetch.md 转成 papers/to-fetch.ris（RIS 2004：每篇 TY - JOUR，TI 标题、AU 作者每位一行、PY 四位年份、T2 来源、DO、UR——筛选记录里已有的字段一律写入，只给 TI/DO/UR 会让 Zotero 里作者/年份/出版物全空；确无数据才留空，不编造），供用户导入 Zotero 建成题录完整的待获取列表。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 不得覆盖。\n" +
       "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/zotero-sync.md 均存在（RIS 允许有效空文件，其他文件非空；未启用或回落时报告原因；无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
@@ -144,7 +168,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     requiredSkills: ["lit-search"],
     asksLitSource: true,
     run: [],
-    humanTasks: [mcpLitSearchTask(), paywallPdfTask("after")],
+    humanTasks: litSearchHumanTasks(),
     decisions: [],
   },
   {
@@ -295,7 +319,8 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "若项目根已有 notes/ 或 papers/included.md：检查检索日期、问题/标准与原文版本，有效则复用；按本课题实证问题补检索、补纳入，保留人写内容并更新失效笔记。没有上游产物时按下面流程全量检索。\n" +
       "围绕课题主题（见上方「课题主题」段；未填写时只提出候选主题记入 papers/screening.md，待人确认后正式筛选；只可先试检摸底）执行：\n" +
       "1. 检索与筛选按 lit-search 技能：**先粗检一轮报数再定标准**（OpenAlex 命中约 N 篇与建议标准写入 .ccode/help-wanted.md，未回复仅做无依赖、可逆准备）；产出 papers/screening.md（标准 + 各库检索式、检索日期与命中数 + 每篇判定理由；拿不准相关性的一律保留为 pending 候选并标注「待确认」，不冒充已决纳入）与 papers/included.md；用户导入的检索结果先解析去重——看项目根 papers/imports/、工作区 papers/imports/、以及「项目资源」「提货单」里的绝对路径；\n" +
-      "2. 全文获取：开放获取直接下载到**项目根 papers/**（文件名：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得绕过，汇总写入 papers/to-fetch.md 并转 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖。\n" +
+      "2. " + LIT_PENDING_BEFORE_FETCH +
+      "开放获取直接下载到**项目根 papers/**（文件名：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得绕过，汇总写入 papers/to-fetch.md 并转 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖。\n" +
       "完成标准：六件套均已提交（无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件；未启用或回落时 zotero-sync.md 写明原因），筛选记录含检索日期与覆盖缺口、可复现。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     optionalInputs: ["notes/", "references.bib", "papers/included.md"],
@@ -313,7 +338,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     requiredSkills: ["lit-search"],
     asksLitSource: true,
     run: [],
-    humanTasks: [mcpLitSearchTask(), paywallPdfTask("after")],
+    humanTasks: litSearchHumanTasks(),
     decisions: [],
   },
   {
@@ -704,7 +729,8 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "1. **先粗检一轮报数再定标准**：OpenAlex 命中约 N 篇与建议标准写入 .ccode/help-wanted.md（未回复仅做无依赖、可逆准备）；纳入/排除标准（年份、语言、来源级别、相关性）写入 papers/screening.md；\n" +
       "2. 解析人工导入题录（项目根 papers/imports/、工作区 papers/imports/、项目资源与提货单绝对路径），去重进候选池；\n" +
       "3. 检索候选并逐条判定，产出 papers/screening.md、papers/included.md 和 papers/included.json（每项稳定唯一字符串 id/title/decision/reason，与 md 一一对应）；拿不准一律保留为 pending 候选并标「待确认」，不冒充已决纳入；检索日期与覆盖缺口写入 screening.md；\n" +
-      "4. 开放获取全文下载到**项目根 papers/**；付费墙写入 papers/to-fetch.md 与 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖。\n" +
+      "4. " + LIT_PENDING_BEFORE_FETCH +
+      "开放获取全文下载到**项目根 papers/**；付费墙写入 papers/to-fetch.md 与 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖。\n" +
       "零结果也交付 included.json=[] 与说明，禁止造条目；没有可精读证据时后续只允许准备，不宣称完成研究。\n" +
       "完成标准：检索交付件存在（无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件；未启用或回落时 zotero-sync.md 写明原因），每条记录无空缺字段，筛选可复现。\n" + QUESTION_GATE + QUALITY_STATUS,
     optionalInputs: ["notes/", "references.bib", "papers/included.md"],
@@ -722,7 +748,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
     requiredSkills: ["lit-search"],
     asksLitSource: true,
     run: [],
-    humanTasks: [mcpLitSearchTask(), paywallPdfTask("after")],
+    humanTasks: litSearchHumanTasks(),
     decisions: [
       { q: "检索年限", options: ["近五年", "近十年", "不限年限"] },
       { q: "文献语言", options: ["中英文都要", "只要英文"] },
