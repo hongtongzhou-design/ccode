@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AGENTS } from "../types";
 import { useAppStore } from "../store";
 import type {
   GatewayUsageRow,
+  PlanQuotaDto,
   UsageStatsDto,
   UsageTopSessionDto,
   UsageTrendDto,
@@ -15,7 +17,33 @@ import {
   sessionDisplayTitle,
   weekOverWeek,
 } from "../stats-insight";
+import {
+  formatPlanTimestamp,
+  formatResetCountdown,
+  formatResetPoint,
+  planProviderLabel,
+  planQuotaDataAt,
+  planTabLabel,
+  planWindowLabel,
+  gatewayHasPlanQuota,
+  planGatewayNameVisible,
+  planLevelLabel,
+  quotaBarLevel,
+  resetCardsLine,
+} from "../plan-quota";
+import { confirmDialog } from "../components/ConfirmDialog";
 import { agentBrand } from "../agent-colors";
+import { RefreshCw } from "lucide-react";
+import zhipuIcon from "../assets/plan-icons/zhipu.svg";
+import kimiIcon from "../assets/plan-icons/kimi.svg";
+import minimaxIcon from "../assets/plan-icons/minimax.svg";
+
+// 各家官方图标（SVG，取自 cc-switch 提取的官方 logo，仅用于标识对应平台）
+const PLAN_PROVIDER_ICON: Record<string, string | undefined> = {
+  zhipu: zhipuIcon,
+  kimi: kimiIcon,
+  minimax: minimaxIcon,
+};
 import {
   Checkbox,
   EmptyState,
@@ -262,6 +290,72 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     () => localStorage.getItem("ccode.stats.showInternal") === "1",
   );
 
+  // 订阅余量卡（智谱/Kimi/MiniMax 一张卡切换）：进页查 + 可见期 2 分钟自动轮询，手动刷新才 force
+  const [planRows, setPlanRows] = useState<PlanQuotaDto[]>([]);
+  const [planActive, setPlanActive] = useState<string | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planUsing, setPlanUsing] = useState<string | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const planSeq = useRef(0);
+  const gateways = useAppStore((s2) => s2.gateways);
+  const hasPlanGateway = useMemo(
+    () => gateways.some((g) => gatewayHasPlanQuota(g)),
+    [gateways],
+  );
+
+  async function loadPlans(force: boolean) {
+    const seq = ++planSeq.current;
+    setPlanLoading(true);
+    try {
+      const rows = await invoke<PlanQuotaDto[]>("plan_quota_overview", { force });
+      if (seq !== planSeq.current) return;
+      setPlanRows(rows);
+      setPlanError(null);
+    } catch (e) {
+      if (seq === planSeq.current) setPlanError(String(e));
+    } finally {
+      if (seq === planSeq.current) setPlanLoading(false);
+    }
+  }
+
+  /** 用一张重置卡：消费性写操作，先确认再触发；成功后整行换成刷新后的余量 */
+  async function useResetCard(row: PlanQuotaDto, type: "five_hour" | "weekly") {
+    const label = planWindowLabel(type);
+    const expiry =
+      type === "five_hour"
+        ? row.resetCards.fiveHourExpiresAt
+        : row.resetCards.weeklyExpiresAt;
+    const expiryAt = expiry != null ? formatPlanTimestamp(expiry, Date.now()) : null;
+    const ok = await confirmDialog(
+      `立即重置「${label}」窗口的额度？将消耗一张重置卡，消费后不可撤销。${
+        expiryAt ? `将优先使用最早过期的一张（${expiryAt} 过期）。` : "将优先使用最早过期的一张。"
+      }`,
+      { danger: true, confirmText: "重置", focusCancel: true },
+    );
+    if (!ok) return;
+    setPlanUsing(row.gatewayId + type);
+    try {
+      const fresh = await invoke<PlanQuotaDto>("plan_use_reset_card", {
+        gatewayId: row.gatewayId,
+        resetType: type,
+      });
+      setPlanRows((cur) =>
+        cur.map((r) => (r.gatewayId === fresh.gatewayId ? fresh : r)),
+      );
+      setPlanError(null);
+    } catch (e) {
+      setPlanError(String(e));
+    } finally {
+      setPlanUsing(null);
+    }
+  }
+
+  function openPlanConsole(provider: string) {
+    void invoke<string>("plan_quota_console_url", { provider })
+      .then((url) => openUrl(url))
+      .catch(() => setPlanError("无法打开外部链接"));
+  }
+
   // 并发守卫：快速切换范围时旧响应不得覆盖新范围
   const loadSeq = useRef(0);
 
@@ -307,9 +401,17 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  // 订阅余量自动轮询：页面开着每 2 分钟刷一次（与后端缓存 TTL 对齐）；不可见即停
+  useEffect(() => {
+    if (!visible) return;
+    const timer = setInterval(() => void loadPlans(false), 120_000);
+    return () => clearInterval(timer);
+  }, [visible]);
+
   useEffect(() => {
     if (visible) {
       void load(range);
+      void loadPlans(false);
       setSessionsLoadError(null);
       void loadSessions().catch((reason) => {
         setSessionsLoadError(`会话明细加载失败：${String(reason)}`);
@@ -509,6 +611,170 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         <p className="mb-3 text-xs text-warn-text">{sessionsLoadError}</p>
       )}
       {notice && <p className="mb-3 text-xs text-ok-text">{notice}</p>}
+
+      {(planRows.length > 0 || (planLoading && hasPlanGateway)) && (
+        <div className="mb-6 rounded-lg ccode-well p-4">
+          <div className="flex items-center gap-2 border-b border-hairline pb-2">
+            <span className="text-xs font-medium tracking-wider text-l4">订阅余量</span>
+            <span className="text-micro text-l4">
+              Coding Plan 实时查询{planLoading ? " · 查询中…" : ""}
+            </span>
+            <button
+              type="button"
+              className="ml-auto flex h-6 w-6 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+              disabled={planLoading}
+              title="强制重查"
+              onClick={() => void loadPlans(true)}
+            >
+              <RefreshCw aria-hidden="true" className={`h-3.5 w-3.5 ${planLoading ? "animate-spin" : ""}`} />
+            </button>
+          </div>
+          {planError && (
+            <p className="mt-2 text-xs text-err-text">{planError}</p>
+          )}
+          {planRows.length === 0 && (
+            <div className="mt-3 space-y-2">
+              <div className="h-3 w-3/4 animate-pulse rounded bg-l4/50" />
+              <div className="h-3 w-2/3 animate-pulse rounded bg-l4/50" />
+            </div>
+          )}
+          {planRows.length === 0 && (
+            <div className="mt-3 space-y-2">
+              <div className="h-3 w-3/4 animate-pulse rounded bg-l4/50" />
+              <div className="h-3 w-2/3 animate-pulse rounded bg-l4/50" />
+            </div>
+          )}
+          {planRows.length > 0 &&
+            (() => {
+            const active =
+              planRows.find((r) => r.gatewayId === planActive) ?? planRows[0];
+            const providerCounts = planRows.reduce<Record<string, number>>(
+              (acc, r) => ({ ...acc, [r.provider]: (acc[r.provider] ?? 0) + 1 }),
+              {},
+            );
+            const row = active;
+            const dataAt = planQuotaDataAt(row.queriedAt, row.fromCache);
+            return (
+              <>
+                {planRows.length > 1 && (
+                  <div className="mt-2">
+                    <SegTabs
+                      items={planRows.map((r) => ({
+                        id: r.gatewayId,
+                        label: planTabLabel(r, providerCounts[r.provider] ?? 1),
+                      }))}
+                      value={row.gatewayId}
+                      onChange={setPlanActive}
+                    />
+                  </div>
+                )}
+                <div key={row.gatewayId} className="mt-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {planGatewayNameVisible(row.gatewayName, row.provider) && (
+                      <span className="text-sm font-medium text-l1">{row.gatewayName}</span>
+                    )}
+                    <span className="flex items-center gap-1.5 text-sm text-l2">
+                      {PLAN_PROVIDER_ICON[row.provider] && (
+                        <img
+                          src={PLAN_PROVIDER_ICON[row.provider]}
+                          alt=""
+                          className="h-[18px] w-[18px] rounded-[4px]"
+                        />
+                      )}
+                      {planProviderLabel(row.provider)}
+                    </span>
+                    {planLevelLabel(row.planLevel) && (
+                      <span className="flex h-4 items-center justify-center rounded-sm bg-hover px-1 text-micro leading-none text-l2">
+                        {/* 字形下侧留白偏多导致文字偏下，上移 1px 修正视觉居中 */}
+                        <span className="-translate-y-px">{planLevelLabel(row.planLevel)}</span>
+                      </span>
+                    )}
+                    {dataAt && <span className="text-micro text-l4">{dataAt}</span>}
+                    <button
+                      type="button"
+                      className={`${rowActionClass} ml-auto`}
+                      onClick={() => openPlanConsole(row.provider)}
+                      title="在系统浏览器打开这家平台的控制台"
+                    >
+                      去控制台 ↗
+                    </button>
+                  </div>
+                  {row.error && !row.ok && (
+                    <p className="mt-1 text-xs text-err-text">{row.error}</p>
+                  )}
+                  {row.windows.map((w) => {
+                    const level = quotaBarLevel(w.usedPercent);
+                    const barColor =
+                      level === "danger"
+                        ? "bg-err-text"
+                        : level === "warn"
+                          ? "bg-warn-text"
+                          : "bg-cta";
+                    const point = formatResetPoint(w.resetsAt, Date.now());
+                    const countdown = formatResetCountdown(w.resetsAt, Date.now());
+                    return (
+                      <div key={w.window} className="mt-2 flex items-center gap-3 text-xs">
+                        <span className="w-14 shrink-0 text-l3">{planWindowLabel(w.window)}</span>
+                        <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded bg-hover">
+                          <div
+                            className={`h-full rounded ${barColor}`}
+                            style={{
+                              width: `${Math.min(100, Math.max(0, w.usedPercent))}%`,
+                            }}
+                          />
+                        </div>
+                        <span className="w-12 shrink-0 text-right tabular-nums text-l2">
+                          {w.usedPercent.toFixed(0)}%
+                        </span>
+                        <span
+                          className="w-36 shrink-0 text-right text-micro text-l4"
+                          title={countdown ?? undefined}
+                        >
+                          {point ?? ""}
+                        </span>
+                      </div>
+                    );
+                  })}
+                  {row.resetCardsSupported && row.resetCards.ok && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-micro text-l3">
+                      <span>{resetCardsLine(row.resetCards, Date.now())}</span>
+                      {row.resetCards.fiveHour > 0 && (
+                        <button
+                          type="button"
+                          className={rowActionClass}
+                          disabled={planUsing != null}
+                          onClick={() => void useResetCard(row, "five_hour")}
+                        >
+                          {planUsing === row.gatewayId + "five_hour"
+                            ? "使用中…"
+                            : "重置 5 小时"}
+                        </button>
+                      )}
+                      {row.resetCards.weekly > 0 && (
+                        <button
+                          type="button"
+                          className={rowActionClass}
+                          disabled={planUsing != null}
+                          onClick={() => void useResetCard(row, "weekly")}
+                        >
+                          {planUsing === row.gatewayId + "weekly"
+                            ? "使用中…"
+                            : "重置周额度"}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {row.resetCardsSupported && !row.resetCards.ok && row.resetCards.error && (
+                    <p className="mt-1 text-micro text-l4" title={row.resetCards.error}>
+                      重置卡查询失败
+                    </p>
+                  )}
+                </div>
+              </>
+            );
+            })()}
+        </div>
+      )}
 
       {!stats ? (
         <LoadingRows />

@@ -60,6 +60,8 @@ const KNOWN_PALETTES: [&str; 8] = [
     "one-light",
     "latte",
 ];
+/// 终端渲染器闭集（terminal_renderer）：auto = 平台默认（Windows 流畅优先 / macOS 清晰优先）
+const KNOWN_RENDERERS: [&str; 3] = ["auto", "dom", "webgl"];
 /// 会话页「⇗ 外部恢复」可选的终端应用；auto = 按平台优先级探测
 const KNOWN_EXTERNAL_TERMINALS: [&str; 10] = [
     "auto",
@@ -198,6 +200,9 @@ fn sanitize_custom_theme_cards(
 pub struct AppSettingsDto {
     pub terminal_font_size: Option<u16>,
     pub terminal_font_family: Option<String>,
+    /// 终端渲染器：auto（默认，Windows 流畅优先 / macOS 清晰优先）| webgl（流畅）| dom（清晰）。
+    /// 未知值读时静默丢弃（同 KNOWN_PALETTES 口径）
+    pub terminal_renderer: Option<String>,
     /// 终端 16 色调色板预设：dark-plus（默认）| solarized | one-dark | catppuccin
     pub terminal_palette: Option<String>,
     pub scrollback: Option<u32>,
@@ -264,8 +269,11 @@ pub struct AppSettingsDto {
     /// 想法期只读保护（卡片区「聊想法」）：开 = 注入只读/计划模式参数（支持的 CLI）+
     /// 预填指令带不动文件约束；关 = 纯聊天不动参数。卡片区就地开关，设置页不加行
     pub discuss_readonly: Option<bool>,
-    /// 聊天页显示终端状态栏（模型/目录/git/token；默认开）。关 = 聊天页隐藏但保留
-    /// invisible 占位——终端几何高度跨模式恒定，切层不改行列数、不触发 codex resize reflow
+    /// 底部状态栏统一开关（终端层与聊天层同进退，默认开）。关 = 两层都不渲染，
+    /// 切层不改终端行列数（两层一致无需占位）；旧字段 status_bar_in_chat=false 自动迁移为关
+    pub status_bar: Option<bool>,
+    /// 已废弃（2026-09-19）：仅保留读取迁移——statusBarInChat=false 老用户保持关闭；
+    /// 前端不再写此字段，生效值一律看 status_bar
     pub status_bar_in_chat: Option<bool>,
     /// 向 agent 主动告知终端底色（Windows 专用，默认开）。ConPTY 双向都不转发
     /// OSC 10/11 底色查询——子进程的查询到不了 xterm，回报也回不去子进程——
@@ -351,6 +359,77 @@ pub fn official_outbound_env() -> Vec<(String, String)> {
         return Vec::new();
     }
     official_outbound_env_from(&read_current())
+}
+
+/// 下载侧（agent 安装/更新、依赖安装、字体、更新检查）注入的代理 env：与官方账号
+/// 启动同源 outbound_proxy，但大小写都写（curl 的 http_proxy 只认小写，npm 两者都认）；
+/// extra_no_proxy（国内镜像主机）并入 NO_PROXY 直连——镜像走代理绕道境外反而慢。
+pub fn download_proxy_env_from(
+    s: &AppSettingsDto,
+    extra_no_proxy: &[&str],
+) -> Vec<(String, String)> {
+    let Some(proxy) = s
+        .outbound_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Vec::new();
+    };
+    if validate_outbound_proxy(proxy).is_err() {
+        return Vec::new();
+    }
+    let mut no_proxy = s
+        .outbound_no_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_NO_PROXY)
+        .to_string();
+    for host in extra_no_proxy {
+        let h = host.trim();
+        if h.is_empty() || no_proxy.split(',').any(|e| e.trim() == h) {
+            continue;
+        }
+        if !no_proxy.is_empty() {
+            no_proxy.push(',');
+        }
+        no_proxy.push_str(h);
+    }
+    [
+        ("http_proxy", proxy),
+        ("HTTP_PROXY", proxy),
+        ("https_proxy", proxy),
+        ("HTTPS_PROXY", proxy),
+        ("all_proxy", proxy),
+        ("ALL_PROXY", proxy),
+        ("no_proxy", no_proxy.as_str()),
+        ("NO_PROXY", no_proxy.as_str()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+/// 生产路径：用户环境已自带任一代理变量（终端手 export 后拉起 Mesa 的场景）时不覆盖；
+/// 单测返回空（避免本机代理污染 PTY/子进程断言）。
+pub fn download_proxy_env(extra_no_proxy: &[&str]) -> Vec<(String, String)> {
+    if cfg!(test) {
+        return Vec::new();
+    }
+    for key in [
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ] {
+        if std::env::var_os(key).is_some_and(|v| !v.to_string_lossy().trim().is_empty()) {
+            return Vec::new();
+        }
+    }
+    download_proxy_env_from(&read_current(), extra_no_proxy)
 }
 
 // ===== 出网代理自动检测（2026-09-16）=====
@@ -641,6 +720,9 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         terminal_font_family: s
             .terminal_font_family
             .or_else(|| Some(DEFAULT_TERMINAL_FONT_FAMILY.to_string())),
+        terminal_renderer: s
+            .terminal_renderer
+            .filter(|r| KNOWN_RENDERERS.contains(&r.as_str())),
         terminal_palette: s
             .terminal_palette
             .filter(|p| KNOWN_PALETTES.contains(&p.as_str())),
@@ -707,6 +789,11 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         // 逐页绑定不做默认值填充：键缺失即「跟随默认」（同 ai_profiles 口径）
         hotkey_pages: s.hotkey_pages,
         discuss_readonly: s.discuss_readonly.or(Some(true)),
+        status_bar: Some(
+            s.status_bar
+                .or(s.status_bar_in_chat)
+                .unwrap_or(true),
+        ),
         status_bar_in_chat: s.status_bar_in_chat.or(Some(true)),
         terminal_color_report: s.terminal_color_report.or(Some(true)),
         outbound_proxy: s.outbound_proxy.filter(|v| !v.trim().is_empty()),
@@ -723,6 +810,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.terminal_font_family.is_some() {
         cur.terminal_font_family = patch.terminal_font_family;
+    }
+    if patch.terminal_renderer.is_some() {
+        cur.terminal_renderer = patch.terminal_renderer;
     }
     if patch.terminal_palette.is_some() {
         cur.terminal_palette = patch.terminal_palette;
@@ -807,6 +897,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.discuss_readonly.is_some() {
         cur.discuss_readonly = patch.discuss_readonly;
+    }
+    if patch.status_bar.is_some() {
+        cur.status_bar = patch.status_bar;
     }
     if patch.status_bar_in_chat.is_some() {
         cur.status_bar_in_chat = patch.status_bar_in_chat;
@@ -1208,6 +1301,67 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_unified_toggle_migrates_legacy_chat_only() {
+        let p = tmp();
+        // 老用户：聊天页关过状态栏 → 迁移为统一关闭
+        let mut cur = read_from(&p);
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                status_bar_in_chat: Some(false),
+                ..Default::default()
+            },
+        );
+        write_to(&p, &cur).unwrap();
+        assert_eq!(with_defaults(read_from(&p)).status_bar, Some(false));
+        // 新开关一旦显式写入即胜出（不再受旧字段影响）
+        let mut cur2 = read_from(&p);
+        merge(
+            &mut cur2,
+            AppSettingsDto {
+                status_bar: Some(true),
+                ..Default::default()
+            },
+        );
+        write_to(&p, &cur2).unwrap();
+        assert_eq!(with_defaults(read_from(&p)).status_bar, Some(true));
+        // 未写过任何字段 → 默认开
+        std::fs::remove_file(&p).unwrap();
+        assert_eq!(with_defaults(read_from(&p)).status_bar, Some(true));
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn terminal_renderer_closed_set_roundtrip() {
+        let p = tmp();
+        let mut cur = read_from(&p);
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                terminal_renderer: Some("webgl".into()),
+                ..Default::default()
+            },
+        );
+        write_to(&p, &cur).unwrap();
+        assert_eq!(
+            with_defaults(read_from(&p)).terminal_renderer.as_deref(),
+            Some("webgl")
+        );
+        // 闭集外的值读时静默丢弃（前端回落 auto）
+        let mut invalid = read_from(&p);
+        merge(
+            &mut invalid,
+            AppSettingsDto {
+                terminal_renderer: Some("gpu".into()),
+                ..Default::default()
+            },
+        );
+        write_to(&p, &invalid).unwrap();
+        assert_eq!(with_defaults(read_from(&p)).terminal_renderer, None);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn partial_update_keeps_other_fields() {
         let p = tmp();
         let mut cur = read_from(&p);
@@ -1548,6 +1702,65 @@ mod tests {
             ..Default::default()
         });
         assert!(bad.is_empty(), "磁盘脏值不注入");
+
+        // 下载侧：大小写成对 + 镜像主机并入 NO_PROXY
+        assert!(download_proxy_env_from(&AppSettingsDto::default(), &[]).is_empty());
+        let dl = download_proxy_env_from(
+            &AppSettingsDto {
+                outbound_proxy: Some("socks5://127.0.0.1:10808".into()),
+                ..Default::default()
+            },
+            &["ghcr.nju.edu.cn", "mirrors.tuna.tsinghua.edu.cn"],
+        );
+        for k in [
+            "http_proxy",
+            "HTTP_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+            "no_proxy",
+            "NO_PROXY",
+        ] {
+            assert!(dl.iter().any(|(ek, _)| ek == k), "缺 {k}");
+        }
+        let np = dl
+            .iter()
+            .find(|(k, _)| k == "no_proxy")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        for host in ["127.0.0.1", "ghcr.nju.edu.cn", "mirrors.tuna.tsinghua.edu.cn"] {
+            assert!(np.split(',').any(|e| e.trim() == host), "NO_PROXY 缺 {host}");
+        }
+        // 用户自定义 no_proxy 优先，镜像主机去重追加
+        let custom = download_proxy_env_from(
+            &AppSettingsDto {
+                outbound_proxy: Some("http://127.0.0.1:7890".into()),
+                outbound_no_proxy: Some("localhost,ghcr.nju.edu.cn".into()),
+                ..Default::default()
+            },
+            &["ghcr.nju.edu.cn", "mirrors.tuna.tsinghua.edu.cn"],
+        );
+        let np2 = custom
+            .iter()
+            .find(|(k, _)| k == "NO_PROXY")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert_eq!(
+            np2,
+            "localhost,ghcr.nju.edu.cn,mirrors.tuna.tsinghua.edu.cn"
+        );
+        assert!(
+            download_proxy_env_from(
+                &AppSettingsDto {
+                    outbound_proxy: Some("not-a-url".into()),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .is_empty(),
+            "脏值不注入"
+        );
 
         let mut cur = AppSettingsDto::default();
         merge(

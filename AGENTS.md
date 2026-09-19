@@ -63,7 +63,7 @@ npm run tauri build    # 打包
 
 ## 本机环境档案（踩坑记录，新会话必读）
 
-- **网络：访问 GitHub/raw/formulae.brew.sh 很慢**。必须用镜像：crates → rsproxy（已配）；rustup → TUNA；brew → `HOMEBREW_API_DOMAIN`/`HOMEBREW_BOTTLE_DOMAIN` 指 TUNA（已在 updater.rs 内置）；npm 如变慢 → `registry.npmmirror.com`。
+- **网络：访问 GitHub/raw/formulae.brew.sh 很慢**。必须用镜像：crates → rsproxy（已配）；rustup → TUNA；brew 元数据 → `HOMEBREW_API_DOMAIN` 指 TUNA（仍有效）；brew bottle → **平铺镜像已死**（TUNA/中科大/腾讯/阿里 2026-09-19 实测 403/404，`HOMEBREW_BOTTLE_DOMAIN` 形同虚设），改 `HOMEBREW_ARTIFACT_DOMAIN=https://ghcr.nju.edu.cn`（南大 ghcr 代理，bottle 实测 6.7MB/s vs ghcr 直连 73KB/s；非 ghcr URL 代理 404 后 brew 自动回落原地址，已在 updater.rs 内置）；npm 如变慢 → `registry.npmmirror.com`。ghcr/GitHub Release 直连仅 ~73KB/s，tap/cask 大包（如 opencode 46MB）直连仍要十几分钟——注意：**CLI 子进程（curl/brew/npm）不读 macOS 系统代理，只认环境变量**，Mesa 下载侧已按设置页「出网代理」注入（`download_proxy_env`），镜像主机进 NO_PROXY 直连；更新超时改「10 分钟无输出闲置判死 + 30 分钟硬上限」（PTY 实测慢下载时 curl 进度条持续出字，不会误杀活下载）。
 - **brew 异常先 `brew doctor`**，别先怀疑应用代码。
 - **macOS 钥匙串对未签名开发构建会因 cdhash 失配丢条目**——密钥存储弃用钥匙串，改 0600 `keys.json`（勿改回）。
 - **管道输出块缓冲**：brew/npm 检测到非 TTY 会块缓冲导致"无输出"假象——安装/更新命令必须在 PTY 里跑（别退回管道）。
@@ -280,7 +280,11 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   tab-working.ts             # 终端标签「生成中」虚线圆：PTY 出字才转；启动注入等回复期间 TUI 开屏不熄灭；会话已落完助手正文；PTY 仍出字时 Codex 中途 done 不得停转圈
                              # 立刻停，sticky working 不得续命；armed 回合不因 PTY 2s 静默熄灭（推理思考间隙≠回合结束，
                              # armed 只由会话层收尾/确认/退出清，未 armed 的 working 仍 2s 静默熄灭兜底——2026-09-15 修正
-                             # 「终端还在出字、标签与聊天层却无运行态」）；出字时间戳记任意 agent 输出（焦点重绘抑制窗内也记，
+                             # 「终端还在出字、标签与聊天层却无运行态」）；完全静默 120s 硬上限熄灭转圈但保留 armed（PTY
+                             # 再出字即复亮，2026-09-19：思考/执行期间 TUI 动画仍在出字，完全无声=回合已结束或链路冻结）；
+                             # 收尾判定被 ptyLive（8s 窗）推迟时 scheduleSettleRetry 保证 PTY_LIVE_MS+1s 后强制重判一次
+                             # ——否则会话文件再无新写入时签名门拦住轮询、转圈永久冻结（2026-09-19 综述大纲跑完实测）；
+                             # 出字时间戳记任意 agent 输出（焦点重绘抑制窗内也记，
                              # 防切聊天瞬间被静默计时器误杀）；动画禁 CSS rotate（WKWebView 转轴圆心晃）、也禁 dashoffset
                              # 关键帧（主线程重绘，xterm 出字满载时一卡一卡）——8 段虚线按相位差闪 opacity（合成器线程，
                              # 2026-09-15 实测重做）（tests/tab-working.test.ts）
@@ -375,8 +379,8 @@ src-tauri/src/
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）；
                              # claude 不写 CLAUDE_CODE_SUBAGENT_MODEL（保留 Task 参数/frontmatter/inherit 原生选择链），
                              #   用 --settings 只覆盖本次连接的非敏感模型选择；
-                             # claude 长上下文声明 CLAUDE_CODE_MAX_CONTEXT_TOKENS 启动注入与设为全局同键同条件
-                             #   （注册链确知 >200K 才注，防第三方模型被按 200K 提前 compact）
+                             # claude 长上下文声明 CLAUDE_CODE_MAX_CONTEXT_TOKENS + CLAUDE_CODE_AUTO_COMPACT_WINDOW
+                             #   同值成对（启动注入与设为全局同键同条件；注册链确知 >200K 才注，防第三方模型被按 200K 提前 compact）
   model_registry.rs          # 模型能力注册表：逐字段查询链 = 用户覆盖 > 网关实测缓存（fetch_models 顺带沉淀
                              # OpenRouter 风格 /models 元数据）> 公共能力库（配置页 ⋯ 下载，models.dev 优先
                              # OpenRouter 回落，download_model_db/model_db_status）> 内置前缀表 > 关键词兜底；
@@ -390,6 +394,9 @@ src-tauri/src/
                              # 文件型加载器 cfg!(test) 下不读本机真实缓存（链语义由 chain_field 单测覆盖）；
                              # model_context_size_authoritative_for = 仅权威层（用户覆盖+网关实测）的 context
                              #   访问器——grok 设为全局写 [model.*].context_window 专用（估值层不配覆盖中转目录）；
+                             # 用户覆盖层有写入通道（2026-09-19）：网关库模型行「能力声明」编辑 →
+                             #   set/clear/list_model_capability_override（原子写、前缀归一小写、api_backend
+                             #   不进 UI 但往返保留；细则 conventions/profiles.md §6.1）；
                              # 下载公共库顺带提取定价（models.dev cost / OpenRouter pricing → 条目 cost 字段），
                              #   db_price_table 供 usage.rs 定价链消费
   profiles.rs                # 网关+绑定：gateways.json / bindings.json；keys.json 键=网关 id（0600）；
@@ -532,18 +539,39 @@ src-tauri/src/
                              # 定价链 PriceChain 三层：用户 pricing.json > 公共能力库 cost > 内置表 BUILTIN_PRICING
                              #   （高层任意前缀命中即胜、同层最长前缀优先——用户写短前缀即覆盖低层细分代；
                              #   内置表口径 2026-08-31 各官方页，跨代改价给新代加更长前缀、旧价留给老会话归属）
+  subscription_quota.rs      # 订阅余量查询（用量页「订阅余量」卡，多供应商一张卡可切换，2026-09-19）：
+                             #   智谱 / Kimi For Coding / MiniMax 三家（火山方舟未接——控制面 OpenAPI 需 IAM AK/SK
+                             #   签名，与网关单密钥模型不符，待网关加 AK/SK 字段后单批做）。
+                             #   智谱额度 GET /api/monitor/usage/quota/limit（limits[] type∈TOKENS_LIMIT|CREDIT_LIMIT、
+                             #   unit 3=5h/6=周锚定禁按重置时间排序、percentage=已用；cc-switch/CodingPlanQuota 口径）+
+                             #   重置卡 GET|POST /api/biz/customer-package-reset/{list,use}（OmniRoute 口径：信封
+                             #   success+code∈{0,200} fail-closed、双桶截断不当 0 张、code 1001=密钥失效、
+                             #   卡条目多别名 + status consumed/redeemed/… 不可用 + 无时区时间戳分区域：bigmodel.cn 北京时间 +8（用户官网比对实测修正）、z.ai UTC；
+                             #   DTO 暴露每类最早过期时间（临期提示 + use 优先消费最早过期的卡））；
+                             #   Kimi GET api.kimi.com/coding/v1/usages（limits[] 多模型 5h 窗取 utilization 最紧、
+                             #   usage=周窗、used=limit-remaining）；MiniMax GET /v1/api/openplatform/coding_plan/remains
+                             #   （general 条目、字段是剩余百分比要反转、周桶仅 current_weekly_status==1）；
+                             #   重置卡仅智谱支持（DTO reset_cards_supported，其余家不渲染该行）；
+                             #   团队版 = 网关 headerEnv 带 bigmodel-organization/project 隐式识别（?type=2 + 两头）；
+                             #   Bearer 鉴权（裸 key 亦通，智谱两者都认）；密钥只在 Rust 层出 keys.json 绝不进 DTO；
+                             #   用卡（plan_use_reset_card）是消费性写操作——显式命令 + 前端确认弹窗，成功作废缓存；
+                             #   2 分钟进程内缓存（对齐用量页可见期自动轮询，页面不可见即停）+ 瞬时失败回落上次成功值
+                             #   标 fromCache；无后台轮询；不注出网代理
   pricing.rs                 # pricing.json 读写与校验（定价链最高层，原子写）
-  settings.rs                # 应用设置（settings.json）：字体/scrollback/汇率/镜像/主题/OS 通知/精确注意力
+  settings.rs                # 应用设置（settings.json）：字体/scrollback/渲染器（terminal_renderer：auto/dom/webgl，Mac 默认清晰、Windows 默认流畅，读时闭集过滤）/汇率/镜像/主题/OS 通知/精确注意力
                              # （hooks_attention 按 agent map，旧 claude_hooks_attention 仅反序列化兼容迁移）/想法期只读保护
-                             # /聊天页状态栏开关（status_bar_in_chat 默认开；关 = 聊天页 invisible 占位，切层不改终端行列数）；
+                             # /底部状态栏统一开关（status_bar 默认开，终端/聊天两层同进退；关 = 都不渲染，
+                             #   切层不改终端行列数，invisible 占位机制退役；旧 status_bar_in_chat=false 读时迁移为关）；
                              # terminal_color_report 默认开（Windows：ConPTY 吞掉 OSC 底色查询，浅色主题下
                              # 主动把前景/底色推给 gemini/qwen；白名单外的 agent 推了会变输入框乱码，
                              # 见 docs/conventions/terminal.md）；
                              # hidden_profiles = 软停用（自动路径跳过、手动可用；v3.142 起不再是纯展示偏好）；
                              # active_global_profiles = 「设为全局」追踪（agent→profile id，record/clear_active_global
                              # 维护、不走 patch、clear_profile_refs 同步清引用；只代表「上次由 Mesa 写入」非绝对生效态）；
-                             # outbound_proxy = 出网代理（只注入官方账号启动与组头登录，网关启动不走；
-                             #   extra_env 同名键覆盖；校验 http(s)/socks5，空串清除）
+                             # outbound_proxy = 出网代理（注入官方账号启动与组头登录；2026-09-19 起下载侧同源注入——
+                             #   agent 安装/更新、依赖安装、字体下载走 download_proxy_env（大小写成对，curl 只认小写 http_proxy），
+                             #   更新检查的 npm view/brew info 同注；国内镜像主机（TUNA/南大 ghcr）并入 NO_PROXY 直连不绕代理；
+                             #   用户环境已带任一代理变量时不覆盖。网关启动仍不走；extra_env 同名键覆盖；校验 http(s)/socks5，空串清除）
   hooks.rs                   # 精确注意力标记（七家 hooks 桥接）：BRIDGE_SPECS 每 agent 一张桥接规格（claude/qwen/
                              # codebuddy/gemini/kimi/grok/codex；cursor 无「等待确认」等价事件、opencode 无 shell hooks
                              #   形态，两家未接入），写各家 hooks 配置（备份留 10 份 + 原子写 + marker 合并/移除 +
@@ -844,6 +872,7 @@ src-tauri/src/
 - Codex 从步骤工作区启动时，pty_spawn 把主仓 `papers/` 预授权进沙箱（`-c sandbox_workspace_write.writable_roots=[...]`，`workspaces::papers_dir_for_worktree` 映射）：口径 C 允许原始文献直写主仓 papers/，不预授权则每写一篇 PDF 都停下等提权（2026-09-15 用户实测「总是让我授权」）。**只加 papers/ 子目录**——派生产物仍必须走工作区 + 评审合并，不得放宽到整个主仓。
 - 配置页查询模型能力必须带 `gatewayId`，网关级能力声明优先于公共/内置能力库；写 Grok 逐模型上下文时只使用显式声明值，不使用通用估值。
 - 思考档注入优先级（2026-09-15）：开工弹层的本次覆盖（`KickoffLaunch.effort` → PendingTerminal → Tab → `pty_spawn` 的 `effortOverride`）> 绑定逐模型策略（网关库 `reasoningEffort`）> 端点默认。弹层选择器按 `combo_surface.injectEffortAllowed` 判定显示（不给调不了的东西）；值只影响本次进程不写回绑定；运行中调整仍在状态栏（起点/运行两层同源 combo）。执行权限不做成弹层选项——步骤执行固定 write_tree + 沙箱，只读讨论走聊想法/商量（弹层只有一行权限边界可见性文案）。
+- **能力声明与能力通道（2026-09-19，对照 cc-switch 补口）**：Claude 长上下文 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 与 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` **同值成对**注入/清除（启动 + 设为全局；只抬上限不抬压缩窗口会把压缩触发点留在旧档，勿拆对）。Codex catalog **不写** `apply_patch_tool_type`（freeform=custom 工具会被原生 /responses 与 Anthropic 网关拒/丢，编辑走 `shell_type: "shell_command"`）。模型能力注册链四层全 miss 时用户可经网关库「能力声明」写覆盖（`model-capabilities.json` 最高层；表单只收 context/思考/视觉——output 的旋钮是策略字段 max output，能力层 output 只喂 opencode limit.output，与策略并排摆两个输出框属重复），`input_modalities` 等按注册链如实声明（宁缺毋滥）+ 覆盖层补口的口径不变。
 
 - **项目页视图（2026-09-06；2026-09-10 加「对话」页）**：项目页顶栏是当前项目身份（名称、工作方式、课题主题、路径），添加项目在左侧列表 +。已注册项目页签顺序为「对话 → 科研任务 / 工作任务 / 编程任务 → 定时任务 → 文件 → Agents」。**对话**只看当前项目的记录（默认铺开列表，点一条才回放；展开后列表不显示 Agent 标签，关闭在右上角，方向键换会话；思考/工具调用默认折成一条过程；可继续/归档、＋新对话），不是侧栏那份全局历史；打开项目默认仍进任务页。＋新对话注入**会话包**（项目是谁、顶层有什么、规则、跟这次说的做），不把目标说明、技能名单、「尚未完成」或「验收后才进项目」塞进对话；勾「验收后写入」才改走目标包。任务页是该工作方式的主面（有流程科研=步骤/工作区，无流程科研=目标，办公=人声明任务，编程=工作树），**不再放右侧对话栏**。文献雷达和定时任务在「定时任务」页签。规则和验收记录收进顶栏 ⋯「项目设置」抽屉。文献/笔记/数据/图像只在「文件」页，任务页不预留空块。文件页：点文件才弹出右侧预览；预览有上下切换，窗口预览时方向键也换文件；顶栏类型图标（空类型不占位）+ 搜索 + 刷新；行悬停图标（问 AI / 显示 / 沉浸阅读），不挤文件名；可切窗口预览。规则面板无说明句。**有研究步骤的科研不展示技能和「写回时跳过」**（技能以步骤挂载为准；写回时跳过是目标验收不覆盖的路径）。无流程科研 / 办公才用技能 + 目标点名，以及写回时跳过；编程用技能、不展示写回时跳过。办公文档筛选与文件页同一套图标。本项目对话未命名显示「对话」。有进行中/待验收目标时雷达默认收起。Agents 页是这个项目的 Agent 名册（点配置名换该项目绑定、＋新对话 / 跟 AI 商量 / 聊想法默认、本项目继续该家会话也用这份绑定、正在负责哪些目标），点目标回任务页；不是连接页的模型配置表单。项目内新会话不沿用上次终端连接。继续会话启动栏必须显示该绑定，不能因 Codex 渠道兼容池静默换回上次的网关；渠道不同时预填绑定、不自动启动，确认后点运行。没有目标时不逐家重复空状态。不自动分派，密钥仍在连接页。编程工作树 ⋯ 可事后分组。侧栏「对话」仍是跨项目全局历史；定时任务在项目「定时任务」页签创建，后台不进正在进行、不进本项目对话。**侧栏没有定时任务页**（2026-09-13 用户移除）：侧栏九页 = 工作台/项目/运行/对话/连接/技能/MCP/用量/设置，页切快捷键、启动页选项、导航胶囊、settings.rs KNOWN_PAGES 都按这九页对齐；全局 page id `schedules` 只作旧持久化值的重定向（App.tsx 转到项目定时任务页签），不得再把定时任务加回侧栏或九页清单。
 - **绑定与网关命名（2026-09-06）**：Gateway.name 是共享端点/网关名称，Binding.name 是单个 Agent 配置名称，必须分开存储；旧 Binding 缺 name 时展示回退 Gateway.name。修改 profile 名称只更新 Binding.name，不得改共享 Gateway.name 或其他 Binding。相同 Agent + 网关允许不同模型选择，完全相同的模型/协议/附加环境变量仍拒绝重复。

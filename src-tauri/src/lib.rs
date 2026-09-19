@@ -99,6 +99,7 @@ mod sheet_preview;
 mod skills;
 mod storage;
 mod task_review;
+mod subscription_quota;
 mod tray;
 mod updater;
 mod usage;
@@ -319,6 +320,9 @@ pub fn run() {
             config_dump::export_effective_config,
             agent_specs::agent_capabilities,
             model_registry::model_capabilities,
+            model_registry::list_model_capability_overrides,
+            model_registry::set_model_capability_override,
+            model_registry::clear_model_capability_override,
             mcp::list_mcp_servers,
             mcp::save_mcp_server,
             mcp::set_mcp_server_app,
@@ -499,6 +503,9 @@ pub fn run() {
             usage::rebuild_usage_index,
             usage::get_usage_stats,
             usage::usage_trend,
+            subscription_quota::plan_quota_overview,
+            subscription_quota::plan_use_reset_card,
+            subscription_quota::plan_quota_console_url,
             usage::top_sessions,
             usage::session_usage,
             usage::usage_by_gateway,

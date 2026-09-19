@@ -11,6 +11,7 @@ import {
   formatKickoffChip,
   chipFileName,
   isDeclaredStepInput,
+  isFlowDeclaredPath,
 } from "../src/kickoff-inputs.ts";
 
 const profiles = [
@@ -151,6 +152,44 @@ test("isDeclaredStepInput：精读步 papers/*.pdf 已在上一步接到，不�
   assert.equal(isDeclaredStepInput("notes/01-foo.md", notes), false);
   assert.equal(isDeclaredStepInput("data/raw.csv", notes), false);
   assert.equal(isDeclaredStepInput("papers/foo.pdf", { inputs: [] }), false);
+});
+
+test("isFlowDeclaredPath：全流水线口径，后续步骤不再整批重报 papers/ PDF", () => {
+  // 英文综述模板的简化步骤链：检索 → 精读（声明 papers/*.pdf 可选输入）→ 综述大纲
+  const steps = [
+    {
+      inputs: [] as string[],
+      expectedArtifacts: [
+        "papers/screening.md",
+        "papers/included.md",
+        "papers/to-fetch.md",
+        "papers/to-fetch.ris",
+      ],
+    },
+    {
+      inputs: ["papers/included.md"],
+      optionalInputs: ["papers/*.pdf"],
+      expectedArtifacts: ["notes/*.md", "references.bib"],
+    },
+    {
+      inputs: ["notes/", "papers/included.md", "references.bib"],
+      expectedArtifacts: ["outline.md"],
+    },
+  ];
+  // 综述大纲步自己的 inputs 不含 papers/*.pdf，但精读步声明过 → 不算陌生发现
+  assert.equal(
+    isFlowDeclaredPath("papers/Ford2018-ionomer-gel.pdf", steps),
+    true,
+  );
+  // 检索步预期产物（.ris 会被资源扫描归类）也属流水线接管
+  assert.equal(isFlowDeclaredPath("papers/to-fetch.ris", steps), true);
+  assert.equal(isFlowDeclaredPath("references.bib", steps), true);
+  // 真正的陌生文件（人工丢进 data/ 的数据、根下散落 PDF）仍要提醒
+  assert.equal(isFlowDeclaredPath("data/raw.csv", steps), false);
+  assert.equal(isFlowDeclaredPath("downloaded-paper.pdf", steps), false);
+  // 空清单 / 空路径
+  assert.equal(isFlowDeclaredPath("papers/foo.pdf", []), false);
+  assert.equal(isFlowDeclaredPath("", steps), false);
 });
 
 test("expectedDeliverLine：列出本步产物短名", () => {

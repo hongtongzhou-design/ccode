@@ -8,12 +8,42 @@ use portable_pty::{native_pty_system, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-// 慢网络下 brew/npm/winget 下载可能远超 5 分钟，给 15 分钟
-const TIMEOUT: Duration = Duration::from_secs(900);
+/// 进程内单调毫秒（闲置判超时的统一时间基准，跨线程可比）
+fn mono_ms() -> u64 {
+    static T0: OnceLock<std::time::Instant> = OnceLock::new();
+    let t0 = T0.get_or_init(std::time::Instant::now);
+    std::time::Instant::now().duration_since(*t0).as_millis() as u64
+}
+
+// 慢网络整包下载可能很久（tap/cask 走 GitHub Release，实测 73KB/s 下 46MB 要 13 分钟），
+// 硬上限 30 分钟；真挂死靠闲置判定单独杀（见 IDLE_TIMEOUT）
+const TIMEOUT: Duration = Duration::from_secs(1800);
+/// 600 秒无任何输出才判挂死：下载活着时 curl 进度条每 5–10 秒一簇输出（PTY 实测），
+/// 不会误伤慢下载；真挂起/网络断死的进程在 10 分钟内被终止
+const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// 超时触发种类：闲置（无输出）优先于硬上限判定
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PtyDeadline {
+    Hard,
+    Idle,
+}
+
+/// 纯判定函数：elapsed = 进程已运行时长，idle = 距最近一次收到输出的时长
+pub(crate) fn pty_deadline_kind(elapsed: Duration, idle: Duration) -> Option<PtyDeadline> {
+    if idle >= IDLE_TIMEOUT {
+        Some(PtyDeadline::Idle)
+    } else if elapsed >= TIMEOUT {
+        Some(PtyDeadline::Hard)
+    } else {
+        None
+    }
+}
 /// npm 默认重试/等待可能持续数分钟且几乎没有可见输出；安装和更新使用
 /// 明确的网络参数，让失败在约 30 秒内反馈到界面，避免被误认为 Mesa 卡死。
 const NPM_FETCH_ARGS: [&str; 5] = [
@@ -340,11 +370,14 @@ pub(crate) fn strip_ansi(input: &str) -> String {
     out
 }
 
-/// 在 PTY 里跑命令并流式转发输出（emit 收到剥离 ANSI 后的文本块）。
-/// 为什么用 PTY 而不是管道：brew（Ruby）/curl 检测到 stdout 是管道会切到块缓冲，
-/// brew 的环境变量：跳过自动元数据更新；settings.brew_mirror 开启时（默认）
-/// API 与 bottle 走清华 TUNA 镜像（用户显式设置过的变量不动）。
-/// 抽成纯函数便于测试镜像开关。
+/// brew 的环境变量：跳过自动元数据更新；settings.brew_mirror 开启时（默认）注入
+/// 国内加速（用户显式设置过的变量不动）。元数据走 TUNA API 镜像（仍有效）；
+/// bottle 自 brew 4+ 起是 ghcr.io OCI 件，平铺镜像（TUNA/中科大等）已全部停供
+/// （2026-09-19 实测 403/404，HOMEBREW_BOTTLE_DOMAIN 形同虚设——brew 7 只给
+/// legacy 平铺镜像 manifest 首试机会，blob 仍回 ghcr）。南大 ghcr 代理按 OCI 语义
+/// 改写 ghcr 域名（HOMEBREW_ARTIFACT_DOMAIN）：bottle 实测 6.7MB/s vs ghcr 直连
+/// 73KB/s；非 ghcr URL（tap/cask 的 GitHub Release 等）代理 404 后 brew 自动
+/// 交错回落原地址，无回归。抽成纯函数便于测试镜像开关。
 pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String)> {
     let mut env = vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())];
     if program == "brew" && mirror {
@@ -355,19 +388,22 @@ pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String
                 "https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles/api".to_string(),
             ));
         }
-        if std::env::var_os("HOMEBREW_BOTTLE_DOMAIN").is_none() {
+        if std::env::var_os("HOMEBREW_ARTIFACT_DOMAIN").is_none() {
             env.push((
-                "HOMEBREW_BOTTLE_DOMAIN".to_string(),
-                "https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles".to_string(),
+                "HOMEBREW_ARTIFACT_DOMAIN".to_string(),
+                "https://ghcr.nju.edu.cn".to_string(),
             ));
         }
     }
     env
 }
 
+/// 在 PTY 里跑命令并流式转发输出（emit 收到剥离 ANSI 后的文本块）。
+/// 为什么用 PTY 而不是管道：brew（Ruby）/curl 检测到 stdout 是管道会切到块缓冲，
 /// 运行期间一个字节都到不了我们手里；接 PTY 后它们按 TTY 行缓冲，输出实时可见。
 /// TERM=dumb 让 brew/npm 放弃彩色和花式重绘，但保留 TTY 行为。
-/// 带 900s 超时（unix 下杀整个进程组）；reader 在子进程退出后最多等 1 秒 drain，
+/// 带 30 分钟硬上限 + 10 分钟无输出闲置判定（unix 下杀整个进程组）；reader 在子进程
+/// 退出后最多等 1 秒 drain，
 /// 其子孙（curl 等）可能持有 slave 导致永远无 EOF，绝不无限 join。
 /// reader 同时客串最小终端应答：子进程（实测 npm on Windows ConPTY）会发 DSR 光标
 /// 位置查询（ESC[6n）并读 stdin 等回答，无人应答就永久挂起——reader 代答
@@ -401,7 +437,16 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
         Err(e) => return (false, format!("创建 PTY 失败: {e}")),
     };
     let mut cmd = crate::process::pty_command(&program_path, args);
-    for (k, v) in brew_env_pairs(program, crate::settings::brew_mirror_enabled()) {
+    let mirror = crate::settings::brew_mirror_enabled();
+    let mut extra_no_proxy: Vec<&str> = Vec::new();
+    for (k, v) in brew_env_pairs(program, mirror) {
+        cmd.env(&k, &v);
+    }
+    // 出网代理（设置页「网络」）：下载优先走代理；镜像主机直连（见 download_proxy_env）
+    if program == "brew" && mirror {
+        extra_no_proxy.extend(["mirrors.tuna.tsinghua.edu.cn", "ghcr.nju.edu.cn"]);
+    }
+    for (k, v) in crate::settings::download_proxy_env(&extra_no_proxy) {
         cmd.env(&k, &v);
     }
     cmd.env("TERM", "dumb");
@@ -440,6 +485,10 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
 
     let collected = Arc::new(Mutex::new(String::new()));
     let collected2 = collected.clone();
+    // 最近一次收到子进程输出的时间戳（毫秒，单调时钟基准）：闲置判超时用。
+    // 下载活着时 curl 进度条持续出字，该值会一直刷新
+    let last_active_ms = Arc::new(std::sync::atomic::AtomicU64::new(mono_ms()));
+    let last_active2 = last_active_ms.clone();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut reader = reader;
@@ -449,6 +498,7 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    last_active2.store(mono_ms(), Ordering::Relaxed);
                     pending.extend_from_slice(&buf[..n]);
                     let (text, used) = crate::pty::split_utf8(&pending);
                     if used > 0 {
@@ -481,12 +531,16 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
     });
 
     let start = std::time::Instant::now();
-    let mut timed_out = false;
+    let mut deadline_hit: Option<PtyDeadline> = None;
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) => {
-                if start.elapsed() > TIMEOUT {
+                let idle = Duration::from_millis(mono_ms().saturating_sub(
+                    last_active_ms.load(Ordering::Relaxed),
+                ));
+                deadline_hit = pty_deadline_kind(start.elapsed(), idle);
+                if deadline_hit.is_some() {
                     // unix 下杀整个进程组：brew/npm 拉起的子孙（curl 等）与父同组
                     #[cfg(unix)]
                     if let Some(pid) = child.process_id() {
@@ -494,7 +548,6 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
                     }
                     let _ = child.kill();
                     let _ = child.wait();
-                    timed_out = true;
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -505,8 +558,13 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
     // 给 reader 最多 1 秒收残余输出，之后放弃该线程（见函数文档）
     let _ = done_rx.recv_timeout(Duration::from_secs(1));
     let tail = tail_lines(&collected.lock().unwrap(), 30);
-    if timed_out {
-        let mut msg = format!("命令超时（{} 秒）", TIMEOUT.as_secs());
+    if let Some(kind) = deadline_hit {
+        let mut msg = match kind {
+            PtyDeadline::Hard => format!("命令超时（{} 秒）", TIMEOUT.as_secs()),
+            PtyDeadline::Idle => {
+                format!("命令 {} 秒无任何输出（进程挂起或网络中断），已终止", IDLE_TIMEOUT.as_secs())
+            }
+        };
         if !tail.is_empty() {
             msg.push('\n');
             msg.push_str(&tail);
@@ -832,16 +890,18 @@ fn semver_newer(a: &str, b: &str) -> bool {
 
 fn npm_latest(pkg: &str) -> Option<String> {
     let npm = agents::resolve_binary("npm")?;
-    let out = crate::process::background_command(npm)
-        .args([
-            "view",
-            pkg,
-            "version",
-            "--fetch-retries=0",
-            "--fetch-timeout=8000",
-        ])
-        .output()
-        .ok()?;
+    let mut cmd = crate::process::background_command(npm);
+    cmd.args([
+        "view",
+        pkg,
+        "version",
+        "--fetch-retries=0",
+        "--fetch-timeout=8000",
+    ]);
+    for (k, v) in crate::settings::download_proxy_env(&[]) {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -858,6 +918,12 @@ fn brew_latest(pkg: &str, cask: bool) -> Option<String> {
     }
     c.arg(pkg);
     for (k, v) in brew_env_pairs("brew", crate::settings::brew_mirror_enabled()) {
+        c.env(k, v);
+    }
+    for (k, v) in crate::settings::download_proxy_env(&[
+        "mirrors.tuna.tsinghua.edu.cn",
+        "ghcr.nju.edu.cn",
+    ]) {
         c.env(k, v);
     }
     let out = c.output().ok()?;
@@ -1204,21 +1270,48 @@ mod tests {
     }
 
     #[test]
-    fn brew_mirror_off_skips_tuna_domains() {
+    fn brew_mirror_toggle_controls_mirror_domains() {
         let on = brew_env_pairs("brew", true);
         assert!(on.iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"));
-        assert!(on.iter().any(|(k, _)| k == "HOMEBREW_BOTTLE_DOMAIN"));
+        // bottle 走 ghcr 代理（HOMEBREW_ARTIFACT_DOMAIN），不再注入已停供的平铺镜像
+        assert!(on.iter().any(|(k, _)| k == "HOMEBREW_ARTIFACT_DOMAIN"));
+        assert!(!on.iter().any(|(k, _)| k == "HOMEBREW_BOTTLE_DOMAIN"));
         let off = brew_env_pairs("brew", false);
         assert!(
             !off.iter().any(|(k, _)| k == "HOMEBREW_API_DOMAIN"),
             "镜像关闭时不注入镜像域名"
         );
-        assert!(!off.iter().any(|(k, _)| k == "HOMEBREW_BOTTLE_DOMAIN"));
+        assert!(!off.iter().any(|(k, _)| k == "HOMEBREW_ARTIFACT_DOMAIN"));
         // NO_AUTO_UPDATE 无论开关都保留；非 brew 命令不注入镜像
         assert!(off.iter().any(|(k, _)| k == "HOMEBREW_NO_AUTO_UPDATE"));
         assert!(!brew_env_pairs("npm", true)
             .iter()
             .any(|(k, _)| k == "HOMEBREW_API_DOMAIN"));
+    }
+
+    #[test]
+    fn pty_deadline_idle_wins_and_slow_download_survives() {
+        use std::time::Duration as D;
+        // 慢下载：持续有输出（闲置远小于阈值）→ 即使逼近硬上限也不杀
+        assert_eq!(
+            pty_deadline_kind(D::from_secs(1750), D::from_secs(30)),
+            None
+        );
+        // 闲置达标 → 优先判闲置（报「无输出」而非笼统超时）
+        assert_eq!(
+            pty_deadline_kind(D::from_secs(60), D::from_secs(600)),
+            Some(PtyDeadline::Idle)
+        );
+        // 硬上限：一直有输出但跑满 30 分钟
+        assert_eq!(
+            pty_deadline_kind(D::from_secs(1800), D::from_secs(5)),
+            Some(PtyDeadline::Hard)
+        );
+        // 双达标 → 闲置优先
+        assert_eq!(
+            pty_deadline_kind(D::from_secs(1800), D::from_secs(700)),
+            Some(PtyDeadline::Idle)
+        );
     }
 
     #[test]

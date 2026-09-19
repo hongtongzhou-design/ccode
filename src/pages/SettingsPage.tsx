@@ -1869,6 +1869,21 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           )}
         </div>
 
+        <Row
+          label="终端渲染"
+          hint="流畅（WebGL）滚动更顺、出字更快；个别 Mac 屏幕上文字略软。清晰即系统默认。自动：Windows 用流畅、Mac 用清晰。重新打开的终端生效"
+        >
+          <select
+            className={fieldFixed}
+            value={settings?.terminalRenderer ?? "auto"}
+            onChange={(e) => patch({ terminalRenderer: e.target.value })}
+          >
+            <option value="auto">自动</option>
+            <option value="webgl">流畅（WebGL）</option>
+            <option value="dom">清晰（默认渲染）</option>
+          </select>
+        </Row>
+
         <Row label="终端字号" hint="立即生效（11–18）">
           <input
             type="number"
@@ -2087,13 +2102,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         </Row>
 
         <Row
-          label="聊天页显示状态栏"
-          hint="聊天页底部显示模型/目录/git/token 状态栏；关闭后隐藏但保留占位，聊天⇄终端切换不改变终端尺寸、不闪烁"
+          label="底部状态栏"
+          hint="终端与聊天层共用这一条（模型/思考档/目录/git/时长）。关闭后两层都不显示，重新打开的标签终端约多两行；模型切换与 git 保存仍在改动面板可达"
         >
           <Toggle
-            label="聊天页显示状态栏"
-            checked={settings?.statusBarInChat ?? true}
-            onChange={(checked) => patch({ statusBarInChat: checked })}
+            label="底部状态栏"
+            checked={settings?.statusBar ?? true}
+            onChange={(checked) => patch({ statusBar: checked })}
           />
         </Row>
 
@@ -2396,7 +2411,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             </button>
           </div>
         )}
-        <Row label="brew 镜像" hint="安装/更新走清华 TUNA 镜像">
+        <Row label="brew 镜像" hint="安装/更新走国内镜像（元数据 TUNA、包体南大 ghcr 代理）">
           <Toggle
             label="brew 镜像"
             checked={settings?.brewMirror ?? false}
@@ -2499,7 +2514,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       >
         <Row
           label="出网代理"
-          hint="只用于官方账号登录（网关启动不走）。空 = 不使用。「检测」探测本机代理（Clash / V2Ray 等），点候选即填。"
+          hint="用于官方账号登录与安装/更新下载（网关启动不走；国内镜像自动直连不绕代理）。空 = 不使用。「检测」探测本机代理（Clash / V2Ray 等），点候选即填。"
         >
           <div className="flex max-w-[34rem] flex-col gap-2">
             <div className="flex items-center gap-2">

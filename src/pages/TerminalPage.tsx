@@ -991,6 +991,8 @@ const TerminalView = memo(function TerminalView({
   const sessionWatchStartingRef = useRef(false);
   const linkStartedAtRef = useRef(0);
   const conversationRequestRef = useRef(0);
+  // 收尾被 ptyLive 推迟后的保证重试定时器（去重：同屏最多挂一个）
+  const settleRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoTitleEarlyRef = useRef(false);
   const autoTitleFinalRef = useRef(false);
   const setLiveSession = useAppStore((s) => s.setLiveSession);
@@ -1298,12 +1300,14 @@ const TerminalView = memo(function TerminalView({
   useEffect(() => {
     if (attention !== "working") return;
     const timer = window.setInterval(() => {
-      if (Date.now() - lastOutputAtRef.current <= PTY_WORKING_SILENCE_MS) return;
+      const silenceMs = Date.now() - lastOutputAtRef.current;
+      if (silenceMs <= PTY_WORKING_SILENCE_MS) return;
       const next = onPtyWorkingSilence({
         prev: "working",
         armed: ptyWorkingArmedRef.current,
         hadPtyWorkingOutput: hadPtyWorkingOutputRef.current,
         pendingReply: pendingReplyRef.current,
+        silenceMs,
       });
       ptyWorkingArmedRef.current = next.armed;
       if (next.clearHadOutput) hadPtyWorkingOutputRef.current = false;
@@ -1554,11 +1558,16 @@ const TerminalView = memo(function TerminalView({
       return true;
     });
 
-    // 渲染器选择：macOS 不用 WebGL——xterm 的字形图集→GPU 纹理采样在 WKWebView 里
-    // 整体偏软发糊（A/B 实测 DOM 渲染明显更锐利，Safari 同引擎复现一致）；
-    // Windows 保留 WebGL 加速，但软件渲染（SwiftShader 等，闪烁）或上下文丢失时退回默认渲染器。
+    // 渲染器选择（设置页「终端渲染」）：auto = Windows 流畅优先（WebGL + 软件渲染探针）、
+    // macOS 清晰优先（DOM）——xterm 的字形图集→GPU 纹理采样在 WKWebView 里整体偏软发糊
+    // （A/B 截屏实测 DOM 渲染明显更锐利，Safari 同引擎复现一致），故 Mac 默认不走 WebGL；
+    // 用户显式选「流畅」(webgl) 时按流畅优先，软件渲染（SwiftShader 等，闪烁）或上下文
+    // 丢失时仍退回默认渲染器。
     try {
-      if (!IS_MAC && !isSoftwareWebGL()) {
+      const renderer = settingsRef.current?.terminalRenderer ?? "auto";
+      const wantWebgl =
+        renderer === "webgl" || (renderer === "auto" && !IS_MAC);
+      if (wantWebgl && !isSoftwareWebGL()) {
         const webgl = new WebglAddon();
         webgl.onContextLoss(() => {
           webgl.dispose();
@@ -1698,6 +1707,10 @@ const TerminalView = memo(function TerminalView({
       stopLinkTimer();
       stopSessionWatcher();
       stopPendingReplyPolling();
+      if (settleRetryTimerRef.current != null) {
+        clearTimeout(settleRetryTimerRef.current);
+        settleRetryTimerRef.current = null;
+      }
       // 释放 liveSessions 登记（「进行中」标记随标签消失）
       const sid = linkCtxRef.current?.sessionId;
       const linkedAgent = linkCtxRef.current?.agentId;
@@ -2028,6 +2041,19 @@ const TerminalView = memo(function TerminalView({
     }
   }
 
+  /** 收尾判定因 PTY 仍出字被推迟时，PTY_LIVE_MS 窗口结束后强制重判一次——
+   *  不能等下一次文件变化（可能永远不来）驱动的刷新 */
+  function scheduleSettleRetry() {
+    if (settleRetryTimerRef.current != null) return;
+    settleRetryTimerRef.current = window.setTimeout(
+      () => {
+        settleRetryTimerRef.current = null;
+        void fetchConversation(true);
+      },
+      PTY_LIVE_MS + 1000,
+    );
+  }
+
   function stopSessionWatcher() {
     sessionWatchUnlistenRef.current?.();
     sessionWatchUnlistenRef.current = null;
@@ -2193,15 +2219,23 @@ const TerminalView = memo(function TerminalView({
       });
       if (linkCtxRef.current !== ctx || requestId !== conversationRequestRef.current)
         return;
+      // 收尾判定被 ptyLive 推迟（PTY 8 秒窗内还出过字）时必须保证一次重试：
+      // 之后会话文件若再无新写入，签名门会让 5s 轮询永远不再重跑 fetch，
+      // 「已收尾但被推迟」就冻结成永久转圈（2026-09-19 综述大纲跑完实测）
+      const fileSaysOver = state === "done" || turnSettled;
+      const ptyLive = Date.now() - lastOutputAtRef.current < PTY_LIVE_MS;
       setAttention((prev) => {
         const next = applyTailAttention({
           prev,
           tail: state,
           armed: ptyWorkingArmedRef.current,
           turnSettled,
-          ptyLive: Date.now() - lastOutputAtRef.current < PTY_LIVE_MS,
+          ptyLive,
         });
         ptyWorkingArmedRef.current = next.armed;
+        if (fileSaysOver && ptyLive && next.attention === "working") {
+          scheduleSettleRetry();
+        }
         return next.attention;
       });
       // confirm 时顺带取「在等什么」（hooks payload 的 message/tool_name；取不到为 null）
@@ -6150,32 +6184,22 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   {/* 终端底部状态栏：在 pane 内部、贴 xterm 画面下缘，与终端同底同色
                       （视觉上是终端自己画的状态行）。常驻渲染——未启动也有 cwd/未启动态，
                       高度恒定不跳动；ResizeObserver 兜底尺寸变化后的 fit。
-                      聊天模式同样渲染（模型/目录/git/token 对聊天也有用）；用户在设置页
-                      关掉「聊天页显示状态栏」后以 invisible 纯占位——无论开关，终端几何
-                      高度跨模式恒定，切层不改行列数、不触发 codex resize reflow（每次
-                      SIGWINCH 重放整个 transcript，上游恒开），切层闪烁与 scrollback
-                      副本同消。（invisible 元素不接收指针事件，隐藏时栏内按钮不可误点）
+                      设置页「底部状态栏」统一开关（终端/聊天两层同进退，默认开）：开关只影响
+                      栏的存在与否，两层一致 → 切层时终端几何不变、不触发 codex resize
+                      reflow（每次 SIGWINCH 重放整个 transcript，上游恒开）；关掉后新 fit 的
+                      终端约多两行。
                       分屏时各 pane 显示各标签；git 段只跟随活跃 pane（数据是 focusedId 的）。
                       聊天层（非 peek）状态栏走 chat 变体：底色涂 var(--color-canvas) 与聊天画布同源、
                       内容与输入卡同一条 max-w-4xl 中轴、模型胶囊灰调（蓝强调只留状态点）——
                       终端层不变（与 xterm 同底拼无缝卡）。
                       data-statusbar-host：阅读区打开时随 xterm 宿主一并搬进覆盖层右栏槽位 */}
                   {(() => {
-                    const chatBarHidden =
-                      (surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) !== "terminal" &&
-                      !(appSettings?.statusBarInChat ?? true);
-                    // 隐形占位只为「切层不改终端行列数」：已有会话/PTY 的标签切回终端会重放
-                    // transcript，必须保住几何；从没启动过的干净标签没有可保护的画面，
-                    // 占位只会白留一段空（用户反馈聊天页「下面空太大」）——直接不占位
-                    const chatReserved = !!(
-                      statuses[t.id]?.ptyId || sessionByTab[t.id]?.sessionId
-                    );
+                    // 统一「底部状态栏」开关（默认开）：关 = 终端/聊天两层都不渲染。
+                    // 两层同进退 → 切层时栏的有无不变化，终端行列数稳定，无需旧聊天页
+                    // 的 invisible 占位（statusBarInChat 已迁移为 status_bar；2026-09-19）
+                    if (!(appSettings?.statusBar ?? true)) return null;
                     return (
-                  <div
-                    data-statusbar-host={t.id}
-                    className={`shrink-0 ${chatBarHidden ? (chatReserved ? "invisible" : "hidden") : ""}`}
-                    aria-hidden={chatBarHidden}
-                  >
+                  <div data-statusbar-host={t.id} className="shrink-0">
                   {(() => {
                     const st = statuses[t.id] ?? null;
                     const prof = st

@@ -5,6 +5,7 @@ import {
   applyTailAttention,
   conversationTurnSettled,
   onPtyWorkingSilence,
+  PTY_ARMED_SILENCE_CAP_MS,
   ptyInputLooksLikeSubmit,
   ptyOutputMarksWorking,
   shouldArmWorkingOnLaunch,
@@ -231,6 +232,29 @@ test("PTY 静默：armed 回合不熄灭（思考间隙≠回合结束），未 
       hadPtyWorkingOutput: true,
     }),
     { attention: null, armed: false, clearHadOutput: true },
+  );
+});
+
+test("armed 静默硬上限：完全无声 120s 熄灭转圈但保留 armed（再出字即复亮）", () => {
+  // 思考间隙量级（秒级到分钟内）不受影响
+  assert.deepEqual(
+    onPtyWorkingSilence({
+      prev: "working",
+      armed: true,
+      hadPtyWorkingOutput: true,
+      silenceMs: PTY_ARMED_SILENCE_CAP_MS - 1,
+    }),
+    { attention: "working", armed: true, clearHadOutput: false },
+  );
+  // 完全无声超上限：回合早已结束或链路冻结，转圈不再点亮；armed 保留
+  assert.deepEqual(
+    onPtyWorkingSilence({
+      prev: "working",
+      armed: true,
+      hadPtyWorkingOutput: true,
+      silenceMs: PTY_ARMED_SILENCE_CAP_MS,
+    }),
+    { attention: null, armed: true, clearHadOutput: true },
   );
 });
 

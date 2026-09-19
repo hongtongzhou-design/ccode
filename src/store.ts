@@ -78,6 +78,8 @@ function cachedRecentRepos(): RepoDto[] {
 export interface AppSettings {
   terminalFontSize: number;
   terminalFontFamily?: string;
+  /** 终端渲染器：auto（默认）| webgl（流畅）| dom（清晰）；只对新开的终端生效 */
+  terminalRenderer?: string;
   terminalPalette?: string; // 四套深色 + 四套配对浅色，见 terminal-palettes.ts PALETTE_LIST
   scrollback: number;
   rateUsdCny: number;
@@ -130,8 +132,8 @@ export interface AppSettings {
   /** 想法期只读保护（卡片区「聊想法」，默认开）：开 = 支持的 CLI 注入只读/计划模式参数 +
       预填指令带不动文件约束；关 = 纯聊天 */
   discussReadonly?: boolean;
-  /** 聊天页显示终端状态栏（默认开）；关 = 聊天页隐藏但保留占位，切层不改变终端行列数 */
-  statusBarInChat?: boolean;
+  /** 底部状态栏统一开关（默认开）：终端层与聊天层同进退；关 = 两层都不显示（旧 statusBarInChat 已迁移） */
+  statusBar?: boolean;
   /** 向 agent 主动告知终端底色（Windows 专用，默认开）：ConPTY 吞掉 OSC 10/11
       底色查询，浅色主题下 agent 会回落深色；开 = attach 后主动推当前主题前景/底色 */
   terminalColorReport?: boolean;

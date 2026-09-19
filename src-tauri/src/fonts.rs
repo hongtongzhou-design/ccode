@@ -1,6 +1,6 @@
 //! 终端字体预设的安装状态检测与一键安装。
 //! 检测只扫字体目录文件名（不解析字体文件，小写包含匹配）；安装走 brew cask，
-//! 复用 updater 的 PTY 流式机制（防块缓冲、TUNA 镜像、key "fonts" 并发互斥、超时）。
+//! 复用 updater 的 PTY 流式机制（防块缓冲、国内镜像加速、key "fonts" 并发互斥、超时）。
 
 use crate::agents;
 use serde::Serialize;

@@ -274,7 +274,9 @@ fn patch_claude_settings(
     }
     // claude 对不认识的第三方模型按 200K 上下文假设；注册表确知更大的（如 kimi-k3 1M）
     // 必须显式写 CLAUDE_CODE_MAX_CONTEXT_TOKENS，否则长会话提前 compact（cc-switch 同口径）。
-    // 不需要时清掉旧值：该键随「设为全局」归 Mesa 管，留着过期大值比没有更有害
+    // AUTO_COMPACT_WINDOW（auto-compact 触发点的窗口基数）与上限同值成对管理——
+    // 只抬上限不抬它，压缩触发点仍留在旧窗口档。不需要时两键都清：随「设为全局」
+    // 归 Mesa 管，留着过期大值比没有更有害
     let max_ctx = models
         .first()
         .map(|m| crate::model_registry::model_context_size_for(m, gateway_id));
@@ -284,9 +286,14 @@ fn patch_claude_settings(
                 "CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(),
                 json!(ctx.to_string()),
             );
+            env.insert(
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
+                json!(ctx.to_string()),
+            );
         }
         _ => {
             env.remove("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
+            env.remove("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
         }
     }
     if let Some(e) = effort.filter(|s| !s.is_empty()) {
@@ -2320,14 +2327,18 @@ mod tests {
 
     #[test]
     fn claude_patch_writes_max_context_only_when_beyond_default_assumption() {
-        // 注册表确知 >200K 的模型（kimi-k3 = 1M）：必须显式声明，否则 claude 按 200K 假设提前 compact
+        // 注册表确知 >200K 的模型（kimi-k3 = 1M）：必须显式声明，否则 claude 按 200K 假设提前 compact；
+        // AUTO_COMPACT_WINDOW 与上限同值成对写（压缩触发点跟随声明窗口）
         let out =
             patch_claude_settings(None, None, None, &["kimi-k3".to_string()], None, None).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1048576");
-        // ≤200K 的模型：不写；已有旧值时清掉（防上一个 profile 的 1M 残留误导）
+        assert_eq!(v["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1048576");
+        // ≤200K 的模型：不写；已有旧值时两键都清掉（防上一个 profile 的 1M 残留误导）
         let out = patch_claude_settings(
-            Some(r#"{"env": {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576"}}"#),
+            Some(
+                r#"{"env": {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1048576"}}"#,
+            ),
             None,
             None,
             &["claude-sonnet-4".to_string()],
@@ -2337,6 +2348,7 @@ mod tests {
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v["env"].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS").is_none());
+        assert!(v["env"].get("CLAUDE_CODE_AUTO_COMPACT_WINDOW").is_none());
     }
 
     #[test]

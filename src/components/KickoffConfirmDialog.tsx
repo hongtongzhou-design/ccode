@@ -29,7 +29,7 @@ import {
 import {
   expectedDeliverNames,
   formatKickoffChip,
-  isDeclaredStepInput,
+  isFlowDeclaredPath,
   type KickoffInputChip,
 } from "../kickoff-inputs";
 import {
@@ -347,7 +347,12 @@ export default function KickoffConfirmDialog({
         if (!stale) {
           setResCandidates(
             items.filter(
-              (d) => !d.exists && !isDeclaredStepInput(d.path, step),
+              (d) =>
+                !d.exists &&
+                // 全流水线口径（2026-09-19）：任一步骤声明过的输入/预期产物都不算陌生
+                // 发现——检索步直写 papers/ 的 OA PDF 只在精读步声明为可选输入，
+                // 只看本步骤会把它们在综述大纲等后续步骤整批再报一遍
+                !isFlowDeclaredPath(d.path, cfgLocal.steps),
             ),
           );
         }

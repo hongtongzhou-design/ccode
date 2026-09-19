@@ -163,6 +163,24 @@ surface(agent, modelId, gatewayId, slot, launchSelected: bool) → ControlSurfac
 - 升级后**不读**无 `|` 的旧键（避免继续互踩）。各网关第一次「获取模型」才填新键；在此之前求交跳过 relay，走公共库 / 内置表。
 - `record_relay_models` 必须传入 `gateway_id`，禁止再写无前缀键。
 
+### 6.1 用户覆盖层的写入通道（2026-09-19）
+
+`model-capabilities.json` 是查询链最高层，此前只能手编 JSON。现在网关库「模型策略」行展开尾部有「能力声明」编辑（`model_registry.rs` `set_model_capability_override` / `clear_model_capability_override` / `list_model_capability_overrides`，原子写、前缀归一小写、`output`/`api_backend` 不进 UI 但往返保留）。约定：
+
+- **字段全 Option、留空＝未声明**：UI 只写用户填了的字段，未填字段继续走下层（公共库 / relay / 内置表），声明「不支持」（显式 false）则硬挡下层。
+- **表单只有 context/思考/视觉**：`output` 不进表单——它的用户旋钮是策略字段 max output（逐模型 `maxOutputTokens`），能力层的 `output` 只喂 opencode `limit.output`（schema 必填、有 8192 兜底），做成两个并排输入框只会让人分不清；手写进文件的 `output`/`api_backend` 在 UI 保存时透传保留。
+- **键是全局模型前缀**（与查询链同口径），不按网关分——覆盖的是「这个模型本身」的能力，所有 Agent、设为全局、注入共用。
+- **校验前后端同口径**：前缀非空、至少一个字段、context/output 正整数（前端 `model-caps-override.ts` 与 Rust `validate_override` 消息一致）。
+- 覆盖保存后前端须重拉 `model_capabilities` 让行徽章反映覆盖生效（链最高层即时改变解析值）。
+
+### 6.2 Claude 上下文声明成对注入（2026-09-19）
+
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS`（>200K 才注）与 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` **同值成对**注入（启动 env + 设为全局同键同条件、不需要时两键都清）。口径来自 cc-switch 校准：Claude Code 用 AUTO_COMPACT_WINDOW 算 auto-compact 触发点，只抬上限不抬它，压缩触发点留在旧窗口档。勿再单写上限。
+
+### 6.3 Codex catalog 不声明 freeform apply_patch（2026-09-19）
+
+catalog 条目不写 `apply_patch_tool_type`（freeform＝type=custom 工具会被原生 /responses 与 Anthropic 协议网关拒/丢，cc-switch 非代理档实证剥除）；编辑走既有 `shell_type: "shell_command"` 的 shell 版 apply_patch，能力不受影响。
+
 ## 7. 逐模型策略是新维度，不是搬字段
 
 今日 `RequestPolicy` 是连接级单份（`profiles.rs`）。OpenCode 注入把同一份 `model_opts` 套到 `provider.ccode.models` 的每一个条目（`agents.rs` 约 436–442 行）。Codex 的 `model_reasoning_effort` 也是启动级一条。

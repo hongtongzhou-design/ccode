@@ -8,7 +8,7 @@
 //! 内置表宁缺毋滥：只收官方文档明确支持思考的模型，不确定的不收（落关键词推断），
 //! 收错的能力声明（思考开了报错）比漏报更有害。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +162,140 @@ fn load_override() -> Vec<(String, ModelCaps)> {
         .into_iter()
         .map(|(p, c)| (p, c))
         .collect()
+}
+
+// ===== 用户覆盖层读写（连接页网关库「能力声明」编辑，2026-09-19）=====
+//
+// 此前覆盖文件只能手编 JSON（注册链最高层却没有写入代码）；查询链四层全 miss 的
+// 中转自命名模型会被低报（context 兜底 128K → claude 提前 compact / codex catalog
+// 窗口低报 / grok 回落 256000）。补上命令 + UI 后，声明能力不再依赖手改文件。
+
+/// 覆盖条目 DTO（读写同一形状）。api_backend 只有 grok 消费、UI 不编辑，
+/// 但往返必须保留——手写在文件里的 grok 目录声明不能被 UI 保存顺手抹掉。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCapsOverrideDto {
+    pub prefix: String,
+    pub thinking: Option<bool>,
+    pub context: Option<i64>,
+    pub output: Option<i64>,
+    pub vision: Option<bool>,
+    pub api_backend: Option<String>,
+}
+
+/// 校验单条覆盖：前缀非空、至少声明一个字段、数值字段必须为正。
+/// 前缀归一（trim + 小写）与 parse_caps_map 的读入口径一致。
+fn validate_override(entry: &mut ModelCapsOverrideDto) -> Result<(), String> {
+    entry.prefix = entry.prefix.trim().to_lowercase();
+    if entry.prefix.is_empty() {
+        return Err("模型名前缀不能为空".into());
+    }
+    if entry.context.is_some_and(|v| v <= 0) {
+        return Err("上下文窗口必须大于 0".into());
+    }
+    if entry.output.is_some_and(|v| v <= 0) {
+        return Err("输出上限必须大于 0".into());
+    }
+    let any = entry.thinking.is_some()
+        || entry.context.is_some()
+        || entry.output.is_some()
+        || entry.vision.is_some()
+        || entry.api_backend.is_some();
+    if !any {
+        return Err("至少声明一个能力字段（上下文 / 输出 / 思考 / 视觉）".into());
+    }
+    Ok(())
+}
+
+/// 覆盖文件序列化：只写 Some 字段（与 parse_caps_map 读入口径互为镜像），按前缀排序
+fn overrides_to_text(list: &[ModelCapsOverrideDto]) -> Result<String, String> {
+    let mut obj = serde_json::Map::new();
+    for entry in list {
+        let mut m = serde_json::Map::new();
+        if let Some(v) = entry.thinking {
+            m.insert("thinking".into(), serde_json::json!(v));
+        }
+        if let Some(v) = entry.context {
+            m.insert("context".into(), serde_json::json!(v));
+        }
+        if let Some(v) = entry.output {
+            m.insert("output".into(), serde_json::json!(v));
+        }
+        if let Some(v) = entry.vision {
+            m.insert("vision".into(), serde_json::json!(v));
+        }
+        if let Some(v) = &entry.api_backend {
+            m.insert("api_backend".into(), serde_json::json!(v));
+        }
+        obj.insert(entry.prefix.clone(), serde_json::Value::Object(m));
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(obj))
+        .map_err(|e| format!("序列化能力覆盖失败: {e}"))
+}
+
+fn write_overrides_to(path: &Path, list: &[ModelCapsOverrideDto]) -> Result<(), String> {
+    crate::profiles::atomic_write(path, &overrides_to_text(list)?)
+}
+
+/// 读覆盖文件为 DTO 列表（文件缺失/损坏返回空表——读取方本就把它当「无声明」）
+fn read_overrides_at(path: &Path) -> Vec<ModelCapsOverrideDto> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut list: Vec<ModelCapsOverrideDto> = parse_caps_map(&text)
+        .into_iter()
+        .map(|(prefix, c)| ModelCapsOverrideDto {
+            prefix,
+            thinking: c.thinking,
+            context: c.context,
+            output: c.output,
+            vision: c.vision,
+            api_backend: c.api_backend,
+        })
+        .collect();
+    list.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+    list
+}
+
+#[tauri::command]
+pub fn list_model_capability_overrides() -> Vec<ModelCapsOverrideDto> {
+    override_path().map(|p| read_overrides_at(&p)).unwrap_or_default()
+}
+
+/// 写单条覆盖（同前缀整条替换），返回写后的完整列表供前端刷新
+#[tauri::command]
+pub fn set_model_capability_override(
+    entry: ModelCapsOverrideDto,
+) -> Result<Vec<ModelCapsOverrideDto>, String> {
+    let mut entry = entry;
+    validate_override(&mut entry)?;
+    let Some(path) = override_path() else {
+        return Err("无法确定平台配置目录".into());
+    };
+    let mut list = read_overrides_at(&path);
+    match list.iter().position(|e| e.prefix == entry.prefix) {
+        Some(i) => list[i] = entry,
+        None => list.push(entry),
+    }
+    list.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+    write_overrides_to(&path, &list)?;
+    Ok(list)
+}
+
+/// 删单条覆盖；返回写后的完整列表供前端刷新
+#[tauri::command]
+pub fn clear_model_capability_override(prefix: String) -> Result<Vec<ModelCapsOverrideDto>, String> {
+    let prefix = prefix.trim().to_lowercase();
+    let Some(path) = override_path() else {
+        return Err("无法确定平台配置目录".into());
+    };
+    let mut list = read_overrides_at(&path);
+    let before = list.len();
+    list.retain(|e| e.prefix != prefix);
+    if list.len() == before {
+        return Ok(list);
+    }
+    write_overrides_to(&path, &list)?;
+    Ok(list)
 }
 
 // ===== 外部能力数据源（2026-08-26；查询链：用户覆盖 > 网关实测缓存 > 公共能力库 > 内置表） =====
@@ -952,6 +1086,74 @@ mod tests {
         assert_eq!(model_output_limit("kimi-k3"), 8192);
         assert_eq!(model_output_limit("gpt-5"), 8192);
         assert_eq!(model_output_limit("some-relay/unknown-model"), 8192);
+    }
+
+    #[test]
+    fn override_write_read_roundtrip_and_validation() {
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("model-capabilities.json");
+
+        // 写两条（含手写 api_backend 保留路径），读回与链消费同一解析器
+        let list = vec![
+            ModelCapsOverrideDto {
+                prefix: "relay-vision-pro".into(),
+                context: Some(1_048_576),
+                vision: Some(true),
+                thinking: None,
+                output: None,
+                api_backend: None,
+            },
+            ModelCapsOverrideDto {
+                prefix: "grok-relay-x".into(),
+                api_backend: Some("responses".into()),
+                thinking: None,
+                context: Some(500_000),
+                output: None,
+                vision: None,
+            },
+        ];
+        write_overrides_to(&path, &list).unwrap();
+        let read = read_overrides_at(&path);
+        assert_eq!(read.len(), 2);
+        // api_backend 不被 UI 往返抹掉
+        assert_eq!(
+            read.iter().find(|e| e.prefix == "grok-relay-x").unwrap().api_backend,
+            Some("responses".into())
+        );
+        // 覆盖层即时生效：链上 context/vision 按 1M 取值（cfg!(test) 只挡 load_override，
+        // 这里显式走 parse_caps_map 同一入口验证文件形状）
+        let parsed = parse_caps_map(&std::fs::read_to_string(&path).unwrap());
+        assert!(parsed.iter().any(|(p, c)| p == "relay-vision-pro"
+            && c.context == Some(1_048_576)
+            && c.vision == Some(true)));
+
+        // 校验：空前缀 / 全空字段 / 非正数
+        let mut bad = ModelCapsOverrideDto {
+            prefix: "  ".into(),
+            thinking: None,
+            context: None,
+            output: None,
+            vision: None,
+            api_backend: None,
+        };
+        assert!(validate_override(&mut bad).is_err());
+        bad.prefix = "x".into();
+        assert!(validate_override(&mut bad).is_err());
+        bad.context = Some(0);
+        assert!(validate_override(&mut bad).is_err());
+        // 前缀归一：大写/空白落小写
+        let mut ok = ModelCapsOverrideDto {
+            prefix: "  Relay-Vision-Pro ".into(),
+            thinking: Some(true),
+            context: None,
+            output: None,
+            vision: None,
+            api_backend: None,
+        };
+        validate_override(&mut ok).unwrap();
+        assert_eq!(ok.prefix, "relay-vision-pro");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

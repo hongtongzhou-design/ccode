@@ -7,6 +7,14 @@ import { mergeGatewayCatalog } from "../gateway-catalog";
 import { Checkbox, fieldClass, FoldMark, primaryActionClass, searchFieldClass, secondaryActionClass } from "./PageFrame";
 import { confirmDialog } from "./ConfirmDialog";
 import { policyFieldHint, policyFieldMode } from "../combo-field";
+import {
+  EMPTY_CAPS_FORM,
+  capsFormFromOverride,
+  capsFormIsEmpty,
+  parseCapsOverrideForm,
+  type CapsOverrideFormState,
+  type TriState,
+} from "../model-caps-override";
 import { type GatewaySlotName } from "../gateway-slot";
 import { groupModelsByVendor, visibleVendorGroups } from "../model-vendors";
 import {
@@ -34,6 +42,7 @@ import type {
   GatewayProbeDto,
   GatewayUsageRow,
   ModelCapabilityDto,
+  ModelCapsOverrideDto,
   ProtocolSlots,
   SlotProbeSummary,
 } from "../types";
@@ -214,6 +223,11 @@ export default function GatewayLibrary({
   const [expanded, setExpanded] = useState<string | null>(null);
   const [comboByModel, setComboByModel] = useState<Record<string, ComboSurfaceDto>>({});
   const [caps, setCaps] = useState<Record<string, ModelCapabilityDto>>({});
+  // 能力声明覆盖（注册链最高层）：列表整体读一次，表单按模型懒初始化
+  const [capOverrides, setCapOverrides] = useState<Record<string, ModelCapsOverrideDto>>({});
+  const [capForms, setCapForms] = useState<Record<string, CapsOverrideFormState>>({});
+  const [capOverridesLoaded, setCapOverridesLoaded] = useState(false);
+  const [capPending, setCapPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -265,6 +279,10 @@ export default function GatewayLibrary({
     setNotice(null);
     setExpanded(null);
     setComboByModel({});
+    setCapOverrides({});
+    setCapForms({});
+    setCapOverridesLoaded(false);
+    setCapPending(null);
     setDraftProbes({});
     setShowAdvanced(false);
     setShowBind(false);
@@ -381,6 +399,92 @@ export default function GatewayLibrary({
 
   function patchModel(id: string, patch: Partial<GatewayModel>) {
     setModels((cur) => cur.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  }
+
+  function patchCapForm(id: string, patch: Partial<CapsOverrideFormState>) {
+    setCapForms((cur) => ({
+      ...cur,
+      [id]: { ...(cur[id] ?? EMPTY_CAPS_FORM), ...patch },
+    }));
+  }
+
+  /** 展开模型行时按需载入覆盖列表并落表单初值（只落一次，不覆盖编辑中的草稿） */
+  async function ensureCapOverrideForm(modelId: string) {
+    let map = capOverrides;
+    if (!capOverridesLoaded) {
+      try {
+        const list = await invoke<ModelCapsOverrideDto[]>("list_model_capability_overrides");
+        map = Object.fromEntries(list.map((e) => [e.prefix, e]));
+        setCapOverrides(map);
+        setCapOverridesLoaded(true);
+      } catch (e) {
+        setError(`能力声明读取失败：${String(e)}`);
+        return;
+      }
+    }
+    setCapForms((cur) =>
+      cur[modelId]
+        ? cur
+        : { ...cur, [modelId]: capsFormFromOverride(map[modelId] ?? EMPTY_CAPS_FORM) },
+    );
+  }
+
+  /** 保存/清除单条能力声明；保存后刷新解析值，行徽章立即反映覆盖生效 */
+  async function saveCapOverride(m: GatewayModel) {
+    const form = capForms[m.id] ?? EMPTY_CAPS_FORM;
+    if (capsFormIsEmpty(form)) {
+      await clearCapOverride(m);
+      return;
+    }
+    const parsed = parseCapsOverrideForm(form);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
+    setCapPending(m.id);
+    try {
+      const list = await invoke<ModelCapsOverrideDto[]>("set_model_capability_override", {
+        entry: {
+          prefix: m.id,
+          thinking: parsed.fields.thinking,
+          context: parsed.fields.context,
+          vision: parsed.fields.vision,
+          // output/api_backend 不进 UI：output 的用户旋钮是上面的 max output（策略），
+          // 能力层的 output 只喂 opencode limit.output（有兜底）；保存时原样保留不丢
+          output: capOverrides[m.id]?.output ?? null,
+          api_backend: capOverrides[m.id]?.api_backend ?? null,
+        },
+      });
+      setCapOverrides(Object.fromEntries(list.map((e) => [e.prefix, e])));
+      await loadModelSurface([m.id]);
+      setError(null);
+      setNotice(`已保存 ${m.id} 的能力声明`);
+    } catch (e) {
+      setError(`能力声明保存失败：${String(e)}`);
+    } finally {
+      setCapPending(null);
+    }
+  }
+
+  async function clearCapOverride(m: GatewayModel) {
+    if (!capOverrides[m.id]) {
+      setNotice("这条模型没有已保存的能力声明");
+      return;
+    }
+    setCapPending(m.id);
+    try {
+      const list = await invoke<ModelCapsOverrideDto[]>("clear_model_capability_override", {
+        prefix: m.id,
+      });
+      setCapOverrides(Object.fromEntries(list.map((e) => [e.prefix, e])));
+      setCapForms((cur) => ({ ...cur, [m.id]: { ...EMPTY_CAPS_FORM } }));
+      await loadModelSurface([m.id]);
+      setNotice(`已清除 ${m.id} 的能力声明`);
+    } catch (e) {
+      setError(`能力声明清除失败：${String(e)}`);
+    } finally {
+      setCapPending(null);
+    }
   }
 
   function slotSum(key: keyof ProtocolSlots): SlotProbeSummary | undefined {
@@ -1110,7 +1214,10 @@ export default function GatewayLibrary({
                           className="flex w-full items-center gap-2 text-left font-mono text-xs"
                           onClick={() => {
                             setExpanded(open ? null : m.id);
-                            if (!open && !combo && !cap) void loadModelSurface([m.id]);
+                            if (!open) {
+                              if (!combo && !cap) void loadModelSurface([m.id]);
+                              void ensureCapOverrideForm(m.id);
+                            }
                           }}
                         >
                           <FoldMark open={open} />
@@ -1233,6 +1340,89 @@ export default function GatewayLibrary({
                                 />
                               </label>
                             )}
+                            <div className="mt-2 border-t border-hairline pt-2">
+                              <p className="text-micro text-l3">
+                                能力声明
+                                <span className="ml-1 text-l4">
+                                  中转新模型查不到/报错时手填；对本机所有 Agent 生效（能力来源最高层）
+                                </span>
+                              </p>
+                              <p className="mt-0.5 text-[11px] text-l4">
+                                当前解析：
+                                {cap
+                                  ? `${Math.round(cap.context / 1024)}K 上下文${cap.thinking ? " · 思考" : ""}${cap.vision ? " · 视觉" : ""}`
+                                  : "加载中…"}
+                                {capOverrides[m.id] ? " · 已声明（最高优先）" : ""}
+                              </p>
+                              <div className="mt-1">
+                                <label className="block text-micro text-l3">
+                                  上下文窗口
+                                  <input
+                                    className={`${fieldClass} mt-0.5 w-full`}
+                                    type="number"
+                                    min="1"
+                                    step="1024"
+                                    placeholder="如 1048576"
+                                    value={(capForms[m.id] ?? EMPTY_CAPS_FORM).context}
+                                    onChange={(e) =>
+                                      patchCapForm(m.id, { context: e.target.value })
+                                    }
+                                  />
+                                </label>
+                                <div className="mt-1 grid grid-cols-2 gap-2">
+                                  <label className="block text-micro text-l3">
+                                    思考
+                                    <select
+                                      className={`${fieldClass} mt-0.5 w-full`}
+                                      value={(capForms[m.id] ?? EMPTY_CAPS_FORM).thinking}
+                                      onChange={(e) =>
+                                        patchCapForm(m.id, {
+                                          thinking: e.target.value as TriState,
+                                        })
+                                      }
+                                    >
+                                      <option value="">未声明</option>
+                                      <option value="true">支持</option>
+                                      <option value="false">不支持</option>
+                                    </select>
+                                  </label>
+                                  <label className="block text-micro text-l3">
+                                    视觉
+                                    <select
+                                      className={`${fieldClass} mt-0.5 w-full`}
+                                      value={(capForms[m.id] ?? EMPTY_CAPS_FORM).vision}
+                                      onChange={(e) =>
+                                        patchCapForm(m.id, {
+                                          vision: e.target.value as TriState,
+                                        })
+                                      }
+                                    >
+                                      <option value="">未声明</option>
+                                      <option value="true">支持</option>
+                                      <option value="false">不支持</option>
+                                    </select>
+                                  </label>
+                                </div>
+                              </div>
+                              <div className="mt-1">
+                                <button
+                                  type="button"
+                                  className={secondaryActionClass}
+                                  disabled={
+                                    capPending === m.id ||
+                                    (capsFormIsEmpty(capForms[m.id] ?? EMPTY_CAPS_FORM) &&
+                                      !capOverrides[m.id])
+                                  }
+                                  onClick={() => void saveCapOverride(m)}
+                                >
+                                  {capPending === m.id
+                                    ? "保存中…"
+                                    : capsFormIsEmpty(capForms[m.id] ?? EMPTY_CAPS_FORM)
+                                      ? "清除声明"
+                                      : "保存声明"}
+                                </button>
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>

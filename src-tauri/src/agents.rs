@@ -113,7 +113,7 @@ fn env_preview_source(name: &str, profile: &Profile) -> &'static str {
     if name.starts_with("ANTHROPIC_DEFAULT_") || name.starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION") {
         return "模型选择器";
     }
-    if name == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" {
+    if name == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" || name == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" {
         return "能力声明（注册链 >200K 才注入）";
     }
     match name {
@@ -649,6 +649,13 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         if ctx > 200_000 {
                             plan.env
                                 .push(("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), ctx.to_string()));
+                            // 自动压缩窗口与上限成对注入、同值（cc-switch 校准口径）：
+                            // Claude Code 用它算 auto-compact 触发点，只抬上限不抬它，
+                            // 长会话的压缩触发点仍留在旧窗口档
+                            plan.env.push((
+                                "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
+                                ctx.to_string(),
+                            ));
                         }
                     }
                 }
@@ -1343,7 +1350,9 @@ fn codex_catalog_entry_for(
         "base_instructions": "You are a coding agent.",
         "support_verbosity": true,
         "default_verbosity": "low",
-        "apply_patch_tool_type": "freeform",
+        // 不声明 apply_patch_tool_type：freeform（type=custom）工具会被原生 /responses 与
+        // Anthropic 协议网关拒/丢（cc-switch 实证，非代理档一律剥除）；缺省时 codex 走
+        // shell_type=shell_command 的 shell 版 apply_patch，编辑能力不受影响
         "truncation_policy": { "mode": "tokens", "limit": 10000 },
         "supports_parallel_tool_calls": true,
         // v0.146 起为必填（无 serde default），空数组即可
@@ -3164,21 +3173,25 @@ mod tests {
 
     #[test]
     fn claude_plan_declares_context_over_200k() {
-        // 注册链确知 >200K（kimi-k3 = 1M 内置表）→ 注入 MAX_CONTEXT_TOKENS；
-        // 未知模型（兜底 128K）不注入
+        // 注册链确知 >200K（kimi-k3 = 1M 内置表）→ 成对注入 MAX_CONTEXT_TOKENS +
+        // AUTO_COMPACT_WINDOW（同值）；未知模型（兜底 128K）两个都不注入
         let mut p = profile("claude-code", None);
         p.models = vec!["kimi-k3".into()];
         let plan = launch_plan(&p, None, Some("kimi-k3"));
         assert!(plan
             .env
             .contains(&("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "1048576".into())));
+        assert!(plan
+            .env
+            .contains(&("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "1048576".into())));
         let mut p2 = profile("claude-code", None);
         p2.models = vec!["unknown-model".into()];
         let plan2 = launch_plan(&p2, None, Some("unknown-model"));
         assert!(!plan2
             .env
             .iter()
-            .any(|(k, _)| k == "CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
+            .any(|(k, _)| k == "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+                || k == "CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
         // 不再注入子 agent 覆盖
         assert!(!plan2
             .env
@@ -4568,7 +4581,8 @@ api_backend = "responses"
         // 关键枚举拼写与打包条目一致（codex-rs models-manager/models.json）
         assert_eq!(e["shell_type"], "shell_command");
         assert_eq!(e["visibility"], "list");
-        assert_eq!(e["apply_patch_tool_type"], "freeform");
+        // freeform apply_patch 会中转被拒（cc-switch 实证）→ 不声明，走 shell 版
+        assert!(e.get("apply_patch_tool_type").is_none());
         assert_eq!(e["truncation_policy"]["mode"], "tokens");
         assert_eq!(e["default_verbosity"], "low");
         assert_eq!(e["supported_in_api"], true);

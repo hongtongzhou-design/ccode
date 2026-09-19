@@ -83,12 +83,19 @@ export function applyTailAttention(input: {
  *  超过数秒；此前 2s 静默即熄灭且 armed 一并耗尽，后续输出再也点不亮 working
  *  （终端还在出字、标签与聊天层却全程无运行态，2026-09-15 实测）。armed 只由
  *  会话层收尾清（settled/confirm）、退出或下一次提交重置；未 armed 的 working
- *  保持 2s 静默熄灭（无回合语义的兜底）。 */
+ *  保持 2s 静默熄灭（无回合语义的兜底）。
+ *  2026-09-19 加硬上限：真实思考/执行期间 TUI 动画仍在出字（claude ✽/codex 流式），
+ *  整轮「完全无声」超过 PTY_ARMED_SILENCE_CAP_MS 只可能是回合早已结束或链路冻结
+ *  （实测：综述大纲跑完后收尾判定被 ptyLive 推迟、轮询又被签名门拦住，转圈冻结）——
+ *  此时熄灭转圈但保留 armed，PTY 再出字立即复亮。 */
+export const PTY_ARMED_SILENCE_CAP_MS = 120_000;
+
 export function onPtyWorkingSilence(input: {
   prev: TabAttention;
   armed: boolean;
   hadPtyWorkingOutput: boolean;
   pendingReply?: boolean;
+  silenceMs?: number;
 }): { attention: TabAttention; armed: boolean; clearHadOutput: boolean } {
   if (input.prev !== "working") {
     return {
@@ -98,6 +105,9 @@ export function onPtyWorkingSilence(input: {
     };
   }
   if (input.armed) {
+    if ((input.silenceMs ?? 0) >= PTY_ARMED_SILENCE_CAP_MS) {
+      return { attention: null, armed: true, clearHadOutput: true };
+    }
     return { attention: "working", armed: true, clearHadOutput: false };
   }
   return { attention: null, armed: false, clearHadOutput: true };

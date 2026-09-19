@@ -1,6 +1,6 @@
 //! 依赖体检 + 一键安装（git / node，agent CLI 之外的基础依赖）。
 //! 检测走 agents::resolve_binary + version_with_timeout；安装复用 updater 的 PTY 流式
-//! 机制（防块缓冲、TUNA 镜像、key "dep-git"/"dep-node" 并发互斥、900s 超时），
+//! 机制（防块缓冲、国内镜像加速、key "dep-git"/"dep-node" 并发互斥、闲置/硬上限双超时），
 //! 事件名沿用 updater 口径（agent-update-output-<key> / agent-update-done-<key>）。
 //! macOS 的 /usr/bin/git 是 Xcode CLT 占位 stub：CLT 未装时跑它会弹系统安装窗，
 //! 先用 `xcode-select -p` 判 CLT 已装与否，未装报 clt_stub、不做版本探测。

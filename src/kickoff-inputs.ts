@@ -89,3 +89,31 @@ function matchesInputPattern(value: string, pattern: string): boolean {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${escaped.replace(/\*/g, ".*")}$`).test(value);
 }
+
+/** 文件是否被流水线任一步骤接管过（声明输入 或 预期产物）。
+ *  「未登记」提醒只该抓陌生文件：检索步按技能直写 papers/ 的开放获取 PDF 不写档案卡，
+ *  只在精读步声明为可选输入——排除口径若只看本步骤，到综述大纲这类后续步骤会整批
+ *  重新冒出来当「陌生发现」（2026-09-19 由「本步骤声明输入」延伸为全流水线口径）。 */
+export function isFlowDeclaredPath(
+  relPath: string,
+  steps: readonly {
+    inputs?: string[];
+    optionalInputs?: string[];
+    anyOfInputs?: string[][];
+    expectedArtifacts?: string[];
+  }[],
+): boolean {
+  const path = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!path) return false;
+  const base = path.split("/").pop() ?? path;
+  for (const step of steps) {
+    if (isDeclaredStepInput(relPath, step)) return true;
+    for (const pattern of step.expectedArtifacts ?? []) {
+      const p = pattern.trim().replace(/\\/g, "/");
+      if (p && (matchesInputPattern(path, p) || matchesInputPattern(base, p))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}

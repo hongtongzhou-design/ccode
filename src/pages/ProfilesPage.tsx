@@ -1433,7 +1433,7 @@ function diagnose(output: string, method: string): string | null {
     output.includes("Could not resolve") ||
     output.includes("Failed to connect")
   ) {
-    return "网络连接问题：检查代理设置；如在国内网络，brew 已自动走 TUNA 镜像，npm 可配置 registry.npmmirror.com 镜像";
+    return "网络连接问题：检查代理设置；如在国内网络，brew 已自动走国内镜像（元数据 TUNA、包体南大 ghcr 代理），npm 可配置 registry.npmmirror.com 镜像";
   }
   if (output.includes("EACCES") || lower.includes("permission denied")) {
     if (/Windows/i.test(navigator.userAgent)) {

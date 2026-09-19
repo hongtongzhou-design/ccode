@@ -207,6 +207,55 @@ export interface ModelCapabilityDto {
   streaming: boolean | null;
 }
 
+/** 模型能力覆盖条目（model-capabilities.json，注册链最高层；api_backend 不进 UI、往返保留） */
+export interface ModelCapsOverrideDto {
+  prefix: string;
+  thinking: boolean | null;
+  context: number | null;
+  output: number | null;
+  vision: boolean | null;
+  api_backend: string | null;
+}
+
+/** 订阅余量（用量页「订阅余量」卡）：智谱 GLM Coding Plan 先行，窗口名闭集供多供应商复用 */
+export interface PlanQuotaWindowDto {
+  /** five_hour | weekly | monthly（monthly 为保留位） */
+  window: string;
+  /** 已用百分比 0-100 */
+  usedPercent: number;
+  /** 重置时间（毫秒 epoch），null = 未知 */
+  resetsAt: number | null;
+}
+
+export interface PlanResetCardsDto {
+  ok: boolean;
+  fiveHour: number;
+  weekly: number;
+  /** 每类最早过期的可用卡（毫秒 epoch）；用卡按它优先消费 */
+  fiveHourExpiresAt: number | null;
+  weeklyExpiresAt: number | null;
+  lastFiveHourResetAt: string | null;
+  lastWeekResetAt: string | null;
+  error: string | null;
+}
+
+export interface PlanQuotaDto {
+  gatewayId: string;
+  gatewayName: string;
+  /** zhipu | kimi | minimax（显示名前端映射） */
+  provider: string;
+  planLevel: string | null;
+  ok: boolean;
+  error: string | null;
+  windows: PlanQuotaWindowDto[];
+  /** 只有智谱有重置卡接口；false 时不渲染重置卡行 */
+  resetCardsSupported: boolean;
+  resetCards: PlanResetCardsDto;
+  /** 本条数据时间（毫秒 epoch） */
+  queriedAt: number;
+  fromCache: boolean;
+}
+
 /** fetch_models 返回：模型列表 + 缓存命中标记 + 拉取时间（RFC3339 本地） */
 export interface FetchModelsResultDto {
   models: string[];
