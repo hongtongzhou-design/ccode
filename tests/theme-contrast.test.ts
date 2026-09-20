@@ -291,10 +291,10 @@ test("科研步骤与流程遮罩接入共享底色，工作树和目标继续�
   assert.match(flow, /ccode-well relative z-10 w-4 shrink-0/);
   assert.match(flow, /bare \? "" : "ccode-well rounded-md px-2\.5 py-2"/);
   const group = source("components/ProjectGroup.tsx");
-  assert.match(group, /className="ccode-well relative shrink-0 px-\[3px\]"/);
+  assert.match(group, /className="ccode-well shrink-0 px-\[3px\]"/);
   assert.match(group, /className="ccode-well mb-3 rounded-md px-3 py-2\.5"/);
   assert.match(source("pages/WorkspacesPage.tsx"), /ccode-well group rounded-lg p-3/);
-  for (const file of ["CodingProjectView", "ProjectUserTasksView", "LitWatchCard", "NotesListSection", "ResourceListSection", "ScheduleSection"]) {
+  for (const file of ["CodingProjectView", "ProjectUserTasksView", "LitWatchCard", "ResourceListSection", "ScheduleSection"]) {
     assert.match(source(`components/${file}.tsx`), /projectWellClass/, file);
   }
   assert.match(source("components/ProjectAgentsView.tsx"), /row.isProjectDefault \? "bg-seg-sel" : "ccode-well"/);

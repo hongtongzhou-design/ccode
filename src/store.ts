@@ -534,10 +534,21 @@ interface AppState {
   previewReq: { path: string; name: string; root?: string } | null;
   setPreviewReq: (r: { path: string; name: string; root?: string } | null) => void;
   /** 沉浸式阅读区的一次性打开请求（终端页消费并清空）：PDF 绝对路径 + 所属项目根；
-      notePath 指定后笔记栏直接编辑该 md（不按 PDF slug 另建模板笔记） */
-  readerReq: { pdfPath: string; projectRoot: string; notePath?: string } | null;
+      notePath 指定后笔记栏直接编辑该 md（不按 PDF slug 另建模板笔记）；
+      fromPage 由 store 自动记发起页——阅读区只挂在终端页，跨页进入退出时回到来源页 */
+  readerReq: {
+    pdfPath: string;
+    projectRoot: string;
+    notePath?: string;
+    fromPage?: string;
+  } | null;
   setReaderReq: (
-    r: { pdfPath: string; projectRoot: string; notePath?: string } | null,
+    r: {
+      pdfPath: string;
+      projectRoot: string;
+      notePath?: string;
+      fromPage?: string;
+    } | null,
   ) => void;
   /** 步骤胶囊「📁」→ 终端页文件树切根的一次性交接（终端页消费并清空） */
   enterCwdReq: string | null;
@@ -783,7 +794,10 @@ export const useAppStore = create<AppState>((set, get) => {
   previewReq: null,
   setPreviewReq: (r) => set({ previewReq: r }),
   readerReq: null,
-  setReaderReq: (r) => set({ readerReq: r }),
+  // 发起页在 store 层自动记（调用方不写 fromPage）：五个跨页入口（文件页/产物核验/资源面板）
+  // 都该在退出阅读区时回来源页；终端页自己的入口不走 readerReq，天然不带回跳
+  setReaderReq: (r) =>
+    set({ readerReq: r ? { ...r, fromPage: get().page } : null }),
   enterCwdReq: null,
   setEnterCwdReq: (p) => set({ enterCwdReq: p }),
   runningScripts: {},

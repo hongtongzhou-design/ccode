@@ -122,12 +122,12 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
     // 配对优先：notes/ 里已有「来源行」指向本 PDF 的笔记（精读步骤产物）就直接打开它，
     // 不另建 slug 笔记——同一篇只有一份笔记。此前误建的 slug 笔记若仍是空模板（从未写过内容），
     // 顺带清进回收站（可反悔）；有内容的保留，不与精读笔记强行合并
-    if let Some(existing) = find_note_by_source(&canon_notes, &rel_pdf) {
+    if let Some(existing) = find_note_by_source(&canon_notes, &root, &pdf) {
         if existing != target && target.exists() {
             if let Ok(content) = fs::read_to_string(&target) {
                 if note_is_untouched(&content)
                     && note_source_pdf(&content)
-                        .is_some_and(|source| crate::paths::same_path(&source, &rel_pdf))
+                        .is_some_and(|source| anchor_is_pdf(&source, &root, &pdf))
                 {
                     let _ = trash::delete(&target);
                 }
@@ -160,9 +160,31 @@ fn ensure_paper_note_sync(project_root: &str, pdf_path: &str) -> Result<PaperNot
     })
 }
 
+/// 来源行锚点解析成绝对候选（绝对路径原样、相对按项目根拼），canonical 后返回。
+/// 简报口径让 agent 写「项目内相对路径」，但实测 agent 几乎总写成项目根绝对路径
+/// （镁硫电池综述课题 156/156 全绝对）——配对判定两种都得认，解析失败（文件不存在）返回 None
+fn anchor_pdf_candidate(source: &str, root: &Path) -> Option<PathBuf> {
+    let s = source.replace('\\', "/");
+    let p = Path::new(&s);
+    let candidate = if p.is_absolute() {
+        PathBuf::from(p)
+    } else {
+        root.join(p)
+    };
+    crate::paths::canonicalize_plain(&candidate).ok()
+}
+
+/// 锚点与目标 PDF（canonical）是否同一文件：双侧 canonical 后比较，
+/// 不做字面比对——绝对锚点对相对 rel_pdf 字面永远不等，PDF 侧入口会因此误建平行笔记
+fn anchor_is_pdf(source: &str, root: &Path, pdf_c: &Path) -> bool {
+    anchor_pdf_candidate(source, root).is_some_and(|c| {
+        crate::paths::same_path(&c.to_string_lossy(), &pdf_c.to_string_lossy())
+    })
+}
+
 /// 笔记「来源行」声明的 PDF 相对路径（只认头部 10 行）。兼容两种格式：
 /// 阅读区建档「> 来源：<path> · 开始阅读 …」与 lit-notes 精读笔记「> 来源 PDF：<path>」
-/// （路径本身可能含空格，只按「 · 」分隔符截尾）
+/// （路径本身可能含空格，只按「 · 」分隔符截尾；path 形态可为项目内相对路径或绝对路径）
 fn note_source_pdf(content: &str) -> Option<String> {
     for line in content.lines().take(10) {
         let line = line.trim();
@@ -180,8 +202,9 @@ fn note_source_pdf(content: &str) -> Option<String> {
     None
 }
 
-/// 在 notes/ 里找「来源行」指向本 PDF 的笔记（lit-notes 配对锚点）。只读各文件头部，返回绝对路径
-fn find_note_by_source(notes: &Path, rel_pdf: &str) -> Option<PathBuf> {
+/// 在 notes/ 里找「来源行」指向本 PDF 的笔记（lit-notes 配对锚点；锚点相对/绝对都认，
+/// 判定走 anchor_is_pdf 的 canonical 比较）。只读各文件头部，返回绝对路径
+fn find_note_by_source(notes: &Path, root: &Path, pdf_c: &Path) -> Option<PathBuf> {
     let mut entries: Vec<PathBuf> = fs::read_dir(notes)
         .ok()?
         .flatten()
@@ -193,7 +216,7 @@ fn find_note_by_source(notes: &Path, rel_pdf: &str) -> Option<PathBuf> {
         fs::read_to_string(p)
             .ok()
             .and_then(|c| note_source_pdf(&c))
-            .is_some_and(|src| crate::paths::same_path(&src, rel_pdf))
+            .is_some_and(|src| anchor_is_pdf(&src, root, pdf_c))
     })
 }
 
@@ -226,18 +249,17 @@ fn gated_root(project_root: &str) -> Result<PathBuf, String> {
 // ===== 笔记 ↔ PDF 配对（精读笔记产物进阅读区） =====
 
 /// 配对内核（canonical 根 + canonical 笔记）：先认笔记头部「来源行」声明的 PDF 相对路径
-/// （lit-notes 精读笔记的机读锚点）；无锚点回落到笔记 stem 与 project.toml 里 type="paper" 资源的
-/// 文件 stem 做规范化标题互相包含（口径与前端 lit-watch.ts paperResourceFor 一致；序号前缀不影响
-/// 包含判定）。多个命中取规范化标题最长者；无命中返回 None。返回 PDF 绝对路径。
+/// （lit-notes 精读笔记的机读锚点）；无锚点回落到笔记 stem 与「project.toml 里 type="paper"
+/// 资源 + papers/ 顶层 PDF」的文件名做规范化标题互相包含（口径与前端 lit-watch.ts
+/// paperResourceFor 一致；序号前缀不影响包含判定）。多个命中取规范化标题最长者；
+/// 无命中返回 None。返回 PDF 绝对路径。
 fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
-    // 来源行锚点优先（lit-notes 精读笔记头部的「> 来源 PDF：<相对路径>」）——
-    // 中文短标题与英文 PDF 名配不上时也能认回
+    // 来源行锚点优先（lit-notes 精读笔记头部的「> 来源 PDF：<path>」，相对/绝对都认，
+    // 解析走 anchor_pdf_candidate）——中文短标题与英文 PDF 名配不上时也能认回；
+    // 锚点解析失败/不可读时落回落层，不硬报错
     if let Ok(content) = fs::read_to_string(note_c) {
         if let Some(rel) = note_source_pdf(&content) {
-            let pdf = root.join(&rel);
-            if pdf.exists() {
-                let c = crate::paths::canonicalize_plain(&pdf)
-                    .map_err(|e| format!("PDF 路径无效（{rel}）: {e}"))?;
+            if let Some(c) = anchor_pdf_candidate(&rel, root) {
                 if readable_project_pdf(root, &c) {
                     return Ok(Some(c.to_string_lossy().replace('\\', "/")));
                 }
@@ -274,6 +296,34 @@ fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
         }
         if best.as_ref().is_none_or(|(len, _)| norm.len() > *len) {
             best = Some((norm.len(), c));
+        }
+    }
+    // 回退层第二来源：papers/ 顶层 PDF 直接扫文件系统。检索步 agent 直下的全文
+    // 没走 Mesa 登记通道（lit_watch 下载/人工补投才有登记），只在 project.toml
+    // 资源表里找会漏配；同一套 normalize_title 包含判定，与登记名合并取最长命中
+    if let Ok(rd) = fs::read_dir(root.join("papers")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p
+                .extension()
+                .is_some_and(|s| s.eq_ignore_ascii_case("pdf"))
+            {
+                continue;
+            }
+            let pstem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let norm = crate::lit_watch::normalize_title(pstem);
+            if norm.is_empty() || !(want.contains(&norm) || norm.contains(&want)) {
+                continue;
+            }
+            let Ok(c) = crate::paths::canonicalize_plain(&p) else {
+                continue;
+            };
+            if !readable_project_pdf(root, &c) {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(len, _)| norm.len() > *len) {
+                best = Some((norm.len(), c));
+            }
         }
     }
     Ok(best.map(|(_, p)| p.to_string_lossy().replace('\\', "/")))
@@ -979,16 +1029,70 @@ mod tests {
     // ===== 建档配对（来源行锚点） =====
 
     #[test]
-    fn find_note_by_source_uses_path_same_on_windows() {
-        let notes = tmpdir("src-case").join("notes");
+    fn find_note_by_source_tolerates_backslash_anchor() {
+        // 锚点按 Windows 反斜杠写法也认：anchor_pdf_candidate 统一解析成 canonical 再比。
+        // 大小写敏感性随文件系统语义（canonicalize 按盘上真实文件解析），
+        // 不再做字面大小写断言——旧断言在大小写不敏感盘上会误伤真实同一文件
+        let (root, pdf) = project_with_pdf("src-case", "Foo.pdf");
+        let notes = root.join("notes");
         fs::create_dir_all(&notes).unwrap();
-        fs::write(notes.join("a.md"), "> 来源 PDF：Papers\\Foo.PDF\n").unwrap();
-        let hit = find_note_by_source(&notes, "papers/foo.pdf");
-        #[cfg(windows)]
-        assert_eq!(hit, Some(notes.join("a.md")));
-        #[cfg(not(windows))]
-        assert!(hit.is_none(), "POSIX 大小写敏感，不误配: {hit:?}");
-        let _ = fs::remove_dir_all(notes.parent().unwrap());
+        fs::write(notes.join("a.md"), "> 来源 PDF：papers\\Foo.pdf\n").unwrap();
+        let pdf_c = crate::paths::canonicalize_plain(&pdf).unwrap();
+        assert_eq!(
+            find_note_by_source(&notes, &root, &pdf_c),
+            Some(notes.join("a.md"))
+        );
+    }
+
+    #[test]
+    fn ensure_pairs_note_with_absolute_anchor() {
+        // agent 实测口径：锚点几乎总写成项目根绝对路径（镁硫电池综述 156/156）。
+        // 从 PDF 侧进阅读区必须认回这份精读笔记，不得按 slug 另建平行模板
+        let (root, pdf) = project_with_pdf("abs-anchor", "Some Paper.pdf");
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        let numbered = notes.join("01-中文短标题精读.md");
+        fs::write(
+            &numbered,
+            format!(
+                "# 中文短标题\n\n> 来源 PDF：{}/papers/Some Paper.pdf\n\n## 研究问题\n",
+                root.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let dto =
+            ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        assert!(!dto.created);
+        assert_eq!(PathBuf::from(&dto.path), numbered);
+        assert!(!notes.join("Some-Paper.md").exists(), "不得另建 slug 笔记");
+    }
+
+    #[test]
+    fn pair_pdf_accepts_absolute_anchor() {
+        let (root, pdf) = project_with_pdf("abs-pair", "Some Paper.pdf");
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        let note = notes.join("02-中文短标题.md");
+        fs::write(
+            &note,
+            format!(
+                "# 中文短标题\n\n> 来源 PDF：{}/papers/Some Paper.pdf\n",
+                root.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let note_c = crate::paths::canonicalize_plain(&note).unwrap();
+        let root_c = crate::paths::canonicalize_plain(&root).unwrap();
+        let got = pair_pdf_at(&root_c, &note_c).unwrap();
+        assert_eq!(
+            got,
+            Some(
+                crate::paths::canonicalize_plain(&pdf)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            )
+        );
     }
 
     #[test]
@@ -1057,6 +1161,41 @@ mod tests {
             let content = fs::read_to_string(&slug).unwrap();
             assert!(note_is_untouched(&content));
         }
+    }
+
+    #[test]
+    fn pair_fallback_scans_papers_dir_without_registration() {
+        // 检索步 agent 直下的 PDF 没登记进 project.toml：无来源行的笔记靠 papers/ 扫描配对
+        let (root, pdf) = project_with_pdf("papers-scan", "Some Paper.pdf");
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        let note = notes.join("04-Some Paper 精读.md");
+        fs::write(&note, "# Some Paper\n\n## 研究问题\n").unwrap(); // 无来源行
+        let note_c = crate::paths::canonicalize_plain(&note).unwrap();
+        let root_c = crate::paths::canonicalize_plain(&root).unwrap();
+        let got = pair_pdf_at(&root_c, &note_c).unwrap();
+        assert_eq!(
+            got,
+            Some(
+                crate::paths::canonicalize_plain(&pdf)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            )
+        );
+    }
+
+    #[test]
+    fn pair_fallback_ignores_mismatched_papers_dir_pdf() {
+        // papers/ 里有别的 PDF 但标题互相包含不上：不误配，返回 None
+        let (root, _pdf) = project_with_pdf("papers-miss", "Some Paper.pdf");
+        let notes = root.join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        let note = notes.join("05-另一篇主题.md");
+        fs::write(&note, "# 另一篇\n\n## 研究问题\n").unwrap();
+        let note_c = crate::paths::canonicalize_plain(&note).unwrap();
+        let root_c = crate::paths::canonicalize_plain(&root).unwrap();
+        assert_eq!(pair_pdf_at(&root_c, &note_c).unwrap(), None);
     }
 
     #[test]

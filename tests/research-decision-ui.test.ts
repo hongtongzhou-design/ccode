@@ -14,12 +14,21 @@ test("手写依据 UI：不提供默认批准，保存原文与依据后才满�
     external: ["react", "react-dom/client", "react/jsx-runtime"],
     plugins: [{ name: "host-boundaries", setup(b) {
       const stubs: Record<string, string> = {
-        "../store": "export const useAppStore = fn => fn({setPendingTerminal(){},setWorkspaceReviewRequest(){},setPage(){},setPreviewReq(){}});",
+        "../store": "const state={setPendingTerminal(){},setWorkspaceReviewRequest(){},setPage(){},setPreviewReq(){}}; export const useAppStore=Object.assign(fn=>fn(state),{getState:()=>state,setState(){},subscribe(){}});",
         "./HumanTasksList": "export const useHumanTasks = () => ({states:[],loading:false,error:null,dropHover:null,rowRefs:{current:new Map()},registerOffer:null}); export const RegisterOfferRow=()=>null;",
         "../pipeline-start": "export const buildWorkspaceTerminalRequest=async()=>({});",
         "../md-math": "export const renderMathInto=async()=>{};",
       };
-      b.onResolve({ filter: /.*/ }, (args) => args.path in stubs && args.importer.replaceAll("\\", "/").endsWith("/StepFlow.tsx") ? { path: args.path, namespace: "host-stub" } : undefined);
+      // 宿主边界对任何导入方都打桩：md-math 真模块会把 katex CSS（含字体 URL）拉进
+      // bundle（无字体 loader 即失败）；真 store 在模块作用域读 localStorage，Node 下即崩
+      const anyImporter = new Set(["../md-math", "../store"]);
+      b.onResolve({ filter: /.*/ }, (args) => {
+        if (!(args.path in stubs)) return undefined;
+        if (anyImporter.has(args.path)) return { path: args.path, namespace: "host-stub" };
+        return args.importer.replaceAll("\\", "/").endsWith("/StepFlow.tsx")
+          ? { path: args.path, namespace: "host-stub" }
+          : undefined;
+      });
       b.onLoad({ filter: /.*/, namespace: "host-stub" }, (args) => ({ contents: stubs[args.path], loader: "js" }));
     } }],
   });

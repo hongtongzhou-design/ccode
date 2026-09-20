@@ -290,7 +290,9 @@ function TextFilePreviewEditor({
     fileName: string,
     send?: boolean,
   ) => string | null | Promise<string | null>;
-  /** 嵌入阅读区笔记栏时置 true：自带的 ⛶ 沉浸层是 z-30，压在阅读区 z-40 下面会失灵 */
+  /** 嵌入阅读区笔记栏等宿主时置 true：自带的 ⺆ 全宽沉浸层是 z-30，压在阅读区 z-40 下面会失灵。
+   *  例外：md 阅读态 + onOpenReader 的「进阅读区」按钮照常显示——它跳去真正的 z-40 阅读区，
+   *  不经过 z-30 层（文件页 md 预览就靠这个入口，2026-09-20） */
   hideImmersive?: boolean;
   /** md 阅读视图相对链接的打开去向（阅读区笔记栏原地打开）；缺省走 previewReq 终端页预览 */
   onOpenFile?: (absPath: string) => void;
@@ -704,22 +706,26 @@ function TextFilePreviewEditor({
           </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1">
-          {ready && !hideImmersive && (mode === "edit" || isMd) && (
+          {ready && isMd && mode === "read" && onOpenReader ? (
             <button
-              onClick={() =>
-                isMd && mode === "read" && onOpenReader
-                  ? onOpenReader()
-                  : setImmersive(true)
-              }
-              title={
-                isMd && mode === "read" && onOpenReader
-                  ? "进沉浸阅读区（笔记｜PDF｜Agent 三栏，自动配对本篇 PDF）"
-                  : `全宽沉浸${mode === "read" ? "阅读" : "编辑"}（Esc 退出）`
-              }
+              onClick={onOpenReader}
+              title="进沉浸阅读区（笔记｜PDF｜Agent 三栏，自动配对本篇 PDF）"
               className="shrink-0 rounded-sm px-2 py-0.5 text-l2 hover:bg-hover"
             >
-              ⛶ {mode === "read" ? "沉浸阅读" : "沉浸编辑"}
+              ⛶ 沉浸阅读
             </button>
+          ) : (
+            ready &&
+            !hideImmersive &&
+            (mode === "edit" || isMd) && (
+              <button
+                onClick={() => setImmersive(true)}
+                title={`全宽沉浸${mode === "read" ? "阅读" : "编辑"}（Esc 退出）`}
+                className="shrink-0 rounded-sm px-2 py-0.5 text-l2 hover:bg-hover"
+              >
+                ⛶ {mode === "read" ? "沉浸阅读" : "沉浸编辑"}
+              </button>
+            )
           )}
           {!readOnlyReason && mode === "edit" && (
             <button

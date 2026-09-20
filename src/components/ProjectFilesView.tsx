@@ -337,6 +337,33 @@ export default function ProjectFilesView({
     setPage("terminal");
   }
 
+  /** md 笔记「⛶ 沉浸阅读」（与 ArtifactChecklist 同链路）：reader_for_note 一次给齐
+   *  归属项目根 + 配对 PDF + 实际笔记路径；无配对 PDF（仅摘要笔记）/未合并等工作区
+   *  场景的失败原因直接透出给用户 */
+  async function readNote(entry: { path: string }) {
+    try {
+      const r = await invoke<{
+        projectRoot: string;
+        pdfPath: string;
+        notePath: string;
+      }>("reader_for_note", { notePath: entry.path });
+      setReaderReq({
+        pdfPath: r.pdfPath,
+        projectRoot: r.projectRoot,
+        notePath: r.notePath,
+      });
+      setPage("terminal");
+    } catch (reason) {
+      onError(String(reason));
+    }
+  }
+
+  /** 行悬停/预览工具条共用的 ⺆ 入口分发：PDF 直接进；md 笔记经配对进 */
+  function openImmersive(entry: DirEntryDto) {
+    if (/\.pdf$/i.test(entry.name)) readPdf(entry);
+    else void readNote(entry);
+  }
+
   useEffect(() => {
     if (!preview) return;
     const node = listRef.current?.querySelector(
@@ -444,13 +471,17 @@ export default function ProjectFilesView({
                   <MessageSquare size={13} strokeWidth={1.8} />
                 )}
               </button>
-              {/\.pdf$/i.test(entry.name) && (
+              {/\.(pdf|md)$/i.test(entry.name) && (
                 <button
                   type="button"
                   className={iconActionClass}
-                  title="沉浸阅读"
+                  title={
+                    /\.pdf$/i.test(entry.name)
+                      ? "沉浸阅读"
+                      : "沉浸阅读（自动配对本篇 PDF；无配对时进不去）"
+                  }
                   aria-label="沉浸阅读"
-                  onClick={() => readPdf(entry)}
+                  onClick={() => openImmersive(entry)}
                 >
                   <BookOpen size={13} strokeWidth={1.8} />
                 </button>
@@ -520,6 +551,17 @@ export default function ProjectFilesView({
                 >
                   <MessageSquare size={13} strokeWidth={1.8} />
                 </button>
+                {/\.(pdf|md)$/i.test(file.name) && (
+                  <button
+                    type="button"
+                    className={iconActionClass}
+                    title="沉浸阅读"
+                    aria-label="沉浸阅读"
+                    onClick={() => openImmersive(asFileEntry(file))}
+                  >
+                    <BookOpen size={13} strokeWidth={1.8} />
+                  </button>
+                )}
                 <button
                   type="button"
                   className={iconActionClass}
@@ -654,6 +696,11 @@ export default function ProjectFilesView({
                 path={preview.path}
                 root={projectPath}
                 onOpenFile={openPath}
+                onOpenReader={
+                  /\.(pdf|md)$/i.test(preview.name)
+                    ? () => openImmersive(preview)
+                    : undefined
+                }
               />
             </div>
           </section>
@@ -711,6 +758,11 @@ export default function ProjectFilesView({
             path={preview.path}
             root={projectPath}
             onOpenFile={openPath}
+            onOpenReader={
+              /\.(pdf|md)$/i.test(preview.name)
+                ? () => openImmersive(preview)
+                : undefined
+            }
           />
         </Modal>
       )}

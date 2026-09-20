@@ -3845,6 +3845,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     pdfPath: string;
     projectRoot: string;
     notePath?: string;
+    /** 跨页进入时的来源页（readerReq 自动记）：退出阅读区回那里；终端页自身入口无此字段 */
+    fromPage?: string;
   } | null>(null);
 
   // 分屏开启时右栏/文件树/改动跟随「活跃 pane」（点击 pane 或点标签条切换），否则跟随活跃标签
@@ -4914,6 +4916,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       pdfPath: readerReq.pdfPath,
       projectRoot: readerReq.projectRoot,
       notePath: readerReq.notePath,
+      fromPage: readerReq.fromPage,
     });
   }, [visible, readerReq, setReaderReq]);
 
@@ -5022,9 +5025,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setReaderAgentTick((t) => t + 1);
   }, []);
 
-  const closeReader = useCallback(() => setReader(null), []);
+  // 跨页进入（文件页/产物核验/资源面板）退出时回到来源页，别把人留在运行页；
+  // 终端页自己的入口（预览工具条/文件树右键）没有 fromPage，退出原地不动。
+  // 阅读会话标签随阅读区一起关（2026-09-20 用户拍板）：它是为阅读区派的临时会话，
+  // 退出留着只会在标签条上积累「阅读 · xxx」；走 requestCloseTab 同款守卫——
+  // agent 还在跑时弹同一句确认，不悄悄杀正在生成的话题
+  const closeReader = useCallback(async () => {
+    const back = reader?.fromPage;
+    const tabId = readerTabId;
+    setReader(null);
+    if (tabId) await requestCloseTab(tabId);
+    if (back && back !== "terminal" && back !== useAppStore.getState().page) {
+      setPage(back);
+    }
+  }, [reader, readerTabId, requestCloseTab, setPage]);
 
-  // 阅读区打开时把阅读会话标签提到活跃（右栏 xterm 就是那个标签的画面；退出阅读区正好落在它上面）
+  // 阅读区打开时把阅读会话标签提到活跃（右栏 xterm 就是那个标签的画面；
+  // 退出阅读区时该标签随 closeReader 一起关掉，不再「正好落在它上面」）
   useEffect(() => {
     if (!reader || !readerTabId || activeId === readerTabId) return;
     activateTab(readerTabId);
@@ -6500,7 +6517,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           onInject={injectToReader}
           onRestartAgent={restartReaderAgent}
           onGoProfiles={() => setPage("profiles")}
-          onClose={closeReader}
+          onClose={() => void closeReader()}
           termSlot={bindReaderTermSlot}
           statusBarSlot={bindReaderStatusSlot}
         />

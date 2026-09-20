@@ -12,17 +12,25 @@ export default function ProjectFilePreview({
   path,
   root,
   onOpenFile,
+  onOpenReader,
 }: {
   path: string;
   root: string;
   onOpenFile?: (absPath: string) => void;
+  /** 「⛶ 沉浸阅读」入口：PDF 预览顶栏与 md 阅读态工具条共用；缺省不渲染该按钮 */
+  onOpenReader?: () => void;
 }) {
   const kind = projectFilePreviewKind(path);
   const frame = "flex min-h-0 flex-1 flex-col";
   if (kind === "pdf") {
     return (
       <div className={`${frame} overflow-hidden`}>
-        <PdfContinuousView path={path} cwdHint={root} maxFitMultiplier={1.5} />
+        <PdfContinuousView
+          path={path}
+          cwdHint={root}
+          maxFitMultiplier={1.5}
+          onOpenReader={onOpenReader}
+        />
       </div>
     );
   }
@@ -68,6 +76,7 @@ export default function ProjectFilePreview({
           root={root}
           onOpenFile={onOpenFile}
           hideImmersive
+          onOpenReader={onOpenReader}
         />
       </Suspense>
     </div>

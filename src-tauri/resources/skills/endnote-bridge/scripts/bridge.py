@@ -241,13 +241,18 @@ def render(records, suffix):
             return f'{tag}  - {str(value).replace(chr(13), " ").replace(chr(10), " ")}'
         def split_pages(pages):
             s = str(pages).replace('–', '-').replace('—', '-').replace('−', '-')
-            if '-' in s:
-                a, b = s.split('-', 1)
-                return a.strip(), b.strip()
+            # 区间分隔符按「横线串」切：BibTeX 页码是 1--8（双横线），按单 - 切会把
+            # -8 当页尾，回程 EP 再拼 -- 变 1---8
+            parts = re.split(r'-+', s, 1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                return parts[0].strip(), parts[1].strip()
             return s.strip(), ''
         result = []
         for r in records:
             result.append(line('TY', {'article':'JOUR','book':'BOOK','incollection':'CHAP','inproceedings':'CONF','phdthesis':'THES'}.get(r.get('type'), 'JOUR')))
+            # RIS Reference ID 载 citation key（XML 走 <label>、.enw 走 %F 的同一职责）：
+            # 不写这条，键出了 RIS 就丢，回程只能重生成 ref<hash>，--existing 也接不上
+            result.append(line('ID', r['id']))
             for author in r.get('authors', []):
                 result.append(line('AU', family_comma(author)))
             if r.get('title'):
@@ -280,9 +285,11 @@ def render(records, suffix):
     if suffix == '.enw':
         def split_pages(pages):
             s = str(pages).replace('–', '-').replace('—', '-').replace('−', '-')
-            if '-' in s:
-                a, b = s.split('-', 1)
-                return a.strip(), b.strip()
+            # 区间分隔符按「横线串」切：BibTeX 页码是 1--8（双横线），按单 - 切会把
+            # -8 当页尾，回程 EP 再拼 -- 变 1---8
+            parts = re.split(r'-+', s, 1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                return parts[0].strip(), parts[1].strip()
             return s.strip(), ''
         type_name = {'article':'Journal Article','book':'Book','incollection':'Book Section','inproceedings':'Conference Paper','phdthesis':'Thesis'}
         result = []

@@ -52,7 +52,7 @@ outputs: [papers/endnote-report.json]
     <urls><pdf-urls><url>file:///C:/project/papers/example.pdf</url></pdf-urls></urls>
   </record></records></xml>
   ```
-- 备选：用户环境导不进 XML 时改产 `papers/endnote-import.ris`（TY/AU/TI/JO/PY/DO/UR，RIS 2004 口径）
+- 备选：用户环境导不进 XML 时改产 `papers/endnote-import.ris`（TY/ID/AU/TI/JO/PY/DO/UR，RIS 2004 口径；`ID` 载 citation key，EndNote 导入后回流才能接上 `--existing` 保键）
 - 导入动作本身是人工：报告里写清指引——双击文件或 EndNote「File → Import」，XML 选「EndNote generated XML / EndNote XML」、RIS 选「Reference Manager (RIS)」；具体名称与附件解析须在实际版本验证
 
 ### 2. Word 侧人工步骤（供人工事项引用）
