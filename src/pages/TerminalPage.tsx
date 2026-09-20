@@ -5027,18 +5027,19 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
 
   // 跨页进入（文件页/产物核验/资源面板）退出时回到来源页，别把人留在运行页；
   // 终端页自己的入口（预览工具条/文件树右键）没有 fromPage，退出原地不动。
-  // 阅读会话标签随阅读区一起关（2026-09-20 用户拍板）：它是为阅读区派的临时会话，
-  // 退出留着只会在标签条上积累「阅读 · xxx」；走 requestCloseTab 同款守卫——
-  // agent 还在跑时弹同一句确认，不悄悄杀正在生成的话题
-  const closeReader = useCallback(async () => {
+  // 阅读会话标签随阅读区一起直接关（2026-09-20 用户拍板）：它是为阅读区派的临时
+  // 会话，退出留着只会在标签条上积累「阅读 · xxx」；不弹任何确认——正在生成的
+  // 回应一并中断，退出就是退干净。也不走 requestCloseTab：它按「PTY 进程活着」拦，
+  // 交互式 CLI 坐在输入提示符上也活着，每次退出都会弹确认
+  const closeReader = useCallback(() => {
     const back = reader?.fromPage;
     const tabId = readerTabId;
     setReader(null);
-    if (tabId) await requestCloseTab(tabId);
+    if (tabId) doCloseTab(tabId);
     if (back && back !== "terminal" && back !== useAppStore.getState().page) {
       setPage(back);
     }
-  }, [reader, readerTabId, requestCloseTab, setPage]);
+  }, [reader, readerTabId, setPage]);
 
   // 阅读区打开时把阅读会话标签提到活跃（右栏 xterm 就是那个标签的画面；
   // 退出阅读区时该标签随 closeReader 一起关掉，不再「正好落在它上面」）
@@ -6509,6 +6510,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           projectRoot={reader.projectRoot}
           notePath={reader.notePath ?? null}
           hasAgentTab={readerTabId !== null}
+          agentTabId={readerTabId}
           agentStatus={readerTabId ? (statuses[readerTabId] ?? null) : null}
           agentSession={
             readerTabId ? (sessionByTab[readerTabId] ?? null) : null
@@ -6517,7 +6519,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           onInject={injectToReader}
           onRestartAgent={restartReaderAgent}
           onGoProfiles={() => setPage("profiles")}
-          onClose={() => void closeReader()}
+          onClose={closeReader}
           termSlot={bindReaderTermSlot}
           statusBarSlot={bindReaderStatusSlot}
         />

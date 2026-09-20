@@ -81,6 +81,7 @@ export default function ReaderOverlay({
   projectRoot,
   notePath,
   hasAgentTab,
+  agentTabId,
   agentStatus,
   agentSession,
   needsProfile,
@@ -97,6 +98,8 @@ export default function ReaderOverlay({
   notePath?: string | null;
   /** 阅读会话标签是否还在（在但没上报状态 = 正在启动；不在 = 被手动关掉） */
   hasAgentTab: boolean;
+  /** 阅读会话标签 id（遮面重启触发器：每次新派必变，关掉重进/重新启动都重新挂遮面） */
+  agentTabId: string | null;
   /** 阅读会话标签状态（还没建起/未上报为 null） */
   agentStatus: TabStatus | null;
   /** 会话联动数据（状态行的关联状态点用；与终端页右栏同一来源） */
@@ -252,6 +255,36 @@ export default function ReaderOverlay({
   /** 笔记栏编辑态脏标记（FilePreviewEditor onDirtyChange 上报）：保存译段/插入图片成功后
       的 toast 口径要用——dirty 时 watcher 停订，界面不会回显刚写入的内容 */
   const [noteDirty, setNoteDirty] = useState(false);
+
+  // ===== 右栏启动占位（2026-09-20）：退出即关标签后，每次进入都新派 CLI 会话——
+  // 头几帧标签还没建出来（hasAgentTab=false，不能闪「阅读会话未在运行」引导卡），
+  // 起来后到 CLI 开屏出字前 xterm 也是一段黑底。两段都用占位盖住，超时兜底回落真状态 */
+  /** 期待会话标签出现（mount / 点「重新启动会话」置 true；标签出现即清，4s 兜底） */
+  const [expectAgent, setExpectAgent] = useState(true);
+  useEffect(() => {
+    if (hasAgentTab) setExpectAgent(false);
+  }, [hasAgentTab]);
+  useEffect(() => {
+    if (!expectAgent) return;
+    const t = setTimeout(() => setExpectAgent(false), 4000);
+    return () => clearTimeout(t);
+  }, [expectAgent]);
+  /** 会话联动出现前的黑屏遮面（会话文件落盘 ≈ TUI 已开屏；8s 兜底防个别 CLI 联动不到）；
+      重启触发器 = 会话标签 id：关掉旧标签 reopen 后旧 startedAt 会原样带回来，
+      以 startedAt 为触发器不会重新挂遮面（裸黑 xterm 露出来），标签 id 是每次新派必变的 */
+  const [sessionVeil, setSessionVeil] = useState(true);
+  useEffect(() => {
+    setSessionVeil(true);
+  }, [agentTabId]);
+  useEffect(() => {
+    if (!sessionVeil) return;
+    if (agentSession) {
+      setSessionVeil(false);
+      return;
+    }
+    const t = setTimeout(() => setSessionVeil(false), 8000);
+    return () => clearTimeout(t);
+  }, [sessionVeil, agentSession]);
 
   // ===== 护眼、toast、生词本、翻译（结果都在 PDF 栏浮卡就地呈现，没有工具页签） =====
 
@@ -789,23 +822,48 @@ export default function ReaderOverlay({
                   </button>
                 </div>
               ) : !hasAgentTab ? (
-                // 阅读会话标签被手动关掉：给个重新拉起的入口（不连环自动重建）
-                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
-                  <p className="text-sm text-l3">阅读会话未在运行</p>
-                  <button
-                    type="button"
-                    onClick={onRestartAgent}
-                    className="rounded-md border border-field bg-strip px-3 py-1.5 text-sm text-l2 hover:bg-inset hover:text-l1"
-                  >
-                    重新启动会话
-                  </button>
-                </div>
+                expectAgent ? (
+                  // 标签还在派的路上：别把「阅读会话未在运行」闪一下（错误状态早于真实状态）
+                  <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
+                    <span className="size-2 animate-pulse rounded-full bg-l3" />
+                    <p className="text-sm text-l3">正在启动 Agent…</p>
+                  </div>
+                ) : (
+                  // 阅读会话标签被手动关掉：给个重新拉起的入口（不连环自动重建）
+                  <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
+                    <p className="text-sm text-l3">阅读会话未在运行</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setExpectAgent(true);
+                        onRestartAgent();
+                      }}
+                      className="rounded-md border border-field bg-strip px-3 py-1.5 text-sm text-l2 hover:bg-inset hover:text-l1"
+                    >
+                      重新启动会话
+                    </button>
+                  </div>
+                )
               ) : (
                 // xterm 宿主槽 + 底部状态栏槽：TerminalPage 把阅读会话标签的终端容器节点
                 // 与 TerminalStatusBar 节点一并搬进来，阅读区关闭/栏收起时搬回原标签
                 // （DOM 搬移不重建，滚动缓冲与状态栏内部状态不丢）
                 <div className="flex min-h-0 flex-1 flex-col">
-                  <div ref={termSlot} className="flex min-h-0 flex-1 flex-col" />
+                  <div
+                    ref={termSlot}
+                    className="relative flex min-h-0 flex-1 flex-col"
+                  >
+                    {/* CLI 开屏遮面：会话联动出现（≈TUI 已开屏）前盖住 xterm 黑底；
+                        搬移是 appendChild，遮面作为槽位孩子与宿主共存 */}
+                    {sessionVeil && (
+                      <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-raised">
+                        <span className="size-2 animate-pulse rounded-full bg-l3" />
+                        <p className="text-sm text-l3">
+                          正在启动 {agentName ?? "Agent"}…
+                        </p>
+                      </div>
+                    )}
+                  </div>
                   <div
                     ref={statusBarSlot}
                     className="shrink-0 border-t border-hairline"

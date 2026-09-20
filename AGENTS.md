@@ -119,6 +119,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # md 笔记「⛶ 沉浸阅读」入口（v3.98：pdf_for_note 配对后发 readerReq 带 notePath 进阅读区）+
                              # ⠿ 拖出手柄经 tauri-plugin-drag 做 OS 级文件拖出——WebView HTML5 拖拽出不了窗口）、TaskCardsSection、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/XlsxPreview/ImagePreview、ImagePairView、GitPanel、HandoffPicker/DigestPicker、
+                             #   PDF 字节模块级 LRU 缓存（loadPdfBytes，上限 8 份）：预览⇄阅读区重挂载不再重走
+                             #   read_pdf_bytes IPC+atob+解析三程，骨架期只剩 pdf.js 解析一程）、
                              # KickoffConfirmDialog（开工确认弹层：TASK.md 预览/编辑（草稿优先）+ 旧简报并入兜底 + 技能区（含 MCP 归处标记）+ 人工事项区 + 主仓提醒 +
                              # 上一步收尾软门：紧邻上一步非可选 after 事项未勾 → 「确认开始」二击变「仍要开工」才开，只确认不阻断）+
                              # 未存进历史软门（2026-09-20）：未提交改动与本步 inputs 相交（相交判定 src/kickoff-dirty-gate.ts）→ 列文件 +
@@ -134,7 +136,11 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # ReaderOverlay（沉浸阅读区全屏覆盖层，v3.96：三栏「笔记｜PDF｜Agent 终端」，fixed inset-0 z-40，
                              #   Esc 退出级联最优先，底下终端/PTY 保持挂载；右栏 = 阅读会话标签 xterm 宿主搬移，注入由 TerminalPage 供给；
                              #   跨页进入的退出回来源页（setReaderReq 在 store 层自动记 fromPage、closeReader 回跳）+
-                             #   退出同时关阅读会话标签（requestCloseTab 同款运行中确认守卫，2026-09-20 用户拍板））+
+                             #   退出同时直接关阅读会话标签、不弹确认（正在生成的回应一并中断；requestCloseTab 的「进程活着」
+                             #   判定对常驻交互式 CLI 恒真、每次退出都会弹，故不走它；2026-09-20 用户拍板）+
+                             #   进入启动占位：标签派出前不闪「未在运行」卡、CLI 开屏前 xterm 黑底用遮面盖住（PDF 栏加载给页形骨架；
+                             #   遮面重启触发器 = agentTabId——关掉旧标签重进后旧 startedAt 会原样带回来，
+                             #   以它为触发器不重新挂遮面会露裸黑 xterm））+
                              #   PdfContinuousView（连续滚动 PDF 栏：±2 页虚拟化懒渲染、选段浮动条（译/◈问 AI/＋生词/⋯）、▦ 圈选截图、
                              #   ⌘+点击段落对照（结果进同款浮卡）、进度记忆/护眼反色/术语淡高亮、
                              #   ⌘/Ctrl+滚轮与触控板双指捏合对准指针缩放）、

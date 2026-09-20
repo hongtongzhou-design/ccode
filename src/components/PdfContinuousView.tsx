@@ -1,15 +1,13 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import * as pdfjs from "pdfjs-dist";
 import SelectionFloatBar from "./SelectionFloatBar";
 import { HoverTip } from "./HoverTip";
 import { IS_MAC } from "../hotkeys";
 import {
   PdfPageView,
-  base64ToBytes,
+  loadPdfBytes,
   openPdfDocument,
   type PdfActionResult,
-  type PdfBytesDto,
 } from "./PdfPreview";
 import { usePdfGestureZoom } from "./use-pdf-zoom";
 import {
@@ -396,12 +394,9 @@ function PdfContinuousView({
     setFixedScale(null);
     void (async () => {
       try {
-        const dto = await invoke<PdfBytesDto>("read_pdf_bytes", {
-          path,
-          cwdHint,
-        });
+        const bytes = await loadPdfBytes(path, cwdHint);
         if (cancelled) return;
-        task = openPdfDocument(base64ToBytes(dto.data));
+        task = openPdfDocument(bytes);
         const loaded = await task.promise;
         if (cancelled) {
           void task.destroy();
@@ -770,8 +765,14 @@ function PdfContinuousView({
           )}
         </div>
       ) : !doc ? (
-        <div className="p-3">
+        // 加载骨架：pdf.js 传输+解析期间给页形占位（与离屏页同一套 pulse 语言），
+        // 别让整栏裸露底色——深色主题下就是一片黑闪（阅读区/文件页预览/终端预览共用）
+        <div className="flex flex-1 flex-col items-center gap-3 overflow-hidden p-4">
           <p className="text-sm text-l4">正在加载 PDF…</p>
+          <div className="flex w-full max-w-md flex-col items-center gap-4 py-2">
+            <div className="aspect-[1/1.414] w-full animate-pulse rounded-sm bg-inset" />
+            <div className="aspect-[1/1.414] w-full animate-pulse rounded-sm bg-inset" />
+          </div>
         </div>
       ) : (
         <>

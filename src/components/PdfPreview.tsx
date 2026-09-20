@@ -38,8 +38,41 @@ export interface PdfBytesDto {
   size: number;
 }
 
-/** base64 → Uint8Array（atob 分块，避免大文件一次性函数调用栈/参数上限）。
- *  export：阅读区的连续滚动视图（PdfContinuousView）同链路复用 */
+/** 模块级 PDF 字节缓存：path→已解码字节（上限 8 份 LRU）。
+ *  阅读区/文件页预览/项目页文件页各自新挂载 PdfContinuousView/PdfPreview 时，
+ *  read_pdf_bytes 的大文件 IPC（Rust 读盘→base64 传输）+ atob 解码 + pdf.js 解析
+ *  都是整栏骨架期；字节缓存命中后只剩 pdf.js 解析一程，打开感知接近即时。
+ *  缓存命中必须复制再返回：pdf.js getDocument 会把传入的 buffer 转给 worker
+ *  （transfer，原数组被 neuter），同一 Uint8Array 第二次打开同文件时已是
+ *  失效对象，再传会抛 DataCloneError（The object can not be cloned） */
+const PDF_BYTES_CACHE_MAX = 8;
+const pdfBytesCache = new Map<string, Uint8Array>();
+
+/** 读 PDF 字节：先查缓存，miss 走 read_pdf_bytes 白名单，命中后把键挪到队尾 */
+export async function loadPdfBytes(
+  path: string,
+  cwdHint: string | null,
+): Promise<Uint8Array> {
+  const key = `${cwdHint ?? ""}${path}`;
+  const hit = pdfBytesCache.get(key);
+  if (hit) {
+    pdfBytesCache.delete(key);
+    pdfBytesCache.set(key, hit);
+    // 复制一份：pdf.js 会 neuter 传入的 buffer，缓存里的原件必须保持可用
+    return hit.slice();
+  }
+  const dto = await invoke<PdfBytesDto>("read_pdf_bytes", { path, cwdHint });
+  const bytes = base64ToBytes(dto.data);
+  pdfBytesCache.set(key, bytes);
+  while (pdfBytesCache.size > PDF_BYTES_CACHE_MAX) {
+    const oldest = pdfBytesCache.keys().next().value;
+    if (oldest === undefined) break;
+    pdfBytesCache.delete(oldest);
+  }
+  return bytes.slice();
+}
+
+/** base64 → Uint8Array（atob 分块，避免大文件一次性函数调用栈/参数上限） */
 export function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -386,12 +419,9 @@ function PdfPreview({
     setFixedScale(null);
     void (async () => {
       try {
-        const dto = await invoke<PdfBytesDto>("read_pdf_bytes", {
-          path,
-          cwdHint,
-        });
+        const bytes = await loadPdfBytes(path, cwdHint);
         if (cancelled) return;
-        task = openPdfDocument(base64ToBytes(dto.data));
+        task = openPdfDocument(bytes);
         const loaded = await task.promise;
         if (cancelled) {
           void task.destroy();
