@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pickWorkspaceResume } from "../src/workspace-resume.ts";
+import {
+  pickWorkspaceResume,
+  shouldResumeWorkspaceSession,
+} from "../src/workspace-resume.ts";
 import type { SessionMetaDto } from "../src/types.ts";
 
 function session(over: Partial<SessionMetaDto>): SessionMetaDto {
@@ -81,6 +84,19 @@ test("去终端 resume：排除归档 / 内部无头 / live 中的会话", () =>
     "/repo",
   );
   assert.equal(out?.sessionId, "s-ok");
+});
+
+test("评审退回接回原会话，开工和按意见重写新开", () => {
+  assert.equal(shouldResumeWorkspaceSession(), true);
+  assert.equal(shouldResumeWorkspaceSession({ hasPrompt: true }), false);
+  assert.equal(
+    shouldResumeWorkspaceSession({ hasPrompt: true, resumeSession: true }),
+    true,
+  );
+  assert.equal(
+    shouldResumeWorkspaceSession({ hasPrompt: true, resumeSession: false }),
+    false,
+  );
 });
 
 test("去终端 resume：全排除或无会话时返回 null（去终端降级为新标签）", () => {

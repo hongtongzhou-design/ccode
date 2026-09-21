@@ -226,6 +226,12 @@ pub struct Gateway {
     /// list 现算：槽、密钥尾、Header、模型策略的内容指纹
     #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
     pub revision: String,
+    /// New API 钱包查询用的用户 ID（非密钥，给 New-Api-User 兼容头）；老站点才要
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_user_id: Option<String>,
+    /// 系统访问令牌尾号；本体在 keys.json 键 `{id}#wallet`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_key_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +273,15 @@ pub struct GatewayInput {
     pub api_key: Option<String>,
     #[serde(default)]
     pub expected_revision: Option<String>,
+    /// New API 系统访问令牌（查钱包）；空 / None = 不改
+    #[serde(default)]
+    pub wallet_access_token: Option<String>,
+    /// 清空系统访问令牌
+    #[serde(default)]
+    pub clear_wallet_token: bool,
+    /// Some("") 清空；None 不改
+    #[serde(default)]
+    pub wallet_user_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +327,11 @@ pub struct ProfileInput {
     /// 绑定保存时对照的网关内容版本；不匹配则拒绝，避免旧表单覆盖共享网关。
     #[serde(default)]
     pub expected_gateway_revision: Option<String>,
+}
+
+/// keys.json 里系统访问令牌的键：网关 id + `#wallet`（UUID 不含 #，不与推理密钥撞）
+pub(crate) fn wallet_key_id(gateway_id: &str) -> String {
+    format!("{gateway_id}#wallet")
 }
 
 /// 取密钥尾号做界面提示，过短的 key 整体打码
@@ -361,11 +381,85 @@ fn same_binding_selection(
         && binding.extra_env == *extra_env
 }
 
+/// §2 唯一约束的单一入口：candidate 与现有绑定逐条比对，`skip_id` 用于编辑场景排除自身。
+/// 新建 / 复制 / 编辑 / 导入四条路都必须过这里——少一条就能「改一次模型」绕过约束。
+fn has_duplicate_binding(bindings: &[Binding], skip_id: Option<&str>, candidate: &Binding) -> bool {
+    let Some(gid) = candidate.gateway_id.as_deref() else {
+        return false;
+    };
+    let models = normalize_models(candidate.models.clone());
+    bindings.iter().any(|b| {
+        Some(b.id.as_str()) != skip_id
+            && same_binding_selection(
+                b,
+                &candidate.agent,
+                gid,
+                candidate.protocol.as_deref(),
+                candidate.api_backend.as_deref(),
+                &models,
+                &candidate.extra_env,
+            )
+    })
+}
+
+/// 编辑路径的 §2 判定（`update`；store 方法要写真实配置目录，无法单测，故独立成纯函数）。
+/// `original` 是改之前那条，`bindings[idx]` 是改之后的：
+/// **模型选择本身没动就放行**——约束补上之前由编辑路径造出的历史重复对，
+/// 否则那条连接连改名字都存不了；只要选择真的变了（协议 / 后端 / 名单 / extraEnv）
+/// 就走单一入口照拦。
+fn update_selection_conflicts(bindings: &[Binding], idx: usize, original: &Binding) -> bool {
+    let Some(cur) = bindings.get(idx) else {
+        return false;
+    };
+    let Some(gid) = cur.gateway_id.as_deref() else {
+        return false;
+    };
+    let selection_moved = !same_binding_selection(
+        original,
+        &cur.agent,
+        gid,
+        cur.protocol.as_deref(),
+        cur.api_backend.as_deref(),
+        &cur.models,
+        &cur.extra_env,
+    );
+    selection_moved && has_duplicate_binding(bindings, Some(cur.id.as_str()), cur)
+}
+
+/// 认证类环境变量闭集：既是「无密钥模式不得附加」的判据（profile_validation），
+/// 也是导出时按名剔除的判据——**两处必须同源**，否则会出现「认证变量被原样导出成明文」。
+/// `OPENCODE_CONFIG_CONTENT` 不含 KEY/TOKEN 字面（它内嵌整份带凭据的配置），
+/// 只有这张表能兜住：导出剔除必须查它，不能只靠子串启发式。
+pub(crate) const AUTH_BEARING_ENV: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "CODEBUDDY_API_KEY",
+    "CODEBUDDY_AUTH_TOKEN",
+    "CURSOR_API_KEY",
+    "XAI_API_KEY",
+    "GROK_CODE_XAI_API_KEY",
+    "KIMI_API_KEY",
+    "KIMI_MODEL_API_KEY",
+    "OPENCODE_CONFIG_CONTENT",
+];
+
+/// 闭集精确命中（大小写不敏感）：用于「无密钥模式不得附加认证变量」的 fail-loud 判定。
+pub(crate) fn auth_bearing_env_name(name: &str) -> bool {
+    AUTH_BEARING_ENV.contains(&name.to_ascii_uppercase().as_str())
+}
+
+/// 导出/展示侧按名剔除：闭集命中，外加 KEY/TOKEN/SECRET/PASSWORD/AUTH 子串启发式。
+/// 宁可多剔（子串误伤无害），不可漏剔（一次泄漏就进别人的导入文件）。
 pub(crate) fn sensitive_env_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    ["KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH"]
-        .iter()
-        .any(|part| upper.contains(part))
+    auth_bearing_env_name(name)
+        || ["KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH"]
+            .iter()
+            .any(|part| upper.contains(part))
 }
 
 pub struct ProfileStore {
@@ -565,6 +659,8 @@ impl ProfileStore {
             name: input.name.clone(),
             no_auth: input.no_auth,
             key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots::default(),
             header_env: input.request_policy.header_env.clone(),
             models: models
@@ -697,6 +793,18 @@ impl ProfileStore {
                 return Err(error);
             }
         }
+        if let Some(tok) = get_key_locked(&wallet_key_id(&gid))? {
+            if let Err(error) = set_key(&wallet_key_id(&new_gid), &tok) {
+                let _ = delete_key(&new_gid);
+                let _ = commit_gateway_binding_files(
+                    &gateways,
+                    &bindings,
+                    &old_gateways,
+                    &old_bindings,
+                );
+                return Err(error);
+            }
+        }
         Ok(copy)
     }
 
@@ -717,30 +825,7 @@ impl ProfileStore {
         };
         let mut bindings = crate::gateway_store::load_bindings()?;
         let models = normalize_models(src.models.clone());
-        if bindings.iter().any(|b| {
-            same_binding_selection(
-                b,
-                target_agent,
-                &gid,
-                protocol.as_deref(),
-                None,
-                &models,
-                &src.extra_env,
-            )
-        }) {
-            return Err("该 Agent 已经有相同模型选择的绑定".into());
-        }
-        let mut gateways = crate::gateway_store::load_gateways()?;
-        let old_gateways = gateways.clone();
-        let old_bindings = bindings.clone();
-        let gw = gateways
-            .iter_mut()
-            .find(|g| g.id == gid)
-            .ok_or("网关不存在")?;
-        let slot = crate::gateway_store::slot_for_agent(target_agent, protocol.as_deref());
-        if crate::gateway_store::slot_url(&gw.slots, slot).is_none() {
-            crate::gateway_store::set_slot_url(&mut gw.slots, slot, src.base_url.clone());
-        }
+        // 先拼候选再查重（唯一约束单一入口），候选本身随后就是要落盘的那条
         let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
             agent: target_agent.to_string(),
@@ -754,6 +839,20 @@ impl ProfileStore {
             extra_env: src.extra_env.clone(),
             last_used_at: None,
         };
+        if has_duplicate_binding(&bindings, None, &binding) {
+            return Err("该 Agent 已经有相同模型选择的绑定".into());
+        }
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        let old_gateways = gateways.clone();
+        let old_bindings = bindings.clone();
+        let gw = gateways
+            .iter_mut()
+            .find(|g| g.id == gid)
+            .ok_or("网关不存在")?;
+        let slot = crate::gateway_store::slot_for_agent(target_agent, binding.protocol.as_deref());
+        if crate::gateway_store::slot_url(&gw.slots, slot).is_none() {
+            crate::gateway_store::set_slot_url(&mut gw.slots, slot, src.base_url.clone());
+        }
         let mut copy = crate::gateway_store::materialize(&binding, Some(gw), None);
         copy.has_key = has_key_locked(&gid)?;
         crate::profile_validation::validate_profile_fields(&copy)?;
@@ -776,6 +875,8 @@ impl ProfileStore {
         if input.account_type == AccountType::Official && input.no_auth {
             return Err("官方账号不能设置为无密钥模式".into());
         }
+        // 改之前的原样：用来判断「模型选择本身有没有动」（历史遗留的重复对不该连改名都存不了）
+        let original = bindings[idx].clone();
         if !input.name.trim().is_empty() {
             bindings[idx].name = input.name.trim().to_string();
         }
@@ -794,6 +895,11 @@ impl ProfileStore {
             return Ok(profile);
         }
         let gid = bindings[idx].gateway_id.clone().ok_or("这条绑定没有网关")?;
+        // §2 唯一约束在编辑路径同样成立（原先只有新建/复制/导入守这条：
+        // 把 A 的模型选择改成与 B 完全相同即可绕过）
+        if update_selection_conflicts(&bindings, idx, &original) {
+            return Err("该 Agent 已经有相同模型选择的绑定".into());
+        }
         let gw_idx = gateways
             .iter()
             .position(|g| g.id == gid)
@@ -882,6 +988,11 @@ impl ProfileStore {
             } else {
                 None
             };
+            g.wallet_key_hint = if has_key_locked(&wallet_key_id(&g.id))? {
+                g.wallet_key_hint.clone().or(Some("····".into()))
+            } else {
+                None
+            };
             g.slot_probes = crate::gateway_store::slot_probe_summaries(&g.last_probe);
             g.revision = crate::gateway_store::gateway_content_revision(g);
         }
@@ -951,6 +1062,21 @@ impl ProfileStore {
             } else if clear_key {
                 gateways[idx].key_hint = None;
             }
+            let pending_wallet = input.wallet_access_token.filter(|k| !k.trim().is_empty());
+            let clear_wallet = input.clear_wallet_token;
+            if let Some(tok) = &pending_wallet {
+                gateways[idx].wallet_key_hint = Some(key_hint_of(tok));
+            } else if clear_wallet {
+                gateways[idx].wallet_key_hint = None;
+            }
+            if let Some(uid) = input.wallet_user_id {
+                let t = uid.trim();
+                gateways[idx].wallet_user_id = if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                };
+            }
             let saved = gateways[idx].clone();
             crate::gateway_store::save_gateways(&gateways)?;
             if let Some(key) = pending_key {
@@ -966,6 +1092,19 @@ impl ProfileStore {
                     return Err(error);
                 }
             }
+            if let Some(tok) = pending_wallet {
+                if let Err(error) = set_key(&wallet_key_id(&id), &tok) {
+                    gateways[idx] = old;
+                    let _ = crate::gateway_store::save_gateways(&gateways);
+                    return Err(error);
+                }
+            } else if clear_wallet {
+                if let Err(error) = delete_key(&wallet_key_id(&id)) {
+                    gateways[idx] = old;
+                    let _ = crate::gateway_store::save_gateways(&gateways);
+                    return Err(error);
+                }
+            }
             Ok(saved)
         } else {
             let mut gw = Gateway {
@@ -973,6 +1112,8 @@ impl ProfileStore {
                 name: input.name,
                 no_auth: input.no_auth,
                 key_hint: None,
+                wallet_user_id: None,
+                wallet_key_hint: None,
                 slots: input.slots,
                 header_env: input.header_env,
                 models: input.models,
@@ -986,12 +1127,31 @@ impl ProfileStore {
             if let Some(key) = &pending_key {
                 gw.key_hint = Some(key_hint_of(key));
             }
+            let pending_wallet = input.wallet_access_token.filter(|k| !k.trim().is_empty());
+            if let Some(tok) = &pending_wallet {
+                gw.wallet_key_hint = Some(key_hint_of(tok));
+            }
+            if let Some(uid) = input.wallet_user_id {
+                let t = uid.trim();
+                gw.wallet_user_id = if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                };
+            }
             let gid = gw.id.clone();
             let old_gateways = gateways.clone();
             gateways.push(gw.clone());
             crate::gateway_store::save_gateways(&gateways)?;
             if let Some(key) = pending_key {
                 if let Err(error) = set_key(&gid, &key) {
+                    let _ = crate::gateway_store::save_gateways(&old_gateways);
+                    return Err(error);
+                }
+            }
+            if let Some(tok) = pending_wallet {
+                if let Err(error) = set_key(&wallet_key_id(&gid), &tok) {
+                    let _ = delete_key(&gid);
                     let _ = crate::gateway_store::save_gateways(&old_gateways);
                     return Err(error);
                 }
@@ -1011,7 +1171,7 @@ impl ProfileStore {
         let old_gateways = gateways.clone();
         gateways.retain(|g| g.id != id);
         crate::gateway_store::save_gateways(&gateways)?;
-        if let Err(error) = delete_key(id) {
+        if let Err(error) = delete_gateway_secrets(id) {
             let _ = crate::gateway_store::save_gateways(&old_gateways);
             return Err(error);
         }
@@ -1041,38 +1201,29 @@ impl ProfileStore {
         }
         let gid = input.gateway_id.clone().ok_or("请选择网关")?;
         let models = normalize_models(input.models.clone());
+        let binding = Binding {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: input.agent.clone(),
+            name: input.name.clone(),
+            kind: BindingKind::Api,
+            gateway_id: Some(gid.clone()),
+            protocol: input.protocol.clone(),
+            api_backend: input.api_backend.clone(),
+            models,
+            extra_env: input.extra_env.clone(),
+            last_used_at: None,
+        };
         let mut bindings = crate::gateway_store::load_bindings()?;
-        if bindings.iter().any(|b| {
-            same_binding_selection(
-                b,
-                &input.agent,
-                &gid,
-                input.protocol.as_deref(),
-                input.api_backend.as_deref(),
-                &models,
-                &input.extra_env,
-            )
-        }) {
+        if has_duplicate_binding(&bindings, None, &binding) {
             return Err("该 Agent 已经有相同模型选择的绑定".into());
         }
         let gateways = crate::gateway_store::load_gateways()?;
         let gw = gateways.iter().find(|g| g.id == gid).ok_or("网关不存在")?;
-        let slot = crate::gateway_store::slot_for_agent(&input.agent, input.protocol.as_deref());
+        let slot =
+            crate::gateway_store::slot_for_agent(&binding.agent, binding.protocol.as_deref());
         if crate::gateway_store::slot_url(&gw.slots, slot).is_none() {
             return Err("这个网关还没配该协议的端点，请先在网关库补槽".into());
         }
-        let binding = Binding {
-            id: uuid::Uuid::new_v4().to_string(),
-            agent: input.agent,
-            name: input.name.clone(),
-            kind: BindingKind::Api,
-            gateway_id: Some(gid.clone()),
-            protocol: input.protocol,
-            api_backend: input.api_backend,
-            models,
-            extra_env: input.extra_env,
-            last_used_at: None,
-        };
         let mut profile = crate::gateway_store::materialize(&binding, Some(gw), None);
         profile.has_key = has_key_locked(&gid)?;
         crate::profile_validation::validate_profile_fields(&profile)?;
@@ -1139,6 +1290,24 @@ impl ProfileStore {
         }
         crate::gateway_store::save_gateways(&gateways)?;
         if let Err(error) = delete_key(id) {
+            let _ = crate::gateway_store::save_gateways(&old_gateways);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn clear_gateway_wallet_token(&self, id: &str) -> Result<(), String> {
+        let _g = store_lock()?;
+        self.ensure_split_locked()?;
+        let mut gateways = crate::gateway_store::load_gateways()?;
+        let old_gateways = gateways.clone();
+        if let Some(g) = gateways.iter_mut().find(|g| g.id == id) {
+            g.wallet_key_hint = None;
+        } else {
+            return Err("网关不存在".into());
+        }
+        crate::gateway_store::save_gateways(&gateways)?;
+        if let Err(error) = delete_key(&wallet_key_id(id)) {
             let _ = crate::gateway_store::save_gateways(&old_gateways);
             return Err(error);
         }
@@ -1495,6 +1664,24 @@ fn delete_key(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 删网关时推理密钥与系统访问令牌一次写回，避免只清了一半。
+fn delete_gateway_secrets(id: &str) -> Result<(), String> {
+    let path = keys_path()?;
+    let mut keys = read_keys_at(&path)?;
+    let wallet = wallet_key_id(id);
+    let changed = keys.remove(id).is_some() | keys.remove(&wallet).is_some();
+    if changed {
+        write_keys_at(&path, &keys)?;
+    }
+    if let Ok(entry) = key_entry(id) {
+        let _ = entry.delete_credential();
+    }
+    if let Ok(entry) = key_entry(&wallet) {
+        let _ = entry.delete_credential();
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn list_profiles(store: tauri::State<'_, ProfileStore>) -> Result<Vec<Profile>, String> {
     store.list()
@@ -1623,6 +1810,10 @@ struct GatewayExportV2 {
     models: Vec<GatewayModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wallet_access_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wallet_user_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1686,6 +1877,8 @@ fn build_export_v2(
             header_env: g.header_env.clone(),
             models: g.models.clone(),
             api_key: None,
+            wallet_access_token: None,
+            wallet_user_id: g.wallet_user_id.clone(),
         });
     }
     let out_binds: Vec<BindingExportV2> = bindings
@@ -1720,6 +1913,7 @@ fn build_export_v2(
         doc = serde_json::from_str(&text).unwrap_or(doc);
         for (g, ge) in gateways.iter().zip(doc.gateways.iter_mut()) {
             ge.api_key = keys.get(&g.id).cloned();
+            ge.wallet_access_token = keys.get(&wallet_key_id(&g.id)).cloned();
         }
         text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     }
@@ -1804,6 +1998,20 @@ fn apply_import_v2(
                     keys.insert(id.clone(), k.to_string());
                     gateways[idx].key_hint = Some(key_hint_of(k));
                 }
+                if let Some(k) = incoming
+                    .wallet_access_token
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                {
+                    keys.insert(wallet_key_id(&id), k.to_string());
+                    gateways[idx].wallet_key_hint = Some(key_hint_of(k));
+                }
+                if incoming.wallet_user_id.is_some() {
+                    gateways[idx].wallet_user_id = incoming
+                        .wallet_user_id
+                        .clone()
+                        .filter(|s| !s.trim().is_empty());
+                }
             }
             id
         } else {
@@ -1813,6 +2021,8 @@ fn apply_import_v2(
                 name: incoming.name.clone(),
                 no_auth: incoming.no_auth,
                 key_hint: None,
+                wallet_user_id: incoming.wallet_user_id.clone(),
+                wallet_key_hint: None,
                 slots: incoming.slots.clone(),
                 header_env: incoming.header_env.clone(),
                 models: incoming.models.clone(),
@@ -1825,6 +2035,14 @@ fn apply_import_v2(
             if let Some(k) = incoming.api_key.as_deref().filter(|s| !s.is_empty()) {
                 keys.insert(id.clone(), k.to_string());
                 gw.key_hint = Some(key_hint_of(k));
+            }
+            if let Some(k) = incoming
+                .wallet_access_token
+                .as_deref()
+                .filter(|s| !s.is_empty())
+            {
+                keys.insert(wallet_key_id(&id), k.to_string());
+                gw.wallet_key_hint = Some(key_hint_of(k));
             }
             gateways.push(gw);
             added_gws += 1;
@@ -1851,25 +2069,7 @@ fn apply_import_v2(
             continue;
         };
         let incoming_models = normalize_models(b.models.clone());
-        if bindings.iter().any(|x| {
-            same_binding_selection(
-                x,
-                &b.agent,
-                &gid,
-                b.protocol.as_deref(),
-                b.api_backend.as_deref(),
-                &incoming_models,
-                &b.extra_env,
-            )
-        }) {
-            skipped.push(format!(
-                "{}「{}」已有相同模型选择，未合并名单",
-                b.agent,
-                b.name.as_deref().unwrap_or(&b.agent)
-            ));
-            continue;
-        }
-        bindings.push(Binding {
+        let binding = Binding {
             id: uuid::Uuid::new_v4().to_string(),
             name: b
                 .name
@@ -1882,14 +2082,34 @@ fn apply_import_v2(
             } else {
                 None
             },
-            agent: b.agent,
+            agent: b.agent.clone(),
             kind: BindingKind::Api,
-            gateway_id: Some(gid),
-            protocol: b.protocol,
-            models: b.models,
-            extra_env: b.extra_env,
+            gateway_id: Some(gid.clone()),
+            protocol: b.protocol.clone(),
+            // 落盘用归一后的模型（原先只拿归一值查重、落盘却是脏列表）
+            models: incoming_models,
+            extra_env: b.extra_env.clone(),
             last_used_at: None,
-        });
+        };
+        if has_duplicate_binding(bindings, None, &binding) {
+            skipped.push(format!(
+                "{}「{}」已有相同模型选择，未合并名单",
+                b.agent, binding.name
+            ));
+            continue;
+        }
+        // 导入同样不得绕过字段校验（agent 白名单 / 协议闭集 / api_backend / 附加环境变量名）：
+        // 外来的脏绑定落盘后会变成前端看不见、只能手改文件的幽灵条目
+        let Some(gw) = gateways.iter().find(|g| g.id == gid) else {
+            skipped.push(format!("绑定 {} 找不到对应网关", b.agent));
+            continue;
+        };
+        let profile = crate::gateway_store::materialize(&binding, Some(gw), None);
+        if let Err(error) = crate::profile_validation::validate_profile_fields(&profile) {
+            skipped.push(format!("{}「{}」未导入：{error}", b.agent, binding.name));
+            continue;
+        }
+        bindings.push(binding);
         added_binds += 1;
     }
     ImportV2Result {
@@ -2091,6 +2311,14 @@ pub fn unbind_split_merge(store: tauri::State<'_, ProfileStore>) -> Result<usize
 #[tauri::command]
 pub fn clear_gateway_key(store: tauri::State<'_, ProfileStore>, id: String) -> Result<(), String> {
     store.clear_gateway_key(&id)
+}
+
+#[tauri::command]
+pub fn clear_gateway_wallet_token(
+    store: tauri::State<'_, ProfileStore>,
+    id: String,
+) -> Result<(), String> {
+    store.clear_gateway_wallet_token(&id)
 }
 
 #[cfg(test)]
@@ -2310,6 +2538,13 @@ mod tests {
     }
 
     #[test]
+    fn wallet_key_id_does_not_collide_with_gateway_uuid() {
+        let id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        assert_eq!(wallet_key_id(id), format!("{id}#wallet"));
+        assert_ne!(wallet_key_id(id), id);
+    }
+
+    #[test]
     fn key_hint_masks_short_keys() {
         assert_eq!(key_hint_of("sk-1234567"), "···4567");
         assert_eq!(key_hint_of("abc"), "····");
@@ -2480,6 +2715,8 @@ mod tests {
             name: name.into(),
             no_auth: false,
             key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots {
                 anthropic: Some(url.into()),
                 ..Default::default()
@@ -2536,11 +2773,132 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_binding_check_excludes_self_but_covers_edit_path() {
+        let a = sample_bind("claude-code", "g1", &["model-a"]);
+        let other = sample_bind("claude-code", "g1", &["model-b"]);
+        let all = vec![a.clone(), other];
+        // 编辑自己但模型选择没变：排除自身，不得拦
+        assert!(!has_duplicate_binding(&all, Some(a.id.as_str()), &a));
+        // 编辑成与另一条完全相同：必须拦（原先 update 不查这条）
+        let mut me = a.clone();
+        me.models = vec!["model-b".into()];
+        assert!(
+            has_duplicate_binding(&all, Some(a.id.as_str()), &me),
+            "编辑路径同样受 §2 唯一约束"
+        );
+        // 新建路径：与既有完全相同 → 拦；不同 → 放行
+        let same = sample_bind("claude-code", "g1", &["model-a"]);
+        assert!(has_duplicate_binding(&all, None, &same));
+        let different = sample_bind("claude-code", "g1", &["model-c"]);
+        assert!(!has_duplicate_binding(&all, None, &different));
+        // 归一后比较：空白/空串/重复不影响判定
+        let dirty = sample_bind("claude-code", "g1", &[" model-a ", "", "model-a"]);
+        assert!(has_duplicate_binding(&all, None, &dirty));
+        // 官方绑定（无网关）不参与这套判定
+        let mut official = sample_bind("claude-code", "g1", &["model-a"]);
+        official.gateway_id = None;
+        assert!(!has_duplicate_binding(&all, None, &official));
+    }
+
+    #[test]
+    fn legacy_duplicate_pair_stays_editable_until_selection_moves() {
+        // 约束补上之前由编辑路径造出的历史重复对（两条一模一样的绑定）
+        let a = sample_bind("claude-code", "g1", &["model-a"]);
+        let b = sample_bind("claude-code", "g1", &["model-a"]);
+        let c = sample_bind("claude-code", "g1", &["model-b"]);
+        let mut pair = vec![a.clone(), b, c];
+        let original = pair[0].clone();
+        // 只改名字（选择没动）：放行，否则那条连接连改名都存不了
+        pair[0].name = "工作用".into();
+        assert!(!update_selection_conflicts(&pair, 0, &original));
+        // 选择真的动了且撞上第三条：拦
+        pair[0].models = vec!["model-b".into()];
+        assert!(update_selection_conflicts(&pair, 0, &original));
+        // 单独一条（无重复）：怎么改都放行
+        let solo = sample_bind("claude-code", "g1", &["model-a"]);
+        let mut alone = vec![solo.clone()];
+        alone[0].models = vec!["model-z".into()];
+        assert!(!update_selection_conflicts(&alone, 0, &solo));
+    }
+
+    #[test]
+    fn import_v2_validates_binding_fields_and_normalizes_models() {
+        let gw = sample_gw("g1", "中转 A", "https://api.example.com");
+        let fp = slot_fingerprint(&gw.slots);
+        let mut gateways = vec![gw.clone()];
+        let mut bindings: Vec<Binding> = Vec::new();
+        let mut keys = std::collections::HashMap::new();
+        let mk = |agent: &str, protocol: Option<&str>, models: &[&str], env: &[(&str, &str)]| {
+            BindingExportV2 {
+                name: Some(format!("{agent} 绑定")),
+                agent: agent.into(),
+                gateway_ref: GatewayRefV2 {
+                    name: "中转 A".into(),
+                    slot_fp: fp.clone(),
+                },
+                protocol: protocol.map(str::to_string),
+                api_backend: None,
+                models: models.iter().map(|s| (*s).to_string()).collect(),
+                extra_env: env
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            }
+        };
+        let doc = ConfigExportV2 {
+            version: 2,
+            gateways: vec![],
+            bindings: vec![
+                // 未知 agent：白名单外不得落盘
+                mk("not-a-real-agent", None, &["m1"], &[]),
+                // 协议不在闭集（qwen 有 openai/anthropic 两槽，claude-code 是空表=无协议概念）
+                mk("qwen", Some("nope"), &["m1"], &[]),
+                // 附加环境变量名非法
+                mk("claude-code", None, &["m1"], &[("BAD=NAME", "x")]),
+                // 合法但模型列表脏：落盘必须是归一后的
+                mk("claude-code", None, &[" m1 ", "", "m1"], &[]),
+            ],
+        };
+        let res = apply_import_v2(doc, &mut gateways, &mut bindings, &mut keys);
+        assert_eq!(res.added_bindings, 1, "{:?}", res.skipped_slots);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].models,
+            vec!["m1".to_string()],
+            "导入落盘必须是归一后的模型列表"
+        );
+        assert!(
+            res.skipped_slots.iter().any(|s| s.contains("未知 agent")),
+            "{:?}",
+            res.skipped_slots
+        );
+        assert!(
+            res.skipped_slots.iter().any(|s| s.contains("不支持协议")),
+            "{:?}",
+            res.skipped_slots
+        );
+        assert!(
+            res.skipped_slots
+                .iter()
+                .any(|s| s.contains("环境变量名不合法")),
+            "{:?}",
+            res.skipped_slots
+        );
+    }
+
+    #[test]
     fn extra_env_for_export_drops_key_token_names() {
         let mut env = std::collections::HashMap::new();
         env.insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
         env.insert("CUSTOM_API_KEY".into(), "sk-should-not-export".into());
         env.insert("AUTH_TOKEN".into(), "tok".into());
+        // 内嵌整份带凭据配置的认证变量：不含 KEY/TOKEN 字面，靠闭集兜住（§18）
+        env.insert(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            r#"{"apiKey":"sk-inside-json"}"#.into(),
+        );
+        // 反向哨兵：非认证同名变量不得被误伤
+        env.insert("OPENCODE_CONFIG".into(), "/tmp/opencode.json".into());
         let out = extra_env_for_export(&env);
         assert_eq!(
             out.get("HTTPS_PROXY").map(String::as_str),
@@ -2548,6 +2906,25 @@ mod tests {
         );
         assert!(!out.contains_key("CUSTOM_API_KEY"));
         assert!(!out.contains_key("AUTH_TOKEN"));
+        assert!(
+            !out.contains_key("OPENCODE_CONFIG_CONTENT"),
+            "opencode 整份配置内嵌凭据，导出必须剔除"
+        );
+        assert_eq!(
+            out.get("OPENCODE_CONFIG").map(String::as_str),
+            Some("/tmp/opencode.json")
+        );
+    }
+
+    #[test]
+    fn auth_bearing_names_are_one_case_insensitive_list() {
+        assert!(sensitive_env_name("OPENCODE_CONFIG_CONTENT"));
+        assert!(auth_bearing_env_name("opencode_config_content"));
+        assert!(auth_bearing_env_name("Anthropic_API_Key"));
+        assert!(!auth_bearing_env_name("OPENCODE_CONFIG"));
+        // 子串启发式只在导出剔除侧生效（闭集判定保持精确，避免误伤非认证变量）
+        assert!(sensitive_env_name("MY_KEYSTONE_PATH"));
+        assert!(!auth_bearing_env_name("MY_KEYSTONE_PATH"));
     }
 
     #[test]
@@ -2579,6 +2956,8 @@ mod tests {
                 },
                 models: vec![],
                 api_key: Some("sk-live-secret-abcdef".into()),
+                wallet_access_token: None,
+                wallet_user_id: None,
             }],
             bindings: vec![BindingExportV2 {
                 name: Some("另一个连接".into()),
@@ -2632,6 +3011,8 @@ mod tests {
                 header_env: Default::default(),
                 models: vec![],
                 api_key: Some("sk-new-key-22222222".into()),
+                wallet_access_token: None,
+                wallet_user_id: None,
             }],
             bindings: vec![],
         };
@@ -2667,6 +3048,8 @@ mod tests {
                 },
                 models: vec![],
                 api_key: Some("sk-same".into()),
+                wallet_access_token: None,
+                wallet_user_id: None,
             }],
             bindings: vec![],
         };

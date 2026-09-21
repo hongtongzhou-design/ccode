@@ -435,6 +435,8 @@ mod tests {
             name: "g".into(),
             no_auth: false,
             key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots {
                 anthropic: Some(url.into()),
                 ..Default::default()

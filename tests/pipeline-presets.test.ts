@@ -189,6 +189,26 @@ test("run 声明的 Quarto/LaTeX 正式输出均进入 expectedArtifacts", () =>
   }
 });
 
+test("同一份稿同时渲 docx 和 pdf 时，docx 排在 pdf 前面", () => {
+  for (const template of PIPELINE_TEMPLATES) {
+    for (const step of template.steps) {
+      const formats = step.run.flatMap((run) =>
+        [...run.command.matchAll(/quarto render\s+\S+\s+--to\s+(pdf|docx)/g)].map(
+          (match) => match[1],
+        ),
+      );
+      const pdf = formats.indexOf("pdf");
+      const docx = formats.indexOf("docx");
+      if (pdf >= 0 && docx >= 0) {
+        assert.ok(
+          docx < pdf,
+          `${template.id}/${step.name} 应先渲 docx 再渲 pdf`,
+        );
+      }
+    }
+  }
+});
+
 test("需要渲染的步骤必须挂载 quarto-render 技能", () => {
   const variants = PIPELINE_TEMPLATES.flatMap((template) =>
     template.id === "submission-rebuttal"
@@ -380,6 +400,31 @@ test("科研论文与投稿的清单文件不对撞，投稿能吃毕业论文�
   assert.ok(format.anyOfInputs?.[0]?.includes("manuscript/thesis-final.md"));
   assert.ok(format.expectedArtifacts.includes("output/formatted.pdf"));
   assert.ok(format.skills.includes("quarto-render"));
+});
+
+test("综述初稿：不以词数为完成标准，扩写必须回笔记或原文", () => {
+  const review = PIPELINE_TEMPLATES.find((t) => t.id === "review");
+  const draft = review?.steps.find((s) => s.name === "综述初稿");
+  assert.ok(draft);
+  assert.match(draft.brief, /词数不是完成标准/);
+  assert.match(draft.brief, /notes\//);
+  assert.match(draft.brief, /来源 PDF/);
+  assert.match(draft.brief, /不以词数判定完成/);
+  assert.match(draft.brief, /防御性套话/);
+  assert.match(draft.brief, /PDF 首页可读/);
+  assert.match(draft.brief, /G1 不准进稿件/);
+  assert.match(draft.brief, /摘要只放全文撑得住/);
+  assert.match(draft.brief, /禁止「待绘制」占位/);
+  assert.match(draft.brief, /摘要级来源/);
+  assert.ok(
+    (draft.acceptanceCriteria ?? []).some((c) => /首页必须能读出/.test(c)),
+    "PDF 验收不得只认非零字节",
+  );
+  const after = (draft.humanTasks ?? []).filter((t) => t.timing === "after");
+  assert.ok(
+    after.some((t) => t.title.includes("审阅初稿")),
+    "综述初稿须有「审阅初稿再开润色」，坏稿不能直接进润色",
+  );
 });
 
 test("声明了 Quarto 渲染的步骤简报必须写明要跑渲染", () => {

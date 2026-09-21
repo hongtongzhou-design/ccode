@@ -36,10 +36,31 @@ function fileName(path: string): string {
   return p.split("/").pop() ?? p;
 }
 
+/** Quarto/Git 脚手架、渲染中间件：进过程，不进稿件主面。 */
+export function isManuscriptScaffold(path: string): boolean {
+  const p = normReviewPath(path);
+  const base = fileName(p).toLowerCase();
+  if (
+    base === ".gitignore" ||
+    base === ".gitattributes" ||
+    base === "_quarto.yml" ||
+    base === "_quarto.yaml"
+  ) {
+    return true;
+  }
+  if (p.includes("/site_libs/") || p.includes("/_tex/")) return true;
+  if (p.startsWith("output/_tex/") || p.startsWith("output/site_libs/")) return true;
+  return false;
+}
+
 export function deliveryFileGroup(path: string): DeliveryFileGroupId {
   const p = normReviewPath(path);
   const base = fileName(p);
   if (base === "to-fetch.md" || base === "to-fetch.ris") return "fetch";
+  if (isManuscriptScaffold(p)) return "machine";
+  if (base === "screening.md" || base === "included.md" || base === "included.json") {
+    return "other";
+  }
   if (
     base === "index.json" ||
     base.endsWith(".bib") ||
@@ -51,6 +72,10 @@ export function deliveryFileGroup(path: string): DeliveryFileGroupId {
     return "notes";
   }
   if (
+    base === "help-wanted.md" ||
+    p === ".ccode" ||
+    p.startsWith(".ccode/") ||
+    p.includes("/.ccode/") ||
     base === "zotero-sync.md" ||
     p === "scripts" ||
     p.startsWith("scripts/") ||
@@ -64,13 +89,20 @@ export function deliveryFileGroup(path: string): DeliveryFileGroupId {
     base === "design.md" ||
     base === "data-dictionary.md" ||
     base === "analysis-report.md" ||
+    base === "eda-report.md" ||
     p.startsWith("manuscript/") ||
     p.startsWith("chapters/") ||
     p.startsWith("proposal/") ||
+    p.startsWith("survey/") ||
+    p.startsWith("submission/") ||
+    p.startsWith("rebuttal/") ||
     p.startsWith("output/") ||
     p.includes("/manuscript/") ||
     p.includes("/chapters/") ||
     p.includes("/proposal/") ||
+    p.includes("/survey/") ||
+    p.includes("/submission/") ||
+    p.includes("/rebuttal/") ||
     base.endsWith(".tex") ||
     base.endsWith(".qmd")
   ) {
@@ -79,13 +111,80 @@ export function deliveryFileGroup(path: string): DeliveryFileGroupId {
   return "other";
 }
 
+/** 渲染 PDF/docx 不抢稿件主面，源稿在前。 */
+export function isDerivedReviewPreview(path: string): boolean {
+  const p = normReviewPath(path);
+  if (p === "output" || p.startsWith("output/") || p.includes("/output/")) return true;
+  return /\.(pdf|docx)$/i.test(fileName(p));
+}
+
 export function sortDeliveryPaths(paths: readonly string[]): string[] {
   return [...paths].sort((a, b) => {
     const ga = DELIVERY_FILE_GROUP_ORDER.indexOf(deliveryFileGroup(a));
     const gb = DELIVERY_FILE_GROUP_ORDER.indexOf(deliveryFileGroup(b));
     if (ga !== gb) return ga - gb;
+    const ra = manuscriptPreviewRank(a);
+    const rb = manuscriptPreviewRank(b);
+    if (ra !== rb) return ra - rb;
     return normReviewPath(a).localeCompare(normReviewPath(b), "zh");
   });
+}
+
+/** 稿件主面：正文源稿 → Word → PDF → 其余。 */
+export function manuscriptPreviewRank(path: string): number {
+  const base = fileName(path).toLowerCase();
+  if (isManuscriptScaffold(path)) return 90;
+  if (isDerivedReviewPreview(path)) {
+    if (base.endsWith(".docx")) return 20;
+    if (base.endsWith(".pdf")) return 21;
+    return 30;
+  }
+  if (
+    base === "draft.md" ||
+    base === "outline.md" ||
+    base === "review-final.md" ||
+    base.endsWith("-draft.md")
+  ) {
+    return 0;
+  }
+  if (base.endsWith(".md") || base.endsWith(".qmd")) return 1;
+  return 50;
+}
+
+/** 打开审阅时先看笔记/稿件，不把 help-wanted 等过程文件摊在主面。 */
+export function preferredDeliveryPath(paths: readonly string[]): string | null {
+  return deliveryContentPaths(paths)[0] ?? deliveryProcessPaths(paths)[0] ?? null;
+}
+
+export function deliveryContentPaths(paths: readonly string[]): string[] {
+  const content = paths.filter((path) => {
+    const group = deliveryFileGroup(path);
+    return group === "notes" || group === "manuscript";
+  });
+  const source = content.filter((path) => !isDerivedReviewPreview(path));
+  const derived = content
+    .filter((path) => isDerivedReviewPreview(path))
+    .sort((a, b) => derivedPreviewRank(a) - derivedPreviewRank(b) || a.localeCompare(b, "zh"));
+  const rankedSource = [...source].sort((a, b) => {
+    const ra = manuscriptPreviewRank(a);
+    const rb = manuscriptPreviewRank(b);
+    if (ra !== rb) return ra - rb;
+    return normReviewPath(a).localeCompare(normReviewPath(b), "zh");
+  });
+  return [...rankedSource, ...derived];
+}
+
+function derivedPreviewRank(path: string): number {
+  const n = fileName(path).toLowerCase();
+  if (n.endsWith(".docx")) return 0;
+  if (n.endsWith(".pdf")) return 1;
+  return 2;
+}
+
+export function deliveryProcessPaths(paths: readonly string[]): string[] {
+  return sortDeliveryPaths(paths).filter(
+    (path) => deliveryFileGroup(path) === "machine",
+  );
 }
 
 export function groupDeliveryFiles<T extends { path: string }>(

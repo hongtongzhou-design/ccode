@@ -406,10 +406,14 @@
 
 ## 预览组件与步进器
 
-- **md 阅读模式（RX2a）**：md 文件预览默认「阅读版式」（marked 渲染，pin 版本、随 FilePreviewEditor 懒加载 chunk，禁进主包；
-  本地可信内容不引 sanitize 重库），排版样式集中在 App.css `.md-body`（全主题令牌）；「阅读/编辑」切换时 Monaco 保持挂载仅
-  隐藏（未保存改动/undo 不丢）；「⛶ 沉浸阅读」为 `fixed inset-0 z-30` 全宽覆盖层（Esc 退出，终端/PTY 保持挂载）；外部写盘
+- **md 阅读模式（RX2a）**：`.md` / `.markdown` / `.mdx` / `.qmd` 预览默认「阅读版式」（marked 渲染，pin 版本、随 FilePreviewEditor 懒加载 chunk，禁进主包）；
+  排版样式集中在 App.css `.md-body`（全主题令牌）；「阅读/编辑」切换时 Monaco 保持挂载仅
+  隐藏（未保存改动/undo 不丢）；「⛶ 沉浸阅读」为 `fixed inset-0 z-40` 三栏阅读区（Esc 退出，终端/PTY 保持挂载）；外部写盘
   自动刷新沿用现有 watcher 链路，编辑中（dirty）不覆盖。
+  标题 ≥3 出浮动目录；围栏代码块语言名 + ⧉ 复制（不做 Shiki 高亮）；````mermaid` 围栏懒加载 mermaid（`securityLevel: 'strict'` + SVG 二次清洗，点图放大）。
+- **HTML 预览**：`.html` / `.htm` 默认沙箱 iframe（不透明源，无 `allow-same-origin`），可切回源码；相对 CSS 内联、本地图走 `read_image_bytes`。
+- **表格预览**：xlsx/xls/ods 走 calamine；csv/tsv 前端按 RFC 4180 解析后复用同一套格子（200×256）。
+- **认不出的二进制**：失败态给「用系统应用打开 / 在文件夹中显示」，不只报「二进制不支持」。
 - **步骤对照（RX2b）**：跨页「文件树切根」走 store 一次性 `enterCwdReq`（终端页消费后复用 enterCwd/externalCwd「真进入」
   机制，文件树根随活动标签 cwd）；`previewReq` 可带可选 `root`（文本预览的后端根约束，缺省回落活动标签 cwd）。产物核验已移到
   任务行手风琴与步进器圆后小方块（见「产物核验清单」条）；大圆悬浮信息（目录/agent/profile）读终端页同一键 `ccode.wsLast.<worktreePath>`。

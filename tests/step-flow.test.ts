@@ -12,6 +12,7 @@ import {
   isPaywallTaskTitle,
   missingToFetchCount,
   parseToFetchItems,
+  reviewActionVisible,
   pickDiscussResume,
   stepHasDiscussSession,
   stripOptionalTitlePrefix,
@@ -114,6 +115,15 @@ test("Blender/库交付沉到可选区，不挡在步骤工作前面", () => {
   assert.equal(carrier.currentKey, "agent");
 });
 
+test("去评审：待评审必给；进行中只在出字时藏，回合结束仍给", () => {
+  assert.equal(reviewActionVisible("pending"), false);
+  assert.equal(reviewActionVisible("active"), true);
+  assert.equal(reviewActionVisible("active", true), false);
+  assert.equal(reviewActionVisible("review"), true);
+  assert.equal(reviewActionVisible("review", true), true);
+  assert.equal(reviewActionVisible("done"), false);
+});
+
 test("runStatus 映射：review/done 都算 agent 节点完成；评审节点只在 done 完成", () => {
   const review = buildStepFlow({
     step: step({}),
@@ -165,6 +175,29 @@ test("EndNote 交差在精读保存后出现，不挡开工、不靠项目设置
     done.nodes.findIndex((n) => n.kind === "review") <
       done.nodes.findIndex((n) => n.key === endnote?.key),
   );
+});
+
+test("继续精读笔记在 EndNote 底下，不挡开工", () => {
+  const pending = buildStepFlow({
+    step: step({ skills: ["lit-notes"] }),
+    states: [],
+    hasDraft: false,
+    runStatus: "pending",
+    endnoteExport: true,
+    continueNotes: true,
+  });
+  assert.equal(pending.nodes.some((n) => n.key === "continue-notes"), false);
+  const done = buildStepFlow({
+    step: step({ skills: ["lit-notes"] }),
+    states: [],
+    hasDraft: true,
+    runStatus: "done",
+    endnoteExport: true,
+    continueNotes: true,
+  });
+  const keys = done.nodes.filter((n) => n.section === "optional").map((n) => n.key);
+  assert.deepEqual(keys.slice(0, 2), ["endnote-export", "continue-notes"]);
+  assert.equal(done.nodes.find((n) => n.key === "continue-notes")?.skipCurrent, true);
 });
 
 test("可选 after 事项进主干但不抢「当前节点」（v3.97）", () => {

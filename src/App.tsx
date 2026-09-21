@@ -42,6 +42,7 @@ import { normalizeNavCapsuleDelay, resolveStartupNavMode } from "./nav-capsule";
 import { macOverlayPadClass, useMacFullscreen } from "./mac-titlebar";
 import ToastHost from "./components/ToastHost";
 import { toast } from "./toast";
+import { isCancellationRejection } from "./diagnostics";
 
 // 页面懒加载：首屏只拉当前页 chunk，其余页首次访问时才加载
 const ProfilesPage = lazy(() => import("./pages/ProfilesPage"));
@@ -699,6 +700,10 @@ function App() {
       report("onerror", `${e.message} @ ${e.filename}:${e.lineno}`);
     };
     const onRejection = (e: PromiseRejectionEvent) => {
+      if (isCancellationRejection(e.reason)) {
+        e.preventDefault();
+        return;
+      }
       const r = e.reason;
       report(
         "unhandledrejection",

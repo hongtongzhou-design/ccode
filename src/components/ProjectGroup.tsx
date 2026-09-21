@@ -233,20 +233,28 @@ function wsLastConfig(
   }
 }
 
-/** 步骤的终端注意力（流程线「已跑完」）：cwd 落在工作区内的运行标签，confirm 优先于 done。
- *  Agent 进程还在跑时不把中途助手正文当成「已跑完」。 */
+/** 步骤的终端注意力（流程线「已跑完」/藏去评审）：cwd 落在工作区内的运行标签。
+ *  confirm > working > done。Agent 进程还在跑时不把中途助手正文当成「已跑完」。 */
 function stepAttention(
   ws: WorkspaceDto | undefined,
   inputs: RunOverviewInput[],
-): "confirm" | "done" | null {
+): "confirm" | "done" | "working" | null {
   if (!ws) return null;
   const root = normSep(ws.worktreePath).replace(/\/+$/, "");
-  let found: "confirm" | "done" | null = null;
+  let found: "confirm" | "done" | "working" | null = null;
   for (const input of inputs) {
     const cwd = normSep(input.cwd).replace(/\/+$/, "");
     if (cwd !== root && !cwd.startsWith(`${root}/`)) continue;
     if (input.attention === "confirm") return "confirm";
-    if (input.attention === "done" && !(input.running && !input.shell)) {
+    if (input.attention === "working") {
+      found = "working";
+      continue;
+    }
+    if (
+      found !== "working" &&
+      input.attention === "done" &&
+      !(input.running && !input.shell)
+    ) {
       found = "done";
     }
   }
@@ -846,8 +854,8 @@ export default function ProjectGroup({
       ...(st.ws
         ? [
             {
-              label: artifactsStep === index ? "收起产物核验" : "产物核验",
-              title: "查看该步骤的预期产物",
+              label: artifactsStep === index ? "收起本步文件" : "本步文件",
+              title: "打开这一步已经写出的文件",
               onSelect: () =>
                 setArtifactsStep((v) => (v === index ? null : index)),
             },

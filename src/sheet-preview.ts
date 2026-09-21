@@ -88,3 +88,88 @@ export function sheetTruncationLabel(input: {
   if (totalRows <= shownRows && totalCols <= shownCols) return null;
   return `显示 ${shownRows} 行 × ${shownCols} 列（共 ${totalRows} × ${totalCols}）`;
 }
+
+export const CSV_PREVIEW_MAX_ROWS = 200;
+export const CSV_PREVIEW_MAX_COLS = 256;
+
+/** RFC 4180 口径：引号字段可含分隔符与换行，`""` 为字面引号。 */
+export function parseDelimitedRows(text: string, delimiter: string): string[][] {
+  const src = text.replace(/^\uFEFF/, "");
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let i = 0;
+  let quoted = false;
+  while (i < src.length) {
+    const ch = src[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          field += '"';
+          i += 2;
+          continue;
+        }
+        quoted = false;
+        i += 1;
+        continue;
+      }
+      field += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      quoted = true;
+      i += 1;
+      continue;
+    }
+    if (ch === delimiter) {
+      row.push(field);
+      field = "";
+      i += 1;
+      continue;
+    }
+    if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && src[i + 1] === "\n") i += 1;
+      row.push(field);
+      field = "";
+      if (row.length > 1 || row[0] !== "") rows.push(row);
+      row = [];
+      i += 1;
+      continue;
+    }
+    field += ch;
+    i += 1;
+  }
+  if (quoted || field.length > 0 || row.length > 0) {
+    row.push(field);
+    if (row.length > 1 || row[0] !== "") rows.push(row);
+  }
+  return rows;
+}
+
+export function delimitedSheetPreview(
+  text: string,
+  delimiter: string,
+  maxRows = CSV_PREVIEW_MAX_ROWS,
+  maxCols = CSV_PREVIEW_MAX_COLS,
+): {
+  rows: string[][];
+  truncated: boolean;
+  totalRows: number;
+  totalCols: number;
+} {
+  const all = parseDelimitedRows(text, delimiter);
+  const totalRows = all.length;
+  const totalCols = all.reduce((m, r) => Math.max(m, r.length), 0);
+  const truncated = totalRows > maxRows || totalCols > maxCols;
+  const rows = all.slice(0, maxRows).map((r) => {
+    const next = r.slice(0, maxCols);
+    while (next.length < Math.min(totalCols, maxCols)) next.push("");
+    return next;
+  });
+  return { rows, truncated, totalRows, totalCols };
+}
+
+export function csvDelimiterForPath(path: string): "," | "\t" {
+  return /\.tsv$/i.test(path) ? "\t" : ",";
+}

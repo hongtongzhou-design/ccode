@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { SquareArrowOutUpRight, SquareTerminal } from "lucide-react";
 import { useAppStore } from "../store";
-import { AGENTS, AGENT_PROTOCOLS } from "../types";
+import { AGENTS, AGENT_PROTOCOLS, type ScheduleDto } from "../types";
 import { presetsForAgent, NO_PRESET_REASON, type ProviderPreset } from "../presets";
 import {
   extraBindTargets,
@@ -2646,9 +2646,23 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
   }
 
   async function onDelete(p: Profile) {
+    // 定时任务把 profile_id 当硬绑定（scheduler 里缺失即停、拒绝静默改投别的连接），
+    // 解绑前必须把这些任务摊给用户看——否则只会在下次运行时炸在日志里。
+    const affected = await invoke<ScheduleDto[]>("list_schedules")
+      .then((all) => all.filter((s) => s.profileId === p.id))
+      .catch(() => [] as ScheduleDto[]);
+    const warn =
+      affected.length > 0
+        ? `\n\n注意：有 ${affected.length} 条定时任务正在用这个配置` +
+          `（${affected
+            .slice(0, 3)
+            .map((s) => `「${s.name}」`)
+            .join("、")}${affected.length > 3 ? " 等" : ""}）。` +
+          `解绑后它们不会自动改用别的配置，会在下次运行时停下并提示重选连接。`
+        : "";
     if (
       !(await confirmDialog(
-        `解绑「${p.name}」？网关和密钥会留下，其它 Agent 的绑定不受影响。`,
+        `解绑「${p.name}」？网关和密钥会留下，其它 Agent 的绑定不受影响。${warn}`,
         {
           danger: true,
         },

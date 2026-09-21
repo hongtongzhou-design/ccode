@@ -28,6 +28,20 @@ export function compareNotesBySeq(a: string, b: string): number {
   return aa.title.localeCompare(bb.title, "zh");
 }
 
+const SKIP_CONTINUE_NOTES = new Set(["index", "glossary", "inbox"]);
+
+/** 精读步「继续精读笔记」打开哪一篇：按序号，跳过索引/生词本/收件箱。 */
+export function pickContinueNotePath(names: readonly string[]): string | null {
+  const notes = names.filter((name) => {
+    const base = name.replace(/\\/g, "/").split("/").pop() ?? name;
+    if (!/\.md$/i.test(base)) return false;
+    const stem = base.replace(/\.md$/i, "").toLowerCase();
+    return !SKIP_CONTINUE_NOTES.has(stem);
+  });
+  if (!notes.length) return null;
+  return [...notes].sort(compareNotesBySeq)[0] ?? null;
+}
+
 export type LitReadState = "read" | "queued" | "unread";
 
 export function litReadState(hasNote: boolean, included: boolean): LitReadState {

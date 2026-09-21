@@ -35,6 +35,10 @@ import {
   type NavCapsuleItemId,
 } from "../nav-capsule";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import {
+  TERMINAL_FONT_CHOICES,
+  isKnownTerminalFont,
+} from "../terminal-font";
 import type { CustomRuntimeDto, StorageEntryDto } from "../types";
 import { AGENTS } from "../types";
 import { getVersion } from "@tauri-apps/api/app";
@@ -980,7 +984,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         setInstitutionalLoginUrl(settings.institutionalLoginUrl ?? "");
       if (!dirty.has("customFont")) {
         const fam = settings.terminalFontFamily ?? "JetBrains Mono";
-        if (["JetBrains Mono", "Maple Mono NF CN", "Sarasa Mono SC", "Iosevka", "SF Mono", "Menlo", "Consolas"].includes(fam)) {
+        if (isKnownTerminalFont(fam)) {
           setFontFamily(fam);
         } else {
           setFontFamily("__custom__");
@@ -1871,7 +1875,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="终端渲染"
-          hint="流畅（WebGL）滚动更顺、出字更快；个别 Mac 屏幕上文字略软。清晰即系统默认。自动：Windows 用流畅、Mac 用清晰。重新打开的终端生效"
+          hint={
+            IS_MAC
+              ? "macOS 实测：WebGL 把字形塞进 GPU 图集，图集按整数设备像素取整（DPR 2 即 0.5px 步进，实测 7.8 的字宽被压成 7.5），笔画发虚，与 Ghostty 一比明显；「清晰」= 系统默认渲染器，字形最锐利。触控板滚动的重复写入已合帧（420 次事件实测：位置写入 240→143，滚动距离不变），但每帧仍只重绘一次——要极限出字速度仍选「流畅」。重新打开的终端生效"
+              : "流畅（WebGL）出字更快；「清晰」= 系统默认渲染器。触控板滚动已合帧（同一帧内只写一次位置）。自动：Windows 用流畅、Mac 用清晰。重新打开的终端生效"
+          }
         >
           <select
             className={fieldFixed}
@@ -1913,7 +1921,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="终端字体"
-          hint="立即生效；未安装的字体可一键装"
+          hint="立即生效；未安装的字体可一键装。想对齐 Ghostty 就用 JetBrains Mono——Ghostty 空配置下解析出的就是这支、字号 13（本机 ghostty +show-face 实测），App 已内置它的 webfont；「系统等宽」是 macOS 的 SF Mono，观感与 Ghostty 不同"
           extra={
             fontInstallTarget &&
             fontInstallTarget === INSTALLABLE_FONTS[fontFamily] &&
@@ -1966,13 +1974,12 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 }
               }}
             >
-              <option value="JetBrains Mono">JetBrains Mono（内置）</option>
-              <option value="Maple Mono NF CN">Maple Mono NF CN（中文+Nerd Font）</option>
-              <option value="Sarasa Mono SC">Sarasa Mono SC（中文）</option>
-              <option value="Iosevka">Iosevka</option>
-              <option value="SF Mono">SF Mono（macOS）</option>
-              <option value="Menlo">Menlo（macOS）</option>
-              <option value="Consolas">Consolas</option>
+              {/* 选项来自 src/terminal-font.ts 单一出处（加字体只改那一处） */}
+              {TERMINAL_FONT_CHOICES.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
               <option value="__custom__">自定义…</option>
             </select>
             {fontFamily === "__custom__" && (

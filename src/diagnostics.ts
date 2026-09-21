@@ -114,6 +114,17 @@ export function isSoftwareWebGL(): boolean {
   return !webglUsable(probeWebGL(), navigator.platform.startsWith("Win"));
 }
 
+/**
+ * monaco-editor 的 CancellationError：`name` 与 `message` 都是 `"Canceled"`。
+ * WKWebView 下剪贴板 workaround 每次点击/按键会取消上一次 `clipboard.write`
+ * 的 DeferredPromise，拒绝是预期取消，不是故障。
+ */
+export function isCancellationRejection(reason: unknown): boolean {
+  if (!reason || typeof reason !== "object") return false;
+  const rec = reason as { name?: unknown; message?: unknown };
+  return rec.name === "Canceled" && rec.message === "Canceled";
+}
+
 export function collectFrontendDiagnostics(): FrontendDiagnostics {
   return {
     userAgent: navigator.userAgent,

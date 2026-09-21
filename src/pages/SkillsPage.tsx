@@ -1804,7 +1804,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                         className="size-2 shrink-0 rounded-full bg-warn-text"
                                         text={[
                                           stale
-                                            ? `副本过期：${(skill.staleCopies ?? []).join("、")}`
+                                            ? `副本过期：${(skill.staleCopies ?? []).join("、")}。点「同步副本」重新分发。`
                                             : "",
                                           update?.updateAvailable
                                             ? update.message
@@ -1813,6 +1813,19 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                           .filter(Boolean)
                                           .join("\n")}
                                       />
+                                    )}
+                                    {stale && (
+                                      <button
+                                        type="button"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          void onResync(skill);
+                                        }}
+                                        title={`把库里的最新版重新拷到：${(skill.staleCopies ?? []).join("、")}`}
+                                        className="shrink-0 rounded-sm px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1"
+                                      >
+                                        同步副本
+                                      </button>
                                     )}
                                   </div>
                                   {/* 描述次行：名称下挂一行简介提升扫视效率（来源列拆除后横向空间
@@ -2037,12 +2050,21 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                 );
               })()}
             {(preview.skill.staleCopies ?? []).length > 0 && (
-              <span
-                className="ml-2 text-warn-text"
-                title={`副本过期：${(preview.skill.staleCopies ?? []).join("、")}`}
-              >
-                副本需同步
-              </span>
+              <>
+                <span
+                  className="ml-2 text-warn-text"
+                  title={`分发给 Agent 的复制件过期：${(preview.skill.staleCopies ?? []).join("、")}。不是 GitHub 更新，点「同步副本」把库里的最新版重新拷过去。`}
+                >
+                  副本需同步
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void onResync(preview.skill)}
+                  className="ml-2 flex h-7 items-center rounded-sm px-2 text-xs text-cta-text bg-cta hover:opacity-90"
+                >
+                  同步副本
+                </button>
+              </>
             )}
             {updates[preview.skill.id]?.updateAvailable && (
               <span

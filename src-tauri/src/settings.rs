@@ -789,11 +789,7 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         // 逐页绑定不做默认值填充：键缺失即「跟随默认」（同 ai_profiles 口径）
         hotkey_pages: s.hotkey_pages,
         discuss_readonly: s.discuss_readonly.or(Some(true)),
-        status_bar: Some(
-            s.status_bar
-                .or(s.status_bar_in_chat)
-                .unwrap_or(true),
-        ),
+        status_bar: Some(s.status_bar.or(s.status_bar_in_chat).unwrap_or(true)),
         status_bar_in_chat: s.status_bar_in_chat.or(Some(true)),
         terminal_color_report: s.terminal_color_report.or(Some(true)),
         outbound_proxy: s.outbound_proxy.filter(|v| !v.trim().is_empty()),
@@ -930,7 +926,12 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
 /// （profiles.delete 路径持锁内联调用，本函数不再加锁）；失败只记日志不否决删除
 pub(crate) fn clear_profile_refs(id: &str) {
     let Ok(path) = settings_path() else { return };
-    let mut cur = read_from(&path);
+    clear_profile_refs_at(&path, id);
+}
+
+/// 同上的路径可注入版（单测用）；失败只记日志不否决删除
+fn clear_profile_refs_at(path: &Path, id: &str) {
+    let mut cur = read_from(path);
     let mut touched = false;
     if cur.ai_profile_id.as_deref() == Some(id) {
         cur.ai_profile_id = None;
@@ -957,8 +958,30 @@ pub(crate) fn clear_profile_refs(id: &str) {
             cur.active_global_profiles = None;
         }
     }
+    // §9 要求 settings 侧字段一次清干净：默认配置（agent→profile）与停用列表同样指向 profile id，
+    // 漏清会留下永远指不到实体的幽灵 id（迁移改写路径 rewrite_profile_refs 早已覆盖这两个字段）。
+    if let Some(map) = &mut cur.default_profiles {
+        let before = map.len();
+        map.retain(|_, v| v != id);
+        if map.len() != before {
+            touched = true;
+        }
+        if map.is_empty() {
+            cur.default_profiles = None;
+        }
+    }
+    if let Some(list) = &mut cur.hidden_profiles {
+        let before = list.len();
+        list.retain(|v| v != id);
+        if list.len() != before {
+            touched = true;
+        }
+        if list.is_empty() {
+            cur.hidden_profiles = None;
+        }
+    }
     if touched {
-        if let Err(e) = write_to(&path, &cur) {
+        if let Err(e) = write_to(path, &cur) {
             crate::logbuf::record(
                 "error",
                 "settings",
@@ -1161,6 +1184,42 @@ mod tests {
         assert!(read_checked(&p).is_err());
         assert!(write_to(&p, &AppSettingsDto::default()).is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "{invalid}");
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn clear_profile_refs_clears_all_five_fields() {
+        let p = tmp();
+        let mut s = AppSettingsDto::default();
+        s.ai_profile_id = Some("gone".into());
+        s.ai_profiles = Some(BTreeMap::from([
+            ("claude-code".to_string(), "gone".to_string()),
+            ("codex".to_string(), "keep".to_string()),
+        ]));
+        s.default_profiles = Some(BTreeMap::from([
+            ("claude-code".to_string(), "gone".to_string()),
+            ("gemini".to_string(), "keep".to_string()),
+        ]));
+        s.hidden_profiles = Some(vec!["gone".into(), "keep".into()]);
+        s.active_global_profiles = Some(BTreeMap::from([(
+            "claude-code".to_string(),
+            "gone".to_string(),
+        )]));
+        write_to(&p, &s).unwrap();
+        clear_profile_refs_at(&p, "gone");
+        let after = read_checked(&p).unwrap();
+        assert_eq!(after.ai_profile_id, None);
+        assert_eq!(
+            after.ai_profiles,
+            Some(BTreeMap::from([("codex".to_string(), "keep".to_string())]))
+        );
+        assert_eq!(
+            after.default_profiles,
+            Some(BTreeMap::from([("gemini".to_string(), "keep".to_string())])),
+            "默认配置里的幽灵引用必须一起清（§9 settings 五字段）"
+        );
+        assert_eq!(after.hidden_profiles, Some(vec!["keep".to_string()]));
+        assert_eq!(after.active_global_profiles, None);
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 
@@ -1729,8 +1788,15 @@ mod tests {
             .find(|(k, _)| k == "no_proxy")
             .map(|(_, v)| v.clone())
             .unwrap();
-        for host in ["127.0.0.1", "ghcr.nju.edu.cn", "mirrors.tuna.tsinghua.edu.cn"] {
-            assert!(np.split(',').any(|e| e.trim() == host), "NO_PROXY 缺 {host}");
+        for host in [
+            "127.0.0.1",
+            "ghcr.nju.edu.cn",
+            "mirrors.tuna.tsinghua.edu.cn",
+        ] {
+            assert!(
+                np.split(',').any(|e| e.trim() == host),
+                "NO_PROXY 缺 {host}"
+            );
         }
         // 用户自定义 no_proxy 优先，镜像主机去重追加
         let custom = download_proxy_env_from(

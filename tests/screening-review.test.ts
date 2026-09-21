@@ -83,6 +83,7 @@ test("同时有 screening 与 included 时按筛选排文件", () => {
   assert.equal(preferredReviewPath(["papers/included.json", "scripts/a.py"]), "papers/included.json");
   assert.equal(reviewFileGroup("papers/included.json"), "machine");
   assert.equal(reviewFileGroup("scripts/rename_downloads.py"), "machine");
+  assert.equal(reviewFileGroup(".ccode/help-wanted.md"), "machine");
   const groups = groupReviewFiles(paths.map((path) => ({ path })));
   assert.deepEqual(
     groups.map((g) => [g.id, g.files.map((f) => f.path)]),

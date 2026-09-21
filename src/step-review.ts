@@ -7,6 +7,7 @@ import {
   isScreeningReviewStep,
   shouldPrioritizeScreeningFiles,
 } from "./screening-review.ts";
+import { deliveryFileGroup, manuscriptPreviewRank } from "./review-file-groups.ts";
 
 export type StepReviewKind = "screening" | "files" | "acceptance" | "default";
 
@@ -16,7 +17,7 @@ export interface StepReviewProfile {
   headerHint: string | null;
   groupFiles: boolean;
   hideListDiffs: boolean;
-  /** 改动对照不占主面底下，从右侧拉出对照窗 */
+  /** 已废弃：对照改动抽屉。检索/精读/大纲一律用基础检查旁的 清单|笔记|稿件 / 过程 / 文件。 */
   filesInDrawer: boolean;
   evidence: "screening" | "report" | "none";
   acceptance: "screening" | "default" | "none";
@@ -113,4 +114,30 @@ export function resolveStepReviewProfile(
   if (isAcceptanceReviewStep(step)) return STEP_REVIEW_PROFILES.acceptance;
   if (step) return STEP_REVIEW_PROFILES.files;
   return STEP_REVIEW_PROFILES.default;
+}
+
+export type ReviewPane = "content" | "process" | "files";
+
+/** 检索、精读、大纲、写作同一套顶栏页签。Git 对照只在「文件」。 */
+export function reviewPaneTabs(
+  kind: StepReviewKind,
+  filePaths: readonly string[] = [],
+): { id: ReviewPane; label: string }[] | null {
+  if (kind === "screening") {
+    return [
+      { id: "content", label: "清单" },
+      { id: "process", label: "过程" },
+      { id: "files", label: "文件" },
+    ];
+  }
+  if (kind === "files") {
+    const groups = new Set(filePaths.map((path) => deliveryFileGroup(path)));
+    const hasArticle = filePaths.some((path) => manuscriptPreviewRank(path) === 0);
+    return [
+      { id: "content", label: hasArticle || !groups.has("notes") ? "稿件" : "笔记" },
+      { id: "process", label: "过程" },
+      { id: "files", label: "文件" },
+    ];
+  }
+  return null;
 }

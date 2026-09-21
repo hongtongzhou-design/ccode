@@ -301,7 +301,7 @@ export function officeDocMatchesQuery(
   return n.includes(q) || r.includes(q);
 }
 
-/** 办公就地预览形态。csv/txt/md 走文本；xlsx 走表格；doc/rtf/幻灯请用系统应用。 */
+/** 办公就地预览形态。txt/md 走文本；xlsx/csv 走表格；doc/rtf/幻灯请用系统应用。 */
 export type OfficePreviewMode =
   | "text"
   | "pdf"
@@ -320,9 +320,7 @@ export function officePreviewMode(path: string): OfficePreviewMode {
     ext === "markdown" ||
     ext === "mdx" ||
     ext === "qmd" ||
-    ext === "txt" ||
-    ext === "tsv" ||
-    ext === "csv"
+    ext === "txt"
   ) {
     return "text";
   }
@@ -337,7 +335,14 @@ export function officePreviewMode(path: string): OfficePreviewMode {
   ) {
     return "image";
   }
-  if (ext === "xlsx" || ext === "xlsm" || ext === "xls" || ext === "ods") {
+  if (
+    ext === "xlsx" ||
+    ext === "xlsm" ||
+    ext === "xls" ||
+    ext === "ods" ||
+    ext === "csv" ||
+    ext === "tsv"
+  ) {
     return "xlsx";
   }
   if (ext === "docx") return "docx";

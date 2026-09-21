@@ -536,9 +536,9 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) => {
-                let idle = Duration::from_millis(mono_ms().saturating_sub(
-                    last_active_ms.load(Ordering::Relaxed),
-                ));
+                let idle = Duration::from_millis(
+                    mono_ms().saturating_sub(last_active_ms.load(Ordering::Relaxed)),
+                );
                 deadline_hit = pty_deadline_kind(start.elapsed(), idle);
                 if deadline_hit.is_some() {
                     // unix 下杀整个进程组：brew/npm 拉起的子孙（curl 等）与父同组
@@ -562,7 +562,10 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
         let mut msg = match kind {
             PtyDeadline::Hard => format!("命令超时（{} 秒）", TIMEOUT.as_secs()),
             PtyDeadline::Idle => {
-                format!("命令 {} 秒无任何输出（进程挂起或网络中断），已终止", IDLE_TIMEOUT.as_secs())
+                format!(
+                    "命令 {} 秒无任何输出（进程挂起或网络中断），已终止",
+                    IDLE_TIMEOUT.as_secs()
+                )
             }
         };
         if !tail.is_empty() {
@@ -920,10 +923,9 @@ fn brew_latest(pkg: &str, cask: bool) -> Option<String> {
     for (k, v) in brew_env_pairs("brew", crate::settings::brew_mirror_enabled()) {
         c.env(k, v);
     }
-    for (k, v) in crate::settings::download_proxy_env(&[
-        "mirrors.tuna.tsinghua.edu.cn",
-        "ghcr.nju.edu.cn",
-    ]) {
+    for (k, v) in
+        crate::settings::download_proxy_env(&["mirrors.tuna.tsinghua.edu.cn", "ghcr.nju.edu.cn"])
+    {
         c.env(k, v);
     }
     let out = c.output().ok()?;

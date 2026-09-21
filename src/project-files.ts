@@ -89,10 +89,40 @@ export function projectFilePreviewKind(path: string): ProjectFilePreviewKind {
   ) {
     return "image";
   }
-  if (ext === "xlsx" || ext === "xlsm" || ext === "xls" || ext === "ods") {
+  if (
+    ext === "xlsx" ||
+    ext === "xlsm" ||
+    ext === "xls" ||
+    ext === "ods" ||
+    ext === "csv" ||
+    ext === "tsv"
+  ) {
     return "xlsx";
   }
   if (ext === "docx") return "docx";
   if (ext === "doc" || ext === "rtf") return "legacy-doc";
   return "text";
+}
+
+const ARTIFACT_TEXT_EXTS = new Set(["md", "markdown", "txt", "ris", "bib"]);
+
+/** 产物核验点开：文本走编辑弹层，pdf/docx/表格/图就地预览，其余才跳运行页。 */
+export function artifactPreviewSurface(
+  path: string,
+): "text" | "media" | "jump" {
+  const name = path.split(/[\\/]/).pop() ?? path;
+  const ext = name.includes(".")
+    ? name.slice(name.lastIndexOf(".") + 1).toLowerCase()
+    : "";
+  if (ARTIFACT_TEXT_EXTS.has(ext)) return "text";
+  const kind = projectFilePreviewKind(path);
+  if (
+    kind === "pdf" ||
+    kind === "docx" ||
+    kind === "xlsx" ||
+    kind === "image"
+  ) {
+    return "media";
+  }
+  return "jump";
 }

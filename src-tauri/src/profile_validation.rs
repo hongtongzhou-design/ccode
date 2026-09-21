@@ -177,26 +177,11 @@ pub(crate) fn validate_profile_fields(profile: &Profile) -> Result<Vec<String>, 
         }
     }
     if profile.no_auth {
-        const AUTH_KEYS: &[&str] = &[
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "OPENAI_API_KEY",
-            "CODEX_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "CODEBUDDY_API_KEY",
-            "CODEBUDDY_AUTH_TOKEN",
-            "CURSOR_API_KEY",
-            "XAI_API_KEY",
-            "GROK_CODE_XAI_API_KEY",
-            "KIMI_API_KEY",
-            "KIMI_MODEL_API_KEY",
-            "OPENCODE_CONFIG_CONTENT",
-        ];
+        // 认证变量闭集单一出处：profiles::AUTH_BEARING_ENV（导出剔除查同一张表，防两处名单漂移）
         if let Some(key) = profile
             .extra_env
             .keys()
-            .find(|key| AUTH_KEYS.contains(&key.as_str()))
+            .find(|key| crate::profiles::auth_bearing_env_name(key))
         {
             return Err(format!("无密钥模式不能附加认证变量 {key}"));
         }
@@ -1120,6 +1105,8 @@ pub async fn probe_gateway_slot(
             name: "草稿".into(),
             no_auth: no_auth.unwrap_or(draft_key.is_none()),
             key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: crate::profiles::ProtocolSlots::default(),
             header_env: Default::default(),
             models: Vec::new(),
@@ -1896,6 +1883,28 @@ mod tests {
             .header_env
             .insert("Bad:Header".into(), "RELAY_KEY".into());
         assert!(validate_profile_fields(&p).is_err());
+    }
+
+    #[test]
+    fn no_auth_rejects_auth_bearing_env_from_shared_list() {
+        let mut p = profile("opencode");
+        p.no_auth = true;
+        // OPENCODE_CONFIG_CONTENT 内嵌整份带凭据的配置，不含 KEY/TOKEN 字面，只有闭集能拦
+        p.extra_env.insert(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            r#"{"apiKey":"sk-inside-json"}"#.into(),
+        );
+        assert!(validate_profile_fields(&p).is_err());
+        p.extra_env.clear();
+        // 闭集判定大小写不敏感：小写写法不得绕过
+        p.extra_env
+            .insert("anthropic_api_key".into(), "sk-lower".into());
+        assert!(validate_profile_fields(&p).is_err());
+        p.extra_env.clear();
+        // 非认证变量照常放行（别把子串启发式搬到这里，否则 OPENCODE_CONFIG 这类会被误伤）
+        p.extra_env
+            .insert("OPENCODE_CONFIG".into(), "/tmp/opencode.json".into());
+        assert!(validate_profile_fields(&p).is_ok());
     }
 
     #[test]

@@ -3632,6 +3632,34 @@ pub struct HelpRequestDto {
 }
 
 pub(crate) const HELP_WANTED_FILE: &str = ".ccode/help-wanted.md";
+pub(crate) const REVIEW_NOTES_FILE: &str = ".ccode/review-notes.md";
+
+/// 人在评审里写下的退回意见。只写本工作树 `.ccode/review-notes.md`。
+#[tauri::command]
+pub async fn write_review_notes(
+    worktree_path: String,
+    content: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        const CAP: usize = 32 * 1024;
+        if content.len() > CAP {
+            return Err("评审意见超过 32 KB".into());
+        }
+        let root = std::fs::canonicalize(crate::sessions::expand_tilde(&worktree_path))
+            .map_err(|e| format!("工作区目录无效: {e}"))?;
+        let conn = db()?;
+        let ok = query_workspaces(&conn)?.iter().any(|w| {
+            w.status == "active"
+                && crate::paths::same_path(&w.worktree_path, &root.to_string_lossy())
+        });
+        if !ok {
+            return Err("不是已登记的活跃工作区，拒绝写入评审意见".into());
+        }
+        crate::profiles::atomic_write(&root.join(REVIEW_NOTES_FILE), &content)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 fn parse_help_wanted(text: &str) -> Vec<String> {
     text.chars()
@@ -3749,7 +3777,11 @@ pub async fn merge_workspace(
     }
     if out.merged {
         if let Err(e) = crate::endnote::export_if_configured(std::path::Path::new(&paths.1)) {
-            crate::logbuf::record("warn", "endnote", &format!("保存进项目后生成 EndNote 导入文件失败: {e}"));
+            crate::logbuf::record(
+                "warn",
+                "endnote",
+                &format!("保存进项目后生成 EndNote 导入文件失败: {e}"),
+            );
         }
     }
     Ok(out)

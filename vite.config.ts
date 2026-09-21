@@ -1,6 +1,58 @@
-import { defineConfig } from "vite";
+import { readFileSync } from "node:fs";
+import type { Plugin as EsbuildPlugin } from "esbuild";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+
+/** monaco 在 WKWebView 里每次 click/keydown 会 cancel 上一次剪贴板 DeferredPromise。 */
+const MONACO_CLIPBOARD_CANCEL =
+  "this.webKitPendingClipboardWritePromise.cancel();";
+const MONACO_CLIPBOARD_CANCEL_PATCH =
+  "void this.webKitPendingClipboardWritePromise.p.catch(() => {}); this.webKitPendingClipboardWritePromise.cancel();";
+
+function patchMonacoClipboardCancel(code: string): string | null {
+  if (
+    !code.includes(MONACO_CLIPBOARD_CANCEL) ||
+    code.includes(MONACO_CLIPBOARD_CANCEL_PATCH)
+  ) {
+    return null;
+  }
+  return code.replace(MONACO_CLIPBOARD_CANCEL, MONACO_CLIPBOARD_CANCEL_PATCH);
+}
+
+function monacoClipboardCancelPlugin(): Plugin {
+  return {
+    name: "monaco-clipboard-cancel",
+    transform(code, id) {
+      const path = id.replace(/\\/g, "/");
+      if (
+        !path.includes("/monaco-editor/") ||
+        !path.includes("clipboardService")
+      ) {
+        return undefined;
+      }
+      const patched = patchMonacoClipboardCancel(code);
+      return patched ? { code: patched, map: null } : undefined;
+    },
+  };
+}
+
+function monacoClipboardCancelEsbuildPlugin(): EsbuildPlugin {
+  return {
+    name: "monaco-clipboard-cancel",
+    setup(build) {
+      build.onLoad({ filter: /clipboardService\.js$/ }, (args) => {
+        if (!args.path.replace(/\\/g, "/").includes("/monaco-editor/")) {
+          return;
+        }
+        const patched = patchMonacoClipboardCancel(
+          readFileSync(args.path, "utf8"),
+        );
+        return patched ? { contents: patched, loader: "js" } : undefined;
+      });
+    },
+  };
+}
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -14,7 +66,12 @@ const port = Number(process.env.CCODE_PORT ?? 17575);
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), monacoClipboardCancelPlugin()],
+  optimizeDeps: {
+    esbuildOptions: {
+      plugins: [monacoClipboardCancelEsbuildPlugin()],
+    },
+  },
 
   build: {
     rollupOptions: {
@@ -32,6 +89,7 @@ export default defineConfig(async () => ({
             }
             return "monaco";
           }
+          if (id.includes("node_modules/mermaid")) return "mermaid";
           return undefined;
         },
       },

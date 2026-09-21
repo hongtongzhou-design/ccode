@@ -11,10 +11,8 @@ import type { DirEntryDto } from "./FileTree";
 import { absTime, relTime } from "../rel-time";
 import { useAppStore } from "../store";
 import type { ProjectConfigReadDto } from "../types";
-
-/** 可就地预览的文本类扩展名（阅读态渲染 md，其余按纯文本预格式化展示）；
- *  pdf/docx 预览组件接线重（onAskAi 等在终端页），维持跳终端页 */
-const INLINE_PREVIEW_EXTS = ["md", "markdown", "txt", "ris", "bib"];
+import { artifactPreviewSurface } from "../project-files";
+import ProjectFilePreview from "./ProjectFilePreview";
 
 /** 拖出会话的悬浮图标（48×48 文档形 PNG，生成脚本见 git 历史；只是拖拽时的视觉反馈，不要求精美） */
 const DRAG_ICON_DATA_URL =
@@ -175,7 +173,6 @@ export default function ArtifactChecklist({
   const setPage = useAppStore((s) => s.setPage);
   const [rows, setRows] = useState<ArtifactRow[] | null>(null);
   const [stepName, setStepName] = useState<string | null>(null);
-  const [acceptanceCriteria, setAcceptanceCriteria] = useState<string[]>([]);
   // 步骤反查失败（未注册项目/未绑定步骤/读取失败）时给明确提示而非空清单
   const [stepFound, setStepFound] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -195,6 +192,10 @@ export default function ArtifactChecklist({
     readOnlyReason: string | null;
     saving: boolean;
     error: string | null;
+  } | null>(null);
+  const [mediaPreview, setMediaPreview] = useState<{
+    path: string;
+    name: string;
   } | null>(null);
 
   async function openInlinePreview(f: DirEntryDto) {
@@ -345,7 +346,6 @@ export default function ArtifactChecklist({
           if (!stale) {
             setStepFound(false);
             setStepName(null);
-            setAcceptanceCriteria([]);
             setRows([]);
           }
           return;
@@ -354,13 +354,11 @@ export default function ArtifactChecklist({
         if (!stale) {
           setStepFound(true);
           setStepName(step.name);
-          setAcceptanceCriteria(step.acceptanceCriteria ?? []);
           setRows(loaded);
         }
       } catch {
         if (!stale) {
           setStepFound(false);
-          setAcceptanceCriteria([]);
           setRows([]);
         }
       } finally {
@@ -376,7 +374,7 @@ export default function ArtifactChecklist({
     <div className="mt-2 rounded-md ccode-well p-2">
       <div className="mb-1 flex items-center gap-2">
         <span className="text-xs text-l2">
-          「{stepName ?? workspaceName}」产物核验
+          「{stepName ?? workspaceName}」本步文件
         </span>
         <span
           className="min-w-0 truncate font-mono text-micro text-l4"
@@ -405,35 +403,20 @@ export default function ArtifactChecklist({
         </p>
       ) : (
         <>
-        {acceptanceCriteria.length > 0 && (
-          <div className="mb-2 rounded-sm border border-white/5 ccode-well px-2 py-1.5">
-            <div className="mb-1 text-micro text-l4">内容级验收证据</div>
-            <ul className="space-y-0.5">
-              {acceptanceCriteria.map((criterion) => (
-                <li key={criterion} className="flex gap-2 text-xs">
-                  <span className="shrink-0 text-l4">
-                    {criterion.startsWith("machine:") ? "⚙" : "○"}
-                  </span>
-                  <span className="min-w-0 flex-1 break-words font-mono text-l3">
-                    {criterion}
-                  </span>
-                  <span className="shrink-0 text-micro text-l4">
-                    {criterion.startsWith("machine:") ? "自动规则" : "人工核对"}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
         <ul className="space-y-0.5">
           {rows.map((row) => {
             const produced = row.files.length > 0;
             // 单文件产物：行本身可点击预览；目录产物：行只表状态，文件逐个列在下方
             const single = row.files.length === 1 ? row.files[0] : null;
-            // 文本类就地预览（TASK.md 同款弹层）；pdf/docx 等跳终端页（右栏 preview 页签）
+            // 文本类就地预览（TASK.md 同款弹层）；pdf/docx/表格/图同页弹层；其余才跳运行页
             const openFile = (f: DirEntryDto) => {
-              if (INLINE_PREVIEW_EXTS.includes(extOf(f.name))) {
+              const surface = artifactPreviewSurface(f.path);
+              if (surface === "text") {
                 void openInlinePreview(f);
+                return;
+              }
+              if (surface === "media") {
+                setMediaPreview({ path: f.path, name: f.name });
                 return;
               }
               setPreviewReq({ path: f.path, name: f.name, root });
@@ -453,9 +436,9 @@ export default function ArtifactChecklist({
               </>
             );
             const fileTitle = (f: DirEntryDto) =>
-              INLINE_PREVIEW_EXTS.includes(extOf(f.name))
-                ? `预览 ${f.path}`
-                : `在终端页预览 ${f.path}`;
+              artifactPreviewSurface(f.path) === "jump"
+                ? `在运行页预览 ${f.path}`
+                : `预览 ${f.path}`;
             return (
               <li key={row.entry}>
                 {!produced ? (
@@ -641,6 +624,62 @@ export default function ArtifactChecklist({
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {mediaPreview && (
+        <Modal
+          open
+          title={mediaPreview.name}
+          onClose={() => setMediaPreview(null)}
+          size="xl"
+          overflow="hidden"
+          panelClassName="z-50 h-[80vh]"
+          contentClassName="flex min-h-0 flex-1 flex-col"
+        >
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="mb-2 flex shrink-0 items-baseline gap-2">
+              <h2 className="min-w-0 truncate text-base font-semibold text-l1">
+                {mediaPreview.name}
+              </h2>
+              <span
+                className="min-w-0 truncate font-mono text-micro text-l4"
+                title={mediaPreview.path}
+              >
+                {mediaPreview.path}
+              </span>
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-field">
+              <ProjectFilePreview
+                path={mediaPreview.path}
+                root={root}
+              />
+            </div>
+            <div className="mt-3 flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setPreviewReq({
+                    path: mediaPreview.path,
+                    name: mediaPreview.name,
+                    root,
+                  });
+                  setPage("terminal");
+                  setMediaPreview(null);
+                }}
+                title="改用运行页打开"
+                className="rounded-sm px-2 py-1.5 text-micro text-l4 hover:bg-hover hover:text-l2"
+              >
+                在运行页打开
+              </button>
+              <button
+                type="button"
+                onClick={() => setMediaPreview(null)}
+                className="ml-auto rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover"
+              >
+                关闭
+              </button>
             </div>
           </div>
         </Modal>

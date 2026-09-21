@@ -1,5 +1,8 @@
 import type { HumanTaskDto, ProjectStepDto } from "./types";
-import { KEEP_WORKING_CLAUSE } from "./step-decisions.ts";
+import {
+  DRAFT_EVIDENCE_DEFAULT,
+  KEEP_WORKING_CLAUSE,
+} from "./step-decisions.ts";
 
 /**
  * 内置流水线模板库（§11.3 机制二、§11.4 P1b 首启引导轻量版）：
@@ -74,6 +77,7 @@ const LIT_NOTES_WRITE =
   "可逆准备只含 PDF 改名、index 骨架、bib 对账、合法 OA 尝试，不包括批量生成笔记正文。" +
   "「按摘要记」= 根据摘要消化来写并标「仅摘要」，不是贴英文。" +
   "分批读写时每批已读的写真笔记、可中途 git 提交；提交后立刻继续：先写完已确认核心篇（有 PDF 的写精读），再按摘要写完非核心，不要每批停下来等人。" +
+  "有全文的笔记在可引用点末列可引用图（Fig./Table 编号｜画了什么｜可拼或仅引用）；仅摘要写无可引用图，不臆造图号。" +
   "pending 只留给待确认、或摘要和题录都不足以写笔记的篇，不是「先写一批再汇报」的许可。\n";
 
 const LIT_NOTES_INDEX_RECORDS =
@@ -211,7 +215,8 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     ],
     skills: ["lit-notes"],
     run: [],
-    // 「继续精读笔记（沉浸阅读区）」已撤（2026-09-19）：说明书不是收尾活，入口在笔记/PDF 的「⛶ 沉浸阅读」。
+    // 「继续精读笔记」不再是人工事项（2026-09-19 撤主干收尾）。保存进项目后，
+    // 可选区「导入到 EndNote」底下给出入口（2026-09-20），进沉浸阅读；改完开大纲走未存进历史软门。
     // 「精读力度怎么分」卡片已移除（v3.97，用户拍板）：力度要看到清单规模和全文到位率才定得了，
     // 开工前点卡片等于让人盲猜——与 v3.89 移除「纳入标准定多严」同一道理。
     // 改为 agent 粗读清单后带着数字经 help-wanted.md 按需问（见上方简报第 2 条）。
@@ -227,10 +232,10 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "2. 拆解范式卡片：从 papers/included.md 选择足以比较候选框架的综述（篇数按问题，不凑数量）（问题相关性与方法透明度优先；期刊/被引仅为发现线索，不作证据权重；清单里没有综述类文献时如实说明并跳过本步，不虚构范式），每篇拆「结构逻辑 / 详略配比 / 论证顺序」三项；\n" +
       "3. **先报候选再融合**：把拆出的范式卡片连同「我建议以哪篇为骨架（按核心问题、证据分歧与读者需求给理由）+ 建议的综述卖点（想让读者读完记住的一句话）」写进 .ccode/help-wanted.md 问用户一句（附兜底：未回复仅保留候选框架，不锁定论证），写完仅推进无依赖、可逆的准备。；\n" +
       "4. 融合构造框架：以最能回答核心问题、解释证据分歧且适合读者的范式做骨架（用户已拍板时从用户选择），核心空白落到具体章节，其余说明未覆盖理由；范式冲突时选更符合核心问题与证据结构的，落选范式的局部优点吸收为节内参考；必要背景/方法/综合章说明其对回答问题的作用，不强迫每章挂 gap；空白无处安放时允许新增章节并在该节标注「空白驱动新增」；\n" +
-      "5. 产出 outline.md：章节结构（引言 / 背景 / 主题各节 / 讨论 / 结论），每节给必要要点、拟引用 bib 键及章节作用（适用时回应空白编号）；末尾固定附「## 框架推演」段（空白清单 / 范式卡片 / 融合理由三块）；\n" +
+      "5. 产出 outline.md：章节结构（引言 / 背景 / 主题各节 / 讨论 / 结论），每节给必要要点、拟引用 bib 键及章节作用（适用时回应空白编号）；拟引用必须分「可写正文 / 仅线索」，初稿按这个等级写。有小节则每小节、否则每章写用图计划（能拼则列出源 [@键] Fig.n，不能拼则仅引用一篇的图号）；禁止写「初稿待绘制」。源图只来自笔记可引用图；G 编号只出现在「框架推演」，不要让初稿把 G1 写进正文。篇幅数字只是读者预期，旁注「不是初稿必须凑到的词数」。末尾固定附「## 框架推演」段（空白清单 / 范式卡片 / 融合理由三块）；\n" +
       "6. 在 outline.md 附证据综合表：研究对象/设计/结果/局限/支持强度/分歧/原文位置；核心论断逐项做支持性核验，不数赞成论文投票。摘要-only 只可支持摘要实际报告的信息；核心全文未得则收窄结论或阻塞。不得把研究作者的 gap 宣传当已证实事实；记录最邻近反例与检索边界。\n" +
       "7. 只引用 references.bib 中存在的键，不为大纲新造引用。\n" +
-      "完成标准：outline.md 结构完整，每节要点/引用键/章节作用齐全，「框架推演」段三块内容齐备。\n" +
+      "完成标准：outline.md 结构完整，每节要点/引用键/章节作用齐全，「框架推演」段三块内容齐备；每章拟引用分可写正文与仅线索，可写键均在证据综合表且非题录级；表内论断编号全部定义；图表占位写明已有数据来源（无现成数据则改示意图，禁止空许诺计数）；每章/小节有用图计划（拼或仅引用）。质量状态在拟引用未分档、论断编号未闭集或用图计划缺源时不得高于已生成待审。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     expectedArtifacts: ["outline.md"],
     inputs: ["notes/", "papers/included.md", "papers/included.json", "references.bib"],
@@ -240,7 +245,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       {
         title: "审阅 outline.md 再开初稿",
         guidance:
-          "核对核心问题、证据综合表和原文支持范围：哪些关键文献仅摘要？有无相反结果？框架是否真正解释分歧？认可范围和未决项写入大纲，再开始初稿。",
+          "核对核心问题、证据综合表和原文支持范围：哪些关键文献仅摘要？有无相反结果？框架是否真正解释分歧？用图计划是「拼/仅引用」还是写成了「待绘制」？篇幅有没有被写成初稿必须凑的词数？认可范围和未决项写入大纲，再开始初稿。",
         target: "",
         timing: "after",
         // 非可选（用户拍板）：大纲是全流水线返工最贵的点，不合意时初稿整篇白写——
@@ -255,23 +260,32 @@ const REVIEW_STEPS: ProjectStepDto[] = [
   {
     name: "综述初稿",
     workspaceName: "draft",
-    decisionMode: "hard_pause",
-    decisions: [{ q: "写作依据的已评阅证据与结论范围（仅探索/待补时明确草稿边界）", options: [] }],
     brief:
       "输入：outline.md（含「框架推演」段）、notes/、references.bib（已随 main 合并在本工作区内）。写作规范全程按 review-writing 技能执行。\n" +
-      "1. 按 outline.md 用规范学术英文撰写综述初稿，产出 manuscript/draft.md（篇幅按读者/期刊与证据需要确定；6000-8000 词仅参考，课题另有约定时从其约定）；全局设定为严格档时，Methods 须写检索策略（库、日期、式、筛选流程），并如实声明方法类型、单人筛选及实际复核范围，不把严格检索当作系统综述质量证明；\n" +
-      "2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献、严禁新造键；\n" +
-      "3. 对照表用 markdown 真表，不假装已绘图；概念图/流程图可占位「图 N：…（待绘制）」，不虚构数据；\n" +
-      "4. 没有文献支撑的论断不得下；必须保留的判断在句末标 [待核实]；\n" +
-      "5. 用本步骤 run 脚本渲染 PDF/docx（环境检查与产物登记按 quarto-render 技能），产物写入本工作区 output/（评审合并后进项目根）。\n" +
-      "完成标准：manuscript/draft.md 覆盖大纲全部章节，引用键全部可在 references.bib 中解析，run 脚本渲染通过。\n" +
+      `写作范围由你按笔记判断：${DRAFT_EVIDENCE_DEFAULT}。人在审阅初稿时拍板，开工前不再问范围。\n` +
+      "1. 按 outline.md 用规范学术英文撰写综述初稿，产出 manuscript/draft.md。**词数不是完成标准**（项目/大纲里的篇幅数字是读者预期，禁止改写成「以 N 词为目标」）。某节薄只回 notes/ 对应笔记的方法/结果/可引用点；笔记有来源 PDF 且非仅摘要时打开该 PDF 核对原文位置再补一句可定位证据；没有更多证据就保持短并标 [待核实]。禁止同义复述、空转场、防御性套话为凑字数。中心论点引言一次、结论一次。标题不要手写序号（Quarto 会再编号）；空白编号 G1 不准进稿件。全局设定为严格档时，Methods 须写检索策略（库、日期、式、筛选流程），并如实声明方法类型、单人筛选及实际复核范围，不把严格检索当作系统综述质量证明；\n" +
+      "2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献、严禁新造键。大纲「仅线索」/摘要级来源：定量句必须 [待核实] 或改成「摘要报告了」；不得把方法段的「32 篇全文」当许可，把其余文献写成已确立。\n" +
+      "3. 对照表用 markdown 真表。按 outline.md 用图计划走 review-figures：能拼则从全文 PDF 裁源图、脚本组 panel 写入 figures/figN.png（图注 Adapted from）；裁不到或不能拼则只标记「见 [@键] Fig.n」。禁止「待绘制」占位。撑主论点的图没有数据就改口。不臆造图号、不把整页当图、不非等比拉伸；\n" +
+      "4. 没有文献支撑的论断不得下。摘要只放全文撑得住的主张，禁止摘要里出现 [待核实] 或未测的近端动作（operando/软包等放 outlook 并标明是建议）。范围点名的主题后文必须展开，否则从范围删除。结论只写本综述论证了什么。\n" +
+      "5. 用本步骤 run 脚本先渲 docx、再渲 PDF（环境检查与产物登记按 quarto-render 技能）。PDF 若 lualatex 无日志空转，按技能停掉改 xelatex，不要空等。产物写入本工作区 output/（评审合并后进项目根）。\n" +
+      "6. 交稿前自检：打开 output/draft.pdf 第一页，必须能读出英文标题和段落；乱码、空心方框、目录页码变成字母 = 渲染失败，质量状态不得高于已生成待审，docx 仍交人审。图裁不到就改成「见 [@键] Fig.n」，禁止用「待绘制」充产出。正文不得留 G1/任务编号、内部清单号。作者「待补」写进验收摘要等人填，不假装齐套。\n" +
+      "完成标准：manuscript/draft.md 覆盖大纲全部章节；引用键全部可在 references.bib 中解析；扩写能回溯到笔记或原文；不以词数判定完成；PDF 首页可读或已如实报渲染失败；人尚未审阅初稿前不得进入润色。\n" +
       QUALITY_STATUS,
-    expectedArtifacts: ["manuscript/draft.md", "output/draft.pdf", "output/draft.docx"],
+    expectedArtifacts: ["manuscript/draft.md", "output/draft.pdf", "output/draft.docx", "figures/"],
     inputs: ["outline.md", "notes/", "references.bib"],
-    skills: ["review-writing", "quarto-render"],
+    skills: ["review-writing", "review-figures", "quarto-render"],
     run: [
-      { name: "render-draft", command: "quarto render manuscript/draft.md --to pdf --output-dir output", default: true },
       { name: "export-docx", command: "quarto render manuscript/draft.md --to docx --output-dir output", default: true },
+      { name: "render-draft", command: "quarto render manuscript/draft.md --to pdf --output-dir output", default: true },
+    ],
+    humanTasks: [
+      {
+        title: "审阅初稿再开润色",
+        guidance:
+          "打开 output/draft.docx（PDF 乱码就丢开）。核对：论点是否覆盖大纲；摘要有无 [待核实]；摘要级文献是否被写成已确立；正文有无 G1；图是真图还是「待绘制」；同一对约束是否翻来覆去。不合意退回本步改，不要开润色。",
+        target: "",
+        timing: "after",
+      },
     ],
   },
   {
@@ -279,10 +293,10 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     role: "you",
     workspaceName: "polish",
     brief:
-      "输入：manuscript/draft.md 与 references.bib（已随 main 合并在本工作区内）。\n" +
+      "输入：manuscript/draft.md 与 references.bib（已随 main 合并在本工作区内）。上一步「审阅初稿再开润色」未勾或人已退回时，本步先修退回项（乱码 PDF、待绘制充图、内部编号、摘要里的 [待核实]、摘要级未降级、凑字数），不要当定稿润色。\n" +
       "1. 先按 bib-check 技能对 draft.md 做引用完整性校验，产出 manuscript/citation-check.md（该技能只读不改稿：未解析引用/字段缺失/元数据存疑逐条列出，联网可用时加做 Crossref/arXiv 外部核验）；\n" +
       "2. 按报告修正（修稿由本步执行，不是 bib-check 的职责）：未解析引用键改为 references.bib 中正确键或补条目（补条目缺字段标「待补」）；「疑似编造」条目不得自行删除对应论断，句末标 [待核实] 并在 changelog 记录；「未引用条目」只在报告列出、不删；\n" +
-      "3. 语言润色按 review-writing 技能阶段三：语法、用词、句式与段落衔接，保持学术语气；只改表达，不改学术观点；图表占位编号连续；发现内容性错误标 [待核实]，不得自行改写事实；\n" +
+      "3. 语言润色按 review-writing 技能阶段三：语法、用词、句式与段落衔接，保持学术语气；只改表达，不改学术观点；去掉防御性套话、空转场和重复立论，不靠加词把套话盖住；对照大纲把摘要级定量句降级或补 [待核实]；删正文 G 编号；摘要清掉 [待核实]；图表占位编号连续；发现内容性错误标 [待核实]，不得自行改写事实；\n" +
       "4. 产出 manuscript/review-final.md 候选定稿（文末 References 节按 references.bib 生成完整文献列表）与 manuscript/changelog.md（逐条列出主要修改点及对应 citation-check.md 条目；未补的「待绘制」占位列入 changelog，不得假装已绘）；\n" +
       "5. 收尾再按 bib-check 复核 review-final.md，结论追加进 citation-check.md；\n" +
       "6. 用本步骤 run 脚本渲染 PDF/docx（按 quarto-render 技能），产物写入本工作区 output/（评审合并后进项目根）。\n" +
@@ -298,8 +312,8 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     inputs: ["manuscript/draft.md", "outline.md", "notes/", "references.bib"],
     skills: ["review-writing", "bib-check", "quarto-render"],
     run: [
-      { name: "render-final", command: "quarto render manuscript/review-final.md --to pdf --output-dir output --output review-final.pdf", default: true },
       { name: "export-docx", command: "quarto render manuscript/review-final.md --to docx --output-dir output --output review-final.docx", default: true },
+      { name: "render-final", command: "quarto render manuscript/review-final.md --to pdf --output-dir output --output review-final.pdf", default: true },
     ],
     humanTasks: [
       {
@@ -503,11 +517,10 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
   {
     name: "论文初稿",
     workspaceName: "paper-draft",
-    decisionMode: "hard_pause",
-    decisions: [{ q: "写作依据的已评阅证据与结论范围（仅探索/待补时明确草稿边界）", options: [] }],
     brief:
       "输入：survey/、notes/、design.md、analysis/、figures/、references.bib（已随 main 合并在本工作区内）。\n" +
-      "1. 按 IMRaD 结构按项目语种（未设时英文）撰写初稿，产出 manuscript/draft.md：Introduction（研究问题+gap+贡献，现状综述引用 survey/ 与 notes/）、Methods（对应 design.md）、Results（对应 analysis/，引用 figures/ 图表）、Discussion（findings 的意义与局限）；目标篇幅：已初定投稿目标时按其惯常篇幅，未定目标时按问题与证据复杂度拟篇幅，不为凑字数扩写；\n" +
+      `写作范围由你按笔记与分析结果判断：${DRAFT_EVIDENCE_DEFAULT}。人在审阅初稿时拍板，开工前不再问范围。\n` +
+      "1. 按 IMRaD 结构按项目语种（未设时英文）撰写初稿，产出 manuscript/draft.md：Introduction（研究问题+gap+贡献，现状综述引用 survey/ 与 notes/）、Methods（对应 design.md）、Results（对应 analysis/，引用 figures/ 图表）、Discussion（findings 的意义与局限）。篇幅跟证据走，不为凑字数扩写；某节薄只回 analysis/、notes/ 或原文补可定位证据，没有就保持短并标 [待核实]/[待补实验]。论断直接说，必要局限写一次，去掉防御性套话；\n" +
       "2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献；\n" +
       "3. 数字与结论必须与 analysis/results-table.md 一致，不得新造实验结果；缺少的数据在文中标 [待补实验]；\n" +
       "4. 图表引用已有 figures/ 文件（「Figure 1: …」），图片文件不复制进 manuscript/；缺图用占位并在文中标明待补；\n" +
@@ -529,17 +542,26 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     discussionSeeds: [
       "卖点怎么讲：贡献如何简洁陈述且不超过证据，Introduction 往哪个方向带？",
     ],
+    humanTasks: [
+      {
+        title: "审阅初稿再开润色",
+        guidance:
+          "打开 output/draft.docx（PDF 乱码就丢开）。核对数字是否对得上 analysis/、有无凑字数套话、图是不是真文件。不合意退回本步改，不要开润色。",
+        target: "",
+        timing: "after",
+      },
+    ],
     // Quarto 可再生产物统一写入 output/，源稿仍留在 manuscript/；
     // RX4a 追加 export-docx：同一份 md 导出 draft.docx，与 render-draft 并存互不冲突
     run: [
       {
-        name: "render-draft",
-        command: "quarto render manuscript/draft.md --to pdf --output-dir output",
+        name: "export-docx",
+        command: "quarto render manuscript/draft.md --to docx --output-dir output",
         default: true,
       },
       {
-        name: "export-docx",
-        command: "quarto render manuscript/draft.md --to docx --output-dir output",
+        name: "render-draft",
+        command: "quarto render manuscript/draft.md --to pdf --output-dir output",
         default: true,
       },
     ],
@@ -585,13 +607,13 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
     // P4 quarto 渲染：定稿 paper-final.md → paper-final.pdf；RX4a 追加 export-docx → paper-final.docx
     run: [
       {
-        name: "render-final",
-        command: "quarto render manuscript/paper-final.md --to pdf --output-dir output",
+        name: "export-docx",
+        command: "quarto render manuscript/paper-final.md --to docx --output-dir output",
         default: true,
       },
       {
-        name: "export-docx",
-        command: "quarto render manuscript/paper-final.md --to docx --output-dir output",
+        name: "render-final",
+        command: "quarto render manuscript/paper-final.md --to pdf --output-dir output",
         default: true,
       },
     ],
@@ -913,10 +935,9 @@ const THESIS_STEPS: ProjectStepDto[] = [
   {
     name: "论文初稿",
     workspaceName: "thesis-draft",
-    decisionMode: "hard_pause",
-    decisions: [{ q: "写作依据的已评阅证据与结论范围（仅探索/待补时明确草稿边界）", options: [] }],
     brief:
       "输入：chapters/ 各章草稿、references.bib、figures/、proposal/proposal.md（已随 main 合并在本工作区内）。\n" +
+      `写作范围由你按笔记与各章草稿判断：${DRAFT_EVIDENCE_DEFAULT}。人在审阅初稿时拍板，开工前不再问范围。\n` +
       "1. 按学校论文模板结构（封面/摘要/目录/正文各章/参考文献/致谢；项目内无模板文件时用通用学位论文结构、语种默认中文，并在 manuscript/README.md 注明所依据的结构）组装全文初稿 manuscript/thesis-draft.md；学校要求独立讨论章则保留讨论章，不要并进结论；\n" +
       "2. 补齐缺失章节：引言（研究背景+问题+贡献，对应开题报告）、结论与展望（对应结果章节）；\n" +
       "3. 统一各章术语、符号与图表编号；引用一律 [@bib键] 且只能引用 references.bib 已有键——严禁编造文献；\n" +
@@ -949,13 +970,13 @@ const THESIS_STEPS: ProjectStepDto[] = [
     // Quarto 渲染：源稿留在 manuscript/，PDF/DOCX 统一落到 output/。
     run: [
       {
-        name: "render-draft",
-        command: "quarto render manuscript/thesis-draft.md --to pdf --output-dir output",
+        name: "export-docx",
+        command: "quarto render manuscript/thesis-draft.md --to docx --output-dir output",
         default: true,
       },
       {
-        name: "export-docx",
-        command: "quarto render manuscript/thesis-draft.md --to docx --output-dir output",
+        name: "render-draft",
+        command: "quarto render manuscript/thesis-draft.md --to pdf --output-dir output",
         default: true,
       },
     ],
@@ -998,13 +1019,13 @@ const THESIS_STEPS: ProjectStepDto[] = [
     // Quarto 渲染：定稿源稿留在 manuscript/，PDF/DOCX 统一落到 output/。
     run: [
       {
-        name: "render-final",
-        command: "quarto render manuscript/thesis-final.md --to pdf --output-dir output",
+        name: "export-docx",
+        command: "quarto render manuscript/thesis-final.md --to docx --output-dir output",
         default: true,
       },
       {
-        name: "export-docx",
-        command: "quarto render manuscript/thesis-final.md --to docx --output-dir output",
+        name: "render-final",
+        command: "quarto render manuscript/thesis-final.md --to pdf --output-dir output",
         default: true,
       },
     ],
@@ -1042,15 +1063,15 @@ const SUBMISSION_INITIAL_STEPS: ProjectStepDto[] = [
     skills: ["bib-check", "quarto-render"],
     run: [
       {
-        name: "render-formatted",
-        command:
-          "quarto render submission/formatted.md --to pdf --output-dir output --output formatted.pdf",
-        default: true,
-      },
-      {
         name: "export-docx",
         command:
           "quarto render submission/formatted.md --to docx --output-dir output --output formatted.docx",
+        default: true,
+      },
+      {
+        name: "render-formatted",
+        command:
+          "quarto render submission/formatted.md --to pdf --output-dir output --output formatted.pdf",
         default: true,
       },
     ],
@@ -1165,8 +1186,8 @@ function submissionRevisionSteps(round: number): ProjectStepDto[] {
       ],
       skills: ["rebuttal-crafter", "bib-check", "quarto-render"],
       run: [
-        { name: `render-revised-r${r}`, command: `quarto render manuscript/revised-r${r}.md --to pdf --output-dir output`, default: true },
         { name: `export-revised-r${r}`, command: `quarto render manuscript/revised-r${r}.md --to docx --output-dir output`, default: true },
+        { name: `render-revised-r${r}`, command: `quarto render manuscript/revised-r${r}.md --to pdf --output-dir output`, default: true },
       ],
       humanTasks: [
         {
@@ -1376,7 +1397,9 @@ function contractizeSteps(steps: ProjectStepDto[]): ProjectStepDto[] {
       criteria.push("脚本包含可重复执行入口，运行参数、数据版本/哈希与失败记录可追溯。");
     }
     if (artifacts.some((x) => /\.(pdf|docx|html)$/.test(x))) {
-      criteria.push("渲染命令成功且再生产物为非零字节；渲染警告已记录。");
+      criteria.push(
+        "渲染产物可打开：PDF 首页必须能读出标题和正文（乱码、空心方框、目录页码变成字母不算通过）；警告已记录。docx 可先交人审。",
+      );
     }
     return {
       ...step,
@@ -1397,7 +1420,7 @@ function researchQualitySteps(steps: ProjectStepDto[]): ProjectStepDto[] {
     ...step,
     acceptanceCriteria: [
       ...(step.acceptanceCriteria ?? []),
-      "人工质量验收：按报告开头的验收摘要逐项核对证据、决定与未决问题；G1–G5 只检查本步适用项，不重复上游有效检查。",
+      "人工质量验收：按报告开头的验收摘要逐项核对证据、决定与未决问题；G1–G5 只写在验收摘要，禁止写入稿件正文，不重复上游有效检查。",
     ],
   })));
 }
@@ -1416,7 +1439,7 @@ const BUILTIN_PIPELINE_TEMPLATES: PipelineTemplateDef[] = [
     ],
     projectSettings: [
       "综述角度：（领域全景 / 聚焦某个子问题）",
-      "目标篇幅：（如 6000-8000 词）",
+      "目标篇幅：（读者预期，如期刊常见 6000-8000 词；不是初稿必须凑到的词数）",
       "读者与文风：（偏同行专家 / 偏入门科普）",
       "去向：（投期刊 / 毕业论文一章 / 课程作业）",
       "综述深度：（标准档 / 严格检索档）",
@@ -1520,7 +1543,7 @@ export const RESOURCE_TYPE_LABELS: Record<string, string> = {
 
 /** 一键开步预填的首条指令（TerminalPage 启动栏可编辑，留空不注入） */
 export const DEFAULT_KICKOFF_PROMPT =
-  `读 TASK.md，按简报做到完成标准。停哪些见「决策暂停策略」。${KEEP_WORKING_CLAUSE} 开工先盘点本会话可用的 MCP 工具（如 Undermind / Consensus）——技能协议要求把它们纳入工作流（检索步骤当检索库用），工具在而没用要在覆盖缺口里写明原因`;
+  `读 TASK.md，按简报做到完成标准。停哪些见「决策暂停策略」。写作红线以技能为准：不凑字数、不准「待绘制」充图、G 编号不进稿件、摘要不准 [待核实]、摘要级必须降级、PDF 首页必须可读。即使 TASK 或大纲写了篇幅配额/全部待绘制，也按技能执行。${KEEP_WORKING_CLAUSE} 开工先盘点本会话可用的 MCP 工具（如 Undermind / Consensus）——技能协议要求把它们纳入工作流（检索步骤当检索库用），工具在而没用要在覆盖缺口里写明原因`;
 
 /** P2b「整理为笔记」开步预填指令：指向本流程写入的 notes/inbox.md */
 export const ORGANIZE_NOTES_PROMPT =

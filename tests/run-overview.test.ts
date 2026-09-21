@@ -5,7 +5,9 @@ import {
   buildRunOverview,
   cwdBasename,
   itemRank,
+  workspaceAgentBusy,
   workspaceHasLiveAgent,
+  workspaceReviewInboxEligible,
   type RunOverviewInput,
 } from "../src/run-overview.ts";
 
@@ -59,6 +61,59 @@ test("workspaceHasLiveAgent：进程还在跑不算待评审，回落 shell 不�
   );
   assert.equal(workspaceHasLiveAgent(ws, [input({ cwd: "/other", running: true })]), false);
   assert.equal(workspaceHasLiveAgent(undefined, [input({ cwd: ws, running: true })]), false);
+});
+
+test("workspaceAgentBusy：出字或等确认才算忙，回合结束不算", () => {
+  const ws = "/ccode/workspaces/draft";
+  assert.equal(
+    workspaceAgentBusy(ws, [input({ cwd: ws, attention: "working", running: true })]),
+    true,
+  );
+  assert.equal(
+    workspaceAgentBusy(ws, [input({ cwd: ws, attention: "confirm", running: true })]),
+    true,
+  );
+  assert.equal(
+    workspaceAgentBusy(ws, [
+      input({ cwd: ws, attention: "done", running: true, shell: false }),
+    ]),
+    false,
+  );
+  assert.equal(workspaceAgentBusy(ws, [input({ cwd: "/other", attention: "working" })]), false);
+});
+
+test("收件箱待评审：可合并才进，出字中和冲突都不进", () => {
+  assert.equal(
+    workspaceReviewInboxEligible({
+      readyToMerge: true,
+      conflict: false,
+      agentBusy: false,
+    }),
+    true,
+  );
+  assert.equal(
+    workspaceReviewInboxEligible({
+      readyToMerge: true,
+      conflict: false,
+      agentBusy: true,
+    }),
+    false,
+  );
+  assert.equal(
+    workspaceReviewInboxEligible({
+      readyToMerge: true,
+      conflict: true,
+      agentBusy: false,
+    }),
+    false,
+  );
+  assert.equal(
+    workspaceReviewInboxEligible({
+      readyToMerge: false,
+      agentBusy: false,
+    }),
+    false,
+  );
 });
 
 test("buildRunOverview 按「要你管」排序，同级保持标签原顺序", () => {

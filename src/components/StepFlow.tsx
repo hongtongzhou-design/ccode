@@ -19,6 +19,7 @@ import {
   isPendingConfirmTaskTitle,
   missingToFetchCount,
   parseToFetchItems,
+  reviewActionVisible,
   recalledToFetchDone,
   rememberToFetchDone,
   toFetchPaperRel,
@@ -47,6 +48,7 @@ import {
 } from "../step-decisions";
 import { useHumanTasks, RegisterOfferRow } from "./HumanTasksList";
 import { buildWorkspaceTerminalRequest } from "../pipeline-start";
+
 import {
   ACADEMIC_MCP_PRESETS,
   academicMcpLoginPrompt,
@@ -287,8 +289,9 @@ export default function StepFlow({
   /** 合并冲突阻塞：评审节点入口改为「去处理冲突」（直达冲突解决意图） */
   reviewConflict?: boolean;
   /** 本步骤工作区内终端的注意力（ProjectGroup stepAttention 同一口径）：
-   *  done = agent 跑完在等你——active 态的「去终端看看」旁给出完成提示 */
-  agentAttention?: "confirm" | "done" | null;
+   *  working/confirm = 正在出字或等确认，藏「去评审」；
+   *  done = 跑完在等你——active 态的「去终端看看」旁给出完成提示 */
+  agentAttention?: "confirm" | "done" | "working" | null;
   /** Explicit Run identity for the review handoff. */
   runId?: string | null;
   /** 项目 Agents 名册解析出的启动；有则「跟 AI 商量一下」直接用它拉起。 */
@@ -315,6 +318,7 @@ export default function StepFlow({
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
   const setPendingMcpPreset = useAppStore((s) => s.setPendingMcpPreset);
   const setFilePreviewReq = useAppStore((s) => s.setFilePreviewReq);
+  const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
 
   /** 已经有文献库的项目：落点在 papers/ 的事项不该再劝人把 PDF 往项目里塞——
    *  文献的唯一出处是那个库，往 papers/ 另放一份之后两边各自漂移。
@@ -419,6 +423,7 @@ export default function StepFlow({
   } | null>(null);
   const [endnoteOpenNote, setEndnoteOpenNote] = useState<string | null>(null);
   const [endnoteChecked, setEndnoteChecked] = useState(false);
+  const [continueNotesChecked, setContinueNotesChecked] = useState(false);
   const [toFetchBusy, setToFetchBusy] = useState<
     Record<number, { status: "busy" | "ok" | "error"; note?: string }>
   >({});
@@ -715,6 +720,18 @@ export default function StepFlow({
     } catch (e) {
       setEndnoteOpenNote(String(e));
     }
+  }
+
+  function openContinueNotes() {
+    if (runStatus !== "done") return;
+    const notesDir = `${projectPath.replace(/[\\/]+$/, "")}/notes`;
+    setSelectProjectReq(projectPath);
+    setFilePreviewReq({
+      projectRoot: projectPath,
+      path: notesDir,
+      token: Date.now(),
+    });
+    setPage("workspaces");
   }
 
   /** 手动关联本地 PDF（2026-09-17）：浏览器手动下载的文件名常是 main(1).pdf 这类
@@ -1019,6 +1036,7 @@ export default function StepFlow({
       step.workspaceName === "journal-format" ||
       step.workspaceName === "submission-materials" ||
       /^rebuttal-r\d+$/.test(step.workspaceName ?? ""),
+    continueNotes: step.skills.includes("lit-notes"),
   });
   const seeds = step.discussionSeeds ?? [];
 
@@ -1070,6 +1088,24 @@ export default function StepFlow({
   function nodeActions(node: StepFlowNode) {
     switch (node.kind) {
       case "human": {
+        if (node.key === "continue-notes") {
+          const ready = runStatus === "done";
+          return (
+            <button
+              type="button"
+              disabled={!ready}
+              onClick={openContinueNotes}
+              title={
+                ready
+                  ? "到文件页打开 notes/，自己点要读的那篇"
+                  : "先保存进项目，再去笔记夹"
+              }
+              className="ml-auto shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+            >
+              去笔记夹
+            </button>
+          );
+        }
         if (node.key === "endnote-export" || (node.human && isEndnoteTaskTitle(node.human.title))) {
           const ready = runStatus === "done";
           return (
@@ -1201,7 +1237,15 @@ export default function StepFlow({
           </span>
         ) : null;
       case "review":
-        if (!ws || runStatus === "pending" || runStatus === "done") return null;
+        if (
+          !ws ||
+          !reviewActionVisible(
+            runStatus,
+            agentAttention === "working" || agentAttention === "confirm",
+          )
+        ) {
+          return null;
+        }
         return (
           <button
             type="button"
@@ -1223,7 +1267,12 @@ export default function StepFlow({
     const isCurrent = node.key === flow.currentKey;
     const ic = icon(node);
     const human = node.human;
-    const done = node.key === "endnote-export" ? endnoteChecked : node.done;
+    const done =
+      node.key === "endnote-export"
+        ? endnoteChecked
+        : node.key === "continue-notes"
+          ? continueNotesChecked
+          : node.done;
     const guidance = node.kind === "human" ? human?.guidance?.trim() : "";
     const guidanceShort = guidance ? guidancePreview(guidance) : "";
     return (
@@ -1292,6 +1341,13 @@ export default function StepFlow({
               checked={endnoteChecked}
               onChange={setEndnoteChecked}
               title="勾选 = 已经在 EndNote 里导入完"
+            />
+          ) : node.key === "continue-notes" ? (
+            <Checkbox
+              className="shrink-0"
+              checked={continueNotesChecked}
+              onChange={setContinueNotesChecked}
+              title="勾选 = 已经去笔记夹看过"
             />
           ) : node.kind === "human" && human ? (
             <Checkbox
@@ -1371,7 +1427,8 @@ export default function StepFlow({
         {!dense &&
           (isCurrent ||
             node.kind === "review" ||
-            node.key === "endnote-export") &&
+            node.key === "endnote-export" ||
+            node.key === "continue-notes") &&
           node.hint && (
           <p className="mt-1 pl-9 text-micro leading-5 text-l4">
             {node.key === "endnote-export" && endnoteOpenNote

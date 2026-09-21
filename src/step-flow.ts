@@ -17,6 +17,19 @@ export type StepRunStatus =
   | "review" // agent 做完了待评审（含阻塞——阻塞也走评审入口）
   | "done"; // 已保存进项目
 
+/**
+ * 「去评审」：待评审必给；进行中只在 Agent 正在出字/等确认时藏起来。
+ * CLI 收完这一轮后进程还坐在提示符上，步骤仍是进行中——精读/大纲就是这样给入口的。
+ */
+export function reviewActionVisible(
+  runStatus: StepRunStatus,
+  agentBusy = false,
+): boolean {
+  if (runStatus === "review") return true;
+  if (runStatus === "active") return !agentBusy;
+  return false;
+}
+
 export interface StepFlowNode {
   key: string;
   kind: "discuss" | "input" | "human" | "agent" | "review";
@@ -82,6 +95,8 @@ export function buildStepFlow(args: {
   toolAsks?: Array<{ key: string; label: string }>;
   /** 精读/投稿步：保存进项目之后出现「导入到 EndNote」，不写进 TASK.md，点一下才生成。 */
   endnoteExport?: boolean;
+  /** 精读步：保存进项目之后，EndNote 底下出现「继续精读笔记」，进沉浸阅读。不是人工事项。 */
+  continueNotes?: boolean;
 }): StepFlow {
   const { step, states, hasDraft, runStatus } = args;
   const pendingDecisions = args.pendingDecisions ?? 0;
@@ -227,6 +242,19 @@ export function buildStepFlow(args: {
       hint: runStatus === "done"
         ? "点「生成RIS并导入」后，把下载里的 Mesa-EndNote-import.ris 拖到 EndNote 图标上（Dock 或应用程序，不要拖进窗口）。导入完再勾选。"
         : "先保存进项目，再生成RIS并导入。",
+      done: false,
+      skipCurrent: true,
+    });
+  }
+  if (args.continueNotes && runStatus !== "pending") {
+    nodes.push({
+      key: "continue-notes",
+      kind: "human",
+      section: "optional",
+      label: "继续精读笔记",
+      hint: runStatus === "done"
+        ? "到文件页打开 notes/。点一篇笔记进沉浸阅读；开大纲前没存进历史的改动会再问你一次。"
+        : "先保存进项目，笔记才会进主文件夹。",
       done: false,
       skipCurrent: true,
     });

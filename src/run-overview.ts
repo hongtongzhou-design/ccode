@@ -63,7 +63,9 @@ export function cwdBasename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-/** 该工作区还有活着的 Agent 进程（不是回落 shell）。步骤不得因此被 git ahead 打成待评审。 */
+/** 该工作区还有活着的 Agent 进程（不是回落 shell）。
+ *  只给步骤大圆：中途提交时圆仍停在进行中。流程线「去评审」不看这个——
+ *  CLI 收完一轮后还坐在提示符上，进程活着，入口仍要给（见 workspaceAgentBusy）。 */
 export function workspaceHasLiveAgent(
   worktreePath: string | undefined,
   inputs: readonly RunOverviewInput[],
@@ -75,6 +77,31 @@ export function workspaceHasLiveAgent(
     const cwd = input.cwd.replace(/\\/g, "/").replace(/\/+$/, "");
     return cwd === root || cwd.startsWith(`${root}/`);
   });
+}
+
+/** Agent 正在出字或等确认。藏「去评审」、工作区行不喊「需要处理」。回合结束（done）不算。 */
+export function workspaceAgentBusy(
+  worktreePath: string | undefined,
+  inputs: readonly RunOverviewInput[],
+): boolean {
+  if (!worktreePath) return false;
+  const root = worktreePath.replace(/\\/g, "/").replace(/\/+$/, "");
+  return inputs.some((input) => {
+    if (input.attention !== "working" && input.attention !== "confirm") {
+      return false;
+    }
+    const cwd = input.cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+    return cwd === root || cwd.startsWith(`${root}/`);
+  });
+}
+
+/** 收件箱「待评审」：可合并且无冲突，且 Agent 没在出字。 */
+export function workspaceReviewInboxEligible(input: {
+  readyToMerge?: boolean | null;
+  conflict?: boolean | null;
+  agentBusy: boolean;
+}): boolean {
+  return Boolean(input.readyToMerge) && !input.conflict && !input.agentBusy;
 }
 
 /** 「要你管」排序：待确认 > 工作中 > 其余 agent 运行中 > shell / 已退出。

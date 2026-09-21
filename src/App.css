@@ -1315,6 +1315,56 @@ select:focus-visible {
   font-size: 0.85em;
   color: inherit;
 }
+.md-body .md-code {
+  margin: 0.9em 0;
+  overflow: hidden;
+  border: 1px solid var(--color-hairline);
+  border-radius: 6px;
+  background: var(--color-inset);
+}
+.md-body .md-code-bar {
+  display: flex;
+  height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--color-hairline);
+}
+.md-body .md-code-lang {
+  font-size: 10px;
+  color: var(--color-l4);
+}
+.md-body .md-code-copy {
+  font-size: 10px;
+  color: var(--color-l3);
+  opacity: 0;
+}
+.md-body .md-code:hover .md-code-copy,
+.md-body .md-code:focus-within .md-code-copy {
+  opacity: 1;
+}
+.md-body .md-code-copy:hover {
+  color: var(--color-l1);
+}
+.md-body .md-code pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+.md-body .md-mermaid {
+  margin: 0.9em 0;
+  overflow-x: auto;
+  cursor: zoom-in;
+}
+.md-body .md-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+.md-body .md-mermaid-error {
+  margin: 0 0 0.4em;
+  font-size: 12px;
+  color: var(--color-err-text);
+}
 /* 上下标不撑高行盒（文献笔记大量化学式/单位上下标） */
 .md-body sub,
 .md-body sup {

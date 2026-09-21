@@ -177,9 +177,8 @@ fn anchor_pdf_candidate(source: &str, root: &Path) -> Option<PathBuf> {
 /// 锚点与目标 PDF（canonical）是否同一文件：双侧 canonical 后比较，
 /// 不做字面比对——绝对锚点对相对 rel_pdf 字面永远不等，PDF 侧入口会因此误建平行笔记
 fn anchor_is_pdf(source: &str, root: &Path, pdf_c: &Path) -> bool {
-    anchor_pdf_candidate(source, root).is_some_and(|c| {
-        crate::paths::same_path(&c.to_string_lossy(), &pdf_c.to_string_lossy())
-    })
+    anchor_pdf_candidate(source, root)
+        .is_some_and(|c| crate::paths::same_path(&c.to_string_lossy(), &pdf_c.to_string_lossy()))
 }
 
 /// 笔记「来源行」声明的 PDF 相对路径（只认头部 10 行）。兼容两种格式：
@@ -304,10 +303,7 @@ fn pair_pdf_at(root: &Path, note_c: &Path) -> Result<Option<String>, String> {
     if let Ok(rd) = fs::read_dir(root.join("papers")) {
         for e in rd.flatten() {
             let p = e.path();
-            if !p
-                .extension()
-                .is_some_and(|s| s.eq_ignore_ascii_case("pdf"))
-            {
+            if !p.extension().is_some_and(|s| s.eq_ignore_ascii_case("pdf")) {
                 continue;
             }
             let pstem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -1060,8 +1056,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let dto =
-            ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
+        let dto = ensure_paper_note_sync(&root.to_string_lossy(), &pdf.to_string_lossy()).unwrap();
         assert!(!dto.created);
         assert_eq!(PathBuf::from(&dto.path), numbered);
         assert!(!notes.join("Some-Paper.md").exists(), "不得另建 slug 笔记");

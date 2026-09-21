@@ -80,6 +80,12 @@ pub(crate) fn extract_bib_keys(text: &str) -> BTreeSet<String> {
     keys
 }
 
+/// 任务书/人工请求里的「[@bib键]」是写法说明，不是正文引用。
+fn skip_citation_md(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "task.md" || n == "help-wanted.md" || n == "review-notes.md"
+}
+
 /// 递归收集 .md 文件：跳过隐藏目录（.git 等）与 node_modules，数量/单文件大小有界
 fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
     if out.len() >= MAX_MD_FILES {
@@ -101,7 +107,10 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
                 continue;
             }
             collect_md_files(&path, out);
-        } else if name.to_lowercase().ends_with(".md") && meta.len() <= MAX_FILE_BYTES {
+        } else if name.to_lowercase().ends_with(".md")
+            && meta.len() <= MAX_FILE_BYTES
+            && !skip_citation_md(&name)
+        {
             out.push(path);
         }
     }
@@ -251,6 +260,23 @@ mod tests {
         assert_eq!(dto.resolved, 1);
         assert_eq!(dto.missing, vec!["missing1".to_string()]);
         assert!(dto.bib_found);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_md_placeholder_cite_is_not_a_missing_key() {
+        let dir = tmpdir("task-md");
+        fs::create_dir_all(dir.join("manuscript")).unwrap();
+        fs::write(
+            dir.join("TASK.md"),
+            "引用一律用 [@bib键] 形式，且只能引用 references.bib。\n",
+        )
+        .unwrap();
+        fs::write(dir.join("manuscript").join("draft.md"), "[@doe2020]\n").unwrap();
+        fs::write(dir.join("references.bib"), "@article{doe2020, title={X}}\n").unwrap();
+        let dto = check_citation_health_in(&dir, std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(dto.missing, Vec::<String>::new());
+        assert_eq!(dto.total_refs, 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -451,6 +451,17 @@ fn apply_request_policy_env(
 /// 密文不进 env 值、不进预览；变量缺失时 grok 行为未实证，按原样发送处理（用户自查）。
 fn grok_config_overlay(profile: &Profile, model: Option<&str>) -> Option<serde_json::Value> {
     let mut models = serde_json::Map::new();
+    // default：1.0.34 实证（remote_config/resolution.rs）开会话前先拿「有效默认模型」与
+    // allowed_models 比对，不匹配直接拒启动——原话 "<id>" (your default) isn't allowed by
+    // allowed_models. Broaden the patterns or remove allowed_models, then try again.。
+    // 有效默认取自 ~/.grok/config.toml 的 [models].default（可能是别家绑定「设为全局默认」
+    // 留下的模型），而 GROK_DEFAULT_MODEL 只是「偏好」、在这道门之后才生效（日志
+    // source=env），救不回被拒的启动。overlay 白名单放行 [models] 全局块，故本次启动有
+    // 模型时把它写成 default：比对随之通过，也顺带治「未注 default 时回落第一方 grok-*
+    // 模型直连 xAI 代理」的老坑（2026-09-20 实测复现 + 修复）
+    if let Some(m) = model {
+        models.insert("default".into(), serde_json::json!(m));
+    }
     // allowed_models：把模型列表收敛进选择器（不注则 GROK_MODELS_BASE_URL 网关的全量
     // 目录，动辄几百个，全进选择器）。空列表不注（allowed_models 空 = fail-closed
     // 一个都不匹配）；选中模型兜底并入，防选择器与默认模型脱节
@@ -537,6 +548,10 @@ fn claude_settings_override(profile: &Profile, model: Option<&str>) -> String {
 
 pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) -> LaunchPlan {
     let mut plan = LaunchPlan::default();
+    // 空串/纯空白按「未选模型」归一：前端 buildAskAiPending 会带空串占位（防被启动栏上次的
+    // 模型顶掉），Some("") 会让下面的 grok 兜底与各处 filter 全部失效，并把空模型写进
+    // GROK_DEFAULT_MODEL / allowed_models / [models].default（2026-09-20 修）
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
     // 官方账号模式：不注入 base_url/密钥（用 CLI 自己的账号登录），仅按需注入选中模型；
     // 并按规格 purge 继承环境里的残留 API 密钥变量（防静默覆盖账号登录，§11.7）
     if profile.account_type == crate::profiles::AccountType::Official {
@@ -652,10 +667,8 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                             // 自动压缩窗口与上限成对注入、同值（cc-switch 校准口径）：
                             // Claude Code 用它算 auto-compact 触发点，只抬上限不抬它，
                             // 长会话的压缩触发点仍留在旧窗口档
-                            plan.env.push((
-                                "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
-                                ctx.to_string(),
-                            ));
+                            plan.env
+                                .push(("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), ctx.to_string()));
                         }
                     }
                 }
@@ -3493,6 +3506,12 @@ mod tests {
             v["models"]["allowed_models"],
             serde_json::json!(["grok-code-fast-1", "grok-4.5"])
         );
+        // overlay 同时把本次启动模型写成 [models].default：1.0.34 先拿 config 的 default 比对
+        // allowed_models，不匹配就拒启动（GROK_DEFAULT_MODEL 偏好在之后才生效）
+        assert_eq!(
+            v["models"]["default"],
+            serde_json::json!("grok-code-fast-1")
+        );
         // 初始 prompt 是位置参数（一键开步注入）
         let plan = launch_plan_with_prompt(&p, Some("xai-secret".into()), None, Some("干活"));
         assert_eq!(plan.prompt_args, vec!["干活"]);
@@ -3535,6 +3554,79 @@ mod tests {
         assert!(!plan
             .env
             .contains(&("GROK_DEFAULT_MODEL".into(), "glm-5.3".into())));
+    }
+
+    #[test]
+    fn grok_overlay_default_overrides_stale_global_default() {
+        // 回归（2026-09-20 用户实机）：~/.grok/config.toml 的 [models].default 若是别家绑定
+        // 「设为全局默认」留下的模型（本例 grok-4.6），1.0.34 会先拿它比对本次 allowed_models
+        // 并直接拒启动。overlay 写 default=本次启动模型可让这道门通过。
+        let mut p = profile("grok", Some("https://relay.example.com/v1"));
+        p.models = vec!["deepseek-v4-flash-0731".into()];
+        let overlay_of = |plan: &LaunchPlan| -> serde_json::Value {
+            serde_json::from_str(
+                &plan
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == "GROK_CONFIG")
+                    .map(|(_, v)| v.clone())
+                    .expect("有模型时必须注入 GROK_CONFIG"),
+            )
+            .unwrap()
+        };
+        // 显式选模
+        let plan = launch_plan(&p, Some("k".into()), Some("deepseek-v4-flash-0731"));
+        let v = overlay_of(&plan);
+        assert_eq!(
+            v["models"]["default"],
+            serde_json::json!("deepseek-v4-flash-0731")
+        );
+        assert_eq!(
+            v["models"]["allowed_models"],
+            serde_json::json!(["deepseek-v4-flash-0731"])
+        );
+        // 未选模型 → 兜底绑定清单第一个，default 与 -m 同为它
+        let plan = launch_plan(&p, Some("k".into()), None);
+        let v = overlay_of(&plan);
+        assert_eq!(
+            v["models"]["default"],
+            serde_json::json!("deepseek-v4-flash-0731")
+        );
+    }
+
+    #[test]
+    fn grok_empty_model_is_treated_as_unselected() {
+        // 前端 buildAskAiPending 会带空串模型占位：必须按「未选」处理——兜底绑定清单第一个，
+        // 不得把空串写进 GROK_DEFAULT_MODEL / allowed_models / [models].default
+        let mut p = profile("grok", Some("https://relay.example.com/v1"));
+        p.models = vec!["glm-5.3".into()];
+        for empty in [Some(""), Some("   ")] {
+            let plan = launch_plan(&p, Some("k".into()), empty);
+            assert!(
+                plan.env
+                    .contains(&("GROK_DEFAULT_MODEL".into(), "glm-5.3".into())),
+                "空模型必须回落绑定清单第一个"
+            );
+            assert!(!plan.env.iter().any(|(_, v)| v.is_empty()));
+            let v: serde_json::Value = serde_json::from_str(
+                &plan
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == "GROK_CONFIG")
+                    .map(|(_, v)| v.clone())
+                    .expect("有模型时必须注入 GROK_CONFIG"),
+            )
+            .unwrap();
+            assert_eq!(
+                v["models"]["allowed_models"],
+                serde_json::json!(["glm-5.3"])
+            );
+            assert_eq!(v["models"]["default"], serde_json::json!("glm-5.3"));
+            assert!(plan
+                .args
+                .windows(2)
+                .any(|pair| pair[0] == "-m" && pair[1] == "glm-5.3"));
+        }
     }
 
     #[test]

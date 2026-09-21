@@ -202,16 +202,40 @@ export default function ProjectFilesView({
         listing = cacheRef.current[dirPath] ?? (await load(dirPath));
       }
       if (cancelled) return;
+      const focusName = focusPath.split(/[\\/]/).pop() ?? focusPath;
+      const dirHit = listing.find(
+        (entry) =>
+          entry.isDir &&
+          (samePath(entry.path, focusPath, IS_WINDOWS) ||
+            entry.name === focusName),
+      );
+      if (dirHit) {
+        nextExpanded.add(dirHit.path);
+        setExpanded(nextExpanded);
+        await load(dirHit.path);
+        if (cancelled) return;
+        setPreview(null);
+        setFilter("all");
+        setQuery("");
+        setWindowed(false);
+        requestAnimationFrame(() => {
+          const el = listRef.current?.querySelector(
+            `[data-file-path="${CSS.escape(dirHit.path)}"]`,
+          );
+          el?.scrollIntoView({ block: "nearest" });
+        });
+        onFocusHandledRef.current?.();
+        return;
+      }
       setExpanded(nextExpanded);
-      const fileName = focusPath.split(/[\\/]/).pop() ?? focusPath;
       const file = listing.find(
         (entry) =>
           !entry.isDir &&
           (samePath(entry.path, focusPath, IS_WINDOWS) ||
-            entry.name === fileName),
+            entry.name === focusName),
       );
       if (file) setPreview(file);
-      else openPath(focusPath);
+      else if (/\.[A-Za-z0-9]+$/.test(focusName)) openPath(focusPath);
       setFilter("all");
       setQuery("");
       setWindowed(false);
@@ -697,7 +721,7 @@ export default function ProjectFilesView({
                 root={projectPath}
                 onOpenFile={openPath}
                 onOpenReader={
-                  /\.(pdf|md)$/i.test(preview.name)
+                  /\.(pdf|md|markdown)$/i.test(preview.name)
                     ? () => openImmersive(preview)
                     : undefined
                 }

@@ -142,13 +142,15 @@ pub fn gateway_content_revision(gateway: &Gateway) -> String {
         .collect();
     models.sort();
     let raw = format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}",
         gateway.name,
         gateway.no_auth,
         serde_json::to_string(&gateway.slots).unwrap_or_default(),
         serde_json::to_string(&gateway.header_env).unwrap_or_default(),
         gateway.key_hint.as_deref().unwrap_or(""),
-        models.join(";")
+        models.join(";"),
+        gateway.wallet_user_id.as_deref().unwrap_or(""),
+        gateway.wallet_key_hint.as_deref().unwrap_or("")
     );
     format!("{:x}", md5::compute(raw.as_bytes()))
 }
@@ -159,10 +161,23 @@ pub fn probe_field_status(
     field: &str,
     model: Option<&str>,
 ) -> ProbeStatus {
+    probe_field_status_with_key(gateway, slot, field, model, gateway.key_hint.is_some())
+}
+
+/// 同上，但「密钥有无」由调用方给出：连接状态徽标拿的是 keys.json 的权威判定，
+/// 不能依赖可能失配的 `gateway.key_hint`（旧钥匙串迁移只写 keys.json、不补 hint，
+/// 于是 hint=None 会让明明有密钥的体检结论被判成「未体检」）。
+pub fn probe_field_status_with_key(
+    gateway: &Gateway,
+    slot: Slot,
+    field: &str,
+    model: Option<&str>,
+    has_key: bool,
+) -> ProbeStatus {
     let slot_s = slot.as_str();
     let url = slot_url(&gateway.slots, slot).unwrap_or("");
     let url_fp = url_fingerprint(url);
-    let key_fp = key_presence_fp(gateway.key_hint.is_some());
+    let key_fp = key_presence_fp(has_key);
     let rec = gateway
         .last_probe
         .iter()
@@ -538,14 +553,18 @@ fn connection_state(
         "credential_missing"
     } else {
         let slot = slot_for_agent(&binding.agent, binding.protocol.as_deref());
-        let probe = gateway
-            .last_probe
-            .iter()
-            .filter(|p| p.slot == slot.as_str())
-            .max_by_key(|p| p.probed_at.as_str());
-        match probe.map(|p| p.basic) {
-            Some(crate::profiles::ProbeStatus::Failed) => "probe_failed",
-            Some(crate::profiles::ProbeStatus::Passed) => {
+        // §8：消费必须匹配「当前槽 + 当前绑定模型 + URL/密钥指纹」，禁用「该槽最近一条」
+        // ——否则同网关 A 模型的体检结论会株连选了 B 模型的绑定（与 probe_field_status 同口径）。
+        let probe = probe_field_status_with_key(
+            gateway,
+            slot,
+            "basic",
+            binding.models.first().map(String::as_str),
+            has_key,
+        );
+        match probe {
+            crate::profiles::ProbeStatus::Failed => "probe_failed",
+            crate::profiles::ProbeStatus::Passed => {
                 if model_sync.0 == "missing" || model_sync.0 == "stale" {
                     "model_unsynced"
                 } else if gateway
@@ -821,6 +840,8 @@ pub fn migrate_from_profiles(
                 name,
                 no_auth,
                 key_hint,
+                wallet_user_id: None,
+                wallet_key_hint: None,
                 slots,
                 header_env,
                 models,
@@ -936,6 +957,8 @@ mod tests {
             name: "G".into(),
             no_auth: false,
             key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots::default(),
             header_env: Default::default(),
             models: vec![
@@ -1180,6 +1203,8 @@ mod tests {
             name: "G".into(),
             no_auth: false,
             key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots::default(),
             header_env: Default::default(),
             models: vec![],
@@ -1233,6 +1258,8 @@ mod tests {
             name: "工作".into(),
             no_auth: false,
             key_hint: Some("····".into()),
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots {
                 anthropic: Some("https://api.example.com".into()),
                 ..Default::default()
@@ -1276,6 +1303,8 @@ mod tests {
             name: "G".into(),
             no_auth: false,
             key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots {
                 anthropic: Some("https://a.example".into()),
                 ..Default::default()
@@ -1397,6 +1426,8 @@ mod tests {
             name: "g".into(),
             no_auth: false,
             key_hint: Some("····".into()),
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots {
                 anthropic: Some("https://example.com".into()),
                 ..Default::default()
@@ -1472,5 +1503,78 @@ mod tests {
         );
         gw.slots.anthropic = Some("https://example.com/".into());
         assert!(probe_record_still_valid(&gw, &rec));
+    }
+
+    /// 连接状态徽标同样受 §8 约束：A 模型的体检结论不得株连选了 B 模型的绑定
+    #[test]
+    fn connection_status_probe_must_match_binding_model_and_fingerprint() {
+        let gw = Gateway {
+            id: "g".into(),
+            name: "g".into(),
+            no_auth: false,
+            key_hint: Some("····".into()),
+            wallet_user_id: None,
+            wallet_key_hint: None,
+            slots: ProtocolSlots {
+                anthropic: Some("https://example.com".into()),
+                ..Default::default()
+            },
+            header_env: Default::default(),
+            models: vec![fetched("model-a", None), fetched("model-b", None)],
+            catalog_fetched_at: None,
+            catalog_from_slot: None,
+            last_probe: vec![crate::profiles::ProbeRecord {
+                slot: "anthropic".into(),
+                model: Some("model-a".into()),
+                url_fp: url_fingerprint("https://example.com"),
+                key_fp: "has".into(),
+                streaming: ProbeStatus::Passed,
+                effort: ProbeStatus::Passed,
+                sampling: ProbeStatus::Never,
+                headers: ProbeStatus::Never,
+                basic: ProbeStatus::Passed,
+                probed_at: "2026-09-01T00:00:00Z".into(),
+                latency_ms: None,
+            }],
+            slot_probes: vec![],
+            revision: String::new(),
+        };
+        let binding = |model: &str| crate::profiles::Binding {
+            id: "b".into(),
+            agent: "claude-code".into(),
+            name: "b".into(),
+            kind: crate::profiles::BindingKind::Api,
+            gateway_id: Some("g".into()),
+            protocol: None,
+            api_backend: None,
+            models: vec![model.into()],
+            extra_env: Default::default(),
+            last_used_at: None,
+        };
+        assert_eq!(
+            connection_state(&binding("model-a"), Some(&gw), false, true, false).0,
+            "ready",
+            "体检模型与绑定默认模型一致才算 ready"
+        );
+        assert_eq!(
+            connection_state(&binding("model-b"), Some(&gw), false, true, false).0,
+            "untested",
+            "同槽另一模型的体检结论不得顶到这条绑定上"
+        );
+        // 指纹不匹配（网关换了地址）时同样回「未体检」，不得沿用旧结论
+        let mut moved = gw.clone();
+        moved.slots.anthropic = Some("https://other.example.com".into());
+        assert_eq!(
+            connection_state(&binding("model-a"), Some(&moved), false, true, false).0,
+            "untested"
+        );
+        // 密钥有无以调用方（keys.json 权威判定）为准：key_hint 失配（旧钥匙串迁移只写 keys.json、
+        // 不补 hint）不得把有密钥的体检结论误判成「未体检」
+        let mut hintless = gw.clone();
+        hintless.key_hint = None;
+        assert_eq!(
+            connection_state(&binding("model-a"), Some(&hintless), false, true, false).0,
+            "ready"
+        );
     }
 }

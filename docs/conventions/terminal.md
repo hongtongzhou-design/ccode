@@ -56,7 +56,7 @@
 - **文件树折叠钮与双击进入分离（v3.157 / v3.209）**：单击文件夹名或折叠箭头只在原地展开/收起。箭头连点也要能开合
   （勿用 `e.detail > 1` 吞第二次点击）。进入此文件夹（只改浏览根）走悬停「进入」，不要靠第二次单击/双击——
   两次单击会被系统合成双击，表现为「点一次展开、再点就进去了」。
-- **任务审阅 = 终端全宽覆盖层**：工作区行「评审」与终端「改动 → 审阅」同一视图，连续浏览累计 diff，可「提交并保存进项目 /
+- **任务审阅 = 终端全宽覆盖层**：工作区行「评审」与终端「改动 → 审阅」同一视图。检索/精读/大纲在基础检查旁切清单或笔记/稿件／过程／文件，Git 对照只在「文件」；冲突模式仍连续浏览累计 diff。可「提交并保存进项目 /
   仅提交 / 保存进项目并归档」；底下终端标签与 PTY 保持挂载。默认只保存进本地项目并保留工作区，不自动推送；原「提交 /
   提交并推送」与工作区行 PR/归档/会话操作保留。`merged_at && ahead == 0` 时按钮禁用显示「已保存进项目」，`ahead > 0` 恢复。
 - **冲突审阅与普通审阅共用同一覆盖层**：冲突模式读 Git index stage 2/3，任务/基准分支按文件连续双栏，右侧冲突清单可
@@ -160,12 +160,37 @@
   对话/预览/改动页签同义；宽度变化必须触发 xterm 重新 fit；任务评审仍用全宽覆盖层。
 - **渲染器按平台分流 + 用户可切（2026-09-19 起设「终端渲染」，勿回退默认）**：macOS 默认不走 WebGL——
   xterm 的字形图集→GPU 纹理采样在 WKWebView 里整体偏软发糊（A/B 截屏实测 DOM 渲染明显更锐利，
-  Safari 同引擎复现一致），故 macOS 默认用 xterm 默认 DOM 渲染器；Windows 默认 WebGL 加速。
+  Safari 同引擎复现一致；2026-09-21 复测到量化证据：图集按整数设备像素取整单元格（DPR 2 即 0.5px 步进），
+  同一字体同一字号实测字宽 7.8 被压成 7.5（−3.8%，字形横向压缩并对齐到更粗的栅格）），故 macOS 默认用
+  xterm 默认 DOM 渲染器；Windows 默认 WebGL 加速。
   滚动流畅度是另一面的真实诉求（DOM 渲染器滚动时要逐行建/拆 DOM，体感不如原生终端）——
   设置页「终端 → 终端渲染」提供 auto（默认，平台分流如上）/ webgl（流畅，Mac 上文字可能略软）/
   dom（清晰）；选择在**新开的终端**生效，选 webgl 仍过 `isSoftwareWebGL` 探针（TerminalPage.tsx）
   并在上下文丢失时自动退回默认渲染器。canvas 渲染器 addon 只声明支持 xterm 5（截至 0.8.0-beta.48），
-  不引入。
+  不引入。**别把「触控板合帧」说成清晰与流畅兼得**——合帧只砍同一帧内的重复位置写入，每帧重绘次数不变。
+- **终端字体链单一出处 `src/terminal-font.ts`（2026-09-21 修）**：xterm 的 `fontFamily` 就是一段 CSS 字体列表。
+  以前 TerminalPage 手拼一份、App.css `--font-mono` 另一份——手拼那份缺 `ui-monospace` 且重复 `'SF Mono'`，
+  设置页选「SF Mono（macOS）」永远落 Menlo。现统一走 `terminalFontStack(族名, monoFallbackStack())`：
+  族名排最前，其余取 App.css `--font-mono` 的 computed 值（`tests/terminal-font.test.ts` 逐字比对防漂移），
+  设置页下拉清单也由 `TERMINAL_FONT_CHOICES` 单点供给。
+  macOS 事实（13px，WKWebView 实测）：公开族名 `SF Mono` **不存在**（`SFNSMono.ttf` 的 family 是私有名
+  `.SF NS Mono`），只有 CSS 关键字 `ui-monospace` 能拿到它（advance = narrow = 8.036）；`Menlo` 7.827；
+  内嵌 JetBrains Mono webfont 7.8。**判定口径：窄字步进 == 宽字步进才算真拿到等宽字体**——族名不存在会
+  静默回退成比例字体（实测 `"SF Mono"` 未装时 narrow 3.61 vs advance 10.11）；`document.fonts.check()`
+  不可信（对不存在的族名也返回 true）。**Ghostty 空配置默认是 JetBrains Mono 13px**
+  （`ghostty +show-face --string=Mesa` 实测解析即它），**不是 SF Mono**——要对齐 Ghostty 观感就选内置
+  JetBrains Mono。
+- **触控板滚动合帧（`src/terminal-wheel-scroll.ts`，2026-09-21）**：真正滚动的节点是 `.xterm-scrollable-element`
+  及其子节点（实测 `term.element` 与 `.xterm-viewport` 命中数都是 0），所以 `attachCustomWheelEventHandler`
+  拿到事件时位置已经写过了；必须在 `term.element` 上用 **capture 阶段** `preventDefault + stopPropagation`
+  截住，累计到 `requestAnimationFrame` 才把合并后的 deltaY 用合成 `WheelEvent` 派回**原始深层 target**
+  （不要缓存 `.xterm-rows` 子节点——DOM 渲染器每次重绘都重建它们，缓存目标会变成游离节点；派发期间
+  `dispatching=true` 防自递归）。抖动来自「一帧内多次位置写入 + 多次 onScroll/滚动条更新」，不是重绘次数——
+  实测 420 个事件（24px/个、3972 行可滚）：DOM 位置写入 240→143、WebGL 240→142（约 −40%），
+  滚动距离 240→235 行（<3%），帧 p95 两者都 9–10ms、无长帧，渲染次数不变。
+  决策纯函数 `shouldCoalesceTrackpadWheel`：备用屏（alternate buffer）／鼠标上报模式（mouseTrackingMode
+  ≠ none）／任何修饰键／deltaMode ≠ 0／deltaX ≠ 0 一律放行不合帧（TUI 自身滚轮语义与横向滚动原样透传）。
+  纯逻辑与假 DOM 时序断言在 `tests/terminal-wheel-scroll.test.ts`。
 - **弱字亮度兜底 `minimumContrastRatio: 4.5`**（VS Code 终端同款默认值）：暗色主题下 brightBlack 灰字、
   dim 修饰文本对比度不足发暗，xterm 自动提亮不达标的颜色；只作用于显示，不改调色板定义。
 - **运行中会话关联排他 + 复合键**：固定 session id 的 CLI 精确锁定；其余 CLI 启动前按 agent+归并后项目登记 claim，同批

@@ -258,7 +258,9 @@ fn read_overrides_at(path: &Path) -> Vec<ModelCapsOverrideDto> {
 
 #[tauri::command]
 pub fn list_model_capability_overrides() -> Vec<ModelCapsOverrideDto> {
-    override_path().map(|p| read_overrides_at(&p)).unwrap_or_default()
+    override_path()
+        .map(|p| read_overrides_at(&p))
+        .unwrap_or_default()
 }
 
 /// 写单条覆盖（同前缀整条替换），返回写后的完整列表供前端刷新
@@ -283,7 +285,9 @@ pub fn set_model_capability_override(
 
 /// 删单条覆盖；返回写后的完整列表供前端刷新
 #[tauri::command]
-pub fn clear_model_capability_override(prefix: String) -> Result<Vec<ModelCapsOverrideDto>, String> {
+pub fn clear_model_capability_override(
+    prefix: String,
+) -> Result<Vec<ModelCapsOverrideDto>, String> {
     let prefix = prefix.trim().to_lowercase();
     let Some(path) = override_path() else {
         return Err("无法确定平台配置目录".into());
@@ -1118,7 +1122,10 @@ mod tests {
         assert_eq!(read.len(), 2);
         // api_backend 不被 UI 往返抹掉
         assert_eq!(
-            read.iter().find(|e| e.prefix == "grok-relay-x").unwrap().api_backend,
+            read.iter()
+                .find(|e| e.prefix == "grok-relay-x")
+                .unwrap()
+                .api_backend,
             Some("responses".into())
         );
         // 覆盖层即时生效：链上 context/vision 按 1M 取值（cfg!(test) 只挡 load_override，

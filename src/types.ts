@@ -123,6 +123,10 @@ export interface Gateway {
   lastProbe: ProbeRecord[];
   slotProbes?: SlotProbeSummary[];
   revision?: string;
+  /** New API 钱包查询用户 ID（非密钥） */
+  walletUserId?: string | null;
+  /** 系统访问令牌尾号；本体不进前端 */
+  walletKeyHint?: string | null;
 }
 
 export interface GlobalDriftDto {
@@ -157,6 +161,11 @@ export interface GatewayInput {
   models: GatewayModel[];
   apiKey: string | null;
   expectedRevision?: string | null;
+  /** New API 系统访问令牌；空 = 不改 */
+  walletAccessToken?: string | null;
+  clearWalletToken?: boolean;
+  /** 空串清空；缺省不改 */
+  walletUserId?: string | null;
 }
 
 export interface BindingInput {
@@ -225,6 +234,9 @@ export interface PlanQuotaWindowDto {
   usedPercent: number;
   /** 重置时间（毫秒 epoch），null = 未知 */
   resetsAt: number | null;
+  /** 已用/总量的绝对值（智谱积分、Kimi 配额点数）；只给百分比的供应商为 null */
+  used: number | null;
+  total: number | null;
 }
 
 export interface PlanResetCardsDto {
@@ -252,6 +264,42 @@ export interface PlanQuotaDto {
   resetCardsSupported: boolean;
   resetCards: PlanResetCardsDto;
   /** 本条数据时间（毫秒 epoch） */
+  queriedAt: number;
+  fromCache: boolean;
+}
+
+/** 网关余额（用量页「网关余额」卡）：New API 预付钱包，与订阅余量并列 */
+export interface GatewayBalanceDto {
+  gatewayId: string;
+  gatewayName: string;
+  /** 站点 origin，去钱包拼 `{origin}/wallet` */
+  origin: string;
+  /** 这个钱包属于哪个账户；同站多网关合并成一张卡的分组键（同站不同账户必须分开） */
+  account: string | null;
+  /** newapi（显示名前端映射） */
+  kind: string;
+  ok: boolean;
+  error: string | null;
+  /** wallet = 账户钱包；token = 这把密钥的额度 */
+  source: string;
+  /** 这个密钥不限额度（看钱包页才有账户余额） */
+  unlimited: boolean;
+  /** CNY | USD | TOKENS */
+  currency: string;
+  remaining: number | null;
+  used: number | null;
+  total: number | null;
+  /** 令牌过期（毫秒 epoch） */
+  expiresAt: number | null;
+  /** 已保存系统访问令牌 */
+  hasWalletToken: boolean;
+  /** 这把推理密钥的额度，与钱包并列 */
+  tokenRemaining: number | null;
+  tokenUsed: number | null;
+  tokenTotal: number | null;
+  tokenUnlimited: boolean;
+  /** 站点上这个令牌的名字（悬停说明用） */
+  tokenName: string | null;
   queriedAt: number;
   fromCache: boolean;
 }

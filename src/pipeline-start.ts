@@ -3,7 +3,10 @@ import { appendUpstreamAcceptance, type UpstreamAcceptance } from "./research-ac
 import { invoke } from "@tauri-apps/api/core";
 import { isGitMissingError } from "./dep-check";
 import { decisionGate, orderedAnswers, parseDecisions } from "./step-decisions";
-import { pickWorkspaceResume } from "./workspace-resume";
+import {
+  pickWorkspaceResume,
+  shouldResumeWorkspaceSession,
+} from "./workspace-resume";
 import { DEFAULT_KICKOFF_PROMPT } from "./pipeline-presets";
 import { renderTaskMd } from "./task-md";
 export { renderTaskMd };
@@ -214,12 +217,13 @@ export async function startPipelineStep({
 /** 工作区 → 终端的交接 payload：取端口段 env + 预填该目录上次使用的配置
  *  （与工作区页 useOpenInTerminal 同一语义；`ccode.wsLast.<worktreePath>` 为共享键）。
  *  始终带 reuseKey：同一工作区永远回到同一个终端标签（开工起的标签之后「去终端」能找回）。
- *  无 initialPrompt（「去终端看看」等纯查看入口）时自动 resume 该工作区最近会话——
- *  保持一个对话，而不是每次新开；有 prompt（开工/整理笔记）时是明确的新任务，不 resume */
+ *  无 initialPrompt（「去终端看看」等纯查看入口）时自动 resume 该工作区最近会话。
+ *  有 prompt 默认是新任务（开工/按意见重写），不 resume；
+ *  `resumeSession: true`（评审「退回修改」）接回最近会话并把意见当下一轮输入。 */
 export async function buildWorkspaceTerminalRequest(
   ws: WorkspaceDto,
   initialPrompt?: string,
-  opts?: { autoStart?: boolean; launch?: KickoffLaunch },
+  opts?: { autoStart?: boolean; launch?: KickoffLaunch; resumeSession?: boolean },
 ): Promise<PendingTerminal> {
   const pairs = await invoke<[string, string][]>("workspace_env_for", {
     worktreePath: ws.worktreePath,
@@ -233,7 +237,12 @@ export async function buildWorkspaceTerminalRequest(
       return {};
     }
   })();
-  const resume = initialPrompt ? null : await latestWorkspaceSession(ws);
+  const resume = shouldResumeWorkspaceSession({
+    hasPrompt: Boolean(initialPrompt?.trim()),
+    resumeSession: opts?.resumeSession,
+  })
+    ? await latestWorkspaceSession(ws)
+    : null;
   return {
     cwd: ws.worktreePath,
     extraEnv: Object.fromEntries(pairs),

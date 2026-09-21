@@ -4,6 +4,7 @@ import {
   compareNotes,
   compareNotesBySeq,
   displayFileTitle,
+  pickContinueNotePath,
   listPreviewToggleLabel,
   litReadState,
   litRowMatches,
@@ -33,6 +34,15 @@ test("笔记序号前缀拆成列，100 排在 02 后面", () => {
   const names = ["100-z.md", "02-a.md", "01-b.md"];
   names.sort(compareNotesBySeq);
   assert.deepEqual(names, ["01-b.md", "02-a.md", "100-z.md"]);
+});
+
+test("继续精读打开序号最早的笔记，跳过索引和生词本", () => {
+  assert.equal(
+    pickContinueNotePath(["glossary.md", "02-b.md", "01-a.md", "index.json", "inbox.md"]),
+    "01-a.md",
+  );
+  assert.equal(pickContinueNotePath(["index.md", "glossary.md"]), null);
+  assert.equal(pickContinueNotePath([]), null);
 });
 
 test("文献状态与搜索/筛选", () => {

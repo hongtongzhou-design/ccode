@@ -4,6 +4,8 @@ import PreviewErrorState from "./PreviewErrorState";
 import {
   cellRef,
   colLetter,
+  csvDelimiterForPath,
+  delimitedSheetPreview,
   sheetCellHidden,
   sheetMergeAt,
   sheetTruncationLabel,
@@ -58,6 +60,32 @@ function XlsxPreview({
     setError(null);
     void (async () => {
       try {
+        if (/\.(csv|tsv)$/i.test(path)) {
+          const root =
+            cwdHint && cwdHint.length > 0
+              ? cwdHint
+              : path.replace(/[\\/][^\\/]*$/, "") || path;
+          const preview = await invoke<{ text: string; truncated: boolean }>(
+            "read_file_preview",
+            { path, root },
+          );
+          const parsed = delimitedSheetPreview(
+            preview.text,
+            csvDelimiterForPath(path),
+          );
+          if (!cancelled) {
+            setDto({
+              sheet: "Sheet1",
+              sheets: ["Sheet1"],
+              rows: parsed.rows,
+              truncated: parsed.truncated || preview.truncated,
+              size: preview.text.length,
+              totalRows: parsed.totalRows,
+              totalCols: parsed.totalCols,
+            });
+          }
+          return;
+        }
         const next = await invoke<SheetPreviewDto>("read_sheet_preview", {
           path,
           cwdHint,

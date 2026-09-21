@@ -108,7 +108,7 @@ export default function TaskCardsSection({
   /** 聚焦步骤的执行状态（v3.71 流程线用；由父级从工作区派生——健康/漂移数据在本组件外） */
   focusRunStatus?: "pending" | "active" | "review" | "done";
   /** 聚焦步骤工作区内终端的注意力（stepAttention 口径）：done 时流程线 agent 节点给「已跑完」提示 */
-  focusAgentAttention?: "confirm" | "done" | null;
+  focusAgentAttention?: "confirm" | "done" | "working" | null;
   focusRunId?: string | null;
   /** 聚焦步骤处于合并冲突阻塞：流程线评审节点入口改为「去处理冲突」 */
   reviewConflict?: boolean;

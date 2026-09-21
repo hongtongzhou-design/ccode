@@ -64,6 +64,8 @@ pub fn helper_pending_for_doi(doi: &str) -> Option<(String, String, String)> {
 
 mod browser_bridge;
 mod download_inbox;
+mod endnote;
+mod gateway_balance;
 mod inst_access;
 mod journal_metrics;
 mod lit_watch;
@@ -98,15 +100,14 @@ mod settings;
 mod sheet_preview;
 mod skills;
 mod storage;
-mod task_review;
 mod subscription_quota;
+mod task_review;
 mod tray;
 mod updater;
 mod usage;
 mod watch_review;
 mod workspaces;
 mod ws_settings;
-mod endnote;
 mod zotero;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -202,6 +203,7 @@ pub fn run() {
             profiles::bind_gateway,
             profiles::unbind_split_merge,
             profiles::clear_gateway_key,
+            profiles::clear_gateway_wallet_token,
             combo::combo_surface,
             combo::combo_surface_for_gateway,
             combo::combo_surface_for_gateway_batch,
@@ -399,6 +401,7 @@ pub fn run() {
             workspaces::set_human_task_check,
             workspaces::import_human_deliverable,
             workspaces::list_help_requests,
+            workspaces::write_review_notes,
             workspaces::workspace_drift,
             workspaces::workspace_repair_remount,
             workspaces::workspace_relocate_repo,
@@ -506,6 +509,7 @@ pub fn run() {
             subscription_quota::plan_quota_overview,
             subscription_quota::plan_use_reset_card,
             subscription_quota::plan_quota_console_url,
+            gateway_balance::gateway_balance_overview,
             usage::top_sessions,
             usage::session_usage,
             usage::usage_by_gateway,

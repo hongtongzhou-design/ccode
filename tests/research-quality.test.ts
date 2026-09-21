@@ -29,7 +29,6 @@ test("关键开工必须有人的证据答案，不接受空草稿、讨论种�
     ["research-paper", "exp-design"], ["research-paper", "exp-run"],
     ["thesis", "methodology"], ["thesis", "thesis-exp-run"],
     ["data-processing", "data-clean"], ["data-processing", "data-eda"],
-    ["review", "draft"], ["research-paper", "paper-draft"], ["thesis", "thesis-draft"],
   ]) {
     const s = step(id, workspace);
     assert.equal(s.decisionMode, "hard_pause", workspace);

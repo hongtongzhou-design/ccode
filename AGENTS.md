@@ -115,7 +115,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 定时任务不是侧栏页（2026-09-13 用户移除）：只是项目「定时任务」页签；
                              #   页切快捷键（hotkeys.ts PAGE_HOTKEY_DEFS）、设置页「启动时进入」与 settings.rs KNOWN_PAGES 同为九页清单，
                              #   全局 page id schedules 仅作旧值重定向（App.tsx 转项目定时任务页签），SchedulesPage.tsx 已删
-  components/                # WorkspaceReviewView、PipelineEditor（含「＋ 从模板追加」）、ProjectGroup/ProjectRail、ArtifactChecklist（文本类产物就地预览层 +
+  components/                # WorkspaceReviewView、PipelineEditor（含「＋ 从模板追加」）、ProjectGroup/ProjectRail、ArtifactChecklist（文本类产物就地预览层；pdf/docx/表格/图同页弹层 +
                              # md 笔记「⛶ 沉浸阅读」入口（v3.98：pdf_for_note 配对后发 readerReq 带 notePath 进阅读区）+
                              # ⠿ 拖出手柄经 tauri-plugin-drag 做 OS 级文件拖出——WebView HTML5 拖拽出不了窗口）、TaskCardsSection、FileTree、
                              # FilePreviewEditor、PdfPreview/DocxPreview/XlsxPreview/ImagePreview、ImagePairView、GitPanel、HandoffPicker/DigestPicker、
@@ -245,6 +245,13 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 锚点实测修正不用公式，连续滚动与单页预览同一套；对齐官方 pdf.js viewer，
                              # 勿退回整层 transform 跟手）/
                              # 画布像素上限 pdfCanvasOutputScale（tests/reader.test.ts）
+  draft-review.ts            # 写作步评审机械红线（摘要待核实/G编号/待绘制/叠号）与退回提示词
+  md-path.ts                 # 阅读版式覆盖的 md 族（md/markdown/mdx/qmd）与 html 判定
+  md-toc.ts                  # md 浮动目录：≥3 标题才出、slug/展开 details
+  md-code-chrome.ts          # 阅读态代码块语言名 + 复制；mermaid 围栏打标
+  mermaid-blocks.ts          # mermaid 围栏检测（无围栏不加载 chunk）
+  mermaid-sanitize.ts        # mermaid SVG 二次清洗（strict + 剥脚本/链接）
+  html-preview.ts            # html 沙箱预览：stylesheet 内联 / 本地图 / srcdoc
   md-math.ts                 # md 阅读版式公式渲染（批次 E）：marked 扩展按 Pandoc 口径切分 $/$$
                              # （边界规则/转义/代码块不渲染/货币不误判）+ renderMathInto 懒加载
                              # katex+CSS（独立 chunk 不进主包，失败回落原文，tests/md-math.test.ts 25 例）
@@ -315,6 +322,34 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   gateway-slot.ts            # Agent→协议槽与目录刷新优先槽（与 slot_for_agent 双端镜像，tests/gateway-slot.test.ts）
   command-palette.ts         # 命令面板过滤纯逻辑
   stats-insight.ts           # 统计页花费环比 / 缓存命中率 / 会话标题回落纯逻辑（tests/stats-insight.test.ts）
+  gateway-balance.ts         # 网关余额卡纯逻辑：主机命中 / 站点币种金额 / 已用百分比 /
+                             #   大数字拆币种符号 splitBalanceAmount（整串 2xl 头重脚轻、tokens 更长）/
+                             #   同站账户合并 groupWalletAccounts（**分组键 = origin + account，不能只按
+                             #   origin**：同站两个账户必须分开；认不出账户的行并进本站第一组不丢行）+
+                             #   walletAccountTitle（单网关用网关名，多网关/并排时标「站点 · 账户」）+
+                             #   walletTokenQuota（三条分支合一：token 数据 > billing 提升值 > null；
+                             #   **回落提升值必须带 source !== "wallet"**，否则拿钱包余额冒充密钥额度）+
+                             #   walletExpirySoon（只有临近/已过期才在卡面露到期，0 = 无到期不算 1970）+
+                             #   walletUnlimitedLine（不限额度也要把已用说出来）
+                             #   （tests/gateway-balance.test.ts；与 gateway_balance.rs WALLET_HOSTS 双端镜像）
+  plan-quota.ts              # 订阅余量卡纯逻辑（用量页，与 gateway-balance.ts 并排的第二张卡）：
+                             #   供应商显示名/切换标签/窗口名/重置倒计时/重置卡；
+                             #   **双窗同构**（2026-09-21）：5 小时与本周同一套「指标名 + 百分比 + 绝对值 + 粗条 + 倒计时」，
+                             #   最紧的窗口排第一（planWindowsByTightness / planPrimaryWindowIndex，并列取靠前者）——
+                             #   本机实测 5 小时 0%、周 100%，固定锚 5 小时会把爆掉的周额度藏住；
+                             #   planResetRemain：卡面只写「还有 28 小时 51 分」，时刻放悬停（formatResetPoint）；
+                             #   quotaTone：分档 → 条/数字同一套颜色令牌（正常档**不着色**，一片彩字反而看不出该管哪个）；
+                             #   绝对值走 formatQuotaPoints（手写千分位）+ planAbsoluteQuotaPair（百分比旁；
+                             #   已用超过总量时按总量封顶，140,023 显示成 140,000 / 140,000；解析层仍如实；
+                             #   MiniMax 只回百分比就不显示）；
+                             #   重置卡两列平铺不套内卡（auto-fit），名称「5 小时重置卡 / 周重置卡」，
+                             #   张数做微型胶囊；期限卡面只写日期，时刻悬停；3 天内/已过期标黄；
+                             #   planResetCardHighlight：只给最紧且 ≥90% 的那张按钮上强调色，**不禁用**另一张；
+                             #   planWindowUnused：窗口一点没用（0%）**只劝退，不禁用按钮**——用户拍板 2026-09-21
+                             #   「看着劝退吧 不拦截」。落地：①确认框写已用 X% ②0% 确认按钮改「仍要用」；
+                             #   **重置卡里不写「已用 X%」**（用量已经在上面两个窗口）；
+                             #   planLevelLabel 全小写等级首字母大写（智谱实测回 level:"max"）
+                             #   （tests/plan-quota.test.ts）
   hotkeys.ts                 # 快捷键组合串纯逻辑
   themes.ts                  # 主题清单单一出处 + isLightTheme() 亮暗判定单一出处（禁另造判定；
                              #   custom / custom-light 不进十四套清单）
@@ -383,7 +418,10 @@ src-tauri/src/
                              #   报 invalid transport）；禁止 enable_mcp_apps；
                              # grok GROK_CONFIG overlay 单一出处 grok_config_overlay：白名单（grok-build OVERLAY_ALLOW_PATHS，
                              #   fail-closed）只放行 [models] 全局块——allowed_models 收敛 + 请求策略五项全局默认（headers 走
-                             #   $VAR 引用不落密文）；[model.<id>] 不在白名单，api_backend/context_window 由中转 /models 目录
+                             #   $VAR 引用不落密文）+ 有启动模型时写 default（1.0.34 实证：开会话前先拿 config.toml 的
+                             #   [models].default 比对 allowed_models，不匹配直接拒启动，GROK_DEFAULT_MODEL 偏好在这道门之后才
+                             #   生效——全局 default 常是别家绑定「设为全局默认」留下的，故必须覆盖；memory：2026-09-20）；
+                             #   [model.<id>] 不在白名单，api_backend/context_window 由中转 /models 目录
                              #   条目 apiBackend/contextWindow 或 config.toml 提供（调研录 matrix §9 第 8 条）；
                              # 选择器显示名统一「配置名 · 模型」（claude _NAME 槽 / codex catalog display_name /
                              #   kimi KIMI_MODEL_DISPLAY_NAME / opencode provider+models name）；
@@ -414,6 +452,16 @@ src-tauri/src/
                              # 绑定级 api_backend 字段（grok 专用，仅设为全局写 [model.*] 消费；闭集校验 +
                              #   导出/导入 v2 随绑定走、非 grok 导入丢弃）；
                              # 有绑定的网关禁删；导出/导入 v2；见 docs/conventions/profiles.md
+                             # 认证变量闭集 AUTH_BEARING_ENV 单一出处（无密钥校验 auth_bearing_env_name 与
+                             #   导出剔除 sensitive_env_name 同源，防两处名单漂移；OPENCODE_CONFIG_CONTENT
+                             #   这类内嵌整份凭据、名字无 KEY/TOKEN 的项只能靠闭集兜住）；
+                             # 解绑清 settings 五字段（含 default_profiles / hidden_profiles）；schedules 的
+                             #   profile_id 不置空——运行时硬 pin 拒绝静默换供应商，前端解绑前列受影响任务；
+                             # §2 唯一约束单一入口 has_duplicate_binding(…, skip_id, candidate)：新建/复制/编辑/
+                             #   导入 v2 四条路同一判据（编辑排除自身；选择没动时放行 update_selection_conflicts，
+                             #   防历史重复对连改名都存不了——别当冗余删掉），漏一条就能「改一次模型」绕过；
+                             #   导入另过 validate_profile_fields（agent 白名单/协议闭集/apiBackend/extraEnv 名），
+                             #   不合格进 skippedSlots 原文列出，脏模型列表归一后才落盘
   combo.rs                   # Agent×模型×槽×体检求交器，DTO 下发；网关库走多 Agent 并集；
                              # 逐字段通道种类 channel_*（inject>persist>tui>unsupported>unknown 并集）随 DTO 下发，
                              #   inject_*_allowed 只认 inject，apply_to_profile 保留 persist 字段（设为全局要写）；
@@ -421,7 +469,8 @@ src-tauri/src/
                              #   混注提示覆盖思考与采样两种不一致（换模不重注）；
                              # policy_channel_note 通道形态说明（qwen 仅设为全局 / grok overlay 边界）随 DTO 下发
   drift.rs                   # 全局配置漂移：只比对 Mesa 写入键的子集，无关字段不算漂移
-  gateway_store.rs           # 网关/绑定落盘与迁移；每槽体检摘要 latest-per-slot
+  gateway_store.rs           # 网关/绑定落盘与迁移；每槽体检摘要 latest-per-slot（摘要可按槽，绑定状态徽标
+                             #   必须按「绑定默认模型 + URL/密钥指纹」取体检，禁「该槽最近一条」株连，§8）
   provider_id.rs             # provider 名 ccode-<网关短id> 单一出处；LEGACY="ccode" 仅旧 rollout
   tray.rs                    # 系统托盘：按 Agent 列绑定一键设为全局；选中态 dry-run 子集比对；不改启动栏默认
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）；
@@ -561,12 +610,39 @@ src-tauri/src/
                              #   Kimi GET api.kimi.com/coding/v1/usages（limits[] 多模型 5h 窗取 utilization 最紧、
                              #   usage=周窗、used=limit-remaining）；MiniMax GET /v1/api/openplatform/coding_plan/remains
                              #   （general 条目、字段是剩余百分比要反转、周桶仅 current_weekly_status==1）；
+                             #   窗口 DTO 除 used_percent/resets_at 外另有 used/total 绝对值（2026-09-21）：
+                             #   智谱 limits[].currentValue/usage 就是已用/总量积分（实测周窗 140023/140000 超发
+                             #   如实透传不在解析层钳），Kimi limit/remaining 是配额点数，MiniMax 只回百分比 → None；
+                             #   **只有字段真的给了才带**（缺 limit 不拿兜底 1.0 当总量），前端两个都有值才显示；
+                             #   parse_zhipu_quota 用 PlanWindow 直接装中间态——它自带 window 字段，
+                             #   归周窗时**必须改窗名**（旧版是 push 时才贴标签，漏改会让两根条都写「5 小时」）；
+                             #   智谱 5h 窗实测不回 nextResetTime → 认 None 不编时间；
                              #   重置卡仅智谱支持（DTO reset_cards_supported，其余家不渲染该行）；
                              #   团队版 = 网关 headerEnv 带 bigmodel-organization/project 隐式识别（?type=2 + 两头）；
                              #   Bearer 鉴权（裸 key 亦通，智谱两者都认）；密钥只在 Rust 层出 keys.json 绝不进 DTO；
                              #   用卡（plan_use_reset_card）是消费性写操作——显式命令 + 前端确认弹窗，成功作废缓存；
                              #   2 分钟进程内缓存（对齐用量页可见期自动轮询，页面不可见即停）+ 瞬时失败回落上次成功值
-                             #   标 fromCache；无后台轮询；不注出网代理
+                             #   标 fromCache；无后台轮询；不注出网代理；
+                             #   复用 reqwest Client（连接池，勿退回每请求新建 Client = 每次重新握手）；
+                             #   plan_quota_overview 多网关并发（spawn 全部再按序收），等待 ≈ 最慢一家不是相加
+  gateway_balance.rs         # 网关余额查询（用量页「网关余额」卡，与订阅余量并列，2026-09-20）：
+                             #   New API 兼容预付钱包，出卡零配置（槽 URL 主机命中 zetatechs.com 即出；加站点 = WALLET_HOSTS 加一条）；
+                             #   公开 GET {origin}/api/status 取 quota_display_type / quota_per_unit；
+                             #   钱包优先：keys.json `{id}#wallet` 系统访问令牌（cc-switch PAT，不是推理 sk-）打
+                             #   GET {origin}/api/user/self，带 New-Api-User 等兼容头（all-api-hub 口径）；
+                             #   无令牌再试推理密钥（多数站 401 不当成密钥失效）→ /api/usage/token/ → billing；
+                             #   source=wallet|token；不限额度且无钱包数字时改口去网关库填令牌；
+                             #   DTO 带 account（/api/user/self 的 display_name→username，**绝不取 email**）与
+                             #   token_name（/api/usage/token 的 name）：account 是前端「同站合并成一张卡」的分组键，
+                             #   同站两个账户必须分成两张卡，拆掉它就会把两个账户的余额混一张；
+                             #   「去钱包」={origin}/wallet；密钥只出 keys.json 不进 DTO；2 分钟缓存 + 瞬时失败回落；
+                             #   不注出网代理；不做 usage script / 探测全部网关
+                             #   **等待结构（2026-09-21 用户实测「刷新很慢、不如智谱那个快」后重做，勿退回）**：
+                             #   多网关并发 spawn 再按序收（三网关顺序 ≈2.1s → 并发 ≈0.66s，本机实测中位）；
+                             #   /api/status 按 origin 进程缓存 10 分钟（同源多网关只打一次，失败回落旧值再回落内置默认）；
+                             #   「密钥额度」端点写尾斜杠 /api/usage/token/——不带斜杠该站 301，跟一跳白多一个 RTT；
+                             #   改等待结构前先量单请求 TTFB（本机 status ≈1.0–1.5s / self ≈0.8s / token ≈0.7–2.0s），
+                             #   慢的是串行 × 网关数，不是某一路慢
   pricing.rs                 # pricing.json 读写与校验（定价链最高层，原子写）
   settings.rs                # 应用设置（settings.json）：字体/scrollback/渲染器（terminal_renderer：auto/dom/webgl，Mac 默认清晰、Windows 默认流畅，读时闭集过滤）/汇率/镜像/主题/OS 通知/精确注意力
                              # （hooks_attention 按 agent map，旧 claude_hooks_attention 仅反序列化兼容迁移）/想法期只读保护

@@ -125,6 +125,7 @@
 - **codex 默认沙箱**：交互启动注入 `-s workspace-write`（只能写当前目录）+ `-c sandbox_workspace_write.network_access=true`
   （沙箱内放开联网——默认拦网会导致文献检索/查资料每次都弹提权确认；定时任务 headless 无人可批，不开网必失败），
   AI 无头调用 `-s read-only`；用户可用 extra_env/参数覆盖。
+- **诊断 unhandledrejection 跳过 monaco CancellationError**（`name` 与 `message` 均为 `"Canceled"`）：WKWebView 下 monaco 剪贴板 workaround 每次点击/按键会取消上一次 `clipboard.write`，属预期取消。上报层 `preventDefault` 且不写 `log_event`；预打包再用 Vite/esbuild 插件在 cancel 前接住 DeferredPromise。不得把这类拒绝当故障刷开发态 stderr。
 - **诊断包是脱敏的有界快照**：设置页一键导出到 `~/Downloads/ccode-exports/`，包含 Windows/WebView2/GPU/WebGL、
   语言与输入法、当前功能开关、应用日志及自应用启动后的子进程生命周期；进程记录为内存环形缓冲，不读取环境变量，命令参数
   与日志在导出前必须经 Rust 层脱敏。ZIP 内只放 UTF-8 JSON/TXT，保证从 Windows 带回 macOS 后无需 Mesa 或 Windows 工具

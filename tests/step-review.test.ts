@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   resolveStepReviewProfile,
+  reviewPaneTabs,
   STEP_REVIEW_PROFILES,
   type StepReviewKind,
 } from "../src/step-review.ts";
-import { PIPELINE_TEMPLATES } from "../src/pipeline-presets.ts";
+import { PIPELINE_TEMPLATES, pipelineStepsForTemplate } from "../src/pipeline-presets.ts";
+import { deliveryContentPaths } from "../src/review-file-groups.ts";
 import { reviewSavePrimaryLabel, historyWorkspaceSaveTitle, REVIEW_SAVE } from "../src/review-save-copy.ts";
 
 test("评审档案闭集：筛选 / 文件交付 / 报告验收 / 默认，不按工作区名另开一页", () => {
@@ -57,6 +59,35 @@ test("评审档案闭集：筛选 / 文件交付 / 报告验收 / 默认，不�
   assert.equal(STEP_REVIEW_PROFILES.screening.showReproduction, false);
 });
 
+test("检索/精读/大纲同一套页签，Git 对照只在文件", () => {
+  assert.deepEqual(
+    reviewPaneTabs("screening")?.map((tab) => tab.label),
+    ["清单", "过程", "文件"],
+  );
+  assert.deepEqual(
+    reviewPaneTabs("files", ["notes/a.md", ".ccode/help-wanted.md"])?.map(
+      (tab) => tab.label,
+    ),
+    ["笔记", "过程", "文件"],
+  );
+  assert.deepEqual(
+    reviewPaneTabs("files", ["outline.md", ".ccode/help-wanted.md"])?.map(
+      (tab) => tab.label,
+    ),
+    ["稿件", "过程", "文件"],
+  );
+  assert.deepEqual(
+    reviewPaneTabs("files", ["submission/formatted.md"])?.map((tab) => tab.label),
+    ["稿件", "过程", "文件"],
+  );
+  assert.deepEqual(
+    reviewPaneTabs("files", ["outline.md", "notes/a.md"])?.map((tab) => tab.label),
+    ["稿件", "过程", "文件"],
+  );
+  assert.equal(reviewPaneTabs("acceptance"), null);
+  assert.equal(reviewPaneTabs("default"), null);
+});
+
 const KIND_BY_WORKSPACE: Record<string, StepReviewKind> = {
   "lit-search": "screening",
   "lit-survey-search": "screening",
@@ -86,22 +117,68 @@ const KIND_BY_WORKSPACE: Record<string, StepReviewKind> = {
   "latex-writing": "files",
   "latex-compile": "files",
   "latex-final": "files",
+  "rebuttal-r1": "files",
 };
 
+function stepsForReviewAudit() {
+  return PIPELINE_TEMPLATES.flatMap((tpl) => {
+    const steps =
+      tpl.id === "submission-rebuttal"
+        ? [
+            ...pipelineStepsForTemplate(tpl, "initial"),
+            ...pipelineStepsForTemplate(tpl, "revision", 1),
+          ]
+        : tpl.steps;
+    return steps.map((step) => ({ tpl, step }));
+  });
+}
+
+function sampleArtifactPath(pattern: string): string {
+  return pattern.replace(/\*/g, "x");
+}
+
 test("六套模板步骤评审档案按产物分流", () => {
-  for (const tpl of PIPELINE_TEMPLATES) {
-    for (const step of tpl.steps) {
-      const ws = step.workspaceName ?? "";
-      assert.ok(
-        KIND_BY_WORKSPACE[ws],
-        `未登记评审档案：${tpl.id}/${step.name} (${ws})`,
-      );
-      assert.equal(
-        resolveStepReviewProfile(step, []).kind,
-        KIND_BY_WORKSPACE[ws],
-        `${tpl.id}/${step.name}`,
-      );
-    }
+  for (const { tpl, step } of stepsForReviewAudit()) {
+    const ws = step.workspaceName ?? "";
+    assert.ok(
+      KIND_BY_WORKSPACE[ws],
+      `未登记评审档案：${tpl.id}/${step.name} (${ws})`,
+    );
+    assert.equal(
+      resolveStepReviewProfile(step, []).kind,
+      KIND_BY_WORKSPACE[ws],
+      `${tpl.id}/${step.name}`,
+    );
+  }
+});
+
+test("精读之后的下一步声明读取 notes/", () => {
+  const rows = stepsForReviewAudit();
+  for (let i = 0; i < rows.length; i++) {
+    const { tpl, step } = rows[i];
+    if (!step.skills.includes("lit-notes")) continue;
+    const next = rows[i + 1]?.tpl.id === tpl.id ? rows[i + 1].step : undefined;
+    if (!next) continue;
+    const inputs = [
+      ...(next.inputs ?? []),
+      ...(next.optionalInputs ?? []),
+      ...(next.anyOfInputs ?? []).flat(),
+    ];
+    assert.ok(
+      inputs.some((path) => path === "notes/" || path.startsWith("notes")),
+      `${tpl.id} 的「${next.name}」没声明读 notes/，精读笔记接不上下一步`,
+    );
+  }
+});
+
+test("files 档每步预期产物都能进笔记/稿件主面", () => {
+  for (const { tpl, step } of stepsForReviewAudit()) {
+    if (resolveStepReviewProfile(step, []).kind !== "files") continue;
+    const samples = (step.expectedArtifacts ?? []).map(sampleArtifactPath);
+    assert.ok(
+      deliveryContentPaths(samples).length > 0,
+      `${tpl.id}/${step.name} 主面空：${samples.join("、")}`,
+    );
   }
 });
 

@@ -52,7 +52,13 @@ import {
   hoverRevealClass,
   secondaryActionClass,
 } from "../components/PageFrame";
-import { attributeToProject, buildRunOverview, runIdForPath } from "../run-overview";
+import {
+  attributeToProject,
+  buildRunOverview,
+  runIdForPath,
+  workspaceAgentBusy,
+  workspaceReviewInboxEligible,
+} from "../run-overview";
 import { depInboxItem, type DepCheckDto } from "../dep-check";
 import {
   litInboxCandidates,
@@ -562,6 +568,7 @@ function workspaceState(
   health: WorkspaceHealthDto | undefined,
   drift: WorkspaceDriftDto | undefined,
   healthFailed = false,
+  agentBusy = false,
 ): WorkspaceState {
   if (workspace.status === "creating") {
     return {
@@ -628,6 +635,23 @@ function workspaceState(
         // 主仓问题与冲突并存时一并列出，避免漏掉合并阻塞项
         ...(health.mainDirty
           ? ["主文件夹里还有没保存的改动，提交保存后才能合并。"]
+          : []),
+        ...(health.mainOffBase
+          ? [`主文件夹当前不在 ${workspace.baseBranch} 分支上。`]
+          : []),
+      ],
+    };
+  }
+  // 正在出字时不把主仓脏 / 待提交 / 可评审当成「要你现在处理」
+  if (agentBusy) {
+    return {
+      label: "进行中",
+      dotClass: "bg-ok-text",
+      textClass: "text-l3",
+      details: [
+        "Agent 正在这个任务里工作。",
+        ...(health.mainDirty
+          ? ["主文件夹里还有没保存的改动，保存进历史后才能合并。"]
           : []),
         ...(health.mainOffBase
           ? [`主文件夹当前不在 ${workspace.baseBranch} 分支上。`]
@@ -1594,7 +1618,16 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
       }));
     }),
     ...active
-      .filter((w) => health[w.id]?.readyToMerge && !health[w.id]?.conflict)
+      .filter((w) =>
+        workspaceReviewInboxEligible({
+          readyToMerge: health[w.id]?.readyToMerge,
+          conflict: health[w.id]?.conflict,
+          agentBusy: workspaceAgentBusy(
+            w.worktreePath,
+            terminalRunInputs,
+          ),
+        }),
+      )
       .map((w) => ({
         key: `ready:${w.id}`,
         dot: "bg-ok-text",
@@ -2569,6 +2602,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                   workspaceHealth,
                   workspaceDrift,
                   isHealthFailed,
+                  workspaceAgentBusy(
+                    workspace.worktreePath,
+                    terminalRunInputs,
+                  ),
                 );
                 const canResolveConflict =
                   workspace.status === "active" &&
@@ -2675,20 +2712,18 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             )}
                           </>
                         )}
-                        {/* 产物核验清单入口：活跃工作区（含已合并）可用，行内手风琴就地展开；展开时保持可见 */}
+                        {/* 本步文件：活跃工作区常驻，行内手风琴就地展开 */}
                         {workspace.status === "active" && (
                           <button
                             type="button"
                             onClick={() => toggleArtifacts(workspace.id)}
                             aria-expanded={artifactsOpen.has(workspace.id)}
-                            title="查看该任务已经产出的文件"
+                            title="打开这一步已经写出的文件"
                             className={`${actionBtn} ${
-                              artifactsOpen.has(workspace.id)
-                                ? "text-l1"
-                                : hoverReveal
+                              artifactsOpen.has(workspace.id) ? "text-l1" : ""
                             }`}
                           >
-                            产物
+                            {artifactsOpen.has(workspace.id) ? "收起文件" : "本步文件"}
                           </button>
                         )}
                         <button
@@ -2889,6 +2924,10 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             health[detailsPopover.ws.id],
             drift[detailsPopover.ws.id],
             !!healthFailed[detailsPopover.ws.id],
+            workspaceAgentBusy(
+              detailsPopover.ws.worktreePath,
+              terminalRunInputs,
+            ),
           )}
           diagFailed={
             !!driftFailed[detailsPopover.ws.id] ||

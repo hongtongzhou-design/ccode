@@ -4,6 +4,9 @@ import {
   cellRef,
   clipSheetMerge,
   colLetter,
+  csvDelimiterForPath,
+  delimitedSheetPreview,
+  parseDelimitedRows,
   sheetCellHidden,
   sheetMergeAt,
   sheetTruncationLabel,
@@ -85,4 +88,29 @@ test("sheetCellHidden / sheetMergeAt：只挡非起点", () => {
   assert.equal(sheetCellHidden(merges, 2, 4), true);
   assert.equal(sheetCellHidden(merges, 0, 2), false);
   assert.equal(sheetCellHidden(merges, 3, 2), false);
+});
+
+test("parseDelimitedRows：引号字段含逗号与换行，双引号转义", () => {
+  assert.deepEqual(parseDelimitedRows("a,b\n1,2\n", ","), [
+    ["a", "b"],
+    ["1", "2"],
+  ]);
+  assert.deepEqual(parseDelimitedRows('name,"hello, world"\n', ","), [
+    ["name", "hello, world"],
+  ]);
+  assert.deepEqual(parseDelimitedRows('"a""b",c\n', ","), [["a\"b", "c"]]);
+  assert.deepEqual(parseDelimitedRows("a\tb\n1\t2\n", "\t"), [
+    ["a", "b"],
+    ["1", "2"],
+  ]);
+});
+
+test("delimitedSheetPreview 截断行列，tsv 用 tab", () => {
+  assert.equal(csvDelimiterForPath("data.tsv"), "\t");
+  assert.equal(csvDelimiterForPath("data.csv"), ",");
+  const many = Array.from({ length: 5 }, (_, i) => `c${i}`).join(",");
+  const parsed = delimitedSheetPreview(`${many}\n1,2,3,4,5\n`, ",", 10, 3);
+  assert.equal(parsed.truncated, true);
+  assert.equal(parsed.totalCols, 5);
+  assert.equal(parsed.rows[0]?.length, 3);
 });

@@ -196,7 +196,7 @@ fn new_skill(
 /// marker 是库目录下的 . 开头文件（发现逻辑跳过），记录已播种到的版本；
 /// 用户删掉某个内置技能后不会被复活——逐技能删除墓碑（BUILTIN_TOMBSTONE_FILE）
 /// 记下用户删过的内置技能名，版本升级补播时跳过墓碑项。
-const BUILTIN_SEED_VERSION: u32 = 5;
+const BUILTIN_SEED_VERSION: u32 = 6;
 const BUILTIN_SEED_MARKER: &str = ".builtin-seed-version";
 
 /// 内置技能删除墓碑（库目录下 . 开头文件，一行一个技能名）：删除内置技能先落墓碑，
@@ -229,6 +229,10 @@ static BUILTIN_SKILLS: &[(&str, &str)] = &[
     (
         "review-writing",
         include_str!("../resources/skills/review-writing/SKILL.md"),
+    ),
+    (
+        "review-figures",
+        include_str!("../resources/skills/review-figures/SKILL.md"),
     ),
     (
         "research-writing",
@@ -300,6 +304,16 @@ static BUILTIN_SUPPORT: &[(&str, &str, &str)] = &[
         "blender-research",
         "scripts/build_scene.py",
         include_str!("../resources/skills/blender-research/scripts/build_scene.py"),
+    ),
+    (
+        "review-figures",
+        "scripts/extract_figure.py",
+        include_str!("../resources/skills/review-figures/scripts/extract_figure.py"),
+    ),
+    (
+        "review-figures",
+        "scripts/assemble_panels.py",
+        include_str!("../resources/skills/review-figures/scripts/assemble_panels.py"),
     ),
 ];
 

@@ -74,7 +74,11 @@ export function reviewFileGroup(path: string): ReviewFileGroupId {
   if (base === "to-fetch.md" || base === "to-fetch.ris") return "fetch";
   if (
     base === "included.json" ||
+    base === "help-wanted.md" ||
     base === "zotero-sync.md" ||
+    p === ".ccode" ||
+    p.startsWith(".ccode/") ||
+    p.includes("/.ccode/") ||
     p === "scripts" ||
     p.startsWith("scripts/") ||
     p.includes("/scripts/")

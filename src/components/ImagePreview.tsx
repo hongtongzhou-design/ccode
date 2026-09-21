@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { pdfWheelShouldZoom, pdfWheelZoomFactor } from "../reader";
 import PreviewErrorState from "./PreviewErrorState";
 
 function basename(p: string): string {
@@ -20,6 +21,7 @@ function ImagePreview({
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const [scale, setScale] = useState(1);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,12 +43,44 @@ function ImagePreview({
     };
   }, [path, cwdHint, retry]);
 
+  useEffect(() => {
+    setScale(1);
+  }, [path]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 bg-strip px-3 py-1.5 text-xs">
         <span className="truncate text-l3" title={path}>
           {basename(path)}
         </span>
+        {url && (
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              className="rounded-sm px-1.5 text-l3 hover:bg-hover hover:text-l1"
+              onClick={() => setScale((s) => Math.max(0.25, s / 1.2))}
+              title="缩小"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="rounded-sm px-1.5 font-mono text-l3 hover:bg-hover hover:text-l1"
+              onClick={() => setScale(1)}
+              title="还原"
+            >
+              {Math.round(scale * 100)}%
+            </button>
+            <button
+              type="button"
+              className="rounded-sm px-1.5 text-l3 hover:bg-hover hover:text-l1"
+              onClick={() => setScale((s) => Math.min(8, s * 1.2))}
+              title="放大"
+            >
+              +
+            </button>
+          </span>
+        )}
       </div>
       {error ? (
         <PreviewErrorState error={error} kind="图片" onRetry={() => {
@@ -64,11 +98,24 @@ function ImagePreview({
               "repeating-conic-gradient(var(--color-inset) 0% 25%, transparent 0% 50%)",
             backgroundSize: "16px 16px",
           }}
+          onWheel={(e) => {
+            if (!pdfWheelShouldZoom(e)) return;
+            const factor = pdfWheelZoomFactor(e.deltaY, e.deltaMode);
+            if (!factor) return;
+            e.preventDefault();
+            setScale((s) => Math.min(8, Math.max(0.25, s * factor)));
+          }}
         >
           <img
             src={url}
             alt={basename(path)}
-            className="max-h-full max-w-full object-contain"
+            className="object-contain"
+            style={{
+              maxHeight: scale === 1 ? "100%" : undefined,
+              maxWidth: scale === 1 ? "100%" : undefined,
+              transform: scale === 1 ? undefined : `scale(${scale})`,
+              transformOrigin: "center center",
+            }}
           />
         </div>
       )}

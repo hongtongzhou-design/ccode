@@ -5,8 +5,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { AGENTS } from "../types";
 import { useAppStore } from "../store";
 import type {
+  GatewayBalanceDto,
   GatewayUsageRow,
   PlanQuotaDto,
+  PlanQuotaWindowDto,
   UsageStatsDto,
   UsageTopSessionDto,
   UsageTrendDto,
@@ -19,21 +21,43 @@ import {
 } from "../stats-insight";
 import {
   formatPlanTimestamp,
-  formatResetCountdown,
   formatResetPoint,
+  planAbsoluteQuotaPair,
+  planWindowUnused,
   planProviderLabel,
   planQuotaDataAt,
+  planResetCardHighlight,
+  planResetRemain,
   planTabLabel,
+  planWindowCaption,
   planWindowLabel,
+  planWindowsByTightness,
   gatewayHasPlanQuota,
   planGatewayNameVisible,
   planLevelLabel,
-  quotaBarLevel,
-  resetCardsLine,
+  quotaTone,
+  resetCardExpiryNote,
 } from "../plan-quota";
+import {
+  formatBalanceAmount,
+  formatBalanceAmountMasked,
+  gatewayHasWallet,
+  groupWalletAccounts,
+  splitBalanceAmount,
+  walletAccountTitle,
+  walletAmountCaption,
+  walletExpirySoon,
+  walletKeyAmountLine,
+  walletKindLabel,
+  walletMissingHint,
+  walletSpendTone,
+  walletTokenQuota,
+  walletUrl,
+  walletUsedPercent,
+} from "../gateway-balance";
 import { confirmDialog } from "../components/ConfirmDialog";
 import { agentBrand } from "../agent-colors";
-import { RefreshCw } from "lucide-react";
+import { Eye, EyeOff, RefreshCw } from "lucide-react";
 import zhipuIcon from "../assets/plan-icons/zhipu.svg";
 import kimiIcon from "../assets/plan-icons/kimi.svg";
 import minimaxIcon from "../assets/plan-icons/minimax.svg";
@@ -52,6 +76,8 @@ import {
   PageFrame,
   PageHeader,
   PageToolbar,
+  compactPrimaryActionClass,
+  ghostActionClass,
   rowActionClass,
   SegTabs,
 } from "../components/PageFrame";
@@ -114,6 +140,124 @@ function CostText({ children }: { children: ReactNode }) {
 function basename(p: string): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || p;
+}
+
+const WALLET_KEY_COLS = "7rem minmax(0,1fr) 4.75rem 11rem";
+
+function WalletKeyRow({
+  name,
+  title,
+  usedPct,
+  used,
+  total,
+  currency,
+  unlimited,
+  hideAmount,
+  empty,
+}: {
+  name: string;
+  title?: string;
+  usedPct: number | null;
+  used: number | null;
+  total: number | null;
+  currency: string;
+  unlimited?: boolean;
+  hideAmount?: boolean;
+  empty?: string;
+}) {
+  const tone = walletSpendTone(usedPct ?? 0);
+  const amount = empty
+    ? empty
+    : walletKeyAmountLine(!!unlimited, used, total, currency, hideAmount);
+  const exhausted = !unlimited && usedPct != null && Math.round(usedPct) >= 100;
+  const status = unlimited
+    ? "不限"
+    : usedPct != null
+      ? `${usedPct.toFixed(0)}%`
+      : "";
+  return (
+    <>
+      <span className="truncate text-l2" title={title || name}>
+        {name}
+      </span>
+      {unlimited || empty ? (
+        <span className="text-l4">{empty ? "" : "不限额度"}</span>
+      ) : (
+        <div className="h-1.5 overflow-hidden rounded bg-l4/20">
+          {usedPct != null && (
+            <div
+              className={`h-full rounded ${tone.bar}`}
+              style={{ width: `${Math.min(100, Math.max(0, usedPct))}%` }}
+            />
+          )}
+        </div>
+      )}
+      <span
+        className={`text-right font-mono tabular-nums ${
+          unlimited || empty ? "text-l3" : exhausted ? "text-err-text" : tone.text
+        }`}
+      >
+        {exhausted ? (
+          <>
+            <span className="mr-1 text-micro">已用尽</span>
+            {status}
+          </>
+        ) : (
+          status
+        )}
+      </span>
+      <span className="truncate text-right font-mono text-micro tabular-nums text-l4">
+        {amount}
+      </span>
+    </>
+  );
+}
+
+function PlanWindowBlock({
+  win,
+  now,
+  lastReset,
+}: {
+  win: PlanQuotaWindowDto;
+  now: number;
+  lastReset: string | null;
+}) {
+  const { bar, text } = quotaTone(win.usedPercent);
+  const abs = planAbsoluteQuotaPair(win.used, win.total);
+  const remain = planResetRemain(win.resetsAt, now);
+  const point = formatResetPoint(win.resetsAt, now);
+  const remainTitle = remain
+    ? [point, lastReset ? `上次重置：${lastReset}` : null].filter(Boolean).join(" · ")
+    : "这家没有给出这个窗口的重置时间";
+  const fill = Math.min(100, Math.max(0, win.usedPercent));
+  return (
+    <div>
+      <div className="text-xs font-medium tracking-wider text-l4">
+        {planWindowCaption(win.window)}
+      </div>
+      <div className="mt-0.5 flex flex-col gap-2">
+        <div className="flex items-baseline gap-2">
+          <span className={`text-2xl font-semibold tracking-tight tabular-nums ${text}`}>
+            {win.usedPercent.toFixed(0)}
+            <span className="ml-1 text-base font-medium tracking-normal text-l3">%</span>
+          </span>
+          {abs && <span className="text-xs tabular-nums text-l3">{abs}</span>}
+          <span
+            className={`ml-auto text-xs ${remain ? "text-l2" : "text-l4"}`}
+            title={remainTitle}
+          >
+            {remain ?? "暂无重置时间"}
+          </span>
+        </div>
+        <div className="h-2 overflow-hidden rounded bg-l4/20">
+          <div
+            className={`h-full rounded ${fill > 0 ? bar : ""}`}
+            style={{ width: `${fill}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** 官方账号（订阅制）行的费用格：不按量计费，固定显示「订阅」并注明口径 */
@@ -303,6 +447,51 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     [gateways],
   );
 
+  // 网关余额卡（New API 钱包，与订阅余量并列）：进页查 + 可见期 2 分钟轮询
+  const [walletRows, setWalletRows] = useState<GatewayBalanceDto[]>([]);
+  const [walletActive, setWalletActive] = useState<string | null>(null);
+  const [walletLoading, setWalletLoading] = useState(false);
+  const [walletError, setWalletError] = useState<string | null>(null);
+  const [hideQuota, setHideQuota] = useState(
+    () => localStorage.getItem("ccode.stats.hideQuota") === "1",
+  );
+  const walletSeq = useRef(0);
+  const hasWalletGateway = useMemo(
+    () => gateways.some((g) => gatewayHasWallet(g)),
+    [gateways],
+  );
+  /** 按当前网关列表收敛：网关删掉后旧行不得留在卡上；网关列表还没加载出来时不过滤（别把好数据滤没） */
+  const walletRowsShown = useMemo(() => {
+    if (gateways.length === 0) return walletRows;
+    const known = new Set(gateways.map((g) => g.id));
+    return walletRows.filter((r) => known.has(r.gatewayId));
+  }, [walletRows, gateways]);
+  /**
+   * 同站同账户合并成一张卡：几个网关共用同一个系统访问令牌时，钱包余额本来就是同一个数字，
+   * 逐个摆成标签页会出现「三个标签页一模一样」。合并后钱包数字只出现一次，密钥额度按网关列明细。
+   */
+  const walletGroups = useMemo(
+    () => groupWalletAccounts(walletRowsShown),
+    [walletRowsShown],
+  );
+
+  async function loadWallets(force: boolean) {
+    const seq = ++walletSeq.current;
+    setWalletLoading(true);
+    try {
+      const rows = await invoke<GatewayBalanceDto[]>("gateway_balance_overview", {
+        force,
+      });
+      if (seq !== walletSeq.current) return;
+      setWalletRows(rows);
+      setWalletError(null);
+    } catch (e) {
+      if (seq === walletSeq.current) setWalletError(String(e));
+    } finally {
+      if (seq === walletSeq.current) setWalletLoading(false);
+    }
+  }
+
   async function loadPlans(force: boolean) {
     const seq = ++planSeq.current;
     setPlanLoading(true);
@@ -326,11 +515,20 @@ export default function StatsPage({ visible }: { visible: boolean }) {
         ? row.resetCards.fiveHourExpiresAt
         : row.resetCards.weeklyExpiresAt;
     const expiryAt = expiry != null ? formatPlanTimestamp(expiry, Date.now()) : null;
+    // 把「这个窗口现在用了多少」写进确认文案：这是不可撤销的消费，
+    // 确认前该看到自己按的是哪个数。**0% 时明说会白费但不拦**（2026-09-21 用户：「看着劝退吧 不拦截」）
+    const used = row.windows.find((w) => w.window === type)?.usedPercent;
+    const usedNote =
+      used == null
+        ? ""
+        : used <= 0
+          ? `该窗口当前已用 0%，重置不会腾出任何额度，这张卡会白费。`
+          : `该窗口当前已用 ${used.toFixed(0)}%。`;
     const ok = await confirmDialog(
-      `立即重置「${label}」窗口的额度？将消耗一张重置卡，消费后不可撤销。${
+      `立即重置「${label}」窗口的额度？${usedNote}将消耗一张重置卡，消费后不可撤销。${
         expiryAt ? `将优先使用最早过期的一张（${expiryAt} 过期）。` : "将优先使用最早过期的一张。"
       }`,
-      { danger: true, confirmText: "重置", focusCancel: true },
+      { danger: true, confirmText: used != null && used <= 0 ? "仍要用" : "重置", focusCancel: true },
     );
     if (!ok) return;
     setPlanUsing(row.gatewayId + type);
@@ -401,10 +599,13 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  // 订阅余量自动轮询：页面开着每 2 分钟刷一次（与后端缓存 TTL 对齐）；不可见即停
+  // 订阅余量 / 网关余额自动轮询：页面开着每 2 分钟刷一次（与后端缓存 TTL 对齐）；不可见即停
   useEffect(() => {
     if (!visible) return;
-    const timer = setInterval(() => void loadPlans(false), 120_000);
+    const timer = setInterval(() => {
+      void loadPlans(false);
+      void loadWallets(false);
+    }, 120_000);
     return () => clearInterval(timer);
   }, [visible]);
 
@@ -412,6 +613,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     if (visible) {
       void load(range);
       void loadPlans(false);
+      void loadWallets(false);
       setSessionsLoadError(null);
       void loadSessions().catch((reason) => {
         setSessionsLoadError(`会话明细加载失败：${String(reason)}`);
@@ -420,7 +622,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, range]);
 
-  /** 重建用量索引后再拉取统计 */
+  /** 重建用量索引后再拉取统计；顺带强制重查两张余额卡——页级「刷新」不该只刷费用 */
   async function onRebuild() {
     setRebuilding(true);
     setNotice(null);
@@ -432,6 +634,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
       setTimeout(() => setNotice(null), 4000);
       setError(null);
       await load(range);
+      void loadPlans(true);
+      void loadWallets(true);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -614,37 +818,29 @@ export default function StatsPage({ visible }: { visible: boolean }) {
 
       {(planRows.length > 0 || (planLoading && hasPlanGateway)) && (
         <div className="mb-6 rounded-lg ccode-well p-4">
-          <div className="flex items-center gap-2 border-b border-hairline pb-2">
-            <span className="text-xs font-medium tracking-wider text-l4">订阅余量</span>
-            <span className="text-micro text-l4">
-              Coding Plan 实时查询{planLoading ? " · 查询中…" : ""}
-            </span>
-            <button
-              type="button"
-              className="ml-auto flex h-6 w-6 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
-              disabled={planLoading}
-              title="强制重查"
-              onClick={() => void loadPlans(true)}
-            >
-              <RefreshCw aria-hidden="true" className={`h-3.5 w-3.5 ${planLoading ? "animate-spin" : ""}`} />
-            </button>
-          </div>
-          {planError && (
-            <p className="mt-2 text-xs text-err-text">{planError}</p>
-          )}
-          {planRows.length === 0 && (
-            <div className="mt-3 space-y-2">
-              <div className="h-3 w-3/4 animate-pulse rounded bg-l4/50" />
-              <div className="h-3 w-2/3 animate-pulse rounded bg-l4/50" />
-            </div>
-          )}
-          {planRows.length === 0 && (
-            <div className="mt-3 space-y-2">
-              <div className="h-3 w-3/4 animate-pulse rounded bg-l4/50" />
-              <div className="h-3 w-2/3 animate-pulse rounded bg-l4/50" />
-            </div>
-          )}
-          {planRows.length > 0 &&
+          {planRows.length === 0 ? (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium tracking-wider text-l4">订阅余量</span>
+                <button
+                  type="button"
+                  className="ml-auto flex h-6 w-6 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                  disabled={planLoading}
+                  title="强制重查"
+                  onClick={() => void loadPlans(true)}
+                >
+                  <RefreshCw aria-hidden="true" className={`h-3.5 w-3.5 ${planLoading ? "animate-spin" : ""}`} />
+                </button>
+              </div>
+              {planError && (
+                <p className="mt-2 text-xs text-err-text">{planError}</p>
+              )}
+              <div className="mt-3 space-y-2">
+                <div className="h-3 w-3/4 animate-pulse rounded bg-l4/50" />
+                <div className="h-3 w-2/3 animate-pulse rounded bg-l4/50" />
+              </div>
+            </>
+          ) : (
             (() => {
             const active =
               planRows.find((r) => r.gatewayId === planActive) ?? planRows[0];
@@ -654,8 +850,54 @@ export default function StatsPage({ visible }: { visible: boolean }) {
             );
             const row = active;
             const dataAt = planQuotaDataAt(row.queriedAt, row.fromCache);
+            const now = Date.now();
+            const windows = planWindowsByTightness(row.windows);
             return (
               <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium tracking-wider text-l4">订阅余量</span>
+                  {planGatewayNameVisible(row.gatewayName, row.provider) && (
+                    <span className="text-xs text-l2">{row.gatewayName}</span>
+                  )}
+                  <span className="flex items-center gap-1.5 text-xs text-l2">
+                    {PLAN_PROVIDER_ICON[row.provider] && (
+                      <img
+                        src={PLAN_PROVIDER_ICON[row.provider]}
+                        alt=""
+                        className="h-3.5 w-3.5 rounded-[3px]"
+                      />
+                    )}
+                    {planProviderLabel(row.provider)}
+                  </span>
+                  {planLevelLabel(row.planLevel) && (
+                    <span className="flex h-4 items-center justify-center rounded-sm bg-hover px-1 text-micro leading-none text-l2">
+                      <span className="-translate-y-px">{planLevelLabel(row.planLevel)}</span>
+                    </span>
+                  )}
+                  {dataAt && <span className="text-micro text-l4">{dataAt}</span>}
+                  <div className="ml-auto flex items-center">
+                    <button
+                      type="button"
+                      className="flex h-6 w-6 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                      disabled={planLoading}
+                      title="强制重查"
+                      onClick={() => void loadPlans(true)}
+                    >
+                      <RefreshCw aria-hidden="true" className={`h-3.5 w-3.5 ${planLoading ? "animate-spin" : ""}`} />
+                    </button>
+                    <button
+                      type="button"
+                      className={ghostActionClass}
+                      onClick={() => openPlanConsole(row.provider)}
+                      title="在系统浏览器打开这家平台的控制台"
+                    >
+                      去控制台 ↗
+                    </button>
+                  </div>
+                </div>
+                {planError && (
+                  <p className="mt-2 text-xs text-err-text">{planError}</p>
+                )}
                 {planRows.length > 1 && (
                   <div className="mt-2">
                     <SegTabs
@@ -668,111 +910,381 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                     />
                   </div>
                 )}
-                <div key={row.gatewayId} className="mt-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {planGatewayNameVisible(row.gatewayName, row.provider) && (
-                      <span className="text-sm font-medium text-l1">{row.gatewayName}</span>
-                    )}
-                    <span className="flex items-center gap-1.5 text-sm text-l2">
-                      {PLAN_PROVIDER_ICON[row.provider] && (
-                        <img
-                          src={PLAN_PROVIDER_ICON[row.provider]}
-                          alt=""
-                          className="h-[18px] w-[18px] rounded-[4px]"
-                        />
-                      )}
-                      {planProviderLabel(row.provider)}
-                    </span>
-                    {planLevelLabel(row.planLevel) && (
-                      <span className="flex h-4 items-center justify-center rounded-sm bg-hover px-1 text-micro leading-none text-l2">
-                        {/* 字形下侧留白偏多导致文字偏下，上移 1px 修正视觉居中 */}
-                        <span className="-translate-y-px">{planLevelLabel(row.planLevel)}</span>
-                      </span>
-                    )}
-                    {dataAt && <span className="text-micro text-l4">{dataAt}</span>}
-                    <button
-                      type="button"
-                      className={`${rowActionClass} ml-auto`}
-                      onClick={() => openPlanConsole(row.provider)}
-                      title="在系统浏览器打开这家平台的控制台"
-                    >
-                      去控制台 ↗
-                    </button>
-                  </div>
+                <div key={row.gatewayId} className="mt-3">
                   {row.error && !row.ok && (
-                    <p className="mt-1 text-xs text-err-text">{row.error}</p>
+                    <p className="text-xs text-err-text">{row.error}</p>
                   )}
-                  {row.windows.map((w) => {
-                    const level = quotaBarLevel(w.usedPercent);
-                    const barColor =
-                      level === "danger"
-                        ? "bg-err-text"
-                        : level === "warn"
-                          ? "bg-warn-text"
-                          : "bg-cta";
-                    const point = formatResetPoint(w.resetsAt, Date.now());
-                    const countdown = formatResetCountdown(w.resetsAt, Date.now());
-                    return (
-                      <div key={w.window} className="mt-2 flex items-center gap-3 text-xs">
-                        <span className="w-14 shrink-0 text-l3">{planWindowLabel(w.window)}</span>
-                        <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded bg-hover">
-                          <div
-                            className={`h-full rounded ${barColor}`}
-                            style={{
-                              width: `${Math.min(100, Math.max(0, w.usedPercent))}%`,
-                            }}
-                          />
-                        </div>
-                        <span className="w-12 shrink-0 text-right tabular-nums text-l2">
-                          {w.usedPercent.toFixed(0)}%
-                        </span>
-                        <span
-                          className="w-36 shrink-0 text-right text-micro text-l4"
-                          title={countdown ?? undefined}
-                        >
-                          {point ?? ""}
-                        </span>
-                      </div>
-                    );
-                  })}
+                  <div className="space-y-3">
+                    {windows.map((w) => (
+                      <PlanWindowBlock
+                        key={w.window}
+                        win={w}
+                        now={now}
+                        lastReset={
+                          w.window === "weekly"
+                            ? row.resetCards.lastWeekResetAt
+                            : w.window === "five_hour"
+                              ? row.resetCards.lastFiveHourResetAt
+                              : null
+                        }
+                      />
+                    ))}
+                  </div>
                   {row.resetCardsSupported && row.resetCards.ok && (
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-micro text-l3">
-                      <span>{resetCardsLine(row.resetCards, Date.now())}</span>
-                      {row.resetCards.fiveHour > 0 && (
-                        <button
-                          type="button"
-                          className={rowActionClass}
-                          disabled={planUsing != null}
-                          onClick={() => void useResetCard(row, "five_hour")}
-                        >
-                          {planUsing === row.gatewayId + "five_hour"
-                            ? "使用中…"
-                            : "重置 5 小时"}
-                        </button>
-                      )}
-                      {row.resetCards.weekly > 0 && (
-                        <button
-                          type="button"
-                          className={rowActionClass}
-                          disabled={planUsing != null}
-                          onClick={() => void useResetCard(row, "weekly")}
-                        >
-                          {planUsing === row.gatewayId + "weekly"
-                            ? "使用中…"
-                            : "重置周额度"}
-                        </button>
-                      )}
-                    </div>
+                    row.resetCards.fiveHour + row.resetCards.weekly === 0 ? (
+                      <p className="mt-5 text-xs text-l3">重置卡无可用（已用完或套餐不含）</p>
+                    ) : (
+                      <div
+                        className="mt-5 grid gap-x-6 gap-y-3"
+                        style={{
+                          gridTemplateColumns:
+                            "repeat(auto-fit, minmax(min(16rem, 100%), 1fr))",
+                        }}
+                      >
+                        {(
+                          [
+                            {
+                              key: "five_hour" as const,
+                              label: "5 小时重置卡",
+                              count: row.resetCards.fiveHour,
+                              expiresAt: row.resetCards.fiveHourExpiresAt,
+                            },
+                            {
+                              key: "weekly" as const,
+                              label: "周重置卡",
+                              count: row.resetCards.weekly,
+                              expiresAt: row.resetCards.weeklyExpiresAt,
+                            },
+                          ] as const
+                        ).map((c) => {
+                          const soon = resetCardExpiryNote(c.expiresAt, now);
+                          const idle = planWindowUnused(row.windows, c.key);
+                          const highlight = planResetCardHighlight(row.windows, c.key);
+                          const cardTitle = [
+                            soon?.title,
+                            idle
+                              ? `${planWindowLabel(c.key)}窗口一点没用（0%），现在用卡不会腾出任何额度`
+                              : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ");
+                          return (
+                            <div
+                              key={c.key}
+                              className="flex items-center gap-3"
+                              title={cardTitle || undefined}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-xs text-l2">{c.label}</span>
+                                  <span className="rounded-sm bg-hover px-1 py-px text-micro tabular-nums text-l3">
+                                    ×{c.count}
+                                  </span>
+                                </div>
+                                {c.count > 0 && (
+                                  <span
+                                    className={`tabular-nums text-micro ${soon?.urgent ? "text-warn-text" : "text-l4"}`}
+                                  >
+                                    {soon?.text ?? "无期限数据"}
+                                  </span>
+                                )}
+                              </div>
+                              {c.count > 0 && (
+                                <button
+                                  type="button"
+                                  className={
+                                    highlight
+                                      ? compactPrimaryActionClass
+                                      : `${ghostActionClass} h-7 border border-field px-2 text-l2`
+                                  }
+                                  disabled={planUsing != null}
+                                  onClick={() => void useResetCard(row, c.key)}
+                                >
+                                  {planUsing === row.gatewayId + c.key
+                                    ? "使用中…"
+                                    : "用一张"}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )
                   )}
                   {row.resetCardsSupported && !row.resetCards.ok && row.resetCards.error && (
-                    <p className="mt-1 text-micro text-l4" title={row.resetCards.error}>
+                    <p className="mt-5 text-micro text-l4" title={row.resetCards.error}>
                       重置卡查询失败
                     </p>
                   )}
                 </div>
               </>
             );
-            })()}
+            })()
+          )}
+        </div>
+      )}
+
+      {hasWalletGateway &&
+        (walletRowsShown.length > 0 || walletLoading) && (
+        <div className="mb-6 rounded-lg ccode-well p-4">
+          {walletGroups.length === 0 ? (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium tracking-wider text-l4">网关余额</span>
+                <div className="ml-auto flex items-center">
+                  <button
+                    type="button"
+                    className="flex h-6 w-6 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
+                    title={hideQuota ? "显示额度" : "隐藏额度"}
+                    onClick={() => {
+                      setHideQuota((v) => {
+                        const next = !v;
+                        localStorage.setItem("ccode.stats.hideQuota", next ? "1" : "0");
+                        return next;
+                      });
+                    }}
+                  >
+                    {hideQuota ? (
+                      <Eye aria-hidden="true" className="h-3.5 w-3.5" />
+                    ) : (
+                      <EyeOff aria-hidden="true" className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="flex h-6 w-6 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                    disabled={walletLoading}
+                    title="强制重查"
+                    onClick={() => void loadWallets(true)}
+                  >
+                    <RefreshCw aria-hidden="true" className={`h-3.5 w-3.5 ${walletLoading ? "animate-spin" : ""}`} />
+                  </button>
+                </div>
+              </div>
+              {walletError && (
+                <p className="mt-2 text-xs text-err-text">{walletError}</p>
+              )}
+              <div className="mt-3 space-y-2">
+                <div className="h-3 w-3/4 animate-pulse rounded bg-l4/50" />
+                <div className="h-3 w-2/3 animate-pulse rounded bg-l4/50" />
+              </div>
+            </>
+          ) : (
+            (() => {
+              const group =
+                walletGroups.find((g) => g.key === walletActive) ?? walletGroups[0];
+              const row = group.head;
+              const dataAt = planQuotaDataAt(row.queriedAt, row.fromCache);
+              const usedPct = walletUsedPercent(row.used, row.total);
+              const hasAmount = row.remaining != null || row.total != null;
+              const amount = splitBalanceAmount(row.remaining ?? row.total ?? NaN, row.currency);
+              const spendTone = usedPct != null ? walletSpendTone(usedPct) : null;
+              const walletAbs =
+                row.used != null && row.total != null
+                  ? hideQuota
+                    ? `${formatBalanceAmountMasked(row.currency)} / ${formatBalanceAmountMasked(row.currency)}`
+                    : `${formatBalanceAmount(row.used, row.currency)} / ${formatBalanceAmount(row.total, row.currency)}`
+                  : null;
+              const multi = group.members.length > 1;
+              const expiringSoon = group.members.filter((m) =>
+                walletExpirySoon(m.expiresAt, Date.now()),
+              );
+              const hintOf = (id: string) =>
+                gateways.find((g) => g.id === id)?.keyHint ?? null;
+              return (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium tracking-wider text-l4">网关余额</span>
+                    {walletGroups.length === 1 && (
+                      <span className="text-xs text-l2" title={walletKindLabel(row.kind)}>
+                        {walletAccountTitle(group)}
+                      </span>
+                    )}
+                    {dataAt && <span className="text-micro text-l4">{dataAt}</span>}
+                    <div className="ml-auto flex items-center">
+                      <button
+                        type="button"
+                        className="flex h-6 w-6 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1"
+                        title={hideQuota ? "显示额度" : "隐藏额度"}
+                        onClick={() => {
+                          setHideQuota((v) => {
+                            const next = !v;
+                            localStorage.setItem("ccode.stats.hideQuota", next ? "1" : "0");
+                            return next;
+                          });
+                        }}
+                      >
+                        {hideQuota ? (
+                          <Eye aria-hidden="true" className="h-3.5 w-3.5" />
+                        ) : (
+                          <EyeOff aria-hidden="true" className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="flex h-6 w-6 items-center justify-center rounded-sm text-l3 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                        disabled={walletLoading}
+                        title="强制重查"
+                        onClick={() => void loadWallets(true)}
+                      >
+                        <RefreshCw aria-hidden="true" className={`h-3.5 w-3.5 ${walletLoading ? "animate-spin" : ""}`} />
+                      </button>
+                      <button
+                        type="button"
+                        className={ghostActionClass}
+                        onClick={() => {
+                          void openUrl(walletUrl(row.origin)).catch(() =>
+                            setWalletError("无法打开外部链接"),
+                          );
+                        }}
+                        title="在系统浏览器打开这个网关的钱包页"
+                      >
+                        去钱包 ↗
+                      </button>
+                    </div>
+                  </div>
+                  {walletError && (
+                    <p className="mt-2 text-xs text-err-text">{walletError}</p>
+                  )}
+                  {walletGroups.length > 1 && (
+                    <div className="mt-2">
+                      <SegTabs
+                        items={walletGroups.map((g) => ({
+                          id: g.key,
+                          label: walletAccountTitle(g, true),
+                        }))}
+                        value={group.key}
+                        onChange={setWalletActive}
+                      />
+                    </div>
+                  )}
+                  <div key={group.key} className="mt-3">
+                    {row.error && (
+                      <p className={`text-xs ${row.ok ? "text-l4" : "text-err-text"}`}>
+                        {row.error}
+                      </p>
+                    )}
+                    <div className="text-xs font-medium tracking-wider text-l4">
+                      {walletAmountCaption(row.source)}
+                    </div>
+                    <div className="mt-0.5 flex items-baseline gap-2">
+                      <div className="text-2xl font-semibold tracking-tight tabular-nums text-l1">
+                        {hideQuota ? (
+                          formatBalanceAmountMasked(row.currency)
+                        ) : hasAmount ? (
+                          <>
+                            {amount.prefix && (
+                              <span className="text-base text-l3">{amount.prefix}</span>
+                            )}
+                            {amount.number}
+                            {amount.unit && (
+                              <span className="ml-1 text-sm text-l3">{amount.unit}</span>
+                            )}
+                          </>
+                        ) : row.tokenUnlimited || row.unlimited ? (
+                          "不限"
+                        ) : (
+                          "—"
+                        )}
+                      </div>
+                      {row.source === "wallet" && usedPct != null && spendTone && (
+                        <span className={`ml-auto font-mono text-xs tabular-nums ${spendTone.text}`}>
+                          已消耗 {usedPct.toFixed(0)}%
+                        </span>
+                      )}
+                      {row.source === "wallet" && walletAbs && (
+                        <span className="font-mono text-xs tabular-nums text-l4">{walletAbs}</span>
+                      )}
+                    </div>
+                    {row.source === "wallet" && usedPct != null && spendTone && (
+                      <div className="mt-2 h-2 overflow-hidden rounded bg-l4/20">
+                        <div
+                          className={`h-full rounded ${spendTone.bar}`}
+                          style={{
+                            width: `${Math.min(100, Math.max(0, usedPct))}%`,
+                          }}
+                        />
+                      </div>
+                    )}
+                    {group.members.length > 0 && (
+                      <div className="mt-5">
+                        <div className="text-xs font-medium tracking-wider text-l4">
+                          密钥额度
+                        </div>
+                        <div
+                          className="mt-3 grid items-center gap-x-3 gap-y-2 text-xs"
+                          style={{ gridTemplateColumns: WALLET_KEY_COLS }}
+                        >
+                          {group.members.map((member) => {
+                            const quota = walletTokenQuota(member);
+                            const keyHint = hintOf(member.gatewayId);
+                            const note = [
+                              member.gatewayName,
+                              member.tokenName && member.tokenName !== member.gatewayName
+                                ? `站点令牌 ${member.tokenName}`
+                                : null,
+                              keyHint ? `尾号 ${keyHint}` : null,
+                              member.expiresAt != null
+                                ? `${formatPlanTimestamp(member.expiresAt, Date.now())} 到期`
+                                : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ");
+                            if (!quota) {
+                              return (
+                                <WalletKeyRow
+                                  key={member.gatewayId}
+                                  name={member.gatewayName}
+                                  title={note}
+                                  usedPct={null}
+                                  used={null}
+                                  total={null}
+                                  currency={member.currency}
+                                  empty={member.error ?? "无数据"}
+                                />
+                              );
+                            }
+                            return (
+                              <WalletKeyRow
+                                key={member.gatewayId}
+                                name={member.gatewayName}
+                                title={note}
+                                unlimited={quota.unlimited}
+                                usedPct={quota.pct}
+                                used={quota.used}
+                                total={quota.total}
+                                currency={member.currency}
+                                hideAmount={hideQuota}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {expiringSoon.length > 0 && (
+                      <p className="mt-2 text-micro text-warn-text">
+                        {expiringSoon
+                          .map(
+                            (m) =>
+                              `${multi ? m.gatewayName : "密钥"} ${
+                                m.expiresAt == null
+                                  ? ""
+                                  : formatPlanTimestamp(m.expiresAt, Date.now())
+                              } 到期`,
+                          )
+                          .join("；")}
+                      </p>
+                    )}
+                    {row.source === "token" && (
+                      <p className="mt-2 text-xs text-l3">
+                        {walletMissingHint(row.hasWalletToken)}
+                      </p>
+                    )}
+                  </div>
+                </>
+              );
+            })()
+          )}
         </div>
       )}
 

@@ -72,8 +72,8 @@ fn run_bridge(
 }
 
 pub fn export_xml(project_root: &Path) -> Result<PathBuf, String> {
-    let root = crate::paths::canonicalize_plain(project_root)
-        .map_err(|e| format!("项目目录无效: {e}"))?;
+    let root =
+        crate::paths::canonicalize_plain(project_root).map_err(|e| format!("项目目录无效: {e}"))?;
     let bib = root.join("references.bib");
     if !bib.is_file() {
         return Err("还没有 references.bib，没法生成 EndNote 导入文件".into());
@@ -88,9 +88,15 @@ pub fn export_xml(project_root: &Path) -> Result<PathBuf, String> {
     crate::storage::atomic_write(&script, BRIDGE_PY.as_bytes(), true)?;
     let py = python_bin()?;
     let enw = papers.join("endnote-import.enw");
-    run_bridge(&py, &script, &bib, &papers, &stamp, "xml", &xml, &report, &root)?;
-    run_bridge(&py, &script, &bib, &papers, &stamp, "ris", &ris, &report, &root)?;
-    run_bridge(&py, &script, &bib, &papers, &stamp, "enw", &enw, &report, &root)?;
+    run_bridge(
+        &py, &script, &bib, &papers, &stamp, "xml", &xml, &report, &root,
+    )?;
+    run_bridge(
+        &py, &script, &bib, &papers, &stamp, "ris", &ris, &report, &root,
+    )?;
+    run_bridge(
+        &py, &script, &bib, &papers, &stamp, "enw", &enw, &report, &root,
+    )?;
     let _ = std::fs::remove_file(&script);
     if !xml.is_file() {
         return Err("转换结束但没有 papers/endnote-import.xml".into());
@@ -121,7 +127,10 @@ fn mdfind_endnote_apps() -> Vec<PathBuf> {
     ];
     let mut out = Vec::new();
     for query in queries {
-        let Ok(result) = crate::process::background_command("mdfind").arg(query).output() else {
+        let Ok(result) = crate::process::background_command("mdfind")
+            .arg(query)
+            .output()
+        else {
             continue;
         };
         if !result.status.success() {
@@ -159,7 +168,9 @@ fn scan_endnote_install_dirs() -> Vec<PathBuf> {
         }
     }
     for root in roots {
-        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if !name_has_endnote(&path) {
@@ -172,7 +183,9 @@ fn scan_endnote_install_dirs() -> Vec<PathBuf> {
             if !path.is_dir() {
                 continue;
             }
-            let Ok(inner) = std::fs::read_dir(&path) else { continue };
+            let Ok(inner) = std::fs::read_dir(&path) else {
+                continue;
+            };
             for child in inner.flatten() {
                 let child_path = child.path();
                 if name_has_endnote(&child_path) && is_endnote_bundle(&child_path) {
@@ -339,7 +352,10 @@ mod tests {
         )
         .unwrap();
         let xml = export_xml(&dir);
-        let text = xml.as_ref().ok().and_then(|p| std::fs::read_to_string(p).ok());
+        let text = xml
+            .as_ref()
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok());
         let _ = std::fs::remove_dir_all(&dir);
         if xml.is_err() && xml.as_ref().unwrap_err().contains("找不到 python") {
             return;
@@ -382,7 +398,9 @@ mod tests {
             return;
         };
         assert!(
-            app.to_string_lossy().to_ascii_lowercase().contains("endnote"),
+            app.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("endnote"),
             "{}",
             app.display()
         );

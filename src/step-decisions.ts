@@ -31,9 +31,15 @@ export const DECISION_STATUS_ASK: Record<DecisionStatus, string> = {
   reject: "先别做这步",
 };
 
+/** 初稿证据范围：技能里已是这条默认；卡片一键记下，不必每次手写。 */
+export const DRAFT_EVIDENCE_DECISION_Q =
+  "写作依据的已评阅证据与结论范围（仅探索/待补时明确草稿边界）";
+export const DRAFT_EVIDENCE_DEFAULT =
+  "按已精读笔记写，没全文的只写到摘要";
+
 /** 合同口吻的题 → 界面上的人话。存草稿仍用原题，避免改文案丢答案。 */
 const DECISION_ASK: Record<string, string> = {
-  "写作依据的已评阅证据与结论范围（仅探索/待补时明确草稿边界）":
+  [DRAFT_EVIDENCE_DECISION_Q]:
     "初稿可以依据哪些已经评过的笔记？结论能写到哪一步？",
 };
 

@@ -31,12 +31,15 @@ quarto check
 ### 2. 渲染命令与产物路径约定
 
 ```bash
-quarto render manuscript/<稿件>.md --to pdf      # 或 .qmd / docx / html
+quarto render manuscript/<稿件>.md --to docx --output-dir output
+quarto render manuscript/<稿件>.md --to pdf --output-dir output
 ```
 
-- 渲染产物统一写入 **本工作区 `output/`**（相对路径；评审合并进主仓时自动带到项目根同名目录），通过 `_quarto.yml` 的 `output-dir` 或命令行 `--output-dir` 指定；该目录必须在 `.gitignore` 中，**产物不进 git**。
-- 缺产物目录约定时，先在工作区根建立 `output/` 并补 `.gitignore`，再渲染。
-- 源稿、`_quarto.yml`、`references.bib` 等源文件照常随 git 管理。
+- **先 docx 后 PDF**：docx 不走 LaTeX，能先交出可审稿。
+- PDF 在源稿 YAML 或 `_quarto.yml` 写 `pdf-engine: xelatex`，并指定 latin 正文字体（如 TeX Gyre Termes / Times New Roman）。Quarto 见到 Mg²⁺ 这类 Unicode 会自己改走 lualatex，Mac 上 luaotfload 扫字体常卡死；xelatex 不嵌字体则整页乱码。
+- `number-sections: true` 时，markdown 标题写 `## Introduction`，不要自带 `## 1.`。
+- 渲染产物统一写入 **本工作区 `output/`**（相对路径；评审合并进主仓时自动带到项目根同名目录）；该目录必须在 `.gitignore` 中，**产物不进 git**。
+- 缺产物目录时先建 `output/` 并补 `.gitignore`，再渲染。
 
 ### 3. 缺失依赖的安装引导顺序
 
@@ -53,7 +56,8 @@ quarto render manuscript/<稿件>.md --to pdf      # 或 .qmd / docx / html
 - **YAML 头错**（解析失败、缩进错乱）：打开对应源稿修 YAML front matter 本身，不要在命令行上加参数掩盖。
 - **引用键缺失**（`citation not found: @xxx`）：回 `references.bib` 补条目或改源稿中的引用键，**不得删除引用来消错**。
 - **LaTeX 包缺失**（`! LaTeX Error: File 'xxx.sty' not found`）：用 `tlmgr install xxx`（tinytex）或让 tinytex 自动补装，**先装不绕路**——禁止删图表、改格式、去掉公式来回避报错。
-- **中文缺字/豆腐块**（PDF 里中文乱码或方框）：用 `fc-list :lang=zh family` 找本机中文字体，在 YAML 设 `mainfont`/`CJKmainfont`；不要靠换引擎来回避。
+- **lualatex 卡死**（CPU 很高、对应 `.log` 仍 0 字节、`luatex-cache` 空）：是 luaotfload 扫字体，不是正常首次编译。**超过 3 分钟无日志就停掉**，YAML 设 `pdf-engine: xelatex` 再渲。不要空等，也不要删公式/改正文符号来躲。
+- **中文缺字/豆腐块**（PDF 里中文乱码或方框）：用 `fc-list :lang=zh family` 找本机中文字体，在 YAML 设 `mainfont`/`CJKmainfont`；缺字靠设字体，不靠换引擎。
 
 ### 5. 修复-验证闭环
 
@@ -77,6 +81,7 @@ quarto render manuscript/<稿件>.md --to pdf      # 或 .qmd / docx / html
 先验收，再登记：
 
 - 产物文件存在且非零字节；
+- **打开 PDF 第一页**：必须能读出标题和正文。乱码、空心方框、目录页码变成字母 = 渲染失败，即使文件有体积也不算通过；改 `pdf-engine: xelatex` 重渲，或只交 docx 并在渲染说明写失败原因。
 - 统计残留 undefined citation/reference 类 warning 条数，写进渲染说明。
 
 验收通过后，建议用户经 **Mesa 改动面板「登记产物」** 把 PDF 记入工作区提货单（`artifacts.yaml`）——产物本体不进 git，清单随分支传给下一步。Agent 本身不直接改 `artifacts.yaml`。

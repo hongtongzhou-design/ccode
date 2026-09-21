@@ -8,8 +8,23 @@ import {
   groupReviewFiles,
   sortReviewPaths,
 } from "../screening-review";
-import { groupDeliveryFiles, sortDeliveryPaths } from "../review-file-groups";
-import { resolveStepReviewProfile } from "../step-review";
+import {
+  deliveryContentPaths,
+  deliveryProcessPaths,
+  groupDeliveryFiles,
+  isManuscriptScaffold,
+  preferredDeliveryPath,
+  sortDeliveryPaths,
+} from "../review-file-groups";
+import { resolveStepReviewProfile, reviewPaneTabs, type ReviewPane } from "../step-review";
+import {
+  scanWritingReview,
+  writingReturnPrompt,
+  writingScanSourcePath,
+  type WritingReviewHit,
+} from "../draft-review";
+import { buildWorkspaceTerminalRequest } from "../pipeline-start";
+import ProjectFilePreview from "./ProjectFilePreview";
 import { REVIEW_SAVE, reviewSavePrimaryLabel } from "../review-save-copy";
 import WatchRunReview from "./WatchRunReview";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -139,6 +154,16 @@ const fileDiffCache = new Map<string, { text: string; rows: DiffLine[] }>();
 
 function fileDiffCacheKey(worktreePath: string, path: string, revision: number) {
   return `${worktreePath}\t${path}\t${revision}`;
+}
+
+function absUnderRoot(root: string, rel: string): string {
+  return `${root.replace(/[\\/]+$/, "")}/${rel.replace(/^[\\/]+/, "")}`;
+}
+
+function reviewFileChip(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? path;
+  if (/\.pdf$/i.test(base)) return `${base} · 先看是否乱码`;
+  return base;
 }
 
 function parseDiff(text: string): DiffLine[] {
@@ -664,6 +689,58 @@ function ChangeTree({
   );
 }
 
+function DeliveryReviewPane({
+  root,
+  paths,
+  activePath,
+  onSelect,
+  empty,
+}: {
+  root: string;
+  paths: readonly string[];
+  activePath: string | null;
+  onSelect: (path: string) => void;
+  empty: string;
+}) {
+  const current =
+    (activePath && paths.includes(activePath) ? activePath : paths[0]) ?? null;
+  if (!current) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-8 text-sm text-l4">
+        {empty}
+      </div>
+    );
+  }
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {paths.length > 1 && (
+        <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-hairline px-3 py-1.5">
+          {paths.map((path) => (
+            <button
+              key={path}
+              type="button"
+              onClick={() => onSelect(path)}
+              title={path}
+              className={`shrink-0 rounded-sm px-2 py-0.5 text-xs ${
+                current === path ? "bg-rail-sel text-l1" : "text-l3 hover:text-l1"
+              }`}
+            >
+              {reviewFileChip(path)}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none">
+        <ProjectFilePreview
+          key={current}
+          path={absUnderRoot(root, current)}
+          root={root}
+        />
+      </div>
+    </div>
+  );
+}
+
 function GroupedReviewFiles({
   groups,
   onSelect,
@@ -1158,12 +1235,17 @@ function LiveWorkspaceReviewView({
   } | null>(null);
   // 人工事项收尾提醒（同一次性读取口径）：本步骤 timing=after 且未完成的事项标题
   const [humanClosing, setHumanClosing] = useState<string[] | null>(null);
+  const [wsRow, setWsRow] = useState<WorkspaceDto | null>(null);
+  const [writingHits, setWritingHits] = useState<WritingReviewHit[]>([]);
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [returnBusy, setReturnBusy] = useState(false);
   // 上游漂移提醒：上游步骤晚于本步最后推进时间合并 → 产物可能过期（list_workspaces 顺带取回）
   const [staleUpstream, setStaleUpstream] = useState<string | null>(null);
   const setPage = useAppStore((s) => s.setPage);
+  const setPendingTerminal = useAppStore((s) => s.setPendingTerminal);
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
   const setFilePreviewReq = useAppStore((s) => s.setFilePreviewReq);
-  const [screeningPane, setScreeningPane] = useState<"list" | "process" | "files">("files");
+  const [reviewPane, setReviewPane] = useState<ReviewPane>("content");
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1296,6 +1378,9 @@ function LiveWorkspaceReviewView({
     setCitations(null);
     setCiteExpanded(false);
     setArtifacts(null);
+    setWsRow(null);
+    setWritingHits([]);
+    setReviewNotes("");
     setStaleUpstream(null);
     setDistillDraftError(null);
     setUnmerged(null);
@@ -1322,6 +1407,7 @@ function LiveWorkspaceReviewView({
         setMergedAt(workspace?.mergedAt ?? null);
         setRepoPath(workspace?.repoPath ?? null);
         setStaleUpstream(workspace?.staleUpstream ?? null);
+        setWsRow(workspace ?? null);
       })
       .catch(() => {});
   }, [diff?.workspaceId, diff?.reviewOnly]);
@@ -1408,6 +1494,41 @@ function LiveWorkspaceReviewView({
       stale = true;
     };
   }, [diff?.workspaceId, diff?.reviewOnly, runId, worktreePath]);
+
+  useEffect(() => {
+    const rel = writingScanSourcePath((diff?.files ?? []).map((file) => file.path));
+    let stale = false;
+    if (rel) {
+      invoke<{ text: string }>("read_file_preview", {
+        path: absUnderRoot(worktreePath, rel),
+        root: worktreePath,
+      })
+        .then((preview) => {
+          if (stale) return;
+          setWritingHits(
+            scanWritingReview(preview.text, {
+              allowGapIds: /(^|\/)outline\.md$/i.test(rel.replace(/\\/g, "/")),
+            }),
+          );
+        })
+        .catch(() => {
+          if (!stale) setWritingHits([]);
+        });
+    } else {
+      setWritingHits([]);
+    }
+    invoke<{ text: string }>("read_file_preview", {
+      path: absUnderRoot(worktreePath, ".ccode/review-notes.md"),
+      root: worktreePath,
+    })
+      .then((preview) => {
+        if (!stale) setReviewNotes(preview.text);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [diff, worktreePath]);
 
   // 合并成功后定位流水线下一步：当前步 = 与本工作区同名的步骤；
   // 下一步 = 其后第一个尚未开步的步骤（同仓库存在同名工作区 = 已开过，含已归档）。
@@ -1531,6 +1652,44 @@ function LiveWorkspaceReviewView({
       setDistillDraftError(String(reason));
     } finally {
       setDistillBusy(false);
+    }
+  }
+
+  async function returnToAgent(rewrite: boolean) {
+    if (!wsRow || returnBusy) return;
+    const notes = reviewNotes.trim();
+    if (
+      rewrite &&
+      !(await confirmDialog("将新开一轮，按你写的意见重写本步稿件。继续？", {
+        confirmText: "按意见重写",
+      }))
+    ) {
+      return;
+    }
+    setReturnBusy(true);
+    setError(null);
+    try {
+      const stored =
+        notes ||
+        writingHits.map((hit) => `- ${hit.label}`).join("\n") ||
+        "按评审意见修改本步产物。";
+      await invoke("write_review_notes", {
+        worktreePath,
+        content: stored,
+      });
+      setPendingTerminal(
+        await buildWorkspaceTerminalRequest(
+          wsRow,
+          writingReturnPrompt({ notes: stored, hits: writingHits, rewrite }),
+          { autoStart: true, resumeSession: !rewrite },
+        ),
+      );
+      setPage("terminal");
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setReturnBusy(false);
     }
   }
 
@@ -1763,6 +1922,16 @@ function LiveWorkspaceReviewView({
   const filesInDrawer = reviewProfile.filesInDrawer && !conflictMode && !health?.conflict;
   const showFilePane = !filesInDrawer;
   const screeningReview = reviewProfile.kind === "screening";
+  const paneTabs = reviewPaneTabs(
+    reviewProfile.kind,
+    (diff?.files ?? []).map((file) => file.path),
+  );
+  const contentReview = Boolean(paneTabs) && !conflictMode && !health?.conflict;
+  const showGitFiles = !contentReview || reviewPane === "files";
+  const deliveryPaths =
+    reviewPane === "process"
+      ? deliveryProcessPaths(displayedPaths)
+      : deliveryContentPaths(displayedPaths);
 
   useEffect(() => {
     if (displayedPaths.length === 0) return;
@@ -1771,8 +1940,12 @@ function LiveWorkspaceReviewView({
       return;
     }
     if (activePath && displayedPaths.includes(activePath)) return;
-    setActivePath(displayedPaths[0]);
-  }, [activePath, displayedPaths, reviewProfile.hideListDiffs]);
+    const preferred =
+      reviewProfile.kind === "files"
+        ? preferredDeliveryPath(displayedPaths)
+        : displayedPaths[0];
+    setActivePath(preferred ?? displayedPaths[0]);
+  }, [activePath, displayedPaths, reviewProfile.hideListDiffs, reviewProfile.kind]);
 
   useEffect(() => {
     if (!reviewRailOpen || !filesInDrawer) return;
@@ -2560,7 +2733,7 @@ function LiveWorkspaceReviewView({
             无 bib/全文无引用/无预期产物/无收尾事项时不渲染，不给非写作类项目添噪声；
             数据进评审时一次性读取，失败静默降级；收尾事项只提醒不阻断合并 */}
         {diff &&
-          (screeningReview ||
+          (contentReview ||
             (citations && citations.bibFound && citations.totalRefs > 0) ||
             (artifacts && artifacts.total > 0) ||
             (humanClosing && humanClosing.length > 0)) && (
@@ -2601,32 +2774,34 @@ function LiveWorkspaceReviewView({
                 )}
                 {humanClosing && humanClosing.length > 0 && (
                   <span
-                    className="shrink-0 text-warn-text"
+                    className="min-w-0 truncate text-warn-text"
                     title={`收尾人工事项未完成：${humanClosing.join("、")}`}
                   >
-                    收尾事项 {humanClosing.length} 件待做
+                    收尾：{humanClosing.join("、")}
                   </span>
                 )}
-                {screeningReview && (
+                {writingHits.length > 0 && (
+                  <span
+                    className="min-w-0 truncate text-warn-text"
+                    title={writingHits.map((hit) => hit.label).join("；")}
+                  >
+                    稿件还要改：{writingHits.map((hit) => hit.label).join("；")}
+                  </span>
+                )}
+                {contentReview && paneTabs && (
                   <div className="ml-auto flex shrink-0 gap-1">
-                    {(
-                      [
-                        ["list", "清单"],
-                        ["process", "过程"],
-                        ["files", "文件"],
-                      ] as const
-                    ).map(([id, label]) => (
+                    {paneTabs.map((tab) => (
                       <button
-                        key={id}
+                        key={tab.id}
                         type="button"
-                        onClick={() => setScreeningPane(id)}
+                        onClick={() => setReviewPane(tab.id)}
                         className={`rounded-sm px-2 py-0.5 ${
-                          screeningPane === id
+                          reviewPane === tab.id
                             ? "bg-rail-sel text-l1"
                             : "text-l3 hover:text-l1"
                         }`}
                       >
-                        {label}
+                        {tab.label}
                       </button>
                     ))}
                   </div>
@@ -2639,6 +2814,38 @@ function LiveWorkspaceReviewView({
                 <p className="mt-1 break-all font-mono text-micro text-warn-text">
                   缺失引用键：{citations.missing.join("、")}
                 </p>
+              )}
+              {contentReview && (
+                <div className="mt-2 border-t border-hairline pt-2">
+                  <p className="mb-1 text-micro text-l4">
+                    写下意见后退回给 Agent。不会保存进项目。
+                  </p>
+                  <textarea
+                    value={reviewNotes}
+                    onChange={(e) => setReviewNotes(e.target.value)}
+                    rows={3}
+                    placeholder="例如：摘要去掉未核实句；删 G1；空图改成见 Fig.n；不要凑字数。"
+                    className="w-full resize-y rounded-sm border border-field bg-canvas px-2 py-1.5 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+                  />
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={returnBusy || !wsRow}
+                      onClick={() => void returnToAgent(false)}
+                      className="rounded-sm border border-field px-2 py-1 text-xs text-l2 hover:bg-hover disabled:opacity-50"
+                    >
+                      {returnBusy ? "交接中…" : "退回修改"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={returnBusy || !wsRow}
+                      onClick={() => void returnToAgent(true)}
+                      className="rounded-sm border border-field px-2 py-1 text-xs text-l2 hover:bg-hover disabled:opacity-50"
+                    >
+                      按意见重写
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           )}
@@ -2701,10 +2908,10 @@ function LiveWorkspaceReviewView({
       </header>
 
       {!diff?.reviewOnly && deliveryError && <p role="alert" className="px-3 py-2 text-xs text-err-text">非 Git 产物未能冻结：{deliveryError}。请刷新评审后再保存进项目。</p>}
-      {!diff?.reviewOnly && deliveryReview && deliveryReview.files.length > 0 && <section aria-label="非 Git 产物评审" className="max-h-48 shrink-0 overflow-auto border-b border-hairline px-3 py-2 text-xs">
-        <h3 className="font-medium">非 Git 产物 · {deliveryReview.files.length} 项</h3>
+      {!diff?.reviewOnly && showGitFiles && deliveryReview && deliveryReview.files.length > 0 && <section aria-label="非 Git 产物评审" className="max-h-48 shrink-0 overflow-auto border-b border-hairline px-3 py-2 text-xs">
+        <h3 className="font-medium">非 Git 产物 · {deliveryReview.files.filter((file) => !isManuscriptScaffold(file.path)).length} 项</h3>
         <p className="text-micro text-l3">保存进项目只带回这版固定副本。看过后内容变化会要求重看；同名冲突不覆盖，未接收文件保留在工作区。</p>
-        <ul>{deliveryReview.files.map((file) => <li key={file.path} className="flex gap-2 py-0.5">
+        <ul>{deliveryReview.files.filter((file) => !isManuscriptScaffold(file.path)).map((file) => <li key={file.path} className="flex gap-2 py-0.5">
           <button type="button" className="min-w-0 flex-1 truncate text-left text-l2 hover:underline disabled:text-l4" disabled={file.disposition !== "copy"} onClick={() => setDeliveryPreview(file.path)}>{file.path}</button>
           <span className="shrink-0 text-micro text-l3">{file.disposition === "copy" ? `${(file.size / 1024).toFixed(1)} KB · ${file.sha256?.slice(0, 8)}` : file.disposition === "conflict" ? "同名存在，不覆盖" : file.disposition === "protected" ? "保护路径跳过" : file.disposition === "too_large" ? "超出冻结预算" : "随 Git 提交"}</span>
         </li>)}</ul>
@@ -2896,13 +3103,13 @@ function LiveWorkspaceReviewView({
         </div>
       ) : showFilePane ? (
         <>
-        {screeningReview && screeningPane !== "files" && researchContext?.root === worktreePath && (
+        {contentReview && !showGitFiles && screeningReview && researchContext?.root === worktreePath && (
           <div className="min-h-0 flex-1 overflow-auto">
             <ScreeningReviewPanel
               root={worktreePath}
               stepName={researchContext.step.name}
               projectRoot={researchContext.workspace.repoPath}
-              pane={screeningPane}
+              pane={reviewPane === "process" ? "process" : "list"}
               onOpenPdf={(path) => {
                 const projectRoot = researchContext.workspace.repoPath;
                 setSelectProjectReq(projectRoot);
@@ -2916,7 +3123,20 @@ function LiveWorkspaceReviewView({
             />
           </div>
         )}
-        <div className={`flex min-h-0 flex-1 ${reviewProfile.hideListDiffs ? "min-h-[42vh]" : ""} ${screeningReview && screeningPane !== "files" ? "hidden" : ""}`}>
+        {contentReview && !showGitFiles && reviewProfile.kind === "files" && (
+          <DeliveryReviewPane
+            root={worktreePath}
+            paths={deliveryPaths}
+            activePath={activePath}
+            onSelect={setActivePath}
+            empty={
+              reviewPane === "process"
+                ? "没有过程记录。"
+                : "没有稿件或笔记。"
+            }
+          />
+        )}
+        <div className={`flex min-h-0 flex-1 ${reviewProfile.hideListDiffs ? "min-h-[42vh]" : ""} ${showGitFiles ? "" : "hidden"}`}>
           {reviewRailOpen && (
             <button
               type="button"

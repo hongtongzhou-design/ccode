@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  deliveryContentPaths,
   deliveryFileGroup,
+  deliveryProcessPaths,
   groupDeliveryFiles,
+  preferredDeliveryPath,
   sortDeliveryPaths,
 } from "../src/review-file-groups.ts";
 
@@ -12,8 +15,18 @@ test("精读与写作改动按笔记/稿件/引文分组", () => {
   assert.equal(deliveryFileGroup("references.bib"), "index");
   assert.equal(deliveryFileGroup("outline.md"), "manuscript");
   assert.equal(deliveryFileGroup("manuscript/draft.md"), "manuscript");
+  assert.equal(deliveryFileGroup("manuscript/_quarto.yml"), "machine");
+  assert.equal(deliveryFileGroup("manuscript/.gitignore"), "machine");
+  assert.equal(deliveryFileGroup("manuscript/screening.md"), "other");
+  assert.equal(deliveryFileGroup("output/site_libs/bootstrap.css"), "machine");
+  assert.equal(deliveryFileGroup("output/_tex/draft.tex"), "machine");
+  assert.equal(deliveryFileGroup("survey/gap-analysis.md"), "manuscript");
+  assert.equal(deliveryFileGroup("submission/formatted.md"), "manuscript");
+  assert.equal(deliveryFileGroup("rebuttal/response-letter-r1.md"), "manuscript");
   assert.equal(deliveryFileGroup("papers/to-fetch.md"), "fetch");
   assert.equal(deliveryFileGroup("scripts/build.py"), "machine");
+  assert.equal(deliveryFileGroup(".ccode/help-wanted.md"), "machine");
+  assert.equal(deliveryFileGroup("help-wanted.md"), "machine");
   assert.equal(deliveryFileGroup("papers/a.pdf"), "other");
 
   const paths = [
@@ -36,4 +49,73 @@ test("精读与写作改动按笔记/稿件/引文分组", () => {
     groupDeliveryFiles(paths.map((path) => ({ path }))).map((g) => g.id),
     ["notes", "manuscript", "index", "fetch", "machine"],
   );
+});
+
+test("大纲审阅默认打开稿件，不把 help-wanted 摊在主面", () => {
+  const files = [
+    ".ccode/help-wanted.md",
+    "outline.md",
+    "artifacts/outline_key_check.json",
+  ];
+  assert.equal(preferredDeliveryPath(files), "outline.md");
+  assert.deepEqual(deliveryContentPaths(files), ["outline.md"]);
+  assert.deepEqual(deliveryProcessPaths(files), [
+    ".ccode/help-wanted.md",
+    "artifacts/outline_key_check.json",
+  ]);
+  assert.equal(
+    preferredDeliveryPath([".ccode/help-wanted.md", "notes/001.md"]),
+    "notes/001.md",
+  );
+  assert.equal(preferredDeliveryPath([".ccode/help-wanted.md"]), ".ccode/help-wanted.md");
+  assert.equal(preferredDeliveryPath([]), null);
+  assert.equal(
+    preferredDeliveryPath(["output/draft.pdf", "manuscript/draft.md"]),
+    "manuscript/draft.md",
+  );
+  assert.deepEqual(
+    deliveryContentPaths([
+      "output/formatted.pdf",
+      "submission/formatted.md",
+      ".ccode/help-wanted.md",
+    ]),
+    ["submission/formatted.md", "output/formatted.pdf"],
+  );
+  assert.deepEqual(
+    deliveryContentPaths([
+      "output/draft.pdf",
+      "output/draft.docx",
+      "manuscript/draft.md",
+    ]),
+    ["manuscript/draft.md", "output/draft.docx", "output/draft.pdf"],
+  );
+});
+
+test("大纲审阅有笔记改动时仍先打开 outline.md", () => {
+  const files = [
+    "notes/001.md",
+    ".ccode/help-wanted.md",
+    "outline.md",
+    "artifacts/outline_key_check.json",
+  ];
+  assert.equal(preferredDeliveryPath(files), "outline.md");
+  assert.equal(deliveryContentPaths(files)[0], "outline.md");
+});
+
+test("写作审阅默认打开 draft.md，不把 _quarto.yml 当稿件", () => {
+  const files = [
+    "manuscript/_quarto.yml",
+    "manuscript/.gitignore",
+    "manuscript/draft.md",
+    "manuscript/screening.md",
+    "output/draft.docx",
+    "output/draft.pdf",
+  ];
+  assert.equal(preferredDeliveryPath(files), "manuscript/draft.md");
+  assert.deepEqual(deliveryContentPaths(files), [
+    "manuscript/draft.md",
+    "output/draft.docx",
+    "output/draft.pdf",
+  ]);
+  assert.equal(deliveryFileGroup("manuscript/_quarto.yml"), "machine");
 });

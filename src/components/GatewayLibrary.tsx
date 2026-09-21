@@ -31,6 +31,7 @@ import {
   slotsFollowMaster,
 } from "../gateway-draft";
 import { gatewayPickerRows } from "../gateway-option";
+import { gatewayHasWallet } from "../gateway-balance";
 import type {
   BindingInput,
   ComboSurfaceDto,
@@ -218,6 +219,8 @@ export default function GatewayLibrary({
   // 跟随主输入；手动改过的槽脱离跟随（镜像到改写为止的经典交互）
   const [masterUrl, setMasterUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [walletToken, setWalletToken] = useState("");
+  const [walletUserId, setWalletUserId] = useState("");
   const [headerText, setHeaderText] = useState("");
   const [models, setModels] = useState<GatewayModel[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -300,6 +303,8 @@ export default function GatewayLibrary({
       setSlots(emptySlots());
       setMasterUrl("");
       setApiKey("");
+      setWalletToken("");
+      setWalletUserId("");
       setHeaderText("");
       setModels([]);
       setShowSlots(false);
@@ -325,6 +330,8 @@ export default function GatewayLibrary({
     setMasterUrl(master);
     setShowSlots(!slotsFollowMaster(next, master));
     setApiKey("");
+    setWalletToken("");
+    setWalletUserId(g.walletUserId ?? "");
     setHeaderText(
       Object.entries(g.headerEnv)
         .map(([k, v]) => `${k}=${v}`)
@@ -487,6 +494,20 @@ export default function GatewayLibrary({
     }
   }
 
+  const showWalletFields = useMemo(
+    () =>
+      gatewayHasWallet({
+        slots: {
+          anthropic: slots.anthropic || masterUrl,
+          openai: slots.openai || masterUrl,
+          responses: slots.responses || masterUrl,
+          gemini: slots.gemini || masterUrl,
+          cursor: slots.cursor || masterUrl,
+        },
+      }),
+    [slots, masterUrl],
+  );
+
   function slotSum(key: keyof ProtocolSlots): SlotProbeSummary | undefined {
     if (draftProbes[key]) return draftProbes[key];
     if (editing === null || editing === "new") return undefined;
@@ -511,6 +532,8 @@ export default function GatewayLibrary({
       models,
       apiKey: apiKey.trim() || null,
       expectedRevision: editing === "new" || editing === null ? null : editing.revision ?? null,
+      walletAccessToken: walletToken.trim() || null,
+      walletUserId,
     };
     const id = editing === "new" || editing === null ? null : editing.id;
     try {
@@ -591,6 +614,27 @@ export default function GatewayLibrary({
       if (fresh) setEditing(fresh);
       setApiKey("");
       setNotice("已清除本地密钥");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function onClearWalletToken() {
+    if (editing === null || editing === "new") return;
+    if (
+      !(await confirmDialog(`清除「${editing.name}」的系统访问令牌？用量页将不再查钱包余额。`, {
+        danger: true,
+      }))
+    )
+      return;
+    try {
+      await invoke("clear_gateway_wallet_token", { id: editing.id });
+      await loadGateways();
+      const list = await invoke<Gateway[]>("list_gateways");
+      const fresh = list.find((g) => g.id === editing.id);
+      if (fresh) setEditing(fresh);
+      setWalletToken("");
+      setNotice("已清除系统访问令牌");
     } catch (e) {
       setError(String(e));
     }
@@ -965,6 +1009,43 @@ export default function GatewayLibrary({
               >
                 清除本地密钥
               </button>
+            )}
+            {showWalletFields && (
+              <div className="space-y-2 rounded-md border border-hairline p-2">
+                <p className="text-micro text-l3">
+                  查钱包余额用系统访问令牌，不是上面的推理密钥。打开站点钱包页登录后，在个人设置里生成。
+                </p>
+                <label className="block text-sm text-l2">
+                  {editing === "new" || !editing.walletKeyHint
+                    ? "系统访问令牌"
+                    : "系统访问令牌（留空不改）"}
+                  <input
+                    className={`${fieldClass} mt-1 w-full`}
+                    type="password"
+                    value={walletToken}
+                    onChange={(e) => setWalletToken(e.target.value)}
+                    placeholder="不是 sk- 推理密钥"
+                  />
+                </label>
+                {editing !== "new" && editing.walletKeyHint && (
+                  <button
+                    type="button"
+                    className={`${secondaryActionClass} text-err-text`}
+                    onClick={() => void onClearWalletToken()}
+                  >
+                    清除系统访问令牌
+                  </button>
+                )}
+                <label className="block text-sm text-l2">
+                  用户 ID（一般不用填）
+                  <input
+                    className={`${fieldClass} mt-1 w-full font-mono text-xs`}
+                    value={walletUserId}
+                    onChange={(e) => setWalletUserId(e.target.value)}
+                    placeholder="老站点才要"
+                  />
+                </label>
+              </div>
             )}
             <div>
               <button

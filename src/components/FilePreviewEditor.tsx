@@ -1,7 +1,9 @@
 import { previewSaveCompletion, type FilePreviewSnapshot } from "../file-preview";
 import { sanitizeDocumentHtml } from "../document-html";
 import {
+  lazy,
   memo,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -32,13 +34,24 @@ import { comboLabel, IS_WINDOWS, READER_MODE_HOTKEY } from "../hotkeys";
 import { renderMathInto } from "../md-math";
 import { hydrateMdImages } from "../md-image-hydrate";
 import { isPreviewableImagePath } from "../file-icons";
+import { isHtmlPath, isMarkdownPath } from "../md-path";
+import { hasMermaidFence } from "../mermaid-blocks";
+import {
+  decorateMdCodeBlocks,
+  handleMdCodeCopyClick,
+} from "../md-code-chrome";
 import ImagePreview from "./ImagePreview";
+import HtmlPreview from "./HtmlPreview";
+import MdToc from "./MdToc";
+import PreviewErrorState from "./PreviewErrorState";
 import {
   LATEX_EXTENSIONS,
   LATEX_LANGUAGE_ID,
   latexMonarch,
   matchLanguageByPath,
 } from "../editor-languages";
+
+const MermaidDiagrams = lazy(() => import("./MermaidDiagrams"));
 
 // 只用基础 editor worker（不需要语言服务的 intellisense）
 self.MonacoEnvironment = {
@@ -85,15 +98,11 @@ interface PathContext {
   branch: string | null;
 }
 
-/** md 文件默认走阅读版式（RX2a 笔记阅读模式） */
-function isMarkdownPath(path: string): boolean {
-  return /\.(md|markdown)$/i.test(path);
-}
-
 /**
  * Markdown 阅读视图（RX2a）：marked 渲染本地文件内容。
  * 本地文件同样是不可信内容；转换与图片重写后统一清洗，保留 GFM 排版。
- * v1 代码块不做语法高亮（素色块），样式全部走 App.css 的 .md-body 主题令牌。
+ * 代码块不做语法高亮（素色块 + 语言名/复制）；mermaid 围栏懒加载成图。
+ * 样式全部走 App.css 的 .md-body 主题令牌。
  * 选中文字出现浮动按钮「◈ 讨论/改写此段」（与 PDF 问 AI 共用 SelectionFloatBar），
  * 点击把选段 + 出处交给调用方写入活跃终端输入（「↵ 直接发送」立即回车发送）；沉浸阅读覆盖层同款生效。
  * 另有「✦ 沉淀为技能」（DistillSkillButton）：AI 把选段提炼成技能草稿，跳技能页新建表单预填。
@@ -146,6 +155,7 @@ function MarkdownView({
   );
   const scrollRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const showMermaid = useMemo(() => hasMermaidFence(text), [text]);
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
   const [hint, setHint] = useState<string | null>(null);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -187,6 +197,7 @@ function MarkdownView({
       cwdHint: root,
       allowHttps: true,
     });
+    decorateMdCodeBlocks(host);
   });
 
   // 公式升级（批次 E）：.md-math 占位换 KaTeX 排版；无公式时函数直接返回、不加载 katex
@@ -199,6 +210,10 @@ function MarkdownView({
   /** 链接点击（批次 B2）：锚点默认滚动；外链走系统浏览器（openUrl，webview 内跳转会破坏应用）；
       相对/绝对路径原地打开——阅读区笔记栏由 onOpenFile 接管，否则 previewReq 跳终端页预览 */
   function onBodyClick(e: React.MouseEvent<HTMLDivElement>) {
+    if (handleMdCodeCopyClick(e.target)) {
+      e.preventDefault();
+      return;
+    }
     const a = (e.target as HTMLElement).closest("a");
     if (!a) return;
     const href = a.getAttribute("href") ?? "";
@@ -226,6 +241,7 @@ function MarkdownView({
         </p>
       )}
       <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-y-auto">
+        <MdToc bodyRef={bodyRef} />
         <div
           ref={bodyRef}
           onClick={onBodyClick}
@@ -234,6 +250,11 @@ function MarkdownView({
           }`}
           dangerouslySetInnerHTML={{ __html: html }}
         />
+        {showMermaid && (
+          <Suspense fallback={null}>
+            <MermaidDiagrams hostRef={bodyRef} html={html} />
+          </Suspense>
+        )}
         {onDiscuss && (
           <SelectionFloatBar
             containerRef={scrollRef}
@@ -314,6 +335,7 @@ function TextFilePreviewEditor({
   /** text 对应的文件路径：路径切换后旧内容不等新加载、立即视为无效（防残留误导） */
   const textPathRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [truncated, setTruncated] = useState(false);
   const [readOnlyReason, setReadOnlyReason] = useState<string | null>(null);
   const dirtyRef = useRef(false);
@@ -335,9 +357,11 @@ function TextFilePreviewEditor({
     },
     [],
   );
-  // 阅读/编辑模式与沉浸覆盖层（仅 md 有阅读态；其他文本固定编辑态）
+  // 阅读/编辑模式与沉浸覆盖层（md/html 有阅读态；其他文本固定编辑态）
   const isMd = isMarkdownPath(path);
-  const [mode, setMode] = useState<"read" | "edit">(isMd ? "read" : "edit");
+  const isHtml = isHtmlPath(path);
+  const hasReadMode = isMd || isHtml;
+  const [mode, setMode] = useState<"read" | "edit">(hasReadMode ? "read" : "edit");
   const [immersive, setImmersive] = useState(false);
 
   /** 编辑→阅读：把编辑器缓冲（含未保存改动）同步进 text 状态。
@@ -356,7 +380,7 @@ function TextFilePreviewEditor({
   useEffect(() => {
     if (modeTickRef.current === modeTick) return;
     modeTickRef.current = modeTick;
-    if (isMd) switchMode(mode === "read" ? "edit" : "read");
+    if (hasReadMode) switchMode(mode === "read" ? "edit" : "read");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modeTick]);
 
@@ -371,7 +395,7 @@ function TextFilePreviewEditor({
 
   // 路径切换时按文件类型重置阅读/编辑与沉浸态
   useEffect(() => {
-    setMode(isMarkdownPath(path) ? "read" : "edit");
+    setMode(isMarkdownPath(path) || isHtmlPath(path) ? "read" : "edit");
     setImmersive(false);
   }, [path]);
 
@@ -436,7 +460,7 @@ function TextFilePreviewEditor({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, root]);
+  }, [path, root, reloadKey]);
 
   // text 只有在属于当前 path 时才有效；切换路径的瞬间旧内容立即失效（空白等待新加载）
   const ready = text !== null && textPathRef.current === path;
@@ -684,7 +708,7 @@ function TextFilePreviewEditor({
           </span>
         )}
         {dirty && <span className="shrink-0 text-l3" title="有未保存的修改">●</span>}
-        {isMd && (
+        {hasReadMode && (
           <div className="flex shrink-0 items-center rounded-sm bg-inset p-0.5 text-micro">
             {(["read", "edit"] as const).map((m) => (
               <button
@@ -717,7 +741,7 @@ function TextFilePreviewEditor({
           ) : (
             ready &&
             !hideImmersive &&
-            (mode === "edit" || isMd) && (
+            (mode === "edit" || hasReadMode) && (
               <button
                 onClick={() => setImmersive(true)}
                 title={`全宽沉浸${mode === "read" ? "阅读" : "编辑"}（Esc 退出）`}
@@ -745,17 +769,34 @@ function TextFilePreviewEditor({
           )}
         </div>
       </div>
-      {error && <p className="px-3 py-1 text-xs text-err-text">{error}</p>}
+      {error && (
+        error.includes("二进制") ? (
+          <PreviewErrorState
+            error={error}
+            kind="文件"
+            path={path}
+            onRetry={() => setReloadKey((n) => n + 1)}
+          />
+        ) : (
+          <p className="px-3 py-1 text-xs text-err-text">{error}</p>
+        )
+      )}
       {pasteNote && <p className="px-3 py-1 text-xs text-l3">{pasteNote}</p>}
       {mode === "read" && ready && (
-        <MarkdownView
-          text={text!}
-          fileName={path.split(/[\\/]/).pop() ?? path}
-          filePath={path}
-          root={root}
-          onDiscuss={onDiscuss}
-          onOpenFile={onOpenFile}
-        />
+        isHtml ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <HtmlPreview html={text!} filePath={path} root={root} />
+          </div>
+        ) : (
+          <MarkdownView
+            text={text!}
+            fileName={path.split(/[\\/]/).pop() ?? path}
+            filePath={path}
+            root={root}
+            onDiscuss={onDiscuss}
+            onOpenFile={onOpenFile}
+          />
+        )
       )}
       {/* Monaco 宿主槽位（display:contents 不改变布局）：编辑器 DOM 节点由 effect 挂入，
           阅读态仅隐藏、沉浸编辑时移到覆盖层槽位——未保存改动/光标/undo 全程不丢，
@@ -795,15 +836,21 @@ function TextFilePreviewEditor({
             </button>
           </div>
           {mode === "read" ? (
-            <MarkdownView
-              text={text ?? ""}
-              large
-              fileName={path.split(/[\\/]/).pop() ?? path}
-              filePath={path}
-              root={root}
-              onDiscuss={onDiscuss}
-              onOpenFile={onOpenFile}
-            />
+            isHtml ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <HtmlPreview html={text ?? ""} filePath={path} root={root} />
+              </div>
+            ) : (
+              <MarkdownView
+                text={text ?? ""}
+                large
+                fileName={path.split(/[\\/]/).pop() ?? path}
+                filePath={path}
+                root={root}
+                onDiscuss={onDiscuss}
+                onOpenFile={onOpenFile}
+              />
+            )
           ) : (
             <div ref={immersiveSlotRef} className="contents" />
           )}

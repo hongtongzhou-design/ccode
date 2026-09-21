@@ -153,8 +153,8 @@ test("办公类型与预览白名单", () => {
   assert.equal(isOfficePreviewable("a.pptx"), false);
   assert.equal(isOfficePreviewable("a.doc"), false);
   assert.equal(isOfficePreviewable("a.csv"), true);
-  assert.equal(officePreviewMode("a.csv"), "text");
-  assert.equal(officePreviewMode("a.tsv"), "text");
+  assert.equal(officePreviewMode("a.csv"), "xlsx");
+  assert.equal(officePreviewMode("a.tsv"), "xlsx");
   assert.equal(officePreviewMode("a.docx"), "docx");
   assert.equal(officePreviewMode("a.DOC"), "external");
   assert.equal(officePreviewMode("REPORT.PDF"), "pdf");

@@ -29,6 +29,8 @@ Gateway
   name
   noAuth
   keyHint       密钥本体在 keys.json，键 = gateway id
+  walletUserId  New API 钱包查询用户 ID（非密钥，给 New-Api-User 兼容头；老站点才要）
+  walletKeyHint 系统访问令牌尾号；本体在 keys.json 键 `{id}#wallet`（查钱包，不是推理 sk-）
   slots         { anthropic, openai, responses, gemini, cursor } 均可空
   headerEnv     Header 名 → 环境变量名（不落密文）
   models[]      GatewayModel（目录 ∪ 手填；策略字段稀疏）
@@ -54,12 +56,23 @@ Binding
   lastUsedAt
 
 约束
-  同一 (agent, gatewayId, protocol, models, extraEnv) 至多一条 api 绑定
+  同一 (agent, gatewayId, protocol, apiBackend, models, extraEnv) 至多一条 api 绑定
   每个 agent 至多一条 official 绑定
   绑定时该 Agent 所需协议槽必须已填，否则先补槽（缺槽态见 §9）
   绑定更新不得回写共享网关的 URL / Header / noAuth / 密钥
   导入按绑定身份规则还原，不得把不同模型选择静默合并成一条
 ```
+
+**唯一约束的执行口（2026-09-21）**：判据是 `has_duplicate_binding(bindings, skip_id, candidate)` 单一函数，
+**新建 / 复制到其他 Agent / 编辑 / 导入 v2 四条路都必须过它**（编辑传 `skip_id` 排除自身）。
+原先只有新建、复制、导入守这条，`update` 漏了——把 A 的模型选择改成与 B 完全相同即可绕过；
+导入也漏了字段校验（外来的未知 agent / 非法协议 / 非法 `extraEnv` 名会静默落盘成前端看不见的幽灵条目）。
+比较前模型列表先归一（空白 / 空串 / 重复不影响判定），比较含 `protocol` 与 `apiBackend`。
+导入的绑定还要过与新建同口径的 `validate_profile_fields`，落盘用归一后的模型列表，
+不合格者进 `skippedSlots` 原文列出。
+编辑路径有一个例外：**模型选择本身没动就放行**（`update_selection_conflicts`）——
+约束补上之前由编辑路径造出的历史重复对，否则那条连接连改名字都存不了；
+只要协议 / 后端 / 名单 / `extraEnv` 真的变了就照拦。别把这个例外当冗余删掉。
 
 槽对照（与现 `launch_plan` 一致，不是新发明）：
 
@@ -198,7 +211,7 @@ catalog 条目不写 `apply_patch_tool_type`（freeform＝type=custom 工具会�
 
 今日探针结果不落盘，每次重探（`profile_validation.rs`）。方案把 `lastProbe` 存进网关之后：
 
-**存什么**：按 **槽 + 模型 + URL 指纹 + 密钥有无** 存各检查项：`never` | `passed` | `failed`，外加探测时间。基础连通、流式、思考档、采样（temperature/top_p）、Header **分字段记录**；思考档失败不得关掉采样。写入前对照当前网关指纹，地址或密钥已变则丢弃迟到回包，不得写成新配置的结论。消费必须匹配当前槽、模型与指纹，禁止用「该槽最近一条」株连其他模型。
+**存什么**：按 **槽 + 模型 + URL 指纹 + 密钥有无** 存各检查项：`never` | `passed` | `failed`，外加探测时间。基础连通、流式、思考档、采样（temperature/top_p）、Header **分字段记录**；思考档失败不得关掉采样。写入前对照当前网关指纹，地址或密钥已变则丢弃迟到回包，不得写成新配置的结论。消费必须匹配当前槽、模型与指纹，禁止用「该槽最近一条」株连其他模型。**这条同时管连接状态徽标**（`gateway_store::connection_state` 与 `probe_field_status` 同一过滤口径）：绑定默认模型换了、槽地址或密钥指纹变了，徽标就回「未体检」，不得沿用同槽别的模型的结论——徽标骗人比不显示更糟。
 
 **作废**：该槽 URL 变更、网关密钥变更（含从有到无 / 轮换）、`noAuth` 翻转。作废 = 回到 `never`，不把旧失败带到新端点。
 
@@ -224,7 +237,8 @@ catalog 条目不写 `apply_patch_tool_type`（freeform＝type=custom 工具会�
 
 - **有绑定的网关禁止删除**。按钮置灰，提示先解绑。不解绑不级联删绑定（绑定 id 是 schedules / 会话锚）。
 - **槽可清空**。依赖该槽的绑定进入 **缺槽态**：配置页行 ⚠「这个网关还没配该协议的端点」；启动栏该项禁选；设为全局 / 托盘该项禁用。绑定记录保留（id 不断）。
-- **解绑**：删除绑定行。先走现有 `clear_profile_refs` 同类清理（settings 五字段、schedules 里指向它的 `profile_id` 置空）。catalog 文件可删。不解绑网关、不动密钥。
+- **解绑**：删除绑定行。先走 `clear_profile_refs` 清理 **settings 五字段**：`ai_profile_id`、`ai_profiles`、`default_profiles`、`hidden_profiles`、`active_global_profiles`（漏清会留下永远指不到实体的幽灵 id，停用/默认徽标跟着脏）。catalog 文件可删。不解绑网关、不动密钥。
+- **schedules 不置空**（2026-09-20 拍板，改原先「置空」口径）：定时任务的 `profile_id` 是**显式连接声明**，解绑只删绑定行、保留该引用，于是运行时硬 pin 拒绝静默回落（`scheduler` 留一条失败 Run，原因写明配置不存在）。理由：无人确认时替用户换供应商/认证出站，比让任务停下更糟。配套**前端义务**：解绑确认弹窗按 `list_schedules` 现算并列出受影响任务条数与名称，不得只说「其它 Agent 的绑定不受影响」。
 - **删除无绑定的网关**：删网关行 + `keys.json` 对应键 + 该网关的 relay 前缀键（尽力而为）+ 该网关 lastProbe。
 
 ## 10. 配置页信息架构
@@ -268,6 +282,10 @@ catalog 条目不写 `apply_patch_tool_type`（freeform＝type=custom 工具会�
 拉起那一刻按当时选中模型求交后注入。`launch_plan` 入参改为 `Binding + selected_model + Gateway`。预览仍脱敏。
 
 需要「启动时把名单注册进选择器」的 CLI（Claude 最多 5 槽、Codex catalog、OpenCode models、Grok `allowed_models`）：写入绑定的整份名单。Codex catalog 路径仍 `codex-<binding_id>.json`（§3）。
+
+Grok 还须同时写 `[models].default` = 本次启动模型（2026-09-20 1.0.34 实机复现）：grok 开会话前先拿 config.toml 的 `[models].default` 比对注入的 `allowed_models`，不匹配直接拒启动（`"<id>" (your default) isn't allowed by allowed_models …`），而 `GROK_DEFAULT_MODEL` 只是「偏好」、在这道门之后才生效，救不回被拒的启动。全局默认很可能是别家绑定「设为全局默认」留下的模型，故 overlay 白名单放行 `default`（实证）时必须写。详见 matrix §9「注入 env」行。
+
+`launch_plan` 把空串/纯空白模型归一成「未选模型」（前端 `buildAskAiPending` 会带空串占位防被启动栏上次模型顶掉）：不归一会让 grok 的绑定清单兜底与各处 `filter` 全部失效，并把空模型写进 `GROK_DEFAULT_MODEL` / `allowed_models` / `[models].default`。
 
 官方绑定：不注 API、`env_remove` 残留密钥变量（现口径）。`extraEnv` 仍最后注入。
 
@@ -396,8 +414,8 @@ Codex            → …
 ```
 
 - `slotFp`：已填槽的 `name=规范化URL` 用 `|` 拼接，导入按它（及可选密钥指纹）对上网关。
-- 默认不含密钥。含密钥须二次确认，落盘 0600；`extraEnv` 仍按名剔除含 KEY/TOKEN/SECRET/PASSWORD/AUTH 的项，再过 `redact_sensitive_text`，然后才把 `apiKey` 写回。
-- 导入：先按密钥指纹匹配，没有或对不上再按槽指纹。同网关槽 URL 冲突、Header / extraEnv / 协议冲突进 `skippedSlots`（界面列出原文）。唯一约束命中则合并模型名单。
+- 默认不含密钥。含密钥须二次确认，落盘 0600；`extraEnv` 仍按名剔除含 KEY/TOKEN/SECRET/PASSWORD/AUTH 的项 **∪ `AUTH_BEARING_ENV` 闭集**，再过 `redact_sensitive_text`，然后才把 `apiKey` 写回。闭集（`auth_bearing_env_name`）是无密钥校验与导出剔除的**同一张表**：`OPENCODE_CONFIG_CONTENT` 这类内嵌整份凭据、名字里没有 KEY/TOKEN 字面的项，只有闭集能兜住；两处各写一份名单必然漂移。
+- 导入：先按密钥指纹匹配，没有或对不上再按槽指纹。同网关槽 URL 冲突、Header / extraEnv / 协议冲突进 `skippedSlots`（界面列出原文）。唯一约束命中则合并模型名单。逐条绑定还要过 §2 的字段校验（agent 白名单 / 协议闭集 / `apiBackend` / `extraEnv` 名），不合格同样进 `skippedSlots` 而不是静默落盘。
 - 旧 profiles 数组仍能导入（v1 回落）。
 
 ## 配置存储与恢复（2026-09-08）

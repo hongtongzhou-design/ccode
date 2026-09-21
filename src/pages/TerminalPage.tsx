@@ -31,6 +31,8 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
+import { monoFallbackStack, terminalFontStack } from "../terminal-font";
+import { installTrackpadWheelCoalescing } from "../terminal-wheel-scroll";
 import {
   dropHitsRect,
   escapeShellPath,
@@ -541,7 +543,10 @@ const TerminalView = memo(function TerminalView({
     const term = termRef.current;
     if (!term || !settings) return;
     term.options.fontSize = settings.terminalFontSize;
-    term.options.fontFamily = `'${settings.terminalFontFamily ?? "JetBrains Mono"}', 'JetBrains Mono', 'SF Mono', Menlo, 'Cascadia Mono', Consolas, 'Microsoft YaHei', monospace`;
+    term.options.fontFamily = terminalFontStack(
+      settings.terminalFontFamily,
+      monoFallbackStack(),
+    );
     term.options.theme = buildXtermTheme(
       settings.theme,
       settings.terminalPalette,
@@ -1422,9 +1427,13 @@ const TerminalView = memo(function TerminalView({
       // Unicode11Addon 使用 xterm 的 proposed Unicode API；显式开启后才能在
       // xterm 6 中加载宽度规则，否则 addon.activate 会抛错并触发顶层错误边界。
       allowProposedApi: true,
-      // 回退链补 Cascadia Mono（Win10+ 自带）与雅黑（CJK 兜底）——否则 Windows 上
-      // JetBrains Mono 未装时中文落到通用 monospace 位图字体，发糊发虚
-      fontFamily: `'${settingsRef.current?.terminalFontFamily ?? "JetBrains Mono"}', 'JetBrains Mono', 'SF Mono', Menlo, 'Cascadia Mono', Consolas, 'Microsoft YaHei', monospace`,
+      // 字体族单一出处：已选族名 + 应用等宽回退链（App.css --font-mono）。
+      // 回退链里 ui-monospace 必须排在 Menlo 之前——macOS 上公开的 "SF Mono" 家族并不
+      // 存在（系统那支的 family 是私有名 .SF NS Mono），只有 ui-monospace 才映射到它。
+      fontFamily: terminalFontStack(
+        settingsRef.current?.terminalFontFamily,
+        monoFallbackStack(),
+      ),
       fontSize: settingsRef.current?.terminalFontSize ?? 14,
       // 显示质感微调：清瘦锐利（向 Ghostty 靠）、盒绘对齐、粗体增亮、平滑滚动
       fontWeight: 400,
@@ -1578,6 +1587,12 @@ const TerminalView = memo(function TerminalView({
       // GPU/驱动不支持时保持默认渲染器
     }
 
+    // 触控板滚动合帧（见 src/terminal-wheel-scroll.ts）：xterm 只对物理滚轮做平滑动画，
+    // 触控板是「一枚事件写一次滚动位置、触发一次整屏重绘」——60–120Hz 细粒度小增量下就是
+    // 「上下滑动一卡一卡」。这里把同帧内的多枚事件合成一枚再交回 xterm 原滚动逻辑，
+    // 压到每帧最多一次写入与重绘；备用屏/鼠标上报/带修饰键仍原样交给 xterm。
+    const teardownWheelCoalescing = installTrackpadWheelCoalescing(term);
+
     // 链接可点击：点击经 opener 插件打开系统浏览器（不泄进 PTY，与技能页同源）
     term.loadAddon(
       new WebLinksAddon((_event, uri) => {
@@ -1721,6 +1736,7 @@ const TerminalView = memo(function TerminalView({
       ptyKindRef.current = null;
       if (id) invoke("pty_kill", { ptyId: id }).catch(() => {});
       unlistenRef.current.forEach((u) => u());
+      teardownWheelCoalescing();
       term.dispose();
       termRef.current = null;
     };
@@ -4403,9 +4419,12 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     if (!pending) return;
     const action = tabActionsRef.current.get(pending.tabId);
     if (!action) return;
+    const st = statuses[pending.tabId];
+    // 恢复会话要等进程起来再写意见；没起来就发会走「新开会话 + 首条指令」
+    if (!st?.running && !st?.shellActive) return;
     pendingChatInjectRef.current = null;
     void action.sendMessage(pending.prompt);
-  }, [injectTick]);
+  }, [injectTick, statuses]);
 
   async function sendChatToActive(text: string): Promise<string | null> {
     const action = tabActionsRef.current.get(focusedId);
@@ -4800,7 +4819,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         prefillCommand: pt.prefillCommand,
         shellOnly: pt.shellOnly,
         customRuntimeId: pt.customRuntimeId,
-        initialPrompt: pt.initialPrompt,
+        // 恢复会话时首条指令改聊天注入，spawn 会丢掉 initialPrompt
+        initialPrompt: pt.resume ? undefined : pt.initialPrompt,
         readonly: pt.readonly ?? pt.permission === "discuss",
         permission: pt.permission ?? (pt.readonly ? "discuss" : "write_tree"),
         reuseKey: pt.reuseKey,
@@ -4808,6 +4828,13 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         runId: pt.runId,
         taskId: pt.taskId,
       });
+      if (tabId && pt.resume && pt.initialPrompt?.trim()) {
+        pendingChatInjectRef.current = {
+          tabId,
+          prompt: pt.initialPrompt.trim(),
+        };
+        setInjectTick((n) => n + 1);
+      }
       // 纯 shell/脚本标签（登录、CLI 自更新、run 脚本）没有会话可供聊天层展示——
       // 显式落终端面（当前默认面层已是终端，这里守住「未来默认值再变也不回到 chat」的口径；
       // 同分叉不支持注入时落终端的处理，3688 行附近）
@@ -6424,7 +6451,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       path={preview.path}
                       cwdHint={preview.root ?? activeCwd}
                     />
-                  ) : /\.(xlsx|xlsm|xls|ods)$/i.test(preview.path) ? (
+                  ) : /\.(xlsx|xlsm|xls|ods|csv|tsv)$/i.test(preview.path) ? (
                     <XlsxPreview
                       path={preview.path}
                       cwdHint={preview.root ?? activeCwd}
@@ -6447,7 +6474,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                       onDirtyChange={setPreviewDirty}
                       onDiscuss={discussMdExcerpt}
                       onOpenReader={
-                        /\.md$/i.test(preview.path)
+                        /\.(md|markdown)$/i.test(preview.path)
                           ? () => void openReaderForNote(preview.path)
                           : undefined
                       }

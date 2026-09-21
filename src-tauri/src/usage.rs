@@ -3990,6 +3990,8 @@ mod gateway_usage_tests {
             name: name.into(),
             no_auth: false,
             key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
             slots: ProtocolSlots::default(),
             header_env: Default::default(),
             models: vec![],
