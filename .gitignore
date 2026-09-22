@@ -27,6 +27,10 @@ dist-ssr
 src-tauri/target
 src-tauri/gen
 
+# Python 运行产物
+__pycache__/
+*.pyc
+
 # 打包前置落位的 sidecar（scripts/stage-sidecar.mjs 生成，勿提交）
 src-tauri/binaries/
 
