@@ -425,3 +425,17 @@ Codex            → …
 - 拆层迁移先写私有 pending 日志，写网关→密钥→绑定→合并日志→引用，最后删除 pending。失败后用相同 ID 重放；bindings 存在不再绕过 pending 恢复。
 - 私有 JSON 从临时文件创建起就是 0600；普通文本原子替换保留可执行位。损坏密钥原件保留并备份，损坏设置保留且拒绝 patch，不把“读失败”当“空配置”。
 - 定时任务绑定缺失时拒绝静默回落；交互 AI 默认选择仍遵守既有显式/专属/默认优先级。
+
+## 模型配置约定（2026-09-05 起）
+
+> 2026-09-22 自 AGENTS.md「模型配置约定」整节迁入（原文未改）。改配置/注入/设为全局/模型能力前与本文件其余章节一起读。
+
+- Claude Code 启动必须用 `--settings` 覆盖本次连接的模型选择，避免用户级 `settings.json.env` 覆盖 Mesa；不得写 `CLAUDE_CODE_SUBAGENT_MODEL`，以保留 Task 参数、frontmatter 和主模型继承链。
+- Anthropic 兼容槽只接受基础 URL；保存时拒绝以 `/messages` 结尾的完整资源地址。
+- CodeBuddy 的 `reasoning_effort` 通过当前 CLI 的 `--effort` 启动参数注入；Grok 的模型/思考档通过 `-m`/`--reasoning-effort` 注入。
+- Grok 的 `api_backend`、`context_window` 不得通过受限 `GROK_CONFIG` 猜测注入；若绑定声明非 `chat_completions`，必须先在 Grok `[model.<id>]` 配置中登记，否则启动和无头调用均 fail-closed。
+- Codex 网关端点必须实现 `/responses`（CLI 已移除 `wire_api="chat"`）：智谱专用端点是 `https://open.bigmodel.cn/api/v1`，`/api/paas/v4` 只有 `chat/completions`，Codex 打过去 404；且 api/v1 **不提供 `/models` 目录**（智谱把错误包成 HTTP 200），目录只有 `paas/v4/models` 有——网关库正确填法 = Base URL/OpenAI 槽 `paas/v4` + Responses 槽 `api/v1` 分槽填（预设与网关库告警已对齐；fetch_models 用 `gateway_error_envelope` 识别 200 包错误体，不误报「0 个模型」；qwen/kimi/opencode/grok 走 openai 槽用 `paas/v4` 不受影响；2026-09-15 实证）。
+- Codex 从步骤工作区启动时，pty_spawn 把主仓 `papers/` 预授权进沙箱（`-c sandbox_workspace_write.writable_roots=[...]`，`workspaces::papers_dir_for_worktree` 映射）：口径 C 允许原始文献直写主仓 papers/，不预授权则每写一篇 PDF 都停下等提权（2026-09-15 用户实测「总是让我授权」）。**只加 papers/ 子目录**——派生产物仍必须走工作区 + 评审合并，不得放宽到整个主仓。
+- 配置页查询模型能力必须带 `gatewayId`，网关级能力声明优先于公共/内置能力库；写 Grok 逐模型上下文时只使用显式声明值，不使用通用估值。
+- 思考档注入优先级（2026-09-15）：开工弹层的本次覆盖（`KickoffLaunch.effort` → PendingTerminal → Tab → `pty_spawn` 的 `effortOverride`）> 绑定逐模型策略（网关库 `reasoningEffort`）> 端点默认。弹层选择器按 `combo_surface.injectEffortAllowed` 判定显示（不给调不了的东西）；值只影响本次进程不写回绑定；运行中调整仍在状态栏（起点/运行两层同源 combo）。执行权限不做成弹层选项——步骤执行固定 write_tree + 沙箱，只读讨论走聊想法/商量（弹层只有一行权限边界可见性文案）。
+- **能力声明与能力通道（2026-09-19，对照 cc-switch 补口）**：Claude 长上下文 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 与 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` **同值成对**注入/清除（启动 + 设为全局；只抬上限不抬压缩窗口会把压缩触发点留在旧档，勿拆对）。Codex catalog **不写** `apply_patch_tool_type`（freeform=custom 工具会被原生 /responses 与 Anthropic 网关拒/丢，编辑走 `shell_type: "shell_command"`）。模型能力注册链四层全 miss 时用户可经网关库「能力声明」写覆盖（`model-capabilities.json` 最高层；表单只收 context/思考/视觉——output 的旋钮是策略字段 max output，能力层 output 只喂 opencode limit.output，与策略并排摆两个输出框属重复），`input_modalities` 等按注册链如实声明（宁缺毋滥）+ 覆盖层补口的口径不变。
