@@ -101,7 +101,29 @@ npm run tauri build    # 打包
   用户指定的**仓库路径**（两个 clone 内容相同，开工先 `git rev-parse --show-toplevel` 自报并与用户指定路径对照）+
   **窗口标题**（17575 实例 = 「Mesa Dev - 热更新」，17576 实例 = 「Mesa Dev - 热更新 :17576」）+ **devUrl 端口**。
   用户指定了哪个实例就只核验哪个，其余窗口不算数；还要第三实例时照此加 conf 文件（端口连续顺延），不即兴改配置。
-- **git 提交**：常规提交加 `[skip ci]`，里程碑提交才跑三平台 CI。
+- **git 提交与单人开发流程（2026-09-22 定稿）**：日常直接在 main 上开发，三条纪律——
+  ① **一个主题一个提交**，提交时基线全绿（`npm test` + `cd src-tauri && cargo test` + `npm run build` 都过）；
+  禁止攒多主题「一系列修复」式大杂烩提交（提交太大 `git bisect` 定位不了回退）。**`node --test` 只剥类型
+  不做类型检查**，tsc 错误只有 `npm run build` 抓得住，提交前必须跑（2026-09-22 实证：三处 tsc 错误
+  带病进了 main，本地测试全绿）。
+  ② 几天的大功能或实验性改动开分支（`git switch -c feat/...`），做完 `git merge --no-ff` 回 main；
+  已 push 的历史禁止 rebase/amend 改写。单晚小修、文档直接 main。
+  ③ **测试基线必须保持全绿**：存量失败不修，「红绿」就没有信号价值，新失败也分不清是不是自己引入的
+  （2026-09-22 实证：3 个 UI 测试存量失败把 CI 挡在 npm test 一步，tsc 报错与 objc2 跨平台编译失败
+  两类更深的问题被挡住看不到）。
+- **CI 纪律（2026-09-22 修订，取代旧规「常规提交加 [skip ci]，里程碑提交才跑 CI」）**：push 到 main 即触发
+  test job（npm test + cargo test + npm run build；当前矩阵 macOS + Windows——**Linux 本版本未开发，
+  2026-09-22 移出测试矩阵**，恢复开发时把 ubuntu-latest 加回 build.yml，平台差异挡过主线三次），
+  **保持绿是硬要求**，红了当次推送就要处理；`[skip ci]` 只用于纯文档等不可能影响构建的提交。
+  平台专属 crate（如 objc2、windows-sys）必须放 `[target.'cfg(...)'.dependencies]` 段——主
+  `[dependencies]` 里的平台专属依赖会让别的平台直接编译失败（2026-09-22 objc2 实证）。
+  发版打包仍走 tag push（package job 只认 tag；Linux 2026-09-22 起同样移出发版矩阵——
+  不再出新安装包，已装的 Linux 用户收不到更新，恢复开发时把 ubuntu-latest 加回两个矩阵）。
+- **UI 组件测试打包口径（2026-09-22）**：tests 用 esbuild 内联打包 .tsx 组件的（research-*-ui.test.ts 模式），
+  组件图拉进 monaco css、Vite `?worker`/`?url` 导入、pdfjs 时按桩处理：`.css` 配 empty loader（css 空了
+  其中字体 url 不再解析）、query 后缀路径桩成惰性 data: URL **字符串**（pdfjs 校验 workerSrc 必须是字符串）、
+  JSDOM globals 补空壳 `DOMMatrix`（pdfjs 模块初始化顶层 `new DOMMatrix()`，`pdf.mjs` 的 SCALE_MATRIX
+  常量）。新组件测试照抄这三个文件的口径，别让打包问题冒充组件 bug。
 - **git 分支纪律**：未经用户明确指令，禁止 checkout/switch/merge/rebase/stash/删分支等任何改动 HEAD 或分支指向的操作；
   开工先 `git branch --show-current` 确认在用户指定的分支上，不符就停下报告，不自行切换；任务收尾报告分支名 + `git status` 结果。
 - **git 推送走 SSH:443 + repo deploy key**；发版推 tag 后先用 `gh run list --workflow build.yml` 确认是否已产生该 tag 的 push run，已触发则只保留该 run；30 秒内未触发才执行 `gh api repos/hongtongzhou-design/ccode/actions/workflows/build.yml/dispatches -f ref=<tag>`。禁止让 tag push 与 workflow_dispatch 两个打包 run 并行写同一 Release。workflow 已配 `permissions: contents: write`（tauri-action 建 Release 草稿必需）。**仓库 owner 与 tauri.conf 升级端点绑定**（同为 `hongtongzhou-design/ccode`）：仓库若转移，本命令、updater endpoint、README 链接三处必须同步改。
