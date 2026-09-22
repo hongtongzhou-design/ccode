@@ -47,7 +47,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        # Linux 本版本不发安装包（2026-09-22，与 test 矩阵同批移除）；
+        # 恢复时把 ubuntu-latest 加回即可（Linux 系统依赖步骤保留未删）
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
