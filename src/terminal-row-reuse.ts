@@ -74,7 +74,8 @@ export function keptRowMap(
 
 /** 和缓冲区译文对齐：不换行空格当普通空格，去掉行尾空白 */
 export function rowTextKey(text: string | null | undefined): string {
-  return (text ?? "").replaceAll("\u00a0", " ").replace(/\s+$/u, "");
+  // replaceAll \u8981 lib es2021\uff08tsconfig \u662f ES2020\uff09\uff0c\u7528\u5168\u5c40\u6b63\u5219\u7b49\u4ef7\u66ff\u6362
+  return (text ?? "").replace(/\u00a0/gu, " ").replace(/\s+$/u, "");
 }
 
 export function keptRowsMatch(

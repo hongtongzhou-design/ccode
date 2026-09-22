@@ -23,7 +23,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
-objc2 = "0.6"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
@@ -57,3 +56,7 @@ tauri-plugin-drag = "2.1.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+
+# WKWebView 手势开关只在 macOS 用（inst_access 登录窗）；无条件依赖会让 Linux/Windows 直接编译失败
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"

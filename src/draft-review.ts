@@ -9,7 +9,6 @@ function abstractBlock(text: string): string {
   const trimmed = text.replace(/^\uFEFF/, "");
   const start = trimmed.search(/^#{1,3}\s+abstract\b/im);
   if (start < 0) {
-    const yamlEnd = trimmed.match(/^---\s*$/m);
     return trimmed.slice(0, 1200);
   }
   const after = trimmed.slice(start);

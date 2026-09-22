@@ -4497,7 +4497,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     if (!action) return;
     const st = statuses[pending.tabId];
     // 恢复会话要等进程起来再写意见；没起来就发会走「新开会话 + 首条指令」
-    if (!st?.running && !st?.shellActive) return;
+    if (!st?.running && !st?.alive) return;
     pendingChatInjectRef.current = null;
     void action.sendMessage(pending.prompt);
   }, [injectTick, statuses]);
