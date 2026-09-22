@@ -17,7 +17,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        # Linux 本版本未开发，2026-09-22 移出测试矩阵（平台差异问题挡主线）；
+        # 恢复 Linux 支持时把 ubuntu-latest 加回来
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
