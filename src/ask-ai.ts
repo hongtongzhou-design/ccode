@@ -21,6 +21,8 @@ export interface AskAiFile {
   preferredAgent?: string | null;
   /** 项目 Agents 页给这家绑的配置。 */
   preferredProfile?: string | null;
+  /** 项目 Agents 页在这条连接里点选的模型。 */
+  preferredModel?: string | null;
   /** 项目对话：true = 隔离写入，结束后验收。 */
   writeReview?: boolean;
   workMode?: "office" | "coding" | "research";
@@ -71,7 +73,7 @@ export function askAiCanSkip(
 
 /** 项目绑了 Agents 就直接用；没绑才回落「问 AI」勾过的默认。⌘ 重选返回 null。 */
 export function askAiDirectLaunch(
-  file: Pick<AskAiFile, "preferredAgent" | "preferredProfile">,
+  file: Pick<AskAiFile, "preferredAgent" | "preferredProfile" | "preferredModel">,
   profiles: readonly { id: string; agent: string; models?: readonly string[] }[],
   remembered: AskAiRemembered | null,
   forcePick?: boolean,
@@ -81,10 +83,12 @@ export function askAiDirectLaunch(
   if (agent) {
     // 空绑定不传空串占位——「没绑」与「绑了空串」语义不同，后者依赖被调方容忍
     const bound = file.preferredProfile?.trim();
+    const model = file.preferredModel?.trim();
     return projectAgentLaunch(
       profiles,
       agent,
       bound ? { [agent]: bound } : {},
+      model ? { [agent]: model } : null,
     );
   }
   if (!askAiCanSkip(remembered, profiles) || !remembered) return null;

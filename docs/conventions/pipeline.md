@@ -22,7 +22,7 @@
 
 ## 科研质量契约（2026-09-07）
 
-**范围与原则**：六套模板保留原阶段数量；质量门放在现有简报/报告/人工决定中，不建科研专用调度器，不自动拆任务或分派 Agent。科研判断仍归模板/技能，人承担验收责任。数据处理是准备/探索模块，LaTeX 是写作排版模块；严格检索档不等于完整系统综述。
+**范围与原则**：质量门放在现有简报/报告/人工决定中，不建科研专用调度器，不自动拆任务或分派 Agent。科研论文在结果分析与初稿之间有「论文大纲」；其余模板的阶段数不变。会改已有成稿的步骤先写审查报告，人把每条写成接受、拒绝或修改之后才改稿。科研判断仍归模板/技能，人承担验收责任。数据处理是准备/探索模块，LaTeX 是写作排版模块；严格检索档不等于完整系统综述。
 
 - **交付与质量分开**：报告状态为「已生成待审 / 有条件接受（仅可准备）/ 证据通过（限定范围）/ 阻塞」。这是报告中的人工审查契约，不是新增 Run 状态。有文件落点的字段判断/投稿批准事项显式 `completion=manual`，不能由报告出现自动勾完；Agent 自评不能代签；文件非空、引用键可解析、记录齐全、Git 合并、`final` 文件名均不等于研究成立或可投稿。评审行叫「基础检查」，保留原计数并说明边界。
 - **G1 问题/可行性**：候选问题写价值、最邻近证据/反例、可区分解释、资料依赖、总预算和最小可回答范围、继续/缩题/停止判据。可先试检，但正式范围/问题不得由沉默默认批准。
@@ -235,6 +235,7 @@
   `manuscript/template/` 由 agent 读说明适配（无内置解析器）；文档类（elsarticle/IEEEtran/achemso/ctexart/
   学位论文通用架）与 natbib/biblatex 为开工前决策项；引用沿用 references.bib（`\cite{bib键}`），
   章节写作挂 `research-writing`（可选）+ `bib-check`。可吃上游 `paper-final` / `review-final` / `thesis-final` / `draft.md`。
+  **引用样式按项目 PDF 推荐，不设默认**（2026-09-22）：渲染前 `citation_style.py` 看 `papers/*.pdf`，在 `manuscript/citation-style.md` 列出编号、作者-年、按期刊。人写「选定：」之后才生成 `manuscript/citation.csl` 并渲染。选定为空不渲染参考文献。换样式改选定再渲。EndNote 域稿仍是交付副本；人在 Word 里增删后，`sync_docx.py` 只出 `papers/endnote-sync-report.md`，接受的删除和新文献才写回源稿与 `references.bib`。Export Traveling Library 由人在 EndNote 菜单里把文献抄进自己的库。
 - **流水线编辑器（RX1）是步骤编辑唯一入口**：`src/components/PipelineEditor.tsx` 全宽覆盖层（fixed inset-0 z-30，与评审
   覆盖层同级），每步一张卡片，整体写回 steps；新增步骤相关编辑一律进
   编辑器，不再开第二套入口。**卡片字段分三档（v3.85）**：常驻只留
@@ -1078,11 +1079,12 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 
 ## 科研外部工具与交付合同（2026-09-11）
 
-- 保留六套模板/原阶段数；工具是项目选择，不增设独立编排系统，不自动路由或自动并行。选择保存在 settings 的闭集 `科研工具/<key>：<value>`（`libraryExport` / `plotting` / `illustration` / `manuscript`），由 `research-tools.ts` 在应用/编辑步骤时补全技能、必需子集、交付、人工事项。**文献从哪来只认 `config.lit_source`**（流程线「确定文献来源」），不再写 `科研工具/literature`；切换来源时重应用合同，选 Zotero 才给检索/精读步挂 `zotero-sync`。外部库**交付**仍走 `libraryExport`，与来源分开；只认一份主 references.bib。Zotero 进库只有检索步待获取「同步到 Zotero」（用户点一下才写库），不跟 `libraryExport` 重复。EndNote 交差走 `libraryExport=endnote`，合同挂在精读（有完整 bib）；流程线不问，改在项目设置。没有精读步才问在期刊格式适配。创建项目时设定屏只填全局设定。稿件载体问在会换正式稿的步骤（期刊格式适配 / 返修 / 投稿材料）；Origin、Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。答案仍是项目级 `科研工具/*`，所有匹配步骤（含以后追加）一起补。不挡在模板列表前面。
+- 保留六套模板；科研论文在结果分析与初稿之间多一步「论文大纲」，其余模板阶段数不变。会改已有成稿的步骤先出审查报告，人逐条决定后才改稿。工具是项目选择，不增设独立编排系统，不自动路由或自动并行。选择保存在 settings 的闭集 `科研工具/<key>：<value>`（`libraryExport` / `plotting` / `illustration` / `manuscript`），由 `research-tools.ts` 在应用/编辑步骤时补全技能、必需子集、交付、人工事项。**文献从哪来只认 `config.lit_source`**（流程线「确定文献来源」），不再写 `科研工具/literature`；切换来源时重应用合同，选 Zotero 才给检索/精读步挂 `zotero-sync`。外部库**交付**仍走 `libraryExport`，与来源分开；只认一份主 references.bib。Zotero 进库只有文献来源选了 Zotero 时才挂 `zotero-sync`（用户点一下才写库），不跟 `libraryExport` 重复。英文综述的检索步不默认写 `papers/zotero-sync.md`，精读步不出现「导入到 EndNote」。项目设置「文献库」是 Zotero 与 EndNote 的同一种选择，一篇只接一个。选了才在定稿交一份：Zotero 为 `output/zotero.rtf`（导入 RIS 后 RTF Scan 一次），EndNote 为 `output/endnote.docx`（Update 一次）。没有精读步才在期刊格式适配上问这个选项。创建项目时设定屏只填全局设定。稿件载体问在会换正式稿的步骤（期刊格式适配 / 返修 / 投稿材料）；Origin、Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。答案仍是项目级 `科研工具/*`，所有匹配步骤（含以后追加）一起补。不挡在模板列表前面。
 - 自动补入项以简报中的 `mesa-research-tools` 记录，反复应用幂等；撤销只移除本机制加入项。原生稿件替换字段若被手改，拒绝静默覆盖。更新旧步骤必须逐项预览、载入编辑草稿；不改旧 TASK.md 或产物。
 - Zotero 用只读 SQLite 在线备份到内存取得一致快照；不再顺序复制主库/WAL，不产生明文临时数据库。首次 bib、增量唯一候选、条目映射与 PDF 资源可追溯；来源与资源同次配置写回，不得前端回写旧 cfg。链接附件基目录须由人显式选择；读库绝不写个人库。
 - Zotero 导出的新键来自 library/item 稳定身份；已有主库键必须通过 DOI/条目差异人工保留，不自动换键。题录候选按 reference 资源登记；已登记只读外部 PDF 精确放行阅读/建笔记，不放行目录、不复制改名附件。2026-09-16 补：to-fetch 清单有「同步到 Zotero」按钮（zotero_attach_fulltexts，免 agent 会话）——papers/ 已拿到的全文按 DOI 匹配挂 linked_file 附件（引用 papers/ 绝对路径、不复制进 Zotero 存储），条目不存在时优先用同源 to-fetch.ris 的全题录新建（作者/年份/来源；RIS 缺失回落标题+DOI 最小条目）；无 DOI 的不同步（避免重复建条）。前提 Zotero 运行中 + 「允许其他应用与本机通信」+ 首次写入授权。写库规则放宽：技能或 UI 显式动作皆算用户意图。**2026-09-17 实机（Zotero 9.0.6）**：官方 local API（`/api/users/0/items`）只读——源码写明 Write access is not yet supported，POST 回纯文本 `Endpoint does not support method`；对着 `.json()` 会变成 reqwest「error decoding response body」。现先探一次写入，只读则停并提示把 papers/ PDF 拖到对应条目（没有条目先拖 to-fetch.ris）。Connector `/connector/saveItems` 能建条目但不能给已有条目挂 linked_file，不走那条以免复制/重复建条。「同步到 Zotero」打开 `to-fetch.ris`（优先项目根）；导入前 GET 对照 DOI，库里已有则确认防重复。PDF 直接拖进 Zotero，客户端一般按元数据对上已有条目。`zotero-sync` 技能只交 RIS/报告，禁止 POST 只读 `/api/`。
-- `origin-plot` 仅 Windows 有许可证本机，`endnote-bridge` 仅离线格式桥/人工插件，`blender-research` 仅用户指定的科研示意。随包脚本与 SKILL.md 一同播种/更新，执行前核对参数；转换/示意成功不能作为科学真实性证明。Blender MCP 不在 worktree 沙箱内，交互只面向受控工程；最后保存脚本+场景并后台重建。
+- `origin-plot` 仅 Windows 有许可证本机，`endnote-bridge` 离线格式桥 + 定稿域稿（`[@键]` → `output/endnote.docx` 的 `ADDIN EN.CITE`，traveling library；未匹配 fail-closed），禁止 COM/点插件；`blender-research` 仅用户指定的科研示意。随包脚本与 SKILL.md 一同播种/更新，执行前核对参数；转换/示意成功不能作为科学真实性证明。Blender MCP 不在 worktree 沙箱内，交互只面向受控工程；最后保存脚本+场景并后台重建。
+- **EndNote 域稿（2026-09-22）**：仅 `libraryExport=endnote` 且定稿/期刊格式适配步（`polish` / `research-paper-polish` / `thesis-final` / `journal-format`）挂 `output/endnote.docx` + `papers/endnote-cite-report.md`。初稿不出域稿。不覆盖 `manuscript/source.docx`。人打开后点一次 Update Citations and Bibliography 才算可换 Output Style。LaTeX 载体不挂。
 - 开工检测以所选 Agent 的实际技能目录摘要为准，必需技能缺失/漂移不可启动；可选技能缺失只报告。Zotero 通道离线可继续已导入文件；读取可用不等于写入授权；不得把模板选择当成批量写库批准。
 - 原生 LaTeX/Word 投稿、返修合同声明真实输入和正式 PDF/源件，不运行 Markdown 说明文档的 Quarto 脚本冒充成稿；Word 引用域与插件刷新仍由人确认。LaTeX 模板日志统一 `output/compile.log`，latexmk 检测 ctex/fontspec 时用 XeLaTeX；实际引擎/宏包兼容仍需真实编译。
 - 复现入口的 `MESA_REPRODUCE`、`--input/--output`、结果 JSON 合同须与面板解析一致。约定结果缺失或显式失败不可记运行成功。上游人工验收只在证据文件版本一致时引用，引用按钮仅带入准备许可；正式执行仍走本步决定。无条件接受与未关闭阻塞项互斥。

@@ -10,6 +10,7 @@ import {
   currentProfileLine,
   projectAgentsEmptyWorkHint,
   projectAgentsHint,
+  selectedProjectAgentProfile,
   type ProjectAgentRow,
 } from "../project-agents";
 import { declaredTaskKindsForMode } from "../project-tasks";
@@ -33,12 +34,16 @@ export default function ProjectAgentsView({
   const [defaultProfiles, setDefaultProfiles] = useState<Record<string, string>>(
     project.defaultProfiles ?? {},
   );
+  const [defaultModels, setDefaultModels] = useState<Record<string, string>>(
+    project.defaultModels ?? {},
+  );
   const [tasks, setTasks] = useState<TaskDto[]>([]);
 
   useEffect(() => {
     setDefaultAgent(project.defaultAgent ?? "");
     setDefaultProfiles(project.defaultProfiles ?? {});
-  }, [project.defaultAgent, project.defaultProfiles]);
+    setDefaultModels(project.defaultModels ?? {});
+  }, [project.defaultAgent, project.defaultModels, project.defaultProfiles]);
 
   const taskKinds = useMemo(
     () => declaredTaskKindsForMode(project.workMode),
@@ -73,11 +78,12 @@ export default function ProjectAgentsView({
         hiddenProfileIds: hiddenProfiles,
         defaultAgent,
         defaultProfiles,
+        defaultModels,
         tasks,
         taskKinds,
         workMode: project.workMode,
       }),
-    [defaultAgent, defaultProfiles, hiddenProfiles, profiles, project.workMode, taskKinds, tasks],
+    [defaultAgent, defaultModels, defaultProfiles, hiddenProfiles, profiles, project.workMode, taskKinds, tasks],
   );
 
   async function saveAgent(agent: string) {
@@ -92,6 +98,7 @@ export default function ProjectAgentsView({
         ...project,
         defaultAgent: agent || null,
         defaultProfiles,
+        defaultModels,
       });
     } catch (reason) {
       onError(`保存项目默认 Agent 失败：${String(reason)}`);
@@ -100,23 +107,29 @@ export default function ProjectAgentsView({
     }
   }
 
-  async function saveProfile(agent: string, profileId: string) {
+  async function saveProfile(agent: string, profileId: string, modelId: string) {
     if (!agent) return;
     setSaving(true);
     const next = { ...defaultProfiles };
     if (profileId) next[agent] = profileId;
     else delete next[agent];
+    const nextModels = { ...defaultModels };
+    if (profileId && modelId) nextModels[agent] = modelId;
+    else delete nextModels[agent];
     try {
       await invoke("set_project_default_profile", {
         projectRoot: project.path,
         agent,
         profileId: profileId || null,
+        model: modelId || null,
       });
       setDefaultProfiles(next);
+      setDefaultModels(nextModels);
       onProjectChanged({
         ...project,
         defaultAgent: defaultAgent || null,
         defaultProfiles: next,
+        defaultModels: nextModels,
       });
     } catch (reason) {
       onError(`保存默认配置失败：${String(reason)}`);
@@ -200,7 +213,7 @@ export default function ProjectAgentsView({
                   <ProfileMenu
                     row={row}
                     disabled={saving}
-                    onPick={(profileId) => void saveProfile(row.agentId, profileId)}
+                    onPick={(profileId, modelId) => void saveProfile(row.agentId, profileId, modelId)}
                     onAdd={() => setPage("profiles")}
                   />
                 )}
@@ -281,15 +294,14 @@ function ProfileMenu({
 }: {
   row: ProjectAgentRow;
   disabled: boolean;
-  onPick: (profileId: string) => void;
+  onPick: (profileId: string, modelId: string) => void;
   onAdd: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const current = row.profiles.find((profile) => profile.id === row.defaultProfileId) ?? row.profiles[0];
+  const current = selectedProjectAgentProfile(row);
   const line = currentProfileLine(row);
-  const currentId = row.defaultProfileId || row.profiles[0]?.id || "";
 
   useEffect(() => {
     if (!open) return;
@@ -319,7 +331,7 @@ function ProfileMenu({
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label={`更换 ${row.label} 的项目连接`}
-        title={`${line ?? "还没有连接"}；只修改本项目的连接选择`}
+        title={`${line ?? "还没有连接"}；只修改本项目的连接和模型`}
         className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-hover disabled:opacity-50"
         onClick={() => setOpen((value) => !value)}
       >
@@ -336,9 +348,9 @@ function ProfileMenu({
           className="ccode-float-surface absolute inset-x-0 z-50 mt-1 max-h-64 overflow-y-auto overscroll-contain rounded-md border border-field py-1"
         >
           {row.profiles.map((profile) => {
-            const selected = profile.id === currentId;
+            const selected = profile.id === current?.id && profile.modelId === current?.modelId;
             return (
-              <li key={profile.id}>
+              <li key={`${profile.id}\n${profile.modelId}`}>
                 <button
                   type="button"
                   role="option"
@@ -349,7 +361,7 @@ function ProfileMenu({
                     selected ? "bg-hover text-l1" : "text-l2 hover:bg-hover hover:text-l1"
                   }`}
                   onClick={() => {
-                    onPick(profile.id);
+                    onPick(profile.id, profile.modelId);
                     setOpen(false);
                   }}
                 >

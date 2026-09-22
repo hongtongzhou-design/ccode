@@ -757,6 +757,11 @@ fn patch_kimi_config(
 /// name 随段写（配置名 · 模型，选择器口径一致）；权威层 = 用户覆盖/网关实测缓存
 ///（model_context_size_authoritative_for——config 优先级高于中转目录，估值层不配写）。
 /// 段键 = 目录模型 id，含 / 或 . 的 id 依赖 toml_edit 自动加引号（测试锁死）。
+/// 每个绑定模型都建段，并写推理强度菜单（1.0.40 实证）：中转 `/v1/models` 不带
+/// `reasoning_efforts` 时 Grok 不出 `/effort`；只写 `[models].default_reasoning_effort`
+/// 也不出菜单。字段形状与内置 grok-4.6 一致（`value`/`label`/`description`，
+/// 旧 `{ effort = "..." }` 整段被忽略）。已有 `reasoning_efforts` 不覆盖；
+/// 显式 `supports_reasoning_effort = false` 不改。
 /// [mcp_servers] 等其他段与用户手写的 [model.*] 其他字段一律不动。
 fn patch_grok_config(
     existing: Option<&str>,
@@ -802,9 +807,6 @@ fn patch_grok_config(
     for m in &profile.models {
         let ctx =
             crate::model_registry::model_context_size_for_config(m, profile.gateway_id.as_deref());
-        if api_backend.is_none() && ctx.is_none() {
-            continue;
-        }
         let model_tbl = sub_table(doc.as_item_mut(), "model")?;
         let entry = sub_table(model_tbl, m)?;
         entry["name"] = value(format!("{} · {m}", profile.name));
@@ -817,8 +819,75 @@ fn patch_grok_config(
         if let Some(c) = ctx {
             entry["context_window"] = value(c);
         }
+        let Some(table) = entry.as_table_mut() else {
+            return Err(format!("模型 {m} 的配置段不是表，已停止写入"));
+        };
+        write_grok_reasoning_menu(table);
     }
     Ok(doc.to_string())
+}
+
+/// Grok 1.0.40 推理强度菜单：与内置 grok-4.6 同形（`value`/`label`/`description`）。
+/// 自定义端点的模型目录通常不带 `reasoning_efforts`，不写这段则 `/effort` 不出。
+/// 用户已写过菜单则保留，避免每次设为全局覆盖手改档位。
+fn write_grok_reasoning_menu(entry: &mut toml_edit::Table) {
+    use toml_edit::{value, ArrayOfTables, Item, Table};
+    // 显式关掉的模型不补菜单，避免把用户的 false 改回 true
+    if entry
+        .get("supports_reasoning_effort")
+        .and_then(|v| v.as_bool())
+        == Some(false)
+    {
+        return;
+    }
+    if entry.get("supports_reasoning_effort").is_none() {
+        entry["supports_reasoning_effort"] = value(true);
+    }
+    if entry.get("reasoning_efforts").is_some() {
+        return;
+    }
+    if entry.get("reasoning_effort").is_none() {
+        entry["reasoning_effort"] = value("high");
+    }
+    // 四档对齐内置 grok-4.6；none/minimal/max 不在这张菜单里
+    let rows: [(&str, &str, &str, bool); 4] = [
+        (
+            "xhigh",
+            "Extra High Effort",
+            "Highest effort and reasoning level",
+            false,
+        ),
+        (
+            "high",
+            "High Effort",
+            "Higher implementation quality with extensive reasoning",
+            true,
+        ),
+        (
+            "medium",
+            "Medium Effort",
+            "Balanced effort with standard implementation and testing",
+            false,
+        ),
+        (
+            "low",
+            "Low Effort",
+            "Quick, fast implementations",
+            false,
+        ),
+    ];
+    let mut tables = ArrayOfTables::new();
+    for (effort, label, description, is_default) in rows {
+        let mut row = Table::new();
+        row.insert("value", value(effort));
+        row.insert("label", value(label));
+        row.insert("description", value(description));
+        if is_default {
+            row.insert("default", value(true));
+        }
+        tables.push(row);
+    }
+    entry.insert("reasoning_efforts", Item::ArrayOfTables(tables));
 }
 
 /// CodeBuddy：settings.json 的 env 块写 CODEBUDDY_* 三件套（无模型槽位机制，结构最简单）
@@ -2903,8 +2972,16 @@ mod tests {
             1,
             "allowed_models 属用户选择器过滤，不接管"
         );
-        // 未设 api_backend 且权威层无 context → 不建 [model.*] 段
-        assert!(doc.get("model").is_none());
+        // 每个绑定模型都建段并写推理菜单（中转目录不带档位时 /effort 才出得来）
+        let entry = &doc["model"]["grok-code-fast-1"];
+        assert_eq!(entry["supports_reasoning_effort"].as_bool(), Some(true));
+        assert_eq!(entry["reasoning_effort"].as_str(), Some("high"));
+        let efforts = entry["reasoning_efforts"].as_array_of_tables().unwrap();
+        assert_eq!(efforts.len(), 4);
+        assert_eq!(efforts.get(0).unwrap()["value"].as_str(), Some("xhigh"));
+        assert_eq!(efforts.get(1).unwrap()["value"].as_str(), Some("high"));
+        assert_eq!(efforts.get(1).unwrap()["default"].as_bool(), Some(true));
+        assert_eq!(efforts.get(3).unwrap()["value"].as_str(), Some("low"));
     }
 
     #[test]
@@ -2951,6 +3028,56 @@ mod tests {
         );
         // 权威层（用户覆盖/网关实测）在测试环境为空 → 不写 context_window
         assert!(gpt.get("context_window").is_none());
+        assert_eq!(gpt["supports_reasoning_effort"].as_bool(), Some(true));
+        assert_eq!(
+            gpt["reasoning_efforts"]
+                .as_array_of_tables()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn grok_config_patch_keeps_existing_reasoning_menu() {
+        // 手写菜单与显式关闭不覆盖；缺菜单的模型仍补上
+        let existing = "\
+[model.\"grok-4.7\"]
+supports_reasoning_effort = true
+reasoning_effort = \"low\"
+
+[[model.\"grok-4.7\".reasoning_efforts]]
+value = \"low\"
+label = \"Low\"
+
+[model.\"no-think\"]
+supports_reasoning_effort = false
+";
+        let mut p = profile("grok");
+        p.models = vec!["grok-4.7".into(), "no-think".into(), "fresh".into()];
+        let out = patch_grok_config(Some(existing), None, &p).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        let kept = doc["model"]["grok-4.7"]["reasoning_efforts"]
+            .as_array_of_tables()
+            .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept.get(0).unwrap()["value"].as_str(), Some("low"));
+        assert_eq!(
+            doc["model"]["grok-4.7"]["reasoning_effort"].as_str(),
+            Some("low")
+        );
+        assert_eq!(
+            doc["model"]["no-think"]["supports_reasoning_effort"].as_bool(),
+            Some(false)
+        );
+        assert!(doc["model"]["no-think"].get("reasoning_efforts").is_none());
+        assert_eq!(
+            doc["model"]["fresh"]["reasoning_efforts"]
+                .as_array_of_tables()
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     #[test]

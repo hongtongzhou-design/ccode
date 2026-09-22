@@ -72,6 +72,7 @@ export function beginProjectChat(
     kind: "office" | "coding" | "research";
     preferredAgent?: string | null;
     preferredProfile?: string | null;
+    preferredModel?: string | null;
   },
   opts?: { forcePick?: boolean },
 ): void {
@@ -86,6 +87,7 @@ export function beginProjectChat(
       preview: false,
       preferredAgent: input.preferredAgent,
       preferredProfile: input.preferredProfile,
+      preferredModel: input.preferredModel,
       workMode: input.kind,
     },
     opts,
@@ -146,7 +148,13 @@ export default function AskAiModal() {
           ? r.profileId
           : list[0]?.id) ?? "";
     setProfileId(nextProfile);
-    setModel(r?.model ?? "");
+    const preferredModel = req.preferredModel?.trim() ?? "";
+    const nextModels = list.find((p) => p.id === nextProfile)?.models ?? [];
+    setModel(
+      preferredModel && nextModels.includes(preferredModel)
+        ? preferredModel
+        : (r?.model ?? ""),
+    );
     setUseDefault(r?.useDefault ?? false);
     setWriteReview(false);
     setStarting(false);

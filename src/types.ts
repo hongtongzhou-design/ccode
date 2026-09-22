@@ -1168,6 +1168,8 @@ export interface ProjectDto {
   defaultAgent?: string | null;
   /** Agent id → 项目默认 profile id；只保存引用。 */
   defaultProfiles?: Record<string, string>;
+  /** Agent id → 本项目在该默认连接里选用的模型。空 = 用连接名单的第一个。 */
+  defaultModels?: Record<string, string>;
 }
 
 /** 档案卡 .ccode/project.toml 的资源条目 */

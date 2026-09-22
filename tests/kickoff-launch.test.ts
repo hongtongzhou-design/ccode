@@ -53,6 +53,28 @@ test("pickKickoffLaunch：都没有则用列表第一个", () => {
   assert.equal(picked?.model, "sonnet");
 });
 
+test("pickKickoffLaunch：项目点选的模型优先于问 AI 记忆", () => {
+  const picked = pickKickoffLaunch(
+    [{ id: "p-grok", agent: "grok", name: "Test", models: ["deepseek-v4-flash-0731", "deepseek-v4.1-flash"] }],
+    { agentId: "grok", profileId: "p-grok", model: "deepseek-v4-flash-0731", useDefault: true },
+    null,
+    "grok",
+    "p-grok",
+    "deepseek-v4.1-flash",
+  );
+  assert.equal(picked?.model, "deepseek-v4.1-flash");
+  assert.equal(
+    codingTerminalLaunch(
+      [{ id: "p-grok", agent: "grok", models: ["deepseek-v4-flash-0731", "deepseek-v4.1-flash"] }],
+      null,
+      "grok",
+      "p-grok",
+      "deepseek-v4.1-flash",
+    )?.model,
+    "deepseek-v4.1-flash",
+  );
+});
+
 test("pickKickoffLaunch：项目默认 Agent 优先于全局记忆", () => {
   const picked = pickKickoffLaunch(
     profiles,

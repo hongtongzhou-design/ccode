@@ -23,7 +23,9 @@
  * - 备用屏幕（全屏 TUI）：此时 wheel 的语义是给 PTY 发方向键，不是滚动历史；
  * - TUI 开了鼠标上报：wheel 属于 TUI 自己（列表滚动/选择）；
  * - 带修饰键：Ctrl/⌘+wheel 是缩放、Alt 是快速滚动、Shift 是横向；
- * - 行/页模式的滚轮（物理鼠标）与带横向分量的手势：交给 xterm，它自己会处理。
+ * - 行/页模式的滚轮与带横向分量的手势：交给 xterm。
+ * 鼠标滚轮在 macOS 上多半仍是像素模式，会进合帧；一格通常只有一枚事件，
+ * 合帧省不下整屏重绘。那部分见 terminal-row-reuse.ts。
  */
 
 /** 判定只需要这几个字段，便于纯逻辑测试（WheelEvent 结构上满足） */
@@ -52,7 +54,7 @@ export function shouldCoalesceTrackpadWheel(
   if (ctx.bufferType !== "normal") return false;
   if (ctx.mouseTrackingMode && ctx.mouseTrackingMode !== "none") return false;
   if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
-  // 行/页模式是物理滚轮（Firefox/macOS 上的滚轮），xterm 自己有平滑动画
+  // 行/页模式是「一格若干行」的滚轮语义，交给 xterm。macOS 鼠标多半仍是像素模式。
   if (e.deltaMode !== 0) return false;
   // 横向分量与零增量交给 xterm 原路径
   if (e.deltaX !== 0) return false;

@@ -33,6 +33,9 @@ pub struct ProjectDto {
     pub default_agent: Option<String>,
     /// Agent id → 项目默认 profile id；只保存引用，不保存密钥。
     pub default_profiles: BTreeMap<String, String>,
+    /// Agent id → 本项目选用的模型 id。须属于该默认连接的模型名单；空 = 用名单第一个。
+    #[serde(default)]
+    pub default_models: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -187,7 +190,7 @@ pub struct ProjectConfigDto {
     /// 与「稍后再选」（不写标记、保留引导）区分；追加模板步骤时自动清回 false
     pub pipeline_opt_out: bool,
     /// 文献来源：search = 让 agent 系统检索（默认，缺省即此）；
-    /// zotero / folder = 用户已有文献库，检索这一步降级为「盘点已有 + 查漏补缺」。
+    /// zotero / endnote / folder = 用户已有文献，检索这一步降级为「盘点已有 + 查漏补缺」。
     /// 纯透传标记——引擎不认科研语义，怎么变形由模板简报自述（§11.1 纪律一）
     pub lit_source: String,
     /// 投稿流程分支：initial = 首投，revision = 返修；缺省表示尚未选择。
@@ -204,7 +207,7 @@ pub struct ProjectConfigDto {
 }
 
 /// 文献来源合法值；非法值解析期归一为 search
-pub const LIT_SOURCES: [&str; 3] = ["search", "zotero", "folder"];
+pub const LIT_SOURCES: [&str; 4] = ["search", "zotero", "endnote", "folder"];
 pub const SUBMISSION_MODES: [&str; 2] = ["initial", "revision"];
 pub const WORK_MODES: [&str; 3] = ["research", "coding", "office"];
 
@@ -307,6 +310,13 @@ fn db_at(path: &Path) -> Result<Connection, String> {
     if !columns.iter().any(|c| c == "default_profiles") {
         conn.execute(
             "ALTER TABLE projects ADD COLUMN default_profiles TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )
+        .map_err(|e| format!("升级 projects 表失败: {e}"))?;
+    }
+    if !columns.iter().any(|c| c == "default_models") {
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN default_models TEXT NOT NULL DEFAULT '{}'",
             [],
         )
         .map_err(|e| format!("升级 projects 表失败: {e}"))?;
@@ -422,15 +432,8 @@ fn register_at(
                     )
                     .ok()
                     .flatten(),
-                default_profiles: conn
-                    .query_row(
-                        "SELECT default_profiles FROM projects WHERE path=?1",
-                        params![key],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok()
-                    .and_then(|raw| serde_json::from_str(&raw).ok())
-                    .unwrap_or_default(),
+                default_profiles: project_string_map(&conn, &key, "default_profiles"),
+                default_models: project_string_map(&conn, &key, "default_models"),
             }));
         }
     }
@@ -467,16 +470,35 @@ fn register_at(
             )
             .ok()
             .flatten(),
-        default_profiles: conn
-            .query_row(
-                "SELECT default_profiles FROM projects WHERE path=?1",
-                params![key],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default(),
+        default_profiles: project_string_map(&conn, &key, "default_profiles"),
+        default_models: project_string_map(&conn, &key, "default_models"),
     }))
+}
+
+fn project_string_map(conn: &Connection, path: &str, column: &str) -> BTreeMap<String, String> {
+    let sql = match column {
+        "default_profiles" => "SELECT default_profiles FROM projects WHERE path=?1",
+        "default_models" => "SELECT default_models FROM projects WHERE path=?1",
+        _ => return BTreeMap::new(),
+    };
+    conn.query_row(sql, params![path], |row| row.get::<_, String>(0))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// 项目只记住连接名单里的一个模型 id。空 = 用名单第一个；不在名单里的拒绝写入。
+pub(crate) fn accept_project_model(
+    models: &[String],
+    model: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if models.iter().any(|item| item == model) {
+        return Ok(Some(model.to_string()));
+    }
+    Err("这个模型不在所选连接里".into())
 }
 
 fn attach_work_mode(mut p: ProjectDto) -> ProjectDto {
@@ -487,7 +509,7 @@ fn attach_work_mode(mut p: ProjectDto) -> ProjectDto {
 pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles, id FROM projects
+            "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles, id, default_models FROM projects
              ORDER BY last_opened_at DESC, path ASC",
         )
         .map_err(|e| format!("读取项目列表失败: {e}"))?;
@@ -502,6 +524,7 @@ pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, Str
                 work_mode: "research".into(),
                 default_agent: r.get(4)?,
                 default_profiles: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+                default_models: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
             })
         })
         .map_err(|e| format!("读取项目列表失败: {e}"))?;
@@ -547,12 +570,17 @@ pub(crate) fn clear_project_default_profile(profile_id: &str) {
     let Ok(conn) = db() else {
         return;
     };
-    let Ok(mut stmt) = conn.prepare("SELECT path, default_profiles FROM projects") else {
+    let Ok(mut stmt) = conn.prepare("SELECT path, default_profiles, default_models FROM projects")
+    else {
         return;
     };
-    let rows: Vec<(String, String)> = stmt
+    let rows: Vec<(String, String, String)> = stmt
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })
         .ok()
         .map(|rows| rows.flatten().collect())
@@ -561,19 +589,32 @@ pub(crate) fn clear_project_default_profile(profile_id: &str) {
     if rows.is_empty() {
         return;
     }
-    for (path, raw) in rows {
+    for (path, raw, raw_models) in rows {
         let mut defaults: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap_or_default();
-        let before = defaults.len();
-        defaults.retain(|_, id| id != profile_id);
-        if defaults.len() == before {
+        let removed: Vec<String> = defaults
+            .iter()
+            .filter(|(_, id)| id.as_str() == profile_id)
+            .map(|(agent, _)| agent.clone())
+            .collect();
+        if removed.is_empty() {
             continue;
         }
-        if let Ok(encoded) = serde_json::to_string(&defaults) {
-            let _ = conn.execute(
-                "UPDATE projects SET default_profiles=?2 WHERE path=?1",
-                params![path, encoded],
-            );
+        defaults.retain(|_, id| id != profile_id);
+        let mut models: BTreeMap<String, String> =
+            serde_json::from_str(&raw_models).unwrap_or_default();
+        for agent in &removed {
+            models.remove(agent);
         }
+        let Ok(encoded) = serde_json::to_string(&defaults) else {
+            continue;
+        };
+        let Ok(encoded_models) = serde_json::to_string(&models) else {
+            continue;
+        };
+        let _ = conn.execute(
+            "UPDATE projects SET default_profiles=?2, default_models=?3 WHERE path=?1",
+            params![path, encoded, encoded_models],
+        );
     }
 }
 
@@ -1433,7 +1474,7 @@ const BRIEF_ARTIFACT_REFS: [&str; 5] = [
 /// 校验单个步骤，返回中文提示文案（不做翻译层）：
 /// ① 绑定值必须在 [[resources]] 的 path 里精确存在；空数组 = 不绑定，不触发；
 /// ② inputs 中的路径必须由上游产物或项目资源覆盖；
-/// ③ brief 引用了约定产物路径，但三处都查无对应项时提示。
+/// ③ brief 引用了约定产物路径，但本步产物、上游、登记资源和已声明输入都查无对应项时提示。
 pub(crate) fn validate_step(
     step: &StepDto,
     resources: &[ResourceDto],
@@ -1520,7 +1561,12 @@ pub(crate) fn validate_step(
         let own = step.expected_artifacts.iter().any(covered);
         let upstream = prior_artifacts.iter().any(covered);
         let resourced = resources.iter().any(|r| covered(&r.path));
-        if !(own || upstream || resourced) {
+        let declared = step
+            .inputs
+            .iter()
+            .chain(step.optional_inputs.iter())
+            .any(covered);
+        if !(own || upstream || resourced || declared) {
             warnings.push(format!(
                 "步骤「{}」的简报引用了「{token}」，但 expectedArtifacts 未包含对应产物",
                 step.name
@@ -2915,12 +2961,14 @@ pub async fn set_project_default_agent(
     .map_err(|e| format!("保存项目默认 Agent 失败: {e}"))?
 }
 
-/// 保存某个 Agent 在该项目中的默认 profile id；只保存 profile 引用。
+/// 保存某个 Agent 在该项目中的默认 profile，以及这条连接里选用的模型 id。
+/// 模型必须在该连接的名单里；不传模型 = 用名单第一个。只保存引用，不改连接本身。
 #[tauri::command]
 pub async fn set_project_default_profile(
     project_root: String,
     agent: String,
     profile_id: Option<String>,
+    model: Option<String>,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let project = PathBuf::from(crate::sessions::expand_tilde(&project_root));
@@ -2928,11 +2976,10 @@ pub async fn set_project_default_profile(
         if crate::agent_specs::agent_spec(&agent).is_none() {
             return Err(format!("未知 Agent：{agent}"));
         }
-        if let Some(profile_id) = profile_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
+        let profile_id = profile_id
+            .map(|value| value.trim().to_string())
+            .filter(|id| !id.is_empty());
+        let model = if let Some(profile_id) = profile_id.as_deref() {
             let bindings = crate::gateway_store::load_bindings()?;
             let binding = bindings
                 .iter()
@@ -2941,7 +2988,10 @@ pub async fn set_project_default_profile(
             if binding.agent != agent {
                 return Err("默认配置与 Agent 不匹配".into());
             }
-        }
+            accept_project_model(&binding.models, model.as_deref())?
+        } else {
+            None
+        };
         let conn = db()?;
         let raw: String = conn
             .query_row(
@@ -2950,21 +3000,37 @@ pub async fn set_project_default_profile(
                 |r| r.get(0),
             )
             .map_err(|_| "项目尚未注册，不能保存默认配置".to_string())?;
+        let raw_models: String = conn
+            .query_row(
+                "SELECT default_models FROM projects WHERE path=?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "{}".to_string());
         let mut defaults: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap_or_default();
-        if let Some(profile_id) = profile_id.map(|value| value.trim().to_string()) {
-            if profile_id.is_empty() {
-                defaults.remove(&agent);
-            } else {
-                defaults.insert(agent, profile_id);
+        let mut models: BTreeMap<String, String> =
+            serde_json::from_str(&raw_models).unwrap_or_default();
+        if let Some(profile_id) = profile_id {
+            defaults.insert(agent.clone(), profile_id);
+            match model {
+                Some(model) => {
+                    models.insert(agent, model);
+                }
+                None => {
+                    models.remove(&agent);
+                }
             }
         } else {
             defaults.remove(&agent);
+            models.remove(&agent);
         }
         let encoded =
             serde_json::to_string(&defaults).map_err(|e| format!("保存默认配置失败: {e}"))?;
+        let encoded_models =
+            serde_json::to_string(&models).map_err(|e| format!("保存默认模型失败: {e}"))?;
         conn.execute(
-            "UPDATE projects SET default_profiles=?2 WHERE path=?1",
-            params![key, encoded],
+            "UPDATE projects SET default_profiles=?2, default_models=?3 WHERE path=?1",
+            params![key, encoded, encoded_models],
         )
         .map_err(|e| format!("保存项目默认配置失败: {e}"))?;
         Ok(())
@@ -3636,7 +3702,7 @@ fn seed_demo_task_card(root: &Path) -> Result<(), String> {
 /// 按 canonical 主键查注册表；未注册返回 None
 fn demo_registered(conn: &Connection, key: &str) -> Result<Option<ProjectDto>, String> {
     match conn.query_row(
-        "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles, id FROM projects WHERE path=?1",
+        "SELECT path, name, created_at, last_opened_at, default_agent, default_profiles, id, default_models FROM projects WHERE path=?1",
         params![key],
         |r| {
             Ok(attach_work_mode(ProjectDto {
@@ -3651,6 +3717,7 @@ fn demo_registered(conn: &Connection, key: &str) -> Result<Option<ProjectDto>, S
                     &r.get::<_, String>(5)?,
                 )
                 .unwrap_or_default(),
+                default_models: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
             }))
         },
     ) {
@@ -4132,13 +4199,17 @@ fn setting_parts(line: &str) -> (&str, &str) {
 }
 
 fn setting_is_placeholder(line: &str) -> bool {
-    let (_, answer) = setting_parts(line);
+    let (question, answer) = setting_parts(line);
+    // 没有冒号的是纪律句，不是待填设定。
+    if question.is_empty() || question == line.trim() {
+        return false;
+    }
     answer.is_empty()
         || (answer.starts_with('（') && answer.ends_with('）'))
         || (answer.starts_with('(') && answer.ends_with(')'))
 }
 
-/// 合并模板建议的项目级设定：按问题名去重；已有真实答案优先，模板占位可被新答案替换。
+/// 合并模板建议的项目级设定：按问题名去重；已有真实答案优先，没填过的占位也要留下。
 pub(crate) fn merge_project_settings(existing: &mut Vec<String>, candidates: &[String]) {
     for candidate in candidates {
         let candidate = candidate.trim();
@@ -4156,7 +4227,7 @@ pub(crate) fn merge_project_settings(existing: &mut Vec<String>, candidates: &[S
             if setting_is_placeholder(&existing[index]) && !setting_is_placeholder(candidate) {
                 existing[index] = candidate.to_string();
             }
-        } else if !setting_is_placeholder(candidate) {
+        } else {
             existing.push(candidate.to_string());
         }
     }
@@ -5341,6 +5412,16 @@ resources = [1, "papers/a.pdf", "", 42]
             validate_step(&miss, &[], &[], true).len(),
             2,
             "papers/ 与 references.bib 各提示一次"
+        );
+        let optional = StepDto {
+            name: "检索".into(),
+            brief: "已有 references.bib 不得覆盖".into(),
+            optional_inputs: vec!["references.bib".into()],
+            ..StepDto::default()
+        };
+        assert!(
+            validate_step(&optional, &[], &[], true).is_empty(),
+            "声明过的可选输入被简报提到，不当成缺产物"
         );
         let hit = StepDto {
             brief: "把综述草稿写进 manuscript/ 并同步 outline.md".into(),
@@ -6814,8 +6895,10 @@ resources = ["ghost.pdf"]
         let raw2 = fs::read_to_string(config_path(&root)).unwrap();
         assert!(!raw2.contains("lit_source"), "默认值不该落盘: {raw2}");
 
-        // 非法值归一为 search 并留 warning，不阻断整份解析
-        let (bad, wb) = parse_config("lit_source = \"endnote\"\nartifact_dir = \"out\"\n");
+        // zotero / endnote / folder 都是合法来源（已有文献盘点）；真非法值归一为 search 并留 warning
+        let (ok2, _) = parse_config("lit_source = \"endnote\"\n");
+        assert_eq!(ok2.lit_source, "endnote");
+        let (bad, wb) = parse_config("lit_source = \"wos\"\nartifact_dir = \"out\"\n");
         assert_eq!(bad.lit_source, "search");
         assert_eq!(bad.artifact_dir, "out", "坏字段不该带垮其余解析");
         assert!(wb.iter().any(|x| x.contains("lit_source")), "{wb:?}");
@@ -6877,7 +6960,8 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
         );
         assert_eq!(existing[0], "目标篇幅：6000-8000 词");
         assert_eq!(existing[1], "读者与文风：偏入门科普");
-        assert_eq!(existing.len(), 2);
+        assert_eq!(existing[2], "去向：（投期刊 / 课程作业）");
+        assert_eq!(existing.len(), 3);
     }
 
     #[test]
@@ -6907,7 +6991,7 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
     }
 
     #[test]
-    fn review_quality_gate_survives_template_serialization() {
+    fn review_template_steps_survive_serialization() {
         let dir = temp_dir("review-quality-gate");
         let cfg = demo_project_config();
         write_config_at(&dir, &cfg).unwrap();
@@ -6917,10 +7001,10 @@ any_of_inputs = [["manuscript/paper-final.md", "manuscript/review-final.md"]]
             .iter()
             .find(|s| s.workspace_name == "draft")
             .unwrap();
-        assert_eq!(draft.decision_mode, "hard_pause");
-        assert_eq!(draft.decisions.len(), 1);
-        assert!(draft.decisions[0].options.is_empty());
-        assert!(draft.decisions[0].q.contains("已评阅证据"));
+        // 模板已去掉 draft 步开工前的 hard_pause 质量门槛与决策问题：
+        // 范围由人在审阅初稿时拍板，序列化往返后保持 auto_continue 且无决策问题
+        assert_eq!(draft.decision_mode, "auto_continue");
+        assert!(draft.decisions.is_empty());
         assert!(restored.steps[1]
             .inputs
             .iter()
@@ -7458,5 +7542,20 @@ briefs = "not-an-array"
         assert_eq!(back, cards[..1].to_vec(), "tasks 往返一致");
         // 现有文件是坏 TOML 时停止写入，不覆盖未知内容
         assert!(render_tasks(Some("not [valid"), &cards).is_err());
+    }
+
+    #[test]
+    fn project_model_must_belong_to_the_connection() {
+        let models = vec!["glm-5.3".to_string(), "glm-5.3-flashx".to_string()];
+        assert_eq!(accept_project_model(&models, None).unwrap(), None);
+        assert_eq!(accept_project_model(&models, Some("  ")).unwrap(), None);
+        assert_eq!(
+            accept_project_model(&models, Some("glm-5.3-flashx"))
+                .unwrap()
+                .as_deref(),
+            Some("glm-5.3-flashx"),
+        );
+        assert!(accept_project_model(&models, Some("deepseek-v4-flash-0731")).is_err());
+        assert!(accept_project_model(&[], Some("glm-5.3")).is_err());
     }
 }

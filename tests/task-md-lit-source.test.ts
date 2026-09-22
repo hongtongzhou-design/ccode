@@ -15,6 +15,8 @@ test("zotero/folder：段内容分版本", () => {
   assert.match(litSourceSectionLines("zotero")!.join("\n"), /Zotero 库/);
   assert.match(litSourceSectionLines("folder")!.join("\n"), /本地文件夹/);
   assert.match(litSourceSectionLines("folder")!.join("\n"), /EndNote/);
+  assert.match(litSourceSectionLines("endnote")!.join("\n"), /不读 \.enl/);
+  assert.match(litSourceSectionLines("endnote")!.join("\n"), /同步到 EndNote/);
 });
 
 test("无段时插入：优先落在「已定方向」之前", () => {

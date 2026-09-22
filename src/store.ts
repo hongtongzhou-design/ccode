@@ -95,9 +95,13 @@ export interface AppSettings {
   customThemeCardId?: string | null;
   /** ◈ AI 功能固定使用的 profile id；null/undefined = 自动（最近使用） */
   aiProfileId?: string | null;
+  /** 专用配置里选中的模型；空 = 该配置的第一个模型 */
+  aiModel?: string | null;
   /** ◈ AI 功能按功能独立配置：键 = 功能 key（commit/summarize/pr/distill/conflict/translate，
       见 ai.rs FN_* 常量），值 = profile id；键缺失 = 跟随默认（aiProfileId） */
   aiProfiles?: Record<string, string>;
+  /** 与 aiProfiles 同键：该功能选中的模型；键缺失 = 该配置的第一个模型 */
+  aiProfileModels?: Record<string, string>;
   /** 每个 agent 的默认 profile（agent id → profile id）：启动栏选完 agent 后预选它。
    *  解析顺序 显式默认 > 上次使用 > 首个配置 */
   defaultProfiles?: Record<string, string>;

@@ -36,6 +36,13 @@ quarto render manuscript/<稿件>.md --to pdf --output-dir output
 ```
 
 - **先 docx 后 PDF**：docx 不走 LaTeX，能先交出可审稿。
+- **引用样式先看项目 PDF，不设默认**。运行本技能 `scripts/citation_style.py --root <项目根>`，它统计 `papers/*.pdf` 里是编号还是作者-年，写出 `manuscript/citation-style.md`。推荐最多三种：编号、作者-年、按期刊。人在「选定：」后填写。选定为空就停止，不渲染参考文献。选定后加 `--apply`，得到 `manuscript/citation.csl`。YAML 写：
+  ```yaml
+  bibliography: ../references.bib
+  csl: citation.csl
+  link-citations: true
+  ```
+  项目根 `_quarto.yml` 则 `bibliography: references.bib` 与 `csl: manuscript/citation.csl`。换样式就改「选定：」再 `--apply` 并重渲。按期刊时先把该刊 csl 放到 `manuscript/journal.csl`。不要手写文末文献表。源稿仍写 `[@bib键]`。
 - PDF 在源稿 YAML 或 `_quarto.yml` 写 `pdf-engine: xelatex`，并指定 latin 正文字体（如 TeX Gyre Termes / Times New Roman）。Quarto 见到 Mg²⁺ 这类 Unicode 会自己改走 lualatex，Mac 上 luaotfload 扫字体常卡死；xelatex 不嵌字体则整页乱码。
 - `number-sections: true` 时，markdown 标题写 `## Introduction`，不要自带 `## 1.`。
 - 渲染产物统一写入 **本工作区 `output/`**（相对路径；评审合并进主仓时自动带到项目根同名目录）；该目录必须在 `.gitignore` 中，**产物不进 git**。
@@ -82,6 +89,7 @@ quarto render manuscript/<稿件>.md --to pdf --output-dir output
 
 - 产物文件存在且非零字节；
 - **打开 PDF 第一页**：必须能读出标题和正文。乱码、空心方框、目录页码变成字母 = 渲染失败，即使文件有体积也不算通过；改 `pdf-engine: xelatex` 重渲，或只交 docx 并在渲染说明写失败原因。
+- **打开 docx**：引用样子与 `manuscript/citation-style.md` 的选定一致。选定为空的文件不能拿去投稿。
 - 统计残留 undefined citation/reference 类 warning 条数，写进渲染说明。
 
 验收通过后，建议用户经 **Mesa 改动面板「登记产物」** 把 PDF 记入工作区提货单（`artifacts.yaml`）——产物本体不进 git，清单随分支传给下一步。Agent 本身不直接改 `artifacts.yaml`。

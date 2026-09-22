@@ -32,6 +32,7 @@ import ArtifactChecklist from "../components/ArtifactChecklist";
 import { REVIEW_SAVE } from "../review-save-copy";
 import ProjectAgentsView from "../components/ProjectAgentsView";
 import ProjectFilesView from "../components/ProjectFilesView";
+import { projectAgentPrefs } from "../project-agents";
 import ProjectSurfaceTabs from "../components/ProjectSurfaceTabs";
 import ProjectIdentityHeader, {
   type ProjectChromeAction,
@@ -360,7 +361,7 @@ function AddProjectModal({
               } disabled:cursor-not-allowed disabled:opacity-50`}
             >
               <span className="block text-sm text-l1">{WORK_MODE_LABEL[id]}</span>
-              <span className="block text-micro text-l4">
+              <span className="block text-xs text-l2">
                 {WORK_MODE_HINT[id]}
                 {modeLocked && mode === id ? "（已选定，不可更改）" : ""}
               </span>
@@ -2454,14 +2455,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
           <ProjectFilesView
             projectPath={selectedGroup.repoPath}
             workMode={selectedGroup.project.workMode}
-            preferredAgent={selectedGroup.project.defaultAgent}
-            preferredProfile={
-              selectedGroup.project.defaultAgent
-                ? selectedGroup.project.defaultProfiles?.[
-                    selectedGroup.project.defaultAgent
-                  ]
-                : undefined
-            }
+            {...projectAgentPrefs(selectedGroup.project)}
             onError={setError}
             focusPath={
               filePreviewReq &&

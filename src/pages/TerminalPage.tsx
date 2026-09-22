@@ -32,6 +32,7 @@ import "@xterm/xterm/css/xterm.css";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import { monoFallbackStack, terminalFontStack } from "../terminal-font";
+import { installDomScrollRowReuse } from "../terminal-row-reuse";
 import { installTrackpadWheelCoalescing } from "../terminal-wheel-scroll";
 import {
   dropHitsRect,
@@ -65,6 +66,11 @@ import FileTree, { type DirEntryDto } from "../components/FileTree";
 import GitPanel, { type GitSummary } from "../components/GitPanel";
 import TerminalStatusBar from "../components/TerminalStatusBar";
 import { LoadingRows, hoverRevealClass } from "../components/PageFrame";
+import LaunchMenu, {
+  DownMenu,
+  useDownMenu,
+  type LaunchMenuOption,
+} from "../components/LaunchMenu";
 import ProjectRail from "../components/ProjectRail";
 import WorkspaceReviewView from "../components/WorkspaceReviewView";
 import ReaderOverlay from "../components/ReaderOverlay";
@@ -108,6 +114,7 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  ChevronDown,
   PanelTopClose,
   PanelTopOpen,
   RefreshCw,
@@ -128,6 +135,7 @@ import {
 import { clampTabDragDx, tabDragTarget } from "../tab-drag";
 import { directoryUnavailableMessage } from "../terminal-cwd";
 import {
+  collapseHomeTreeOnce,
   idleTabTitle,
   isTerminalIdle,
   welcomeCwdActionLabel,
@@ -670,6 +678,9 @@ const TerminalView = memo(function TerminalView({
   );
   // 模型 combo：下拉开合状态 + 选项来源（profile 预设 + 本 agent 历史，去重）
   const [modelOpen, setModelOpen] = useState(false);
+  // Agent / 配置同时只开一个，且不跟模型清单叠在一起
+  const [openPick, setOpenPick] = useState<null | "agent" | "profile">(null);
+  const modelAnchorRef = useRef<HTMLSpanElement>(null);
   // 换 profile 时保留了手填模型：说明行据此提示「仍按原样注入」（选中预设即消）
   const [modelKept, setModelKept] = useState(false);
   // 官方账号：丢掉上次中转留下的 DeepSeek 等模型，避免 -m 进 ChatGPT 通道
@@ -701,6 +712,24 @@ const TerminalView = memo(function TerminalView({
     ].filter(Boolean);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, selectedProfile, model]);
+  const modelMenuBox = useDownMenu(
+    modelOpen && modelOptions.length > 0,
+    modelAnchorRef,
+    0,
+  );
+  // 模型清单挂在 body 上，点输入框外要收起（箭头按钮在锚点内，不误关）
+  useEffect(() => {
+    if (!modelOpen) return;
+    const onDoc = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (modelAnchorRef.current?.contains(target)) return;
+      const menu = document.getElementById(`mesa-launch-model-menu-${tabId}`);
+      if (menu?.contains(target)) return;
+      setModelOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [modelOpen, tabId]);
   const [cwd, setCwd] = useState(initialCwd ?? "~");
   const [cwdIssue, setCwdIssue] = useState<string | null>(null);
   const [cwdChecking, setCwdChecking] = useState(false);
@@ -1005,8 +1034,27 @@ const TerminalView = memo(function TerminalView({
   const setPage = useAppStore((s) => s.setPage);
 
   const agentProfiles = profiles.filter((p) => p.agent === agentId);
-  // 「隐藏」的配置：只在启动栏下拉里沉到「更多」分组，不影响可用性
+  // 「隐藏」的配置：只在启动栏下拉里沉到「已停用」分组，不影响可用性
   const hiddenProfiles = settings?.hiddenProfiles ?? [];
+  const profileMenuLabel = (p: (typeof agentProfiles)[number]): string =>
+    p.accountType === "official" && officialSt && !officialSt.connected
+      ? `${p.name}（未登录）`
+      : p.name;
+  const profileMenuOptions: LaunchMenuOption[] = [
+    ...(profileId && !selectedProfile
+      ? [{ value: profileId, label: "上次配置已不存在" }]
+      : []),
+    ...agentProfiles
+      .filter((p) => !hiddenProfiles.includes(p.id))
+      .map((p) => ({ value: p.id, label: profileMenuLabel(p) })),
+    ...agentProfiles
+      .filter((p) => hiddenProfiles.includes(p.id))
+      .map((p) => ({
+        value: p.id,
+        label: profileMenuLabel(p),
+        group: "已停用（可手选）",
+      })),
+  ];
   const [skillCount, setSkillCount] = useState(0);
   // 当前 agent 已启用的技能清单（技能页开关同步）；「插入」菜单一键使用
   const [agentSkills, setAgentSkills] = useState<SkillDto[]>([]);
@@ -1404,7 +1452,7 @@ const TerminalView = memo(function TerminalView({
   ]);
 
   // 从工作树带入目录创建的标签：聚焦配置选择，选好即可启动
-  const profileSelectRef = useRef<HTMLSelectElement>(null);
+  const profileSelectRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (initialCwd) profileSelectRef.current?.focus();
   }, [initialCwd]);
@@ -1592,6 +1640,8 @@ const TerminalView = memo(function TerminalView({
     // 「上下滑动一卡一卡」。这里把同帧内的多枚事件合成一枚再交回 xterm 原滚动逻辑，
     // 压到每帧最多一次写入与重绘；备用屏/鼠标上报/带修饰键仍原样交给 xterm。
     const teardownWheelCoalescing = installTrackpadWheelCoalescing(term);
+    // 滚轮一格也是整屏重画。视口平移不到一屏时把还在屏幕上的行挪走，只重画新行。
+    const teardownRowReuse = installDomScrollRowReuse(term);
 
     // 链接可点击：点击经 opener 插件打开系统浏览器（不泄进 PTY，与技能页同源）
     term.loadAddon(
@@ -1737,6 +1787,7 @@ const TerminalView = memo(function TerminalView({
       if (id) invoke("pty_kill", { ptyId: id }).catch(() => {});
       unlistenRef.current.forEach((u) => u());
       teardownWheelCoalescing();
+      teardownRowReuse();
       term.dispose();
       termRef.current = null;
     };
@@ -3039,38 +3090,47 @@ const TerminalView = memo(function TerminalView({
       {embedInPeek ? null : barExpanded ? (
         <>
           <div className="mb-1 flex min-w-0 flex-wrap items-start gap-x-1.5 gap-y-2">
-            {/* Agent/配置/模型收进同一条分段工具条（v3.92）：去掉三个独立框线；
-                段间留空隙（容器 gap + 内边距）各自成小胶囊，不粘在一起。
-                v3.93：段间加 h-4 短竖线（不贯穿整行，居中一小段）强化三段的分组边界 */}
+            {/* Agent/配置/模型收进同一条分段工具条：段间留空隙各自成胶囊。
+                菜单从按钮下沿向下展开（系统 select 会把当前项钉在按钮上、整单往上长）。 */}
             <div className="flex w-fit min-w-0 max-w-full flex-[0_1_auto] items-center gap-1 overflow-hidden rounded-md border border-field bg-inset p-0.5">
-            <select
-              className={`${seg} w-[clamp(6.5rem,10vw,8rem)] min-w-[6rem] max-w-[8rem] shrink`}
+            <LaunchMenu
+              label="Agent"
               value={agentId}
-              onChange={(e) => {
-                setAgentId(e.target.value);
+              placeholder="选择 Agent"
+              options={AGENTS.map((a) => ({ value: a.id, label: a.label }))}
+              disabled={running}
+              open={openPick === "agent"}
+              onOpenChange={(next) => {
+                setOpenPick(next ? "agent" : null);
+                if (next) setModelOpen(false);
+              }}
+              onChange={(id) => {
+                setAgentId(id);
                 setProfileId("");
                 setModel("");
                 setModelKept(false);
               }}
-              disabled={running}
-            >
-              {AGENTS.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
+              className={`${seg} w-[clamp(7.5rem,12vw,10rem)] min-w-[7.5rem] max-w-[10rem] shrink`}
+            />
             <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
-            <select
-              ref={profileSelectRef}
-              className={`${seg} w-[clamp(7rem,12vw,9rem)] min-w-[6.5rem] max-w-[9rem] shrink`}
+            <LaunchMenu
+              label="配置"
               value={profileId}
-              onChange={(e) => {
+              placeholder="选择配置"
+              options={profileMenuOptions}
+              emptyHint="还没有配置"
+              disabled={running}
+              open={openPick === "profile"}
+              onOpenChange={(next) => {
+                setOpenPick(next ? "profile" : null);
+                if (next) setModelOpen(false);
+              }}
+              onChange={(id) => {
                 const prevModels =
                   profiles.find((p) => p.id === profileId)?.models ?? [];
-                const prof = profiles.find((p) => p.id === e.target.value);
-                setProfileId(e.target.value);
-                // 手填的模型不再被静默清掉（v3.88）：不在新配置模型表里就保留，
+                const prof = profiles.find((p) => p.id === id);
+                setProfileId(id);
+                // 手填的模型不再被静默清掉：不在新配置模型表里就保留，
                 // 并由下方说明行告知「仍会按原样注入」
                 const next = modelOnProfileSwitch(
                   model,
@@ -3080,65 +3140,67 @@ const TerminalView = memo(function TerminalView({
                 setModel(next.model);
                 setModelKept(next.kept);
               }}
-              disabled={running}
-            >
-              <option value="" disabled>
-                选择配置
-              </option>
-              {profileId && !selectedProfile && (
-                <option value={profileId}>上次配置已不存在</option>
-              )}
-              {/* 「停用」的落点（软停用）：停用项沉到「已停用」optgroup，不从列表里消失
-                  ——真删掉会让已选中它的标签无从显示；手动选它仍照常启动。配置本身与启动行为一字未改 */}
-              {agentProfiles
-                .filter((p) => !hiddenProfiles.includes(p.id))
-                .map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.accountType === "official" && officialSt && !officialSt.connected
-                      ? `${p.name}（未登录）`
-                      : p.name}
-                  </option>
-                ))}
-              {agentProfiles.some((p) => hiddenProfiles.includes(p.id)) && (
-                <optgroup label="已停用（可手选）">
-                  {agentProfiles
-                    .filter((p) => hiddenProfiles.includes(p.id))
-                    .map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.accountType === "official" && officialSt && !officialSt.connected
-                          ? `${p.name}（未登录）`
-                          : p.name}
-                      </option>
-                    ))}
-                </optgroup>
-              )}
-            </select>
+              buttonRef={profileSelectRef}
+              className={`${seg} w-[clamp(6.5rem,12vw,9rem)] min-w-[6.5rem] max-w-[9rem] shrink`}
+            />
             {selectedProfile && (
               // 模型 combo-box：可输可选（profile 预设 + 本 agent 历史），输入即筛选，
               // 自由输入的模型启动成功后记入历史（ccode.modelHistory.<agent>），下次直接可选
               <>
               <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
-              <span className="relative w-[clamp(10rem,22vw,18rem)] min-w-[9rem] max-w-[18rem] shrink">
+              <span
+                ref={modelAnchorRef}
+                className="flex w-[clamp(10rem,22vw,18rem)] min-w-[9rem] max-w-[18rem] shrink items-center"
+              >
                 <input
-                  className={`${seg} w-full`}
+                  className={`${seg} min-w-0 flex-1`}
                   value={model}
                   onChange={(e) => {
                     setModel(e.target.value);
                     setModelKept(false);
+                    setOpenPick(null);
                     setModelOpen(true);
                   }}
-                  onFocus={() => setModelOpen(true)}
+                  onFocus={() => {
+                    setOpenPick(null);
+                    setModelOpen(true);
+                  }}
                   onBlur={() => setModelOpen(false)}
                   onKeyDown={(e) => {
                     if (e.key === "Escape" || e.key === "Enter")
                       setModelOpen(false);
                   }}
-                  placeholder="模型（可选可输）"
+                  placeholder="模型，可输入"
                   disabled={running}
                   title="选择或输入本次启动使用的模型"
                 />
-                {modelOpen && modelOptions.length > 0 && (
-                  <ul className="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-auto rounded-md border border-field ccode-float-surface py-1">
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  aria-label="展开模型列表"
+                  disabled={running || modelOptions.length === 0}
+                  className="mr-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-l4 hover:bg-hover hover:text-l2 disabled:opacity-40"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setOpenPick(null);
+                    setModelOpen((v) => !v);
+                  }}
+                >
+                  <ChevronDown size={14} strokeWidth={1.8} aria-hidden="true" />
+                </button>
+                <DownMenu
+                  box={
+                    modelMenuBox &&
+                    modelOptions.some((m) =>
+                      m.toLowerCase().includes(model.trim().toLowerCase()),
+                    )
+                      ? modelMenuBox
+                      : null
+                  }
+                  id={`mesa-launch-model-menu-${tabId}`}
+                  labelledBy="模型"
+                >
+                  <ul>
                     {modelOptions
                       .filter((m) =>
                         m.toLowerCase().includes(model.trim().toLowerCase()),
@@ -3147,21 +3209,24 @@ const TerminalView = memo(function TerminalView({
                         <li key={m}>
                           <button
                             type="button"
-                            // mousedown 抢在 input blur 前生效，选项才不会一闪而过
                             onMouseDown={(e) => {
                               e.preventDefault();
                               setModel(m);
                               setModelKept(false);
                               setModelOpen(false);
                             }}
-                            className="flex w-full truncate px-2 py-1 text-left text-xs text-l2 hover:bg-hover hover:text-l1"
+                            className={`flex h-8 w-full items-center truncate px-2.5 text-left text-sm ${
+                              m === model
+                                ? "bg-hover text-l1"
+                                : "text-l2 hover:bg-hover hover:text-l1"
+                            }`}
                           >
                             {m}
                           </button>
                         </li>
                       ))}
                   </ul>
-                )}
+                </DownMenu>
               </span>
               </>
             )}
@@ -3758,6 +3823,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       return false;
     }
   });
+  // 主目录自动收起只做一次。人点「显示文件树」先记下，效果里不得再收掉这一下。
+  const homeTreeHandledRef = useRef(false);
+  const homeTreeUserOpenRef = useRef(false);
   // 收缩态启动行可整体隐藏（全局偏好，2026-09-13）：身份信息底部状态栏都有，
   // 隐藏后标签栏出现召回钮；hidden 时恢复提示等一并在召回行里
   const [compactBarHidden, setCompactBarHidden] = useState(() => {
@@ -3809,6 +3877,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   }, []);
 
   function persistTreeOpen(next: boolean) {
+    if (next) homeTreeUserOpenRef.current = true;
     setTreeOpen(next);
     try {
       localStorage.setItem("ccode.terminal.treeOpen", next ? "1" : "0");
@@ -3925,27 +3994,34 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     setTreeRoot(null);
   }, [activeCwd]);
 
-  // 文件树根落在主目录时自动收起（会话内一次性，不写持久化偏好）：
-  // 主目录树下全是系统文件夹，展开态对默认视图是纯噪音（用户反馈「页面不简洁」）。
-  // 只改视图态不动 localStorage——用户手动再展开不拦（根不变不重触发），
-  // 离开主目录后守卫复位，再回主目录时按新会话重新收一次
+  // 文件树根落在主目录时自动收起一次（不写偏好）：主目录下全是系统文件夹。
+  // 人点「显示文件树」当次保持打开。离开主目录后守卫复位。
   const [homeDir, setHomeDir] = useState("");
   useEffect(() => {
     void invoke<string>("home_dir")
       .then(setHomeDir)
       .catch(() => {});
   }, []);
-  const homeTreeCollapseRef = useRef(false);
   useEffect(() => {
     const root = treeRoot ?? activeCwd;
+    // 家目录还没问到、cwd 又不是 ~ 时，先别判断，避免人刚点开就被补上的 homeDir 收掉
+    const homeKnown = root === "~" || !!homeDir;
     const atHome =
+      homeKnown &&
       !!root &&
-      (root === "~" || (!!homeDir && samePath(root, homeDir, IS_WINDOWS)));
-    if (atHome && treeOpen && !homeTreeCollapseRef.current) {
-      homeTreeCollapseRef.current = true;
-      setTreeOpen(false);
+      (root === "~" || samePath(root, homeDir, IS_WINDOWS));
+    if (homeTreeUserOpenRef.current) {
+      homeTreeUserOpenRef.current = false;
+      homeTreeHandledRef.current = true;
     }
-    if (!atHome) homeTreeCollapseRef.current = false;
+    if (!homeKnown) return;
+    const next = collapseHomeTreeOnce(
+      atHome,
+      treeOpen,
+      homeTreeHandledRef.current,
+    );
+    homeTreeHandledRef.current = next.handled;
+    if (next.open !== treeOpen) setTreeOpen(next.open);
   }, [treeRoot, activeCwd, homeDir, treeOpen]);
 
   /** 标签激活：分屏时点到右 pane 的标签则左右互换（活跃标签始终固定在左 pane） */
@@ -5715,17 +5791,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       <div className="relative flex min-w-0 flex-1 flex-col">
         {/* 顶部标签条：常驻中带顶部 */}
         <div className="flex h-9 items-center gap-1 overflow-hidden px-2">
-          {!rightExpanded && !treeOpen && (
-            <button
-              type="button"
-              title="显示文件树"
-              aria-label="显示文件树"
-              onClick={() => persistTreeOpen(true)}
-              className="flex size-7 shrink-0 items-center justify-center rounded-md text-l4 hover:bg-hover hover:text-l2"
-            >
-              <PanelLeftOpen size={16} strokeWidth={1.8} aria-hidden="true" />
-            </button>
-          )}
           <div className="min-w-0 flex-1 overflow-x-auto">
             <div className="flex w-full min-w-0 items-center">
           {tabs.map((t, tabIndex) => {
@@ -5789,7 +5854,9 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   position: isDragSource ? "relative" : undefined,
                   zIndex: isDragSource ? 10 : undefined,
                 }}
-                className={`group/tab flex h-8 min-w-[72px] flex-1 basis-0 cursor-pointer items-center gap-1.5 border px-2.5 text-xs ${
+                className={`group/tab flex h-8 min-w-[72px] flex-1 basis-0 cursor-pointer items-center gap-1.5 border text-xs ${
+                  tabIndex === 0 && !rightExpanded && !treeOpen ? "pl-1 pr-2.5" : "px-2.5"
+                } ${
                   active
                     ? "rounded-full border-field bg-raised text-l1"
                     : "border-transparent text-l3 hover:bg-hover hover:text-l1"
@@ -5799,6 +5866,23 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                     （合成器驱动，终端出字满载也不掉帧）；既不用 CSS rotate——
                     WKWebView 会让圆心晃，也不用 dashoffset 动画——主线程重绘，
                     xterm 渲染挤占时一卡一卡（2026-09-15 实测）。 */}
+                {tabIndex === 0 && !rightExpanded && !treeOpen && (
+                  <button
+                    type="button"
+                    title="显示文件树"
+                    aria-label="显示文件树"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      persistTreeOpen(true);
+                    }}
+                    onClick={(event) => event.stopPropagation()}
+                    className="flex size-6 shrink-0 items-center justify-center rounded-full text-l4 hover:bg-hover hover:text-l2"
+                  >
+                    <PanelLeftOpen size={15} strokeWidth={1.8} aria-hidden="true" />
+                  </button>
+                )}
                 {s?.attention === "working" && (
                   <span
                     className="inline-flex size-3 shrink-0 items-center justify-center"

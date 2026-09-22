@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  collapseHomeTreeOnce,
   idleTabTitle,
   isTerminalIdle,
   welcomeCwdActionLabel,
@@ -50,4 +51,23 @@ test("空态目录行：启动与恢复各一句", () => {
     welcomeCwdLine("/Users/me", "/Users/me", "开始"),
     "将在 ~ 开始",
   );
+});
+
+test("主目录文件树：已经开着才自动收一次，人点开的保持打开", () => {
+  assert.deepEqual(collapseHomeTreeOnce(true, true, false), {
+    open: false,
+    handled: true,
+  });
+  assert.deepEqual(collapseHomeTreeOnce(true, true, true), {
+    open: true,
+    handled: true,
+  });
+  assert.deepEqual(collapseHomeTreeOnce(true, false, false), {
+    open: false,
+    handled: false,
+  });
+  assert.deepEqual(collapseHomeTreeOnce(false, true, true), {
+    open: true,
+    handled: false,
+  });
 });

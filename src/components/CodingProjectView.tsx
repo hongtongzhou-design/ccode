@@ -54,6 +54,7 @@ import {
 } from "../coding-lanes";
 import { loadAskAiRemembered } from "../ask-ai";
 import { codingTerminalLaunch } from "../kickoff-launch";
+import { projectAgentPrefs } from "../project-agents";
 import { loadProjectContextPack } from "../project-context-load";
 import { absTime, relTime } from "../rel-time";
 import { imeBlocksEnter } from "../ime-guard";
@@ -477,13 +478,13 @@ export default function CodingProjectView({
       );
       if (!ok) return;
     }
+    const prefs = projectAgentPrefs(project);
     const launch = codingTerminalLaunch(
       profiles,
       loadAskAiRemembered(),
-      project?.defaultAgent,
-      project?.defaultAgent
-        ? project.defaultProfiles?.[project.defaultAgent]
-        : undefined,
+      prefs.preferredAgent,
+      prefs.preferredProfile,
+      prefs.preferredModel,
     );
     const pack = await loadProjectContextPack({
       name: project?.name ?? title,
@@ -594,13 +595,13 @@ export default function CodingProjectView({
         await reload();
         if (r.worktree) {
           const name = r.worktree.branch;
+          const prefs = projectAgentPrefs(project);
           const launch = codingTerminalLaunch(
             profiles,
             loadAskAiRemembered(),
-            project?.defaultAgent,
-            project?.defaultAgent
-              ? project.defaultProfiles?.[project.defaultAgent]
-              : undefined,
+            prefs.preferredAgent,
+            prefs.preferredProfile,
+            prefs.preferredModel,
           );
           const pack = await loadProjectContextPack({
             name: project?.name ?? name,

@@ -34,6 +34,11 @@ import {
   resolveStartupNavMode,
   type NavCapsuleItemId,
 } from "../nav-capsule";
+import {
+  aiProfileChoices,
+  parseAiProfileChoice,
+  selectedAiProfileChoice,
+} from "../ai-profile-choice";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   TERMINAL_FONT_CHOICES,
@@ -792,6 +797,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const loadSettings = useAppStore((s) => s.loadSettings);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const profiles = useAppStore((s) => s.profiles);
+  const aiChoices = aiProfileChoices(profiles);
   const loadAll = useAppStore((s) => s.loadAll);
   const appUpdate = useAppStore((s) => s.appUpdate);
   const appUpdateStatus = useAppStore((s) => s.appUpdateStatus);
@@ -1294,11 +1300,24 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   }
 
   /** 按功能 AI 配置：改一键后整图提交；空值 = 删除该键（跟随默认） */
-  function patchAiFnProfile(fnKey: string, profileId: string) {
+  function patchAiFnProfile(fnKey: string, value: string) {
     const next = { ...(settings?.aiProfiles ?? {}) };
-    if (profileId) next[fnKey] = profileId;
-    else delete next[fnKey];
-    void patch({ aiProfiles: next });
+    const models = { ...(settings?.aiProfileModels ?? {}) };
+    if (!value) {
+      delete next[fnKey];
+      delete models[fnKey];
+    } else {
+      const choice = parseAiProfileChoice(value);
+      next[fnKey] = choice.profileId;
+      if (choice.model) models[fnKey] = choice.model;
+      else delete models[fnKey];
+    }
+    void patch({ aiProfiles: next, aiProfileModels: models });
+  }
+
+  function patchAiProfile(value: string) {
+    const choice = parseAiProfileChoice(value);
+    void patch({ aiProfileId: choice.profileId, aiModel: choice.model });
   }
 
   /** 精确注意力标记开关：走专用命令（写/移除该 agent 的 hooks 配置 + 记设置），
@@ -1877,8 +1896,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           label="终端渲染"
           hint={
             IS_MAC
-              ? "macOS 实测：WebGL 把字形塞进 GPU 图集，图集按整数设备像素取整（DPR 2 即 0.5px 步进，实测 7.8 的字宽被压成 7.5），笔画发虚，与 Ghostty 一比明显；「清晰」= 系统默认渲染器，字形最锐利。触控板滚动的重复写入已合帧（420 次事件实测：位置写入 240→143，滚动距离不变），但每帧仍只重绘一次——要极限出字速度仍选「流畅」。重新打开的终端生效"
-              : "流畅（WebGL）出字更快；「清晰」= 系统默认渲染器。触控板滚动已合帧（同一帧内只写一次位置）。自动：Windows 用流畅、Mac 用清晰。重新打开的终端生效"
+              ? "重开终端生效。清晰更锐，流畅更快"
+              : "重开终端生效。自动：Windows 流畅，Mac 清晰"
           }
         >
           <select
@@ -1921,7 +1940,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="终端字体"
-          hint="立即生效；未安装的字体可一键装。想对齐 Ghostty 就用 JetBrains Mono——Ghostty 空配置下解析出的就是这支、字号 13（本机 ghostty +show-face 实测），App 已内置它的 webfont；「系统等宽」是 macOS 的 SF Mono，观感与 Ghostty 不同"
+          hint="立即生效。没装上的可以一键装"
           extra={
             fontInstallTarget &&
             fontInstallTarget === INSTALLABLE_FONTS[fontFamily] &&
@@ -2099,7 +2118,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="长任务 OS 通知"
-          hint="agent 转为待确认且窗口未聚焦时发系统通知（同一标签 30 秒内最多一条）；首次发送需允许系统通知权限"
+          hint="窗口在后台、待你确认时通知，30 秒内不重复"
         >
           <Toggle
             label="长任务 OS 通知"
@@ -2110,7 +2129,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="底部状态栏"
-          hint="终端与聊天层共用这一条（模型/思考档/目录/git/时长）。关闭后两层都不显示，重新打开的标签终端约多两行；模型切换与 git 保存仍在改动面板可达"
+          hint="终端和聊天共用。关掉后两边都不显示"
         >
           <Toggle
             label="底部状态栏"
@@ -2123,7 +2142,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         {IS_WINDOWS && (
           <Row
             label="向 agent 告知终端底色"
-            hint="Windows 的 ConPTY 会吞掉 agent 的终端底色查询，浅色主题下 gemini / qwen 探不到底色就回落深色配色（输入框变深灰）。开启后在浅色主题下主动告知，新开标签即为浅色。只对会读这个回报的 agent 生效（codex / Claude Code 不看终端底色，不受影响）"
+            hint="浅色主题下告诉 gemini / qwen 底色，新开标签生效"
           >
             <Toggle
               label="向 agent 告知终端底色"
@@ -2428,18 +2447,21 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="AI 专用配置"
-          hint="◈ 生成（提交信息/摘要/PR）固定走此配置，建议选快模型；默认自动=最近使用"
+          hint="同一配置的每个模型各占一条。自动用最近使用的配置"
         >
           <select
             className={fieldFixed}
-            value={settings?.aiProfileId ?? ""}
-            onChange={(e) => patch({ aiProfileId: e.target.value })}
+            value={selectedAiProfileChoice(
+              settings?.aiProfileId,
+              settings?.aiModel,
+              profiles,
+            )}
+            onChange={(e) => patchAiProfile(e.target.value)}
           >
             <option value="">自动（最近使用）</option>
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}（{p.agent}
-                {p.models[0] ? ` · ${p.models[0]}` : ""}）
+            {aiChoices.map((choice) => (
+              <option key={choice.value} value={choice.value}>
+                {choice.label}
               </option>
             ))}
           </select>
@@ -2453,14 +2475,17 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           >
             <select
               className={fieldFixed}
-              value={settings?.aiProfiles?.[fn.key] ?? ""}
+              value={selectedAiProfileChoice(
+                settings?.aiProfiles?.[fn.key],
+                settings?.aiProfileModels?.[fn.key],
+                profiles,
+              )}
               onChange={(e) => patchAiFnProfile(fn.key, e.target.value)}
             >
               <option value="">跟随默认</option>
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}（{p.agent}
-                  {p.models[0] ? ` · ${p.models[0]}` : ""}）
+              {aiChoices.map((choice) => (
+                <option key={choice.value} value={choice.value}>
+                  {choice.label}
                 </option>
               ))}
             </select>

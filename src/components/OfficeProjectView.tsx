@@ -37,6 +37,7 @@ import {
 } from "../work-mode";
 import type { ProjectFileFilter } from "../project-files";
 import { beginAskAi, beginProjectChat } from "./AskAiModal";
+import { projectAgentPrefs } from "../project-agents";
 import {
   countTouchedSince,
   officeContinueItems,
@@ -248,10 +249,7 @@ export default function OfficeProjectView({
         root: repoPath,
         reuseKey: officeFileReuseKey(repoPath, d.rel),
         prompt,
-        preferredAgent: project?.defaultAgent,
-        preferredProfile: project?.defaultAgent
-          ? project.defaultProfiles?.[project.defaultAgent]
-          : undefined,
+        ...projectAgentPrefs(project),
       },
       { forcePick: !!(e?.metaKey || e?.ctrlKey) },
     );
@@ -290,10 +288,7 @@ export default function OfficeProjectView({
         cwd: repoPath,
         name,
         kind: "office",
-        preferredAgent: project?.defaultAgent,
-        preferredProfile: project?.defaultAgent
-          ? project.defaultProfiles?.[project.defaultAgent]
-          : undefined,
+        ...projectAgentPrefs(project),
       },
       { forcePick: !!(e?.metaKey || e?.ctrlKey) },
     );

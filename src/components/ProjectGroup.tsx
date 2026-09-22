@@ -40,6 +40,7 @@ import { isTaskMdStub } from "../step-decisions";
 import { demoReadPaperResource } from "../step-flow";
 import { normSep } from "../path-utils";
 import { beginAskAi } from "./AskAiModal";
+import { projectAgentPrefs } from "../project-agents";
 import {
   runIdForPath,
   workspaceHasLiveAgent,
@@ -932,15 +933,13 @@ export default function ProjectGroup({
   const [toolBusy, setToolBusy] = useState(false);
 
   /** 切换文献来源：改 project.toml 的 lit_source + 就地同步各步骤已编辑的 TASK.md 内容文件。
-   *  v3.86 起改为**显式三值**（search / zotero / folder）——原先是两档开关，
-   *  「我已有文献库」无法表达 zotero 与 folder 的区别，才需要「已是 zotero 就不降级」的特判；
-   *  流程线「输入准备」三个选项一一对应后，特判不再需要，选什么就是什么。
+   *  取值与后端 LIT_SOURCES 一致：search / zotero / endnote / folder。选什么就是什么。
    *  v3.90 起内容文件是快照（编辑/播种后不再随模板拼装变化），但「文献来源」段是改变检索
    *  步骤性质的硬前提，必须就地 upsert 进已有正文的文件；无正文/不存在的文件不管
    *  （它们展示与落盘走模板拼装，本来就是最新） */
   async function setLitSource(next: string) {
     if (!cfg || litBusy) return;
-    const target = ["search", "zotero", "folder"].includes(next)
+    const target = ["search", "zotero", "endnote", "folder"].includes(next)
       ? next
       : "search";
     if (target === (cfg.litSource?.trim() || "search")) return;
@@ -1226,10 +1225,7 @@ export default function ProjectGroup({
         cwd: projectPath,
         root: projectPath,
         reuseKey: `lit:${projectPath}:${r.path.replace(/\\/g, "/")}`,
-        preferredAgent: project?.defaultAgent,
-        preferredProfile: project?.defaultAgent
-          ? project.defaultProfiles?.[project.defaultAgent]
-          : undefined,
+        ...projectAgentPrefs(project),
       },
       { forcePick: !!(e?.metaKey || e?.ctrlKey) },
     );
@@ -1863,12 +1859,7 @@ export default function ProjectGroup({
       {registered && cfg && (!liteResearch || (taskCards?.length ?? 0) > 0) && (
         <TaskCardsSection
           projectPath={projectPath}
-          preferredAgent={project?.defaultAgent}
-          preferredProfile={
-            project?.defaultAgent
-              ? project.defaultProfiles?.[project.defaultAgent]
-              : undefined
-          }
+          {...projectAgentPrefs(project)}
           steps={cfg.steps}
           cfg={cfg}
           workspaces={workspaces}
@@ -2435,12 +2426,7 @@ export default function ProjectGroup({
           projectPath={project.path}
           step={cfg.steps[kickoff.index]}
           cfg={cfg}
-          preferredAgent={project.defaultAgent}
-          preferredProfile={
-            project.defaultAgent
-              ? project.defaultProfiles?.[project.defaultAgent]
-              : undefined
-          }
+          {...projectAgentPrefs(project)}
           originCardId={kickoff.originCardId}
           busy={starting !== null}
           onCancel={() => setKickoff(null)}

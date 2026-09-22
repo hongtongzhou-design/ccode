@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   PIPELINE_TEMPLATES,
@@ -111,10 +112,10 @@ test("内置模板的后续步骤输入都能接到上游产物", () => {
 
 test("空落点人工事项必须使用 manual，且推荐技能存在于内置技能集合", () => {
   const builtin = new Set([
-    "bib-check", "data-clean", "data-eda", "endnote-bridge", "figure-forge", "lit-notes",
-    "lit-search", "lit-watch", "proposal-writer", "quarto-render",
-    "rebuttal-crafter", "research-writing", "review-framework", "review-writing",
-    "slides-deck", "stats-check", "origin-plot", "zotero-sync",
+    "bib-check", "blender-research", "data-clean", "data-eda", "endnote-bridge", "figure-forge",
+    "lit-notes", "lit-search", "lit-watch", "origin-plot", "proposal-writer", "quarto-render",
+    "rebuttal-crafter", "research-writing", "review-figures", "review-framework", "review-writing",
+    "slides-deck", "stats-check", "zotero-sync",
   ]);
   for (const template of PIPELINE_TEMPLATES) {
     for (const step of template.steps) {
@@ -126,7 +127,7 @@ test("空落点人工事项必须使用 manual，且推荐技能存在于内置�
   }
 });
 
-test("每套模板有自己的纪律，应用时不把空表格写进 settings", () => {
+test("每套模板有自己的纪律，没填的全局设定留占位", () => {
   for (const template of PIPELINE_TEMPLATES) {
     assert.ok(
       (template.projectRules ?? []).length > 0,
@@ -139,12 +140,16 @@ test("每套模板有自己的纪律，应用时不把空表格写进 settings",
   assert.doesNotMatch(review.projectRules!.join("\n"), /原始数据/);
   assert.match(data.projectRules!.join("\n"), /原始数据/);
   assert.doesNotMatch(data.projectRules!.join("\n"), /虚构文献/);
-  assert.deepEqual(settingsForTemplateApply(review), review.projectRules);
+  assert.deepEqual(settingsForTemplateApply(review), [
+    ...review.projectRules!,
+    ...(review.projectSettings ?? []),
+  ]);
   assert.deepEqual(
     settingsForTemplateApply(review, ["聚焦某个子问题", "", "", "", ""]),
     [
       ...review.projectRules!,
       "综述角度：聚焦某个子问题",
+      ...(review.projectSettings ?? []).slice(1),
     ],
   );
 });
@@ -155,7 +160,12 @@ test("Zotero 只默认挂到三套科研文献检索步骤，Origin/EndNote 保�
     assert.ok(template, `缺少模板：${id}`);
     const searchStep = template.steps.find((step) => step.skills.includes("lit-search"));
     assert.ok(searchStep, `${id} 缺少文献检索步骤`);
-    assert.ok(searchStep.skills.includes("zotero-sync"), `${id} 文献检索步骤未挂载 zotero-sync`);
+    if (id === "review") {
+      assert.equal(searchStep.skills.includes("zotero-sync"), false, "综述检索不默认挂 Zotero");
+      assert.equal(searchStep.expectedArtifacts.includes("papers/zotero-sync.md"), false);
+    } else {
+      assert.ok(searchStep.skills.includes("zotero-sync"), `${id} 文献检索步骤未挂载 zotero-sync`);
+    }
     assert.deepEqual(searchStep.requiredSkills, ["lit-search"], `${id} 的 zotero-sync 应为可选技能`);
     assert.ok(!searchStep.skills.includes("origin-plot"));
     assert.ok(!searchStep.skills.includes("endnote-bridge"));
@@ -204,6 +214,36 @@ test("同一份稿同时渲 docx 和 pdf 时，docx 排在 pdf 前面", () => {
           docx < pdf,
           `${template.id}/${step.name} 应先渲 docx 再渲 pdf`,
         );
+      }
+    }
+  }
+});
+
+test("quarto-render 随包 CSL 是编号引用", () => {
+  const csl = readFileSync(
+    "src-tauri/resources/skills/quarto-render/ieee.csl",
+    "utf8",
+  );
+  assert.match(csl, /citation-format="numeric"/);
+  assert.match(csl, /<text variable="citation-number"/);
+  assert.match(csl, /prefix="\[" suffix="\]"/);
+});
+
+test("Quarto 渲染步骤先按项目 PDF 选定引用样式，不设默认", () => {
+  for (const template of PIPELINE_TEMPLATES) {
+    const variants =
+      template.id === "submission-rebuttal"
+        ? [
+            pipelineStepsForTemplate(template, "initial", 1),
+            pipelineStepsForTemplate(template, "revision", 2),
+          ]
+        : [template.steps];
+    for (const steps of variants) {
+      for (const step of steps) {
+        if (!step.run.some((run) => /quarto render\s+/.test(run.command))) continue;
+        assert.match(step.brief, /citation-style\.md/);
+        assert.match(step.brief, /不设默认样式/);
+        assert.equal(step.brief.includes("ieee.csl"), false, step.name);
       }
     }
   }

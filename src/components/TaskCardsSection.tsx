@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import ContextMenu from "./ContextMenu";
 import { confirmDialog } from "./ConfirmDialog";
 import { hoverRevealClass, inlineActionClass, RoleBadge, Toggle } from "./PageFrame";
+import StepEvidenceChip from "./StepEvidenceChip";
 import StepFlow from "./StepFlow";
 import FuseDraftModal from "./FuseDraftModal";
 import { useAppStore } from "../store";
@@ -27,6 +28,7 @@ import type {
   TaskDraftDto,
   WorkspaceDto,
 } from "../types";
+import { isSettingPlaceholder } from "../project-context";
 import { researchToolAskFieldsForStep, researchToolsFromSettings } from "../research-tools";
 import { statusBadgeTitle } from "../git-status-groups";
 import {
@@ -88,6 +90,7 @@ export default function TaskCardsSection({
   onMainDirtyRefresh,
   preferredAgent,
   preferredProfile,
+  preferredModel,
 }: {
   projectPath: string;
   steps: ProjectStepDto[];
@@ -133,18 +136,23 @@ export default function TaskCardsSection({
   litBusy?: boolean;
   onSetResearchTool?: (key: "libraryExport" | "plotting" | "illustration" | "manuscript", value: string) => void | Promise<void>;
   toolBusy?: boolean;
-  /** 项目 Agents 页的默认 Agent / 绑定；新会话和「跟 AI 商量一下」用这份。 */
+  /** 项目 Agents 页的默认 Agent / 绑定 / 模型；新会话和「跟 AI 商量一下」用这份。 */
   preferredAgent?: string | null;
   preferredProfile?: string | null;
+  preferredModel?: string | null;
 }) {
   const profiles = useAppStore((s) => s.profiles);
   const preferredAgentTrimmed = preferredAgent?.trim() ?? "";
   const preferredProfileTrimmed = preferredProfile?.trim() ?? "";
+  const preferredModelTrimmed = preferredModel?.trim() ?? "";
   const projectLaunch = projectAgentLaunch(
     profiles,
     preferredAgentTrimmed,
     preferredAgentTrimmed && preferredProfileTrimmed
       ? { [preferredAgentTrimmed]: preferredProfileTrimmed }
+      : null,
+    preferredAgentTrimmed && preferredModelTrimmed
+      ? { [preferredAgentTrimmed]: preferredModelTrimmed }
       : null,
   );
   const cards = useAppStore((s) => s.taskCards[projectPath]);
@@ -777,6 +785,14 @@ export default function TaskCardsSection({
           {/* 角色标记（v3.89）：步骤名保留学术术语，另标「这一步轮到谁」——
               用户扫一眼就知道哪几步要自己出场，流程感来自角色交替而非序号 */}
           {focusStepDto && <RoleBadge role={focusStepDto.role} />}
+          {focusStepDto && (
+            <StepEvidenceChip
+              projectPath={projectPath}
+              step={focusStepDto}
+              workspaces={workspaces}
+              refreshToken={refreshToken}
+            />
+          )}
           {onFocusIndex && (
             <button
               type="button"
@@ -918,6 +934,7 @@ export default function TaskCardsSection({
             discussed={discussed}
             discussResume={discussResume}
             litSource={cfg.litSource}
+            openSettings={(cfg.settings ?? []).filter((line) => isSettingPlaceholder(line))}
             onOpenResources={onOpenResources}
             onSetLitSource={onSetLitSource}
             litBusy={litBusy}

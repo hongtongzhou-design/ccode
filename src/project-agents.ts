@@ -32,17 +32,35 @@ export type ProjectAgentWork = {
   statusLabel: string;
 };
 
+export type ProjectAgentChoice = {
+  id: string;
+  name: string;
+  /** 连接名单里的模型 id；空串 = 这条连接没有指定模型（CLI 默认） */
+  modelId: string;
+  model: string;
+  modelLine: string;
+};
+
 export type ProjectAgentRow = {
   agentId: string;
   label: string;
   isProjectDefault: boolean;
   defaultProfileId: string;
-  profiles: { id: string; name: string; model: string; modelLine: string }[];
+  /** 本项目点选过的模型；空 = 用这条连接的第一个 */
+  defaultModelId: string;
+  profiles: ProjectAgentChoice[];
   works: ProjectAgentWork[];
 };
 
-function profileLine(profile: ProjectAgentProfile): string {
-  return `${profile.name} · ${profile.models[0] || "CLI 默认"}`;
+function choiceFor(profile: ProjectAgentProfile, modelId: string): ProjectAgentChoice {
+  const model = modelId || "CLI 默认";
+  return {
+    id: profile.id,
+    name: profile.name,
+    modelId,
+    model,
+    modelLine: `${profile.name} · ${model}`,
+  };
 }
 
 function asWork(
@@ -75,11 +93,13 @@ export function buildProjectAgentRoster(input: {
   hiddenProfileIds: readonly string[];
   defaultAgent: string | null | undefined;
   defaultProfiles: Record<string, string> | null | undefined;
+  defaultModels?: Record<string, string> | null;
   tasks: readonly ProjectAgentTaskRef[];
   taskKinds: ReadonlySet<string>;
   workMode?: string | null;
 }): { rows: ProjectAgentRow[]; unassigned: ProjectAgentWork[] } {
   const defaults = input.defaultProfiles ?? {};
+  const modelDefaults = input.defaultModels ?? {};
   const projectDefault = input.defaultAgent?.trim() || "";
   const hidden = new Set(input.hiddenProfileIds);
   const visibleProfiles = input.profiles.filter(
@@ -127,17 +147,21 @@ export function buildProjectAgentRoster(input: {
   const rows: ProjectAgentRow[] = agentIds.map((agentId) => {
     const profiles = visibleProfiles
       .filter((profile) => profile.agent === agentId)
-      .map((profile) => ({
-        id: profile.id,
-        name: profile.name,
-        model: profile.models[0] || "CLI 默认",
-        modelLine: profileLine(profile),
-      }));
+      .flatMap((profile) => {
+        const models = profile.models.length > 0 ? profile.models : [""];
+        return models.map((modelId) => choiceFor(profile, modelId));
+      });
+    const boundId = defaults[agentId] ?? "";
+    const boundModel = modelDefaults[agentId]?.trim() ?? "";
+    const modelStillThere =
+      !!boundModel &&
+      profiles.some((profile) => profile.id === boundId && profile.modelId === boundModel);
     return {
       agentId,
       label: labelById.get(agentId) ?? agentId,
       isProjectDefault: agentId === projectDefault,
-      defaultProfileId: defaults[agentId] ?? "",
+      defaultProfileId: boundId,
+      defaultModelId: modelStillThere ? boundModel : "",
       profiles,
       works: worksByAgent.get(agentId) ?? [],
     };
@@ -159,12 +183,42 @@ export function projectAgentsEmptyWorkHint(
   return "新建目标或开步时指定谁干。";
 }
 
+export function selectedProjectAgentProfile<T extends { id: string; modelId?: string }>(
+  row: {
+    defaultProfileId: string;
+    defaultModelId?: string;
+    profiles: readonly T[];
+  },
+): T | undefined {
+  const wanted = row.defaultModelId?.trim() ?? "";
+  return (
+    (wanted
+      ? row.profiles.find(
+          (profile) => profile.id === row.defaultProfileId && profile.modelId === wanted,
+        )
+      : undefined) ??
+    row.profiles.find((profile) => profile.id === row.defaultProfileId) ??
+    row.profiles[0]
+  );
+}
+
 export function currentProfileLine(
-  row: Pick<ProjectAgentRow, "defaultProfileId" | "profiles">,
+  row: Pick<ProjectAgentRow, "defaultProfileId" | "profiles"> & {
+    defaultModelId?: string;
+  },
 ): string | null {
-  const selected = row.profiles.find((profile) => profile.id === row.defaultProfileId);
-  if (selected) return selected.modelLine;
-  return row.profiles[0]?.modelLine ?? null;
+  return selectedProjectAgentProfile(row)?.modelLine ?? null;
+}
+
+/** 记下的模型还在这条连接的名单里就用它，否则用名单第一个。 */
+export function resolveProfileModel(
+  models: readonly string[] | null | undefined,
+  wanted?: string | null,
+): string {
+  const list = models ?? [];
+  const model = wanted?.trim() ?? "";
+  if (model && list.includes(model)) return model;
+  return list[0] ?? "";
 }
 
 /** 项目 Agents 页为这家绑定的配置；空 = 未绑定，继续会话走原 Run / 上次使用。 */
@@ -182,6 +236,7 @@ export function projectAgentLaunch(
   profiles: readonly { id: string; agent: string; models?: readonly string[] }[],
   defaultAgent?: string | null,
   defaultProfiles?: Record<string, string> | null,
+  defaultModels?: Record<string, string> | null,
 ): { agentId: string; profileId: string; model: string } | null {
   const agent = defaultAgent?.trim() ?? "";
   if (!agent) return null;
@@ -192,6 +247,27 @@ export function projectAgentLaunch(
   return {
     agentId: agent,
     profileId: profile.id,
-    model: profile.models?.[0] ?? "",
+    model: resolveProfileModel(profile.models, defaultModels?.[agent]),
+  };
+}
+
+/** 项目默认 Agent、连接、以及这条连接里点选的模型。没设项目默认时三个都空。 */
+export function projectAgentPrefs(project?: {
+  defaultAgent?: string | null;
+  defaultProfiles?: Record<string, string> | null;
+  defaultModels?: Record<string, string> | null;
+} | null): {
+  preferredAgent?: string;
+  preferredProfile?: string;
+  preferredModel?: string;
+} {
+  const preferredAgent = project?.defaultAgent?.trim() || undefined;
+  if (!preferredAgent) return {};
+  const preferredProfile = project?.defaultProfiles?.[preferredAgent]?.trim() || undefined;
+  const preferredModel = project?.defaultModels?.[preferredAgent]?.trim() || undefined;
+  return {
+    preferredAgent,
+    ...(preferredProfile ? { preferredProfile } : {}),
+    ...(preferredModel ? { preferredModel } : {}),
   };
 }

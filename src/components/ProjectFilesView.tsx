@@ -74,6 +74,7 @@ export default function ProjectFilesView({
   workMode,
   preferredAgent,
   preferredProfile,
+  preferredModel,
   onError,
   focusPath,
   focusToken,
@@ -83,6 +84,7 @@ export default function ProjectFilesView({
   workMode?: string | null;
   preferredAgent?: string | null;
   preferredProfile?: string | null;
+  preferredModel?: string | null;
   onError: (message: string) => void;
   /** 从待获取清单跳过来：展开父目录并打开这篇 */
   focusPath?: string | null;
@@ -353,6 +355,7 @@ export default function ProjectFilesView({
       reuseKey: `project-file:${projectPath}:${entry.path}`,
       preferredAgent,
       preferredProfile,
+      preferredModel,
     });
   }
 

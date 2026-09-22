@@ -102,7 +102,7 @@ Binding
 | Codex catalog 文件名 | `ccode/catalogs/codex-<id>.json`（`agents.rs` `codex_catalog_path`） |
 | 定时任务 | `schedules.json` 的 `profile_id`（`scheduler.rs`） |
 | 会话归属 | `app.db` `session_meta.profile_id` |
-| 设置五字段 | `ai_profile_id` / `ai_profiles` / `default_profiles` / `hidden_profiles` / `active_global_profiles`（字段名暂不改存储，语义改为 binding id） |
+| 设置五字段 | `ai_profile_id` / `ai_profiles` / `default_profiles` / `hidden_profiles` / `active_global_profiles`（字段名暂不改存储，语义改为 binding id）。`ai_model` / `ai_profile_models` 挂在前两个 id 上，解绑时随 id 一起清 |
 | localStorage | `ccode.terminalTabs.v1`（`profileId`）、`ccode.lastProfile.<agent>`、`ccode.lastLaunch`、`ccode.wsLast.<cwd>`、`ccode.quickChat`（`profileId`） |
 
 **必须重键的只有 `keys.json`**：密钥从 profile id 迁到 gateway id。`get_key` 的入参改为 gateway id；启动路径 = binding → gateway → key。官方绑定不查密钥。
@@ -237,7 +237,7 @@ catalog 条目不写 `apply_patch_tool_type`（freeform＝type=custom 工具会�
 
 - **有绑定的网关禁止删除**。按钮置灰，提示先解绑。不解绑不级联删绑定（绑定 id 是 schedules / 会话锚）。
 - **槽可清空**。依赖该槽的绑定进入 **缺槽态**：配置页行 ⚠「这个网关还没配该协议的端点」；启动栏该项禁选；设为全局 / 托盘该项禁用。绑定记录保留（id 不断）。
-- **解绑**：删除绑定行。先走 `clear_profile_refs` 清理 **settings 五字段**：`ai_profile_id`、`ai_profiles`、`default_profiles`、`hidden_profiles`、`active_global_profiles`（漏清会留下永远指不到实体的幽灵 id，停用/默认徽标跟着脏）。catalog 文件可删。不解绑网关、不动密钥。
+- **解绑**：删除绑定行。先走 `clear_profile_refs` 清理 **settings 五字段**：`ai_profile_id`、`ai_profiles`、`default_profiles`、`hidden_profiles`、`active_global_profiles`（漏清会留下永远指不到实体的幽灵 id，停用/默认徽标跟着脏）。挂在这些 id 上的 `ai_model` / `ai_profile_models` 一起清。catalog 文件可删。不解绑网关、不动密钥。
 - **schedules 不置空**（2026-09-20 拍板，改原先「置空」口径）：定时任务的 `profile_id` 是**显式连接声明**，解绑只删绑定行、保留该引用，于是运行时硬 pin 拒绝静默回落（`scheduler` 留一条失败 Run，原因写明配置不存在）。理由：无人确认时替用户换供应商/认证出站，比让任务停下更糟。配套**前端义务**：解绑确认弹窗按 `list_schedules` 现算并列出受影响任务条数与名称，不得只说「其它 Agent 的绑定不受影响」。
 - **删除无绑定的网关**：删网关行 + `keys.json` 对应键 + 该网关的 relay 前缀键（尽力而为）+ 该网关 lastProbe。
 
@@ -258,7 +258,7 @@ catalog 条目不写 `apply_patch_tool_type`（freeform＝type=custom 工具会�
 | 保存网关 | 保存地址、凭证、目录和逐模型策略 |
 | 添加 Agent 配置 | 选择这个 Agent 使用哪些模型、哪个默认；不写 CLI 文件 |
 | 设为 Mesa 启动默认 | 只影响 Mesa 新启动时的预选 |
-| 设为项目默认 | 只影响当前项目的默认配置选择 |
+| 设为项目默认 | 只影响当前项目的默认连接；项目里另选的模型也只记在这个项目上，不改连接的模型名单 |
 | 写入 CLI 全局默认 | 修改外部 CLI 的配置文件；确认前给出脱敏预览 |
 | 注册到客户端 | 登记 provider，不切换默认渠道 |
 

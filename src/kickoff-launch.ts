@@ -20,6 +20,7 @@ export function pickKickoffLaunch(
   last?: { agentId?: string; profileId?: string; model?: string } | null,
   preferredAgent?: string | null,
   preferredProfile?: string | null,
+  preferredModel?: string | null,
 ): KickoffLaunch | null {
   if (profiles.length === 0) return null;
   const has = (id: string) => profiles.some((p) => p.id === id);
@@ -41,10 +42,17 @@ export function pickKickoffLaunch(
       : null) ??
     profiles[0]!;
   const models = profile.models ?? [];
-  const wanted = from?.model?.trim() ?? "";
-  const model =
-    wanted && (models.length === 0 || models.includes(wanted))
-      ? wanted
+  const projectModel =
+    preferredProfile &&
+    profile.id === preferredProfile.trim() &&
+    preferredModel?.trim()
+      ? preferredModel.trim()
+      : "";
+  const rememberedModel = from?.model?.trim() ?? "";
+  const model = projectModel && models.includes(projectModel)
+    ? projectModel
+    : rememberedModel && (models.length === 0 || models.includes(rememberedModel))
+      ? rememberedModel
       : (models[0] ?? "");
   return { agentId: profile.agent, profileId: profile.id, model };
 }
@@ -55,6 +63,7 @@ export function codingTerminalLaunch(
   remembered: AskAiRemembered | null,
   preferredAgent?: string | null,
   preferredProfile?: string | null,
+  preferredModel?: string | null,
 ): {
   agentId: string;
   profileId: string;
@@ -63,10 +72,12 @@ export function codingTerminalLaunch(
 } | null {
   const agent = preferredAgent?.trim() ?? "";
   const bound = preferredProfile?.trim() ?? "";
+  const model = preferredModel?.trim() ?? "";
   const project = projectAgentLaunch(
     profiles,
     agent,
     agent && bound ? { [agent]: bound } : null,
+    agent && model ? { [agent]: model } : null,
   );
   const launch =
     project ??
@@ -76,6 +87,7 @@ export function codingTerminalLaunch(
       null,
       preferredAgent,
       preferredProfile,
+      preferredModel,
     );
   if (!launch) return null;
   return {

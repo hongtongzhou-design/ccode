@@ -5,7 +5,7 @@ import { agentBrandBadgeStyle } from "../agent-colors";
 import { beginProjectChat } from "./AskAiModal";
 import ConversationView from "./ConversationView";
 import { resumeSessionInTerminal } from "./QuickChatModal";
-import { projectBoundProfileId } from "../project-agents";
+import { projectAgentPrefs, projectBoundProfileId } from "../project-agents";
 import {
   compactFieldClass,
   compactPrimaryActionClass,
@@ -146,10 +146,7 @@ export default function ProjectChatsView({
         cwd: project.path,
         name: project.name,
         kind: kind === "coding" || kind === "office" ? kind : "research",
-        preferredAgent: project.defaultAgent,
-        preferredProfile: project.defaultAgent
-          ? project.defaultProfiles?.[project.defaultAgent]
-          : undefined,
+        ...projectAgentPrefs(project),
       },
       { forcePick: e.metaKey || e.ctrlKey },
     );

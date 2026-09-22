@@ -22,10 +22,10 @@ export default function ResearchToolFields({
   if (!collapsible) return <>{selects}</>;
   const hasManuscript = fields.some((field) => field.key === "manuscript");
   return <details className="rounded-md ccode-well p-3 text-xs" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
-    <summary className="cursor-pointer font-medium text-l2" title="文献从哪来请在检索步骤的「确定文献来源」里选。Zotero 进库用待获取里的「同步到 Zotero」。">
+    <summary className="cursor-pointer font-medium text-l2" title="文献从哪来在检索步骤选。Zotero 和 EndNote 都能导入、同步和交稿。">
       {hasManuscript ? "稿件载体与外部工具（按需选择）" : "按需补齐交付"}
     </summary>
-    <p className="my-2 text-l3">{hasManuscript ? "按需补齐交付。Zotero 进库用检索步待获取的「同步到 Zotero」，不会在这里写库。" : "Zotero 进库用检索步待获取的「同步到 Zotero」，不会在这里写库。"}</p>
+    <p className="my-2 text-l3">文献库选 Zotero 或 EndNote。导入和同步在检索步，交稿在定稿。两个都能做这三件事，一篇交稿只选一个。</p>
     <div className="grid gap-2 sm:grid-cols-2">{selects}</div>
   </details>;
 }

@@ -17,9 +17,9 @@ const md = (id: string, workspace: string) => renderTaskMd(step(id, workspace), 
   settings: settingsForTemplateApply(template(id)), rulesOwned: true,
 }, "/research/project");
 
-test("保留六套模板及原有阶段数量，不以自动编排或更多阶段代替质量门", () => {
+test("六套模板阶段数固定，科研论文多一步论文大纲，不另建自动编排", () => {
   assert.deepEqual(PIPELINE_TEMPLATES.map((t) => [t.id, t.steps.length]), [
-    ["review", 5], ["research-paper", 7], ["data-processing", 4], ["thesis", 8],
+    ["review", 5], ["research-paper", 8], ["data-processing", 4], ["thesis", 8],
     ["submission-rebuttal", 2], ["latex-paper", 4],
   ]);
 });
@@ -168,6 +168,25 @@ test("有文件落点的科研人工判断仍须手动确认，不能以产物�
     assert.notEqual(ethical.optional, true);
     assert.equal(ethical.completion, "manual");
   }
+});
+
+test("大纲、结论条目和先报告后改稿落在对应步骤", () => {
+  assert.equal(step("research-paper", "paper-outline").expectedArtifacts[0], "manuscript/outline.md");
+  assert.match(md("research-paper", "exp-analysis"), /## 结论条目/);
+  assert.match(md("data-processing", "data-eda"), /## 结论条目/);
+  assert.match(md("thesis", "thesis-exp-analysis"), /## 结论条目/);
+  assert.match(md("research-paper", "lit-survey-gap"), /已批准问题与范围/);
+  assert.match(md("thesis", "proposal"), /已批准问题与范围/);
+  assert.match(md("research-paper", "exp-design"), /已批准设计/);
+  assert.match(md("research-paper", "exp-run"), /已批准范围/);
+  for (const [id, workspace] of [["review", "polish"], ["research-paper", "research-paper-polish"], ["thesis", "thesis-final"], ["latex-paper", "latex-final"], ["submission-rebuttal", "journal-format"]]) {
+    assert.match(md(id, workspace), /禁止边查边改已有成稿/, workspace);
+  }
+  assert.match(md("review", "draft"), /section-status/);
+  assert.match(md("research-paper", "paper-draft"), /section-status/);
+  const revision = pipelineStepsForTemplate(template("submission-rebuttal"), "revision", 1)[0];
+  assert.match(revision.brief, /review-report-r1/);
+  assert.ok(revision.expectedArtifacts.includes("rebuttal/review-report-r1.md"));
 });
 
 test("质量证据声明为实际输入并进入验收合同，自定义模板不被套科研条件", () => {

@@ -14,7 +14,8 @@ const md = (id: string) => find(id).steps.map((s) => renderTaskMd(s, {
 
 test("任务书减重不靠删阶段/门禁：共用摘要一次，格式适配不重复终审", () => {
   // 上限含按步骤派生的停工清单（拍板/先报再问/样张）。
-  const before: Record<string, number> = { review: 16500, "research-paper": 23200, "data-processing": 10400, thesis: 23700, "submission-rebuttal": 6493, "latex-paper": 10297 };
+  // 上限含论文大纲、结论条目、章节状态和先报告后改稿。再涨要说明加了什么合同。
+  const before: Record<string, number> = { review: 21200, "research-paper": 31900, "data-processing": 12100, thesis: 29400, "submission-rebuttal": 8600, "latex-paper": 13200 };
   for (const t of PIPELINE_TEMPLATES) {
     const tasks = md(t.id);
     assert.ok(tasks.reduce((n, s) => n+s.length, 0) < before[t.id], t.id);

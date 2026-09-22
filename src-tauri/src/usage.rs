@@ -22,7 +22,9 @@ const LIST_CAP: usize = 20;
 // 官方账号登记从项目级改为会话级，旧项目级行只回填登记时刻已存在的会话（不再粘住新会话）；
 // 会话级 internal 标记（session_meta.internal，无头 AI / 定时巡检按会话 id 登记）纳入用量索引。
 // SQLite 不能 ALTER 主键，provenance 整表重建迁移、旧行保留；升版本自动重建用量索引。
-const USAGE_SCHEMA_VERSION: &str = "7";
+// v8：Grok 回合用量改认 params.update.usage（camelCase）。v7 索引按猜的 _meta.usage
+// 提取，Grok 行为空；只清 Grok 的日行和 seen 标记，其它 agent 的已建索引留着。
+const USAGE_SCHEMA_VERSION: &str = "8";
 const SOURCE_CLI: &str = "cli";
 const SOURCE_CCODE_AI: &str = "ccode-ai";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -342,10 +344,94 @@ where
     out
 }
 
-/// Grok Build：token usage 在 updates.jsonl 中 turn 结束时的 ACP 通知 `_meta.usage`（PromptUsage）：
-/// input_tokens/output_tokens/total_tokens/cached_read_tokens + modelUsage{<model>:{...}}。
-/// _meta 位置未完全实证（params._meta 或 params.update._meta 两种都探）；
-/// 无 usage 字段的行不产生事件（不报错）。模型取 modelUsage 的第一个键（多模型取其一）。
+fn usage_u64(u: &Value, keys: &[&str]) -> u64 {
+    keys.iter()
+        .find_map(|k| u.get(*k).and_then(|x| x.as_u64()))
+        .unwrap_or(0)
+}
+
+/// 实机（2026-09-22）回合用量在 `params.update.usage`。
+/// 早期按文档猜的 `_meta.usage`（`params._meta` 或 `params.update._meta`）仍认。
+fn grok_usage_value(params: &Value) -> Option<&Value> {
+    let update = params.get("update");
+    update
+        .and_then(|u| u.get("usage"))
+        .filter(|u| u.is_object())
+        .or_else(|| {
+            update
+                .and_then(|u| u.get("_meta"))
+                .and_then(|m| m.get("usage"))
+                .filter(|u| u.is_object())
+        })
+        .or_else(|| {
+            params
+                .get("_meta")
+                .and_then(|m| m.get("usage"))
+                .filter(|u| u.is_object())
+        })
+}
+
+fn grok_usage_has_own_tokens(u: &Value) -> bool {
+    u.get("inputTokens").is_some()
+        || u.get("input_tokens").is_some()
+        || u.get("outputTokens").is_some()
+        || u.get("output_tokens").is_some()
+}
+
+/// 多模型各记各的。条目不带 token（旧夹具空对象）时，整笔归到第一个模型名。
+fn grok_usage_parts(u: &Value) -> Vec<(String, &Value)> {
+    let Some(map) = u.get("modelUsage").and_then(|m| m.as_object()) else {
+        return vec![(String::new(), u)];
+    };
+    if map.is_empty() || !map.values().any(grok_usage_has_own_tokens) {
+        let model = map.keys().next().cloned().unwrap_or_default();
+        return vec![(model, u)];
+    }
+    map.iter()
+        .filter(|(_, part)| grok_usage_has_own_tokens(part))
+        .map(|(model, part)| (model.clone(), part))
+        .collect()
+}
+
+fn grok_event_from_usage(day: String, model: String, u: &Value) -> Option<UsageEvent> {
+    let raw_input = usage_u64(u, &["input_tokens", "inputTokens"]);
+    let output = usage_u64(u, &["output_tokens", "outputTokens"]);
+    let cache_read = usage_u64(u, &["cached_read_tokens", "cachedReadTokens"]);
+    let cache_write = usage_u64(
+        u,
+        &[
+            "cache_creation_input_tokens",
+            "cacheCreationTokens",
+            "cache_creation_tokens",
+        ],
+    );
+    // camelCase 实机：inputTokens 已含缓存读（cache 从不大于 input，total = input + output）。
+    // 拆成未命中输入再入库，否则缓存会按输入全价再加一折。reasoningTokens 不另加：
+    // 它不是 total 之外的第三项，有时还大于 outputTokens。
+    // snake_case 旧夹具把 input_tokens 与 cached_read_tokens 当独立字段，不拆。
+    let input =
+        if u.get("inputTokens").is_some() && raw_input >= cache_read.saturating_add(cache_write) {
+            raw_input - cache_read - cache_write
+        } else {
+            raw_input
+        };
+    if input + output + cache_read + cache_write == 0 {
+        return None;
+    }
+    Some(UsageEvent {
+        day,
+        model,
+        input,
+        output,
+        cache_read,
+        cache_write,
+        source: SOURCE_CLI.into(),
+        internal: false,
+        official: false,
+    })
+}
+
+/// Grok Build：token usage 在 turn 结束通知里。无 usage 对象的行不产生事件（不报错）。
 fn grok_events<I, S>(lines: I) -> Vec<UsageEvent>
 where
     I: IntoIterator<Item = S>,
@@ -359,43 +445,20 @@ where
         let Some(params) = v.get("params") else {
             continue;
         };
-        // _meta 两层兼容：params._meta 或 params.update._meta
-        let usage = params
-            .get("_meta")
-            .and_then(|m| m.get("usage"))
-            .or_else(|| {
-                params
-                    .get("update")
-                    .and_then(|u| u.get("_meta"))
-                    .and_then(|m| m.get("usage"))
-            });
-        let Some(u) = usage else {
+        let Some(u) = grok_usage_value(params) else {
             continue;
         };
-        let num = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
         // 时间戳是 unix 秒数字（容错 ISO 字符串）
         let day = match v.get("timestamp") {
             Some(Value::Number(n)) => n.as_i64().map(|s| day_of_ms(s * 1000)).unwrap_or_default(),
             Some(Value::String(s)) => day_of_iso(s),
             _ => String::new(),
         };
-        // modelUsage 是 <model> → {...} 的 map；模型名取第一个键
-        let model = u
-            .get("modelUsage")
-            .and_then(|m| m.as_object())
-            .and_then(|o| o.keys().next().cloned())
-            .unwrap_or_default();
-        out.push(UsageEvent {
-            day,
-            model,
-            input: num("input_tokens"),
-            output: num("output_tokens"),
-            cache_read: num("cached_read_tokens"),
-            cache_write: 0,
-            source: SOURCE_CLI.into(),
-            internal: false,
-            official: false,
-        });
+        for (model, part) in grok_usage_parts(u) {
+            if let Some(event) = grok_event_from_usage(day.clone(), model, part) {
+                out.push(event);
+            }
+        }
     }
     out
 }
@@ -713,11 +776,17 @@ fn ensure_usage_schema(conn: &Connection) -> Result<(), String> {
         .ok();
     if current.as_deref() != Some(USAGE_SCHEMA_VERSION) {
         // 旧索引没有可靠来源，清空后由会话源重新生成，避免把历史猜测伪装成权威分类。
-        conn.execute_batch(
+        // v7→v8 只是 Grok 提取口径变了：Grok 旧行本就是空的，清掉 seen 让它重扫；
+        // 其它 agent 已建好的日行和 seen 标记留着，避免整库重解析。
+        let reset_sql = if current.as_deref() == Some("7") {
+            "DELETE FROM usage_daily WHERE agent='grok';
+             DELETE FROM usage_meta WHERE key LIKE 'seen:grok:%' OR key='initialized';"
+        } else {
             "DELETE FROM usage_daily;
-             DELETE FROM usage_meta WHERE key LIKE 'seen:%' OR key='initialized';",
-        )
-        .map_err(|e| format!("重置旧用量索引失败: {e}"))?;
+             DELETE FROM usage_meta WHERE key LIKE 'seen:%' OR key='initialized';"
+        };
+        conn.execute_batch(reset_sql)
+            .map_err(|e| format!("重置旧用量索引失败: {e}"))?;
         conn.execute(
             "INSERT INTO usage_meta(key, value) VALUES('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -2377,6 +2446,54 @@ mod tests {
         assert!(meta_get(&conn, "initialized").is_none());
     }
 
+    #[test]
+    fn usage_schema_v8_reindexes_grok_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_daily(
+               day TEXT, agent TEXT, model TEXT, project_path TEXT, session_id TEXT,
+               input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER,
+               source TEXT, internal INTEGER, workspace TEXT, official INTEGER,
+               PRIMARY KEY(day, agent, model, project_path, session_id));
+             CREATE TABLE usage_meta(key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE usage_provenance(
+               agent TEXT NOT NULL, project_path TEXT NOT NULL,
+               session_id TEXT NOT NULL DEFAULT '',
+               source TEXT NOT NULL, internal INTEGER NOT NULL DEFAULT 0,
+               official INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL,
+               PRIMARY KEY(agent, project_path, session_id));
+             INSERT INTO usage_daily VALUES
+               ('2026-09-21','codex','gpt-5','/repo','s-codex',10,2,0,0,'cli',0,'',0),
+               ('2026-09-21','grok','grok-4','/repo','s-grok',0,0,0,0,'cli',0,'',0);
+             INSERT INTO usage_meta VALUES
+               ('schema_version','7'),
+               ('initialized','old'),
+               ('seen:codex:s-codex:live','old'),
+               ('seen:grok:s-grok:live','old');",
+        )
+        .unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        assert_eq!(
+            meta_get(&conn, "schema_version").as_deref(),
+            Some(USAGE_SCHEMA_VERSION)
+        );
+        assert!(meta_get(&conn, "initialized").is_none());
+        assert_eq!(
+            meta_get(&conn, "seen:codex:s-codex:live").as_deref(),
+            Some("old")
+        );
+        assert!(meta_get(&conn, "seen:grok:s-grok:live").is_none());
+        let agents: Vec<String> = conn
+            .prepare("SELECT agent FROM usage_daily ORDER BY agent")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(agents, vec!["codex".to_string()]);
+    }
+
     /// 旧的纯路径查询形态：无会话 id、无创建时间、无会话级标记（等价 v7 前行为）
     fn prov(conn: &Connection, agent: &str, project_path: &str) -> (String, bool, bool) {
         session_provenance(conn, agent, project_path, "", None, false, false)
@@ -3697,14 +3814,15 @@ mod tests {
         let lines = vec![
             r#"{"timestamp":1786005441,"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}}}"#.to_string(),
             r#"{"timestamp":1786005442,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"你好"}}}}"#.to_string(),
+            r#"{"timestamp":1786005443,"method":"session/update","params":{"_meta":{"totalTokens":999},"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}}}"#.to_string(),
         ];
         assert!(
             grok_events(&lines).is_empty(),
-            "无 _meta.usage 的行必须零事件不报错"
+            "无 usage 对象的行（含流式 _meta.totalTokens）必须零事件不报错"
         );
         // params.update._meta 位置
         let lines = vec![
-            r#"{"timestamp":1786005445,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"完成"},"_meta":{"usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150,"cached_read_tokens":40,"modelUsage":{"grok-code-fast-1":{"input_tokens":120,"output_tokens":30}},"numTurns":1,"usageIsIncomplete":false}}}}}"#.to_string(),
+            r#"{"timestamp":1786005445,"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"完成"},"_meta":{"usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150,"cached_read_tokens":40,"modelUsage":{"grok-code-fast-1":{"input_tokens":120,"output_tokens":30,"cached_read_tokens":40}},"numTurns":1,"usageIsIncomplete":false}}}}}"#.to_string(),
         ];
         let evs = grok_events(&lines);
         assert_eq!(evs.len(), 1);
@@ -3730,6 +3848,41 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].model, "grok-4");
         assert_eq!((evs[0].input, evs[0].output, evs[0].cache_read), (10, 5, 2));
+        // 实机：_x.ai/session/update 的 turn_completed，用量在 params.update.usage（camelCase）。
+        // inputTokens 含缓存，入库时拆成未命中输入。
+        let lines = vec![
+            r#"{"timestamp":1786005600,"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":1000,"outputTokens":50,"totalTokens":1050,"cachedReadTokens":400,"cacheCreationTokens":10,"reasoningTokens":80,"modelUsage":{"grok-4.7-build":{"inputTokens":1000,"outputTokens":50,"cachedReadTokens":400,"cacheCreationTokens":10}}}}}}"#.to_string(),
+        ];
+        let evs = grok_events(&lines);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].day, day_of_ms(1786005600 * 1000));
+        assert_eq!(evs[0].model, "grok-4.7-build");
+        assert_eq!(
+            (
+                evs[0].input,
+                evs[0].output,
+                evs[0].cache_read,
+                evs[0].cache_write
+            ),
+            (590, 50, 400, 10),
+            "inputTokens 去掉缓存读和缓存写"
+        );
+        // 同一回合两个模型各记各的，不把合计塞给第一个键
+        let lines = vec![
+            r#"{"timestamp":1786005700,"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":300,"outputTokens":30,"cachedReadTokens":100,"modelUsage":{"grok-4.6":{"inputTokens":100,"outputTokens":10,"cachedReadTokens":40},"grok-4.6-build":{"inputTokens":200,"outputTokens":20,"cachedReadTokens":60}}}}}}"#.to_string(),
+        ];
+        let evs = grok_events(&lines);
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].model, "grok-4.6");
+        assert_eq!(
+            (evs[0].input, evs[0].output, evs[0].cache_read),
+            (60, 10, 40)
+        );
+        assert_eq!(evs[1].model, "grok-4.6-build");
+        assert_eq!(
+            (evs[1].input, evs[1].output, evs[1].cache_read),
+            (140, 20, 60)
+        );
     }
 
     #[test]

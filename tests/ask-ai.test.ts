@@ -86,6 +86,14 @@ test("项目绑了 Agents 就直接启动，不走问 AI 记忆", () => {
     remembered,
   );
   assert.deepEqual(project, { agentId: "codex", profileId: "p-codex", model: "gpt-5" });
+  assert.deepEqual(
+    askAiDirectLaunch(
+      { preferredAgent: "codex", preferredProfile: "p-codex", preferredModel: "gpt-5-mini" },
+      [{ id: "p-codex", agent: "codex", models: ["gpt-5", "gpt-5-mini"] }],
+      remembered,
+    ),
+    { agentId: "codex", profileId: "p-codex", model: "gpt-5-mini" },
+  );
   assert.equal(
     askAiDirectLaunch(
       { preferredAgent: "codex", preferredProfile: "p-codex" },

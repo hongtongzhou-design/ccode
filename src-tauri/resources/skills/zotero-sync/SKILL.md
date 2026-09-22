@@ -10,7 +10,7 @@ outputs: [papers/zotero-sync.md]
 
 - 按钮：打开 `papers/to-fetch.ris`，走 Zotero 原生导入（RIS/BibTeX/CSL JSON）。
 - 内核「从 Zotero 导入」：只读 sqlite 快照进项目，绝不写回个人库。
-- 本技能：检索/精读时盘点通道、产出 RIS、写 `papers/zotero-sync.md`。Word 插件插引用是 GUI 人工操作，不在本技能射程。
+- 本技能：检索时盘点已有库，定稿时把 `[@键]` 写成 Zotero 能扫描的 RTF。不点 Zotero 的 Word 插件。
 
 ## 何时使用
 
@@ -34,7 +34,7 @@ outputs: [papers/zotero-sync.md]
 - 交付 `papers/to-fetch.ris`（RIS 2004，与 to-fetch.md 同序：TI/AU/PY/T2/DO/UR）。Zotero 原生导入 RIS/BibTeX/CSL JSON，不需要插件
 - 告诉用户用清单「同步到 Zotero」或把 RIS 拖进 Zotero。不要另开一条 API/BBT 写库
 - 不要代点按钮、不要循环导入。库里已有条目再导会重复——界面会按 DOI 提示
-- **PDF：** 有全文的把 `papers/` 里的文件直接拖进 Zotero，客户端一般会按元数据对上已有条目。对不上再拖到那一条上。禁止声称 Mesa 已自动挂附件
+- **PDF：** 用户不用 Zotero 时，不要要求把 PDF 拖进 Zotero。题录由检索/精读按 PDF 里的 DOI 写入 `references.bib`。用户自己在用 Zotero、且库里还没有这些篇时，可以把 `papers/` 的 PDF 拖进 Zotero：确认「自动检索 PDF 元数据」开着、「自动重命名附件文件」关着，它会读前几页并生成父条目。拖完再用「从 Zotero 导入」。已有条目时，拖进去一般会按元数据对上；对不上再拖到那一条上。禁止声称 Mesa 已自动建条目或挂附件。
 - 未明确要求进库：只留 RIS，报告写明「未进库，文件已交」
 
 ### 2. 出库（Zotero → 项目，仅精读/用户明确要求时）
@@ -43,7 +43,19 @@ outputs: [papers/zotero-sync.md]
 - 不要默认调用 Better BibTeX `autoexport.add`，不得悄然修改用户 BBT 配置
 - 已有 bib 键一律不改；与 lit-notes 冲突时保留既有键并在报告列出
 
-### 3. 边界与报告
+### 3. 定稿交稿（与 EndNote 域稿同一位置）
+
+项目设置「文献库」选了 Zotero，并且这一步是定稿或期刊格式时：
+
+```bash
+python3 <技能目录>/scripts/zotero_rtf.py --input manuscript/review-final.md --bib references.bib --rtf output/zotero.rtf --ris papers/zotero-import.ris --report papers/zotero-cite-report.md
+```
+
+科研论文改 `manuscript/paper-final.md`，学位论文用 `manuscript/thesis-final.md`，期刊格式用 `submission/formatted.md`。
+
+未匹配的 `[@键]` 不写 rtf。人先把 `papers/zotero-import.ris` 拖进 Zotero（库里已有就跳过），再对 `output/zotero.rtf` 做一次 **RTF Scan**，然后在 Zotero 里换引用样式。不点插件，不生成 EndNote 域。
+
+### 4. 边界与报告
 
 - 不删除、合并重复或批量改用户库
 - 报告 `papers/zotero-sync.md`：模式（search/zotero/folder）、Zotero 是否在跑、进库方式（按钮/拖 RIS/未进库）、RIS 路径、未挂 PDF 的说明、键冲突

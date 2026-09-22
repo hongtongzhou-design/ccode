@@ -994,7 +994,8 @@ fn execute_one(id: &str) -> RunDonePayload {
         let profiles = crate::profiles::ProfileStore::new()?.list()?;
         // 日程的显式连接失效必须停止，不得在无人确认时换供应商/认证出站。
         let cur_settings = crate::settings::read_current_checked()?;
-        let dedicated = cur_settings.ai_profile_id;
+        let dedicated_model = cur_settings.ai_model.clone();
+        let dedicated = cur_settings.ai_profile_id.clone();
         let hidden: std::collections::HashSet<String> = cur_settings
             .hidden_profiles
             .unwrap_or_default()
@@ -1005,7 +1006,7 @@ fn execute_one(id: &str) -> RunDonePayload {
             profiles,
             pinned.clone(),
             None,
-            dedicated,
+            dedicated.clone(),
             &hidden,
         ) {
             Ok(profile) => profile,
@@ -1063,8 +1064,17 @@ fn execute_one(id: &str) -> RunDonePayload {
         if task.skill != "lit-watch" {
             crate::skills::require_skill_distributed(&task.skill, &profile.agent)?;
         }
+        let model = crate::ai::preferred_ai_model(
+            &profile.id,
+            pinned.as_deref().filter(|id| !id.trim().is_empty()),
+            None,
+            None,
+            dedicated.as_deref(),
+            dedicated_model.as_deref(),
+        );
         crate::ai::run_agent_task(
             &profile,
+            model,
             &build_task_prompt(&task.skill),
             root,
             RUN_TIMEOUT,

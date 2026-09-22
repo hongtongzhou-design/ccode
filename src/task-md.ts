@@ -1,7 +1,11 @@
 import { litSourceSectionLines } from "./task-md-sections.ts";
 import { decisionPolicyBlock } from "./step-decisions.ts";
 import { RESOURCE_TYPE_LABELS } from "./pipeline-presets.ts";
-import { effectiveProjectRules } from "./project-context.ts";
+import {
+  effectiveProjectRules,
+  isSettingPlaceholder,
+  uniqueRuleLines,
+} from "./project-context.ts";
 import { stripOptionalTitlePrefix } from "./step-flow.ts";
 import type {
   ArtifactEntryDto,
@@ -32,6 +36,17 @@ export function renderTaskMd(
   if (globals.length > 0) {
     lines.push("## 项目规则", ...globals.map((x) => `- ${x}`), "");
   }
+  const pending = uniqueRuleLines(cfg.settings ?? []).filter((line) =>
+    isSettingPlaceholder(line),
+  );
+  if (pending.length > 0) {
+    lines.push(
+      "## 待确认的全局设定",
+      ...pending.map((line) => `- ${line}`),
+      "这些还没有由人确定。先逐项问人，说明括号里可以怎么填。人确定一项后，把 .ccode/project.toml 的 settings 里对应那一行改成「名称：答案」，再按答案做。确定之前不得把括号里的提示当成已经决定的口径，也不得写进正文。",
+      "",
+    );
+  }
   const litLines = litSourceSectionLines(cfg.litSource);
   if (litLines) {
     lines.push(...litLines, "");
@@ -60,6 +75,18 @@ export function renderTaskMd(
       ...optionalInputs.map((input) => `- 可选：${input}`),
       ...anyOfInputs.map((group) => `- 任一：${group.join(" 或 ")}`),
       "按上述规则读取上游产物或项目资源；必需输入缺失时先在 .ccode/help-wanted.md 说明，不要猜测替代输入；可选输入缺失可继续，任一组满足一项即可。",
+      "",
+    );
+  }
+  const watched = [...inputs, ...optionalInputs, ...anyOfInputs.flat()];
+  if (
+    watched.some((path) =>
+      /(?:^|\/)(?:gap-analysis|proposal|design)\.md$/.test(path.replace(/\\/g, "/")),
+    )
+  ) {
+    lines.push(
+      "## 已批准范围",
+      "若上游有「## 已批准问题与范围」或「## 已批准设计」，只按其中状态为已批准的句子执行。没有该节，或状态不是已批准，候选问题与候选假设保持候选，不得写成已经确定。",
       "",
     );
   }

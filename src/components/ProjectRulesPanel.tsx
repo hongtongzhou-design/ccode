@@ -4,8 +4,10 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { File, Folder, Plus, Search, X } from "lucide-react";
 import {
   effectiveProjectRules,
+  isSettingPlaceholder,
   projectShowsProtectedPaths,
   projectUsesSkillPool,
+  uniqueRuleLines,
 } from "../project-context";
 import {
   pathIsProtected,
@@ -79,11 +81,15 @@ export default function ProjectRulesPanel({
       });
       listed = read.config;
       setConfig(read.config);
+      const saved = uniqueRuleLines(read.config.settings ?? []);
       setRulesDraft(
-        effectiveProjectRules(
-          read.config.settings,
-          workMode ?? read.config.workMode,
-          read.config.rulesOwned,
+        (saved.length
+          ? saved
+          : effectiveProjectRules(
+              read.config.settings,
+              workMode ?? read.config.workMode,
+              read.config.rulesOwned,
+            )
         ).join("\n"),
       );
       nextProtected = read.config.protectedPaths ?? [];
@@ -296,6 +302,11 @@ export default function ProjectRulesPanel({
             placeholder={RULE_PLACEHOLDER[mode]}
             aria-label="项目规则"
           />
+          {rulesDraft.split("\n").some((line) => isSettingPlaceholder(line)) && (
+            <p className="text-xs text-l2">
+              带括号的还没定。把括号换成你的答案，或在步骤上点「跟 AI 商量一下」，它会逐项问你，确定后改这一行。
+            </p>
+          )}
           {showProtect && (
             <div className="pt-2">
               <button

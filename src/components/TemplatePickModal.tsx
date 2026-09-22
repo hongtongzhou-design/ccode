@@ -24,8 +24,8 @@ import { Modal } from "./Modal";
  *
  * v3.90 第二屏「全局设定」：模板带 projectSettings（贯穿全程的决定）时，
  * 选中模板先进入填写屏——注册当下正是人最有耐心的时刻，只预填空答案等人
- * 自己去项目设置抽屉里发现，等于没引导（用户实测反馈）。全部可留空跳过，
- * 跳过则不写空表格，之后在项目规则里补。
+ * 自己去项目设置抽屉里发现，等于没引导（用户实测反馈）。全部可留空跳过。
+ * 留空仍写入「名称：（提示）」占位，人在项目设置的规则里改，或让「跟 AI 商量一下」逐项问完再改。占位不进 TASK.md。
  * 2026-09-14：设定屏只填全局设定。稿件载体问在会换正式稿的步骤；库交付/Origin/Blender 问在用得上的那一步。
  */
 export default function TemplatePickModal({
@@ -291,7 +291,7 @@ export default function TemplatePickModal({
              在用得上的那一步问，不挡在创建屏。 */
           <>
             <p className="mb-4 text-xs text-l3">
-              这些设定会贯穿后续研究流程，并在每次开工时写入 TASK.md。暂时不确定的可以留空，之后在项目设置中补充。
+              这些设定会贯穿后续研究流程。填了的下次开工会写进任务书。留空也会在项目设置的规则里留出「综述角度：（…）」这样的空位，你可以把括号换成自己的答案，或稍后让 AI 逐项问你。
             </p>
             <div className="space-y-2.5">
               {settingsTpl.projectSettings!.map((line, i) => {
@@ -338,7 +338,7 @@ export default function TemplatePickModal({
                   type="button"
                   disabled={busy !== null}
                   onClick={() => void apply(settingsTpl)}
-                  title="按模板原样预填，之后可在项目设置中补充"
+                  title="空着的项会留在项目设置的规则里，带括号提示"
                   className={`${secondaryActionClass} disabled:opacity-50`}
                 >
                   暂不填写，稍后补充

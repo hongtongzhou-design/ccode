@@ -99,6 +99,7 @@ const KIND_BY_WORKSPACE: Record<string, StepReviewKind> = {
   "exp-design": "files",
   "exp-run": "acceptance",
   "exp-analysis": "acceptance",
+  "paper-outline": "files",
   "paper-draft": "files",
   "research-paper-polish": "files",
   "data-inspect": "files",

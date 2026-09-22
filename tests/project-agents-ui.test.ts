@@ -182,15 +182,59 @@ test("连接菜单分行显示并保持原有选择、回退和保存范围", as
     assert.equal(view.host.querySelector('[role="listbox"]'), null);
     assert.equal(trigger.querySelector(".font-medium")!.textContent, "科研 · 精读");
     assert.deepEqual(view.calls, [{
-      command: "set_project_default_profile", args: { projectRoot: "/project", agent: "codex", profileId: "codex-b" },
+      command: "set_project_default_profile",
+      args: {
+        projectRoot: "/project",
+        agent: "codex",
+        profileId: "codex-b",
+        model: "gpt-6-astra-review",
+      },
     }]);
     assert.equal(view.changes.at(-1)!.defaultAgent, "codex");
     assert.deepEqual(view.changes.at(-1)!.defaultProfiles, { codex: "codex-b", gemini: "gemini-a" });
+    assert.deepEqual(view.changes.at(-1)!.defaultModels, { codex: "gpt-6-astra-review" });
     await view.click("更换 Gemini CLI 的项目连接");
     assert.equal(view.host.querySelectorAll('[role="option"]').length, 1, "单连接仍能打开菜单");
     await view.click("去连接页添加");
     assert.deepEqual(view.pages, ["profiles"]);
     assert.equal(view.calls.length, 1);
+  } finally {
+    await view.close();
+  }
+});
+
+test("同一条连接的其他模型可以点选，不再只留第一个", async () => {
+  const view = await renderView({
+    profiles: profiles.map((profile) =>
+      profile.id === "grok-a"
+        ? { ...profile, name: "Test", models: ["deepseek-v4-flash-0731", "deepseek-v4.1-flash"] }
+        : profile,
+    ),
+    project: { defaultProfiles: { grok: "grok-a" }, defaultModels: { grok: "deepseek-v4-flash-0731" } },
+  });
+  try {
+    const trigger = view.button("更换 Grok Build 的项目连接");
+    assert.match(trigger.textContent!, /deepseek-v4-flash-0731/);
+    await view.click("更换 Grok Build 的项目连接");
+    const items = Array.from(view.host.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+    assert.deepEqual(items.map((item) => item.querySelector(".text-l3")!.textContent), [
+      "deepseek-v4-flash-0731",
+      "deepseek-v4.1-flash",
+    ]);
+    assert.equal(items[0].getAttribute("aria-selected"), "true");
+    assert.equal(items[1].getAttribute("aria-selected"), "false");
+    await view.act(async () => items[1].click());
+    assert.equal(trigger.querySelector(".text-l3")!.textContent, "deepseek-v4.1-flash");
+    assert.deepEqual(view.calls, [{
+      command: "set_project_default_profile",
+      args: {
+        projectRoot: "/project",
+        agent: "grok",
+        profileId: "grok-a",
+        model: "deepseek-v4.1-flash",
+      },
+    }]);
+    assert.deepEqual(view.changes.at(-1)!.defaultModels, { grok: "deepseek-v4.1-flash" });
   } finally {
     await view.close();
   }

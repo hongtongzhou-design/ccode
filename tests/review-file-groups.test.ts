@@ -16,6 +16,7 @@ test("精读与写作改动按笔记/稿件/引文分组", () => {
   assert.equal(deliveryFileGroup("outline.md"), "manuscript");
   assert.equal(deliveryFileGroup("manuscript/draft.md"), "manuscript");
   assert.equal(deliveryFileGroup("manuscript/_quarto.yml"), "machine");
+  assert.equal(deliveryFileGroup("manuscript/ieee.csl"), "machine");
   assert.equal(deliveryFileGroup("manuscript/.gitignore"), "machine");
   assert.equal(deliveryFileGroup("manuscript/screening.md"), "other");
   assert.equal(deliveryFileGroup("output/site_libs/bootstrap.css"), "machine");

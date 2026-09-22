@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import {
   buildProjectAgentRoster,
   currentProfileLine,
+  projectAgentLaunch,
+  projectAgentPrefs,
   projectAgentsEmptyWorkHint,
   projectAgentsHint,
-  projectAgentLaunch,
   projectBoundProfileId,
+  resolveProfileModel,
   resolvedTaskAgentId,
 } from "../src/project-agents.ts";
 import { declaredTaskKindsForMode, taskStatusLabel } from "../src/project-tasks.ts";
@@ -226,6 +228,65 @@ test("projectAgentLaunch uses the Agents roster, not last launch", () => {
   });
   assert.equal(projectAgentLaunch(profiles, "codex", { codex: "gone" })?.profileId, "p-codex");
   assert.equal(projectAgentLaunch(profiles, "gemini", {}), null);
+});
+
+test("a connection lists every model, and the project pick wins over the first", () => {
+  const { rows } = buildProjectAgentRoster({
+    catalog,
+    profiles: [
+      {
+        id: "p-grok",
+        agent: "codex",
+        name: "Test",
+        models: ["deepseek-v4-flash-0731", "deepseek-v4.1-flash"],
+      },
+    ],
+    hiddenProfileIds: [],
+    defaultAgent: "codex",
+    defaultProfiles: { codex: "p-grok" },
+    defaultModels: { codex: "deepseek-v4.1-flash" },
+    tasks: [],
+    taskKinds: declaredTaskKindsForMode("coding"),
+  });
+  assert.deepEqual(
+    rows[0].profiles.map((profile) => profile.model),
+    ["deepseek-v4-flash-0731", "deepseek-v4.1-flash"],
+  );
+  assert.equal(rows[0].defaultModelId, "deepseek-v4.1-flash");
+  assert.equal(
+    currentProfileLine(rows[0]),
+    "Test · deepseek-v4.1-flash",
+  );
+  const launch = projectAgentLaunch(
+    [{ id: "p-grok", agent: "codex", models: ["deepseek-v4-flash-0731", "deepseek-v4.1-flash"] }],
+    "codex",
+    { codex: "p-grok" },
+    { codex: "deepseek-v4.1-flash" },
+  );
+  assert.equal(launch?.model, "deepseek-v4.1-flash");
+  assert.equal(
+    projectAgentLaunch(
+      [{ id: "p-grok", agent: "codex", models: ["deepseek-v4-flash-0731", "deepseek-v4.1-flash"] }],
+      "codex",
+      { codex: "p-grok" },
+      { codex: "gone" },
+    )?.model,
+    "deepseek-v4-flash-0731",
+  );
+  assert.equal(resolveProfileModel(["a", "b"], "b"), "b");
+  assert.equal(resolveProfileModel(["a"], "gone"), "a");
+  assert.deepEqual(
+    projectAgentPrefs({
+      defaultAgent: "codex",
+      defaultProfiles: { codex: "p-grok" },
+      defaultModels: { codex: "deepseek-v4.1-flash" },
+    }),
+    {
+      preferredAgent: "codex",
+      preferredProfile: "p-grok",
+      preferredModel: "deepseek-v4.1-flash",
+    },
+  );
 });
 
 test("roster keeps connection names and models separate, including names with separators", () => {

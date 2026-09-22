@@ -1,7 +1,7 @@
 import type { ProjectStepDto } from "./types";
 
 export interface ResearchTools {
-  libraryExport: "none" | "endnote";
+  libraryExport: "none" | "zotero" | "endnote";
   plotting: "python" | "origin";
   illustration: "none" | "blender";
   manuscript: "markdown" | "latex" | "word";
@@ -10,7 +10,7 @@ export const DEFAULT_RESEARCH_TOOLS: ResearchTools = {
   libraryExport: "none", plotting: "python", illustration: "none", manuscript: "markdown",
 };
 export const RESEARCH_TOOL_FIELDS = [
-  { key: "libraryExport", label: "EndNote 交差", options: [["none", "不需要"], ["endnote", "EndNote XML / RIS"]] },
+  { key: "libraryExport", label: "文献库", options: [["none", "不使用"], ["zotero", "Zotero"], ["endnote", "EndNote"]] },
   { key: "plotting", label: "数值图", options: [["python", "Python"], ["origin", "Origin（Windows）"]] },
   { key: "illustration", label: "结构 / 装置示意", options: [["none", "不需要"], ["blender", "Blender"]] },
   { key: "manuscript", label: "稿件载体", options: [["markdown", "Markdown / Quarto"], ["latex", "LaTeX（原生源码）"], ["word", "已有 Word（人工插件验收）"]] },
@@ -35,7 +35,7 @@ function stepTakesReading(step: Pick<ProjectStepDto, "skills">): boolean {
   return step.skills.some((s) => s === "lit-search" || s === "lit-notes");
 }
 function stepTakesLibraryExport(step: Pick<ProjectStepDto, "skills" | "workspaceName">): boolean {
-  // EndNote XML 挂在有完整 bib 的精读步；没有精读的流程才挂格式适配 / 投稿材料。
+  // 文献库是 Zotero 与 EndNote 的同一种选择，挂在有定稿交接或精读的流程上。
   if (step.skills.includes("lit-notes")) return true;
   return step.workspaceName === "submission-materials"
     || step.workspaceName === "journal-format"
@@ -53,6 +53,15 @@ function stepTakesPlotting(step: Pick<ProjectStepDto, "skills">): boolean {
 }
 function stepTakesIllustration(step: Pick<ProjectStepDto, "workspaceName">): boolean {
   return step.workspaceName === "methodology" || step.workspaceName === "exp-design";
+}
+function stepTakesEndnoteCite(step: Pick<ProjectStepDto, "workspaceName">): boolean {
+  const name = step.workspaceName ?? "";
+  return (
+    name === "polish" ||
+    name === "research-paper-polish" ||
+    name === "thesis-final" ||
+    name === "journal-format"
+  );
 }
 function stepTakesManuscript(step: Pick<ProjectStepDto, "name" | "workspaceName">): boolean {
   return /论文|初稿|定稿|格式|投稿|回复/.test(step.name)
@@ -139,8 +148,11 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
   const figures = stepTakesPlotting(step);
   const illustration = stepTakesIllustration(step);
   const lit = litSource.trim();
-  if (lit === "zotero" && reading) {
-    mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：进库用清单「同步到 Zotero」或拖 to-fetch.ris（原生 RIS/BibTeX）。本地 API 只读，不要 POST 假装写库。PDF 直接拖进 Zotero，一般会按元数据对上已有条目。出库用「从 Zotero 导入」。已有主 bib 键不改。");
+  if (reading && (lit === "zotero" || tools.libraryExport === "zotero")) {
+    mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：导入用「从 Zotero 导入」（只读，不 POST）。用户若把 PDF 拖进 Zotero，它会检索元数据并生成条目，拖完再导入。未使用 Zotero 的项目不要走这条，题录直接写入 references.bib。同步用待获取清单「同步到 Zotero」或拖 to-fetch.ris。已有主 bib 键不改。交付在定稿，交 output/zotero.rtf。");
+  }
+  if (reading && (lit === "endnote" || tools.libraryExport === "endnote")) {
+    mount("endnote-bridge", ["papers/endnote-import.ris"], "EndNote：导入是把导出的 XML/RIS 放进 papers/imports/，不读 .enl。同步用待获取清单「同步到 EndNote」，从 references.bib 生成导入文件。交付在定稿，交 output/endnote.docx。");
   }
   const outputRoot = artifactDir.replace(/\\/g, "/").replace(/\/+$/, "") || "artifacts";
   if ((tools.plotting === "origin" || tools.illustration === "blender") && (outputRoot.startsWith("/") || outputRoot.includes(":") || outputRoot.split("/").some((part) => !part || part === "." || part === ".."))) {
@@ -152,10 +164,35 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
   if (tools.illustration === "blender" && illustration) {
     mount("blender-research", ["analysis/build_scene.py", "figures/blender-manifest.json", "figures/blender-schematic.png", `${outputRoot}/blender/scene.blend`], `Blender：仅用于本步明确的结构/装置/机制示意；不把示意冒充实验观测。先确认真实尺寸、单位、来源/许可与不按比例部分。MCP 无 OS 沙箱，使用新建受控工程；交付脚本、${outputRoot}/blender/scene.blend、figures/blender-schematic.png 和 manifest，后台重建失败非零退出。`, "核对 Blender 结构、比例、来源和示意标注");
   }
+  if ((tools.libraryExport === "endnote" || tools.libraryExport === "zotero") && stepTakesEndnoteCite(step) && tools.manuscript !== "latex") {
+    const md =
+      step.workspaceName === "research-paper-polish"
+        ? "manuscript/paper-final.md"
+        : step.workspaceName === "thesis-final"
+          ? "manuscript/thesis-final.md"
+          : step.workspaceName === "journal-format"
+            ? "submission/formatted.md"
+            : "manuscript/review-final.md";
+    if (tools.libraryExport === "zotero") {
+      mount(
+        "zotero-sync",
+        ["output/zotero.rtf", "papers/zotero-import.ris"],
+        `Zotero 交稿：用技能 scripts/zotero_rtf.py 从 ${md} 的 [@键] 写出 output/zotero.rtf 和 papers/zotero-import.ris。未匹配键不交稿。不点 Zotero 插件。库里还没有这些文献时，先导入这份 RIS；然后对 zotero.rtf 做一次 RTF Scan，再换引用样式。`,
+        "导入 RIS 并对 Zotero 稿做一次 RTF Scan",
+      );
+    } else {
+      mount(
+        "endnote-bridge",
+        ["output/endnote.docx", "papers/endnote-cite-report.md"],
+        `EndNote 交稿：用技能 scripts/cite_docx.py 从 ${md} 的 [@键] 写出 output/endnote.docx（真正的 ADDIN EN.CITE，带 traveling library）。未匹配键只写 papers/endnote-cite-report.md、不交 docx。不覆盖 manuscript/source.docx，不点 Word 插件。人打开域稿后 Update Citations and Bibliography，再换 Output Style。`,
+        "打开 EndNote 域稿并 Update 一次",
+      );
+    }
+  }
   if (tools.manuscript !== "markdown" && /论文|初稿|定稿|格式|投稿|回复/.test(step.name)) {
     notes.push(tools.manuscript === "latex"
       ? "稿件以 LaTeX 原生源码为最终载体：已有稿先保留来源与版本，本步 md 是内容/审查交付；定稿须通过 LaTeX 模板编译并交付源码包与图源。不得把 Markdown 的完成状态当成 TeX 版面验收。"
-      : "稿件以已有 Word 原件为最终载体：本步 Markdown/Quarto 输出只作建议稿或审查材料，不覆盖 source.docx，不生成伪 EndNote/Zotero 引文域。由人将变更应用至原件、刷新引用插件并核对最终 PDF 后才提交。");
+      : "稿件以已有 Word 原件为最终载体：本步 Markdown/Quarto 输出只作建议稿或审查材料，不覆盖 source.docx。EndNote 域稿另写 output/endnote.docx，不往 source.docx 里塞假域。由人将变更应用至原件、刷新引用插件并核对最终 PDF 后才提交。");
   }
   // 原生稿件分支有自己的正式交付；不把适配说明的 Quarto 输出当投稿稿。
   const revision = /^rebuttal-r(\d+)$/.exec(step.workspaceName ?? "");

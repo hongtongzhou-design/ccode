@@ -87,6 +87,38 @@ pub(crate) fn resolve_profile_from(
         .ok_or_else(|| "请先在配置页创建并保存一个 profile".to_string())
 }
 
+/// 这次解析落到哪一档，就用哪一档记下的模型。
+/// 显式传入的 profile（调用方自己选的）不带模型，回落该配置的第一个。
+/// 功能专属命中时只用功能自己的模型，不借用全局专用的模型。
+pub(crate) fn preferred_ai_model<'a>(
+    resolved_id: &str,
+    explicit_id: Option<&str>,
+    fn_id: Option<&str>,
+    fn_model: Option<&'a str>,
+    dedicated_id: Option<&str>,
+    dedicated_model: Option<&'a str>,
+) -> Option<&'a str> {
+    if explicit_id.is_some_and(|id| !id.trim().is_empty()) {
+        return None;
+    }
+    if fn_id.is_some_and(|id| id == resolved_id) {
+        return fn_model.filter(|model| !model.trim().is_empty());
+    }
+    if dedicated_id.is_some_and(|id| id == resolved_id) {
+        return dedicated_model.filter(|model| !model.trim().is_empty());
+    }
+    None
+}
+
+/// preferred 还在这份配置的模型列表里就用它，否则用第一个。
+pub(crate) fn pick_listed_model(models: &[String], preferred: Option<&str>) -> Option<String> {
+    preferred
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && models.iter().any(|item| item == model))
+        .map(str::to_string)
+        .or_else(|| models.first().cloned())
+}
+
 /// 各 agent 的非交互调用参数（matrix「关键启动参数」列；codex 的 provider -c 参数在 plan.args 里）
 fn headless_args(agent: &str, prompt: &str) -> Vec<String> {
     match agent {
@@ -322,23 +354,39 @@ pub(crate) fn ai_prompt_impl(
 ) -> Result<String, String> {
     // 设置页的按功能/全局专用 profile 作为显式 id 之外的默认（每次现读，改动即时生效）
     let settings = crate::settings::read_current_checked()?;
+    let explicit_id = profile_id.clone().filter(|v| !v.trim().is_empty());
     let fn_profile = fn_key.and_then(|k| {
         settings
             .ai_profiles
             .as_ref()
             .and_then(|m| m.get(k).cloned())
     });
+    let fn_model = fn_key.and_then(|k| {
+        settings
+            .ai_profile_models
+            .as_ref()
+            .and_then(|m| m.get(k))
+            .map(String::as_str)
+    });
     let profile = resolve_profile_from(
         profiles,
         profile_id,
-        fn_profile,
-        settings.ai_profile_id,
+        fn_profile.clone(),
+        settings.ai_profile_id.clone(),
         &settings
             .hidden_profiles
             .unwrap_or_default()
             .into_iter()
             .collect(),
     )?;
+    let preferred = preferred_ai_model(
+        &profile.id,
+        explicit_id.as_deref(),
+        fn_profile.as_deref(),
+        fn_model,
+        settings.ai_profile_id.as_deref(),
+        settings.ai_model.as_deref(),
+    );
     let binary = agents::binary_for(&profile.agent)
         .ok_or_else(|| format!("profile 所属 agent 不支持无头调用: {}", profile.agent))?;
     let binary_path = agents::resolve_binary(binary)
@@ -347,7 +395,7 @@ pub(crate) fn ai_prompt_impl(
     let key = profiles::get_key_for_profile(&profile)?;
     agents::ensure_launch_credentials(&profile, key.as_deref())?;
     let mut profile = profile;
-    let selected = profile.models.first().cloned();
+    let selected = pick_listed_model(&profile.models, preferred);
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
     agents::validate_launch_compatibility(&profile, selected.as_deref())?;
     let plan = agents::launch_plan(&profile, key, selected.as_deref());
@@ -494,6 +542,7 @@ pub(crate) fn compose_headless_args(
 
 pub(crate) fn run_agent_task(
     profile: &Profile,
+    model: Option<&str>,
     prompt: &str,
     cwd: &std::path::Path,
     timeout: Duration,
@@ -509,7 +558,7 @@ pub(crate) fn run_agent_task(
     let key = profiles::get_key_for_profile(&profile)?;
     agents::ensure_launch_credentials(&profile, key.as_deref())?;
     let mut profile = profile.clone();
-    let selected = profile.models.first().cloned();
+    let selected = pick_listed_model(&profile.models, model);
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
     agents::validate_launch_compatibility(&profile, selected.as_deref())?;
     let plan = agents::launch_plan(&profile, key, selected.as_deref());
@@ -1703,6 +1752,48 @@ mod tests {
             ["a".to_string(), "b".to_string()].into_iter().collect();
         let p = resolve_profile_from(profiles, None, None, None, &all_hidden).unwrap();
         assert_eq!(p.id, "b");
+    }
+
+    #[test]
+    fn listed_model_prefers_the_slot_that_actually_resolved() {
+        let models = vec!["glm-5.3".into(), "glm-5.3-flashx".into()];
+        assert_eq!(
+            pick_listed_model(&models, Some("glm-5.3-flashx")).as_deref(),
+            Some("glm-5.3-flashx")
+        );
+        assert_eq!(
+            pick_listed_model(&models, Some("missing")).as_deref(),
+            Some("glm-5.3"),
+            "选中的模型已从配置里拿掉时回落第一个"
+        );
+        assert_eq!(pick_listed_model(&models, None).as_deref(), Some("glm-5.3"));
+        // 功能专属命中：用功能自己的模型，不用全局专用的
+        assert_eq!(
+            preferred_ai_model("p", None, Some("p"), Some("flash"), Some("p"), Some("big")),
+            Some("flash")
+        );
+        // 功能没单独选：落到全局专用，用专用模型
+        assert_eq!(
+            preferred_ai_model("p", None, None, None, Some("p"), Some("flash")),
+            Some("flash")
+        );
+        // 调用方显式指定配置时不套设置里的模型
+        assert_eq!(
+            preferred_ai_model("p", Some("p"), None, None, Some("p"), Some("flash")),
+            None
+        );
+        // 最近使用回落：没有记下的模型
+        assert_eq!(
+            preferred_ai_model(
+                "other",
+                None,
+                Some("gone"),
+                Some("flash"),
+                Some("p"),
+                Some("big")
+            ),
+            None
+        );
     }
 
     #[test]

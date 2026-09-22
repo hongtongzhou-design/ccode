@@ -42,12 +42,45 @@ test("Blender 只挂研究设计/结构示意，不替代统计图；EndNote 交
   assert.ok(steps.find((s) => s.name === "实验设计")!.skills.includes("blender-research"));
   assert.ok(!steps.find((s) => s.name === "结果分析")!.skills.includes("blender-research"));
   assert.ok(!withResearchTools(template("review").steps.find((s) => s.workspaceName === "outline")!, tools).skills.includes("blender-research"));
-  assert.ok(!steps[0].skills.includes("endnote-bridge"));
+  assert.ok(steps[0].skills.includes("endnote-bridge"));
+  assert.equal(steps[0].expectedArtifacts.includes("output/endnote.docx"), false);
   const notes = steps.find((s) => s.skills.includes("lit-notes"))!;
-  assert.equal(notes.skills.includes("endnote-bridge"), false);
-  assert.equal(notes.expectedArtifacts.includes("papers/endnote-import.xml"), false);
-  assert.equal((notes.humanTasks ?? []).some((h) => h.title.includes("EndNote")), false);
-  assert.ok(!steps.at(-1)!.skills.includes("endnote-bridge"));
+  assert.ok(notes.skills.includes("endnote-bridge"));
+  assert.ok(notes.expectedArtifacts.includes("papers/endnote-import.ris"));
+  assert.equal(notes.expectedArtifacts.includes("output/endnote.docx"), false);
+  const paperPolish = steps.find((s) => s.workspaceName === "research-paper-polish")!;
+  assert.ok(paperPolish.skills.includes("endnote-bridge"));
+  assert.ok(paperPolish.expectedArtifacts.includes("output/endnote.docx"));
+  assert.ok(paperPolish.expectedArtifacts.includes("papers/endnote-cite-report.md"));
+  assert.ok((paperPolish.humanTasks ?? []).some((h) => h.title === "打开 EndNote 域稿并 Update 一次"));
+  const reviewDraft = withResearchTools(template("review").steps.find((s) => s.workspaceName === "draft")!, tools);
+  assert.ok(!reviewDraft.skills.includes("endnote-bridge"));
+  const reviewPolish = withResearchTools(template("review").steps.find((s) => s.workspaceName === "polish")!, tools);
+  assert.ok(reviewPolish.skills.includes("endnote-bridge"));
+  const latexPolish = withResearchTools(template("review").steps.find((s) => s.workspaceName === "polish")!, {
+    ...tools,
+    manuscript: "latex",
+  });
+  assert.ok(!latexPolish.skills.includes("endnote-bridge"));
+});
+
+test("Zotero 与 EndNote 是同一种文献库选择，定稿只交一份", () => {
+  const review = template("review").steps;
+  const polish = review.find((s) => s.workspaceName === "polish")!;
+  const notes = review.find((s) => s.workspaceName === "lit-notes")!;
+  const zotero = withResearchTools(polish, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "zotero" });
+  assert.ok(zotero.expectedArtifacts.includes("output/zotero.rtf"));
+  assert.ok(zotero.skills.includes("zotero-sync"));
+  assert.equal(zotero.expectedArtifacts.includes("output/endnote.docx"), false);
+  const endnote = withResearchTools(polish, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "endnote" });
+  assert.ok(endnote.expectedArtifacts.includes("output/endnote.docx"));
+  assert.equal(endnote.expectedArtifacts.includes("output/zotero.rtf"), false);
+  assert.equal(withResearchTools(notes, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "zotero" }).expectedArtifacts.includes("output/zotero.rtf"), false);
+  const fromZotero = withResearchTools(polish, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "endnote" }, "artifacts", "zotero");
+  assert.ok(fromZotero.expectedArtifacts.includes("output/endnote.docx"));
+  const notesEndnote = withResearchTools(notes, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "endnote" });
+  assert.ok(notesEndnote.skills.includes("endnote-bridge"));
+  assert.match(notesEndnote.brief, /同步到 EndNote/);
 });
 
 test("Zotero 同步技能跟 lit_source，不跟已废除的 literature 设置", () => {

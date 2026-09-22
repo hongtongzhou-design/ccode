@@ -28,6 +28,7 @@ import {
 } from "./PageFrame";
 import { Modal } from "./Modal";
 import { agentBrand } from "../agent-colors";
+import { resolveProfileModel } from "../project-agents";
 
 import { confirmDialog } from "./ConfirmDialog";
 import ResearchReproductionPanel from "./ResearchReproductionPanel";
@@ -316,7 +317,12 @@ export default function ProjectUserTasksView({
         title: task.name,
         agentId: profile.agent,
         profileId: profile.id,
-        model: profile.models[0] ?? "",
+        model: resolveProfileModel(
+          profile.models,
+          profile.id === project.defaultProfiles?.[profile.agent]
+            ? project.defaultModels?.[profile.agent]
+            : "",
+        ),
         resume:
           retrying?.sessionId && retrying.agent === profile.agent
             ? { agentId: retrying.agent, sessionId: retrying.sessionId }

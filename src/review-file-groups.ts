@@ -44,7 +44,8 @@ export function isManuscriptScaffold(path: string): boolean {
     base === ".gitignore" ||
     base === ".gitattributes" ||
     base === "_quarto.yml" ||
-    base === "_quarto.yaml"
+    base === "_quarto.yaml" ||
+    base.endsWith(".csl")
   ) {
     return true;
   }

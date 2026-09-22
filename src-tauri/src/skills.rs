@@ -296,6 +296,11 @@ static BUILTIN_SUPPORT: &[(&str, &str, &str)] = &[
         include_str!("../resources/skills/endnote-bridge/scripts/bridge.py"),
     ),
     (
+        "endnote-bridge",
+        "scripts/cite_docx.py",
+        include_str!("../resources/skills/endnote-bridge/scripts/cite_docx.py"),
+    ),
+    (
         "origin-plot",
         "scripts/plot_origin.py",
         include_str!("../resources/skills/origin-plot/scripts/plot_origin.py"),
@@ -314,6 +319,31 @@ static BUILTIN_SUPPORT: &[(&str, &str, &str)] = &[
         "review-figures",
         "scripts/assemble_panels.py",
         include_str!("../resources/skills/review-figures/scripts/assemble_panels.py"),
+    ),
+    (
+        "quarto-render",
+        "ieee.csl",
+        include_str!("../resources/skills/quarto-render/ieee.csl"),
+    ),
+    (
+        "quarto-render",
+        "author-date.csl",
+        include_str!("../resources/skills/quarto-render/author-date.csl"),
+    ),
+    (
+        "quarto-render",
+        "scripts/citation_style.py",
+        include_str!("../resources/skills/quarto-render/scripts/citation_style.py"),
+    ),
+    (
+        "endnote-bridge",
+        "scripts/sync_docx.py",
+        include_str!("../resources/skills/endnote-bridge/scripts/sync_docx.py"),
+    ),
+    (
+        "zotero-sync",
+        "scripts/zotero_rtf.py",
+        include_str!("../resources/skills/zotero-sync/scripts/zotero_rtf.py"),
     ),
 ];
 
@@ -3008,6 +3038,7 @@ mod tests {
         seed_builtin_skills_impl(&fx.store).unwrap();
         let name = "endnote-bridge";
         let script = fx.store.skill_dir(name).join("scripts/bridge.py");
+        assert!(fx.store.skill_dir("quarto-render").join("ieee.csl").is_file());
         assert!(script.is_file());
         fs::write(&script, "user changed script").unwrap();
         let other = fx.store.skill_dir(name).join("my-note.txt");

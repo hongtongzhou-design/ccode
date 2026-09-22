@@ -173,9 +173,16 @@ const LIT_SOURCES: {
     focus: "zotero",
   },
   {
+    id: "endnote",
+    label: "我有 EndNote 库",
+    hint: "把 EndNote 导出的 XML 或 RIS 放进项目，开工时解析。不读 .enl。",
+    action: "去放入 EndNote 题录 →",
+    focus: "files",
+  },
+  {
     id: "folder",
     label: "我已有 PDF / 题录",
-    hint: "把 PDF 或 RIS/XML 题录放进项目，开工时自动解析。",
+    hint: "PDF 或 RIS/XML 放进项目，开工时写成题录。不必安装 Zotero 或 EndNote。",
     action: "去放入题录 / PDF →",
     focus: "files",
   },
@@ -214,6 +221,7 @@ export default function StepFlow({
   discussResume = null,
   discussContent,
   litSource,
+  openSettings,
   onOpenResources,
   onSetLitSource,
   litBusy = false,
@@ -269,6 +277,8 @@ export default function StepFlow({
   /** 项目的文献来源（project.toml lit_source）：zotero/folder 时，落点在 papers/ 的人工事项
    *  不该再劝人往 papers/ 里塞 PDF——那会造出第二个文献存放处，与已有库各自漂移 */
   litSource?: string;
+  /** 项目规则里还没填实的全局设定（「综述角度：（…）」）。商量开场要逐项问。 */
+  openSettings?: string[];
   /** 展开项目的「文献与数据」面板：文献类交付统一引到那里，不在每个事项行复制入口。
    *  focus = 落地后高亮哪个进料入口（按所选文献来源给） */
   onOpenResources?: (focus?: "zotero" | "files") => void;
@@ -323,7 +333,7 @@ export default function StepFlow({
   /** 已经有文献库的项目：落点在 papers/ 的事项不该再劝人把 PDF 往项目里塞——
    *  文献的唯一出处是那个库，往 papers/ 另放一份之后两边各自漂移。
    *  只影响文案与按钮，不改事项本身的完成口径（落点检测照旧） */
-  const hasLibrary = litSource === "zotero" || litSource === "folder";
+  const hasLibrary = litSource === "zotero" || litSource === "endnote" || litSource === "folder";
   /** 落点在 papers/ 的事项 = 文献类交付，统一引到「文献与数据」 */
   const isPapersTarget = (target: string | undefined) =>
     (target ?? "").replace(/\\/g, "/").startsWith("papers/");
@@ -875,8 +885,11 @@ export default function StepFlow({
               `我们一起敲定「${step.name}」这一步的任务书（${draft.relPath}）。` +
               `它现在的内容就是 TASK.md 的默认拼装（步骤简报、预期产物等都在里面），定稿后会原样落成工作区的 TASK.md。` +
               `先通读一遍，把拿不准的点（范围、口径、标准等）逐个问我，按我的回答直接修改这份文件。` +
-              `只允许新建/修改这一个文件，其他文件一律不要动。` +
+              `只允许新建/修改这一个文件，以及下面点名的项目规则行。其他文件一律不要动。` +
               `讨论中没定下来的问题，记到这份任务书的「## 待拍板」小节。` +
+              ((openSettings ?? []).filter((line) => line.trim()).length
+                ? `项目规则里还有没定的全局设定。开场先逐项问我，说明括号里的说法。我确定一项，就把 .ccode/project.toml 的 settings 里对应那一行从「名称：（提示）」改成「名称：我的答案」，不要改这个文件的其他内容。还没定的是：${(openSettings ?? []).filter((line) => line.trim()).join("；")}。`
+                : "") +
               (seeds.length > 0 ? `可以先从这几个问题聊起：${seeds.join("；")}` : ""),
             ...(projectLaunch ?? {}),
             autoStart: Boolean(projectLaunch?.profileId),
@@ -1032,7 +1045,7 @@ export default function StepFlow({
     pendingDecisions: decisionGaps.length,
     toolAsks: toolAskFields.map((field) => ({ key: field.key, label: field.label })),
     endnoteExport:
-      step.skills.includes("lit-notes") ||
+      (step.skills.includes("lit-notes") && step.workspaceName !== "lit-notes") ||
       step.workspaceName === "journal-format" ||
       step.workspaceName === "submission-materials" ||
       /^rebuttal-r\d+$/.test(step.workspaceName ?? ""),
@@ -1145,7 +1158,7 @@ export default function StepFlow({
                 onOpenResources?.(
                   litSource === "zotero"
                     ? "zotero"
-                    : litSource === "folder"
+                    : litSource === "folder" || litSource === "endnote"
                       ? "files"
                       : undefined,
                 )
@@ -2140,8 +2153,16 @@ export default function StepFlow({
                         </button>
                         <button
                           type="button"
+                          onClick={() => void openEndnoteImport()}
+                          title="从 references.bib 生成 RIS，交给 EndNote 导入。不要把文件拖进 EndNote 窗口。"
+                          className={`${ghostActionClass} shrink-0`}
+                        >
+                          同步到 EndNote
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => void openPapersDir()}
-                          title="打开项目 papers/。把 PDF 直接拖进 Zotero，一般会自己对上已有条目；对不上再拖到那一条上"
+                          title="打开项目 papers/。不用文献库时，PDF 留在这里，由这一步写成题录。若你用 Zotero，把 PDF 拖进去它会检索并生成条目；已有条目时一般会对上"
                           className={`${ghostActionClass} shrink-0`}
                         >
                           打开 papers/

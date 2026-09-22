@@ -103,6 +103,10 @@ test("TASK.md 项目规则不含未填的全局设定空表", () => {
   );
   assert.match(md, /不要虚构文献/);
   assert.match(md, /综述角度：聚焦某个子问题/);
-  assert.doesNotMatch(md, /答辩时间/);
-  assert.doesNotMatch(md, /领域全景/);
+  const rules = md.split("## 待确认的全局设定")[0];
+  assert.doesNotMatch(rules, /答辩时间/);
+  assert.doesNotMatch(rules, /领域全景/);
+  assert.match(md, /## 待确认的全局设定/);
+  assert.match(md, /答辩时间：（倒推各章节的截止）/);
+  assert.match(md, /先逐项问人/);
 });

@@ -219,9 +219,13 @@ pub struct AppSettingsDto {
     pub custom_theme_card_id: Option<String>,
     /// ◈ AI 功能（提交信息/摘要/PR 描述）固定使用的 profile id；None = 自动（最近使用）
     pub ai_profile_id: Option<String>,
+    /// 专用配置选中的模型。空 = 该配置 models 的第一个。不在该配置列表里时启动侧回落第一个。
+    pub ai_model: Option<String>,
     /// ◈ AI 功能按功能独立配置：键 = 功能 key（见 ai.rs FN_* 常量），值 = profile id；
     /// 某功能缺省时回落 ai_profile_id，None = 全部走默认
     pub ai_profiles: Option<BTreeMap<String, String>>,
+    /// 与 ai_profiles 同键的模型。键不在 ai_profiles 里的丢弃；空值丢弃。
+    pub ai_profile_models: Option<BTreeMap<String, String>>,
     /// 每个 agent 的默认 profile（agent id → profile id）：终端启动栏选完 agent 后预选它。
     /// 解析顺序 显式默认 > ccode.lastProfile（上次使用）> 该 agent 首个配置。
     /// 键缺失 = 没设默认，整图覆盖（同 ai_profiles 口径）。
@@ -698,6 +702,23 @@ fn write_to(path: &Path, settings: &AppSettingsDto) -> Result<(), String> {
     crate::profiles::atomic_write(path, &text)
 }
 
+/// 模型选择必须挂在还存在的功能配置上；专用配置清空时模型一并去掉。
+fn prune_ai_model_choice(settings: &mut AppSettingsDto) {
+    if settings.ai_profile_id.is_none() {
+        settings.ai_model = None;
+    }
+    let Some(mut models) = settings.ai_profile_models.take() else {
+        return;
+    };
+    let profiles = settings.ai_profiles.as_ref();
+    models.retain(|key, model| {
+        !model.trim().is_empty() && profiles.is_some_and(|map| map.contains_key(key))
+    });
+    if !models.is_empty() {
+        settings.ai_profile_models = Some(models);
+    }
+}
+
 /// 合并默认值：get_settings 永远返回完整对象；未知 theme 值回落默认
 fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
     let custom_theme = sanitize_custom_theme(s.custom_theme);
@@ -715,7 +736,7 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
             None => DEFAULT_THEME.to_string(),
         }
     };
-    AppSettingsDto {
+    let mut out = AppSettingsDto {
         terminal_font_size: s.terminal_font_size.or(Some(DEFAULT_TERMINAL_FONT_SIZE)),
         terminal_font_family: s
             .terminal_font_family
@@ -737,8 +758,10 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         custom_themes,
         custom_theme_card_id,
         ai_profile_id: s.ai_profile_id.filter(|v| !v.trim().is_empty()),
+        ai_model: s.ai_model.filter(|v| !v.trim().is_empty()),
         // 按功能配置不做默认值填充：键缺失即「跟随默认」
         ai_profiles: s.ai_profiles,
+        ai_profile_models: s.ai_profile_models,
         default_profiles: s.default_profiles,
         start_page: s.start_page.filter(|p| KNOWN_PAGES.contains(&p.as_str())),
         startup_nav_mode: s
@@ -796,7 +819,9 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         outbound_no_proxy: s.outbound_no_proxy.filter(|v| !v.trim().is_empty()),
         institutional_prefix: s.institutional_prefix.filter(|v| !v.trim().is_empty()),
         institutional_login_url: s.institutional_login_url.filter(|v| !v.trim().is_empty()),
-    }
+    };
+    prune_ai_model_choice(&mut out);
+    out
 }
 
 /// patch 语义：只覆盖传入的 Some 字段
@@ -843,6 +868,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     if patch.ai_profile_id.is_some() {
         cur.ai_profile_id = patch.ai_profile_id.filter(|v| !v.trim().is_empty());
     }
+    if patch.ai_model.is_some() {
+        cur.ai_model = patch.ai_model.filter(|v| !v.trim().is_empty());
+    }
     // 按功能配置整图覆盖（前端每次提交完整 map；空 map = 全部跟随默认）
     if patch.start_page.is_some() {
         cur.start_page = patch.start_page;
@@ -867,6 +895,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.ai_profiles.is_some() {
         cur.ai_profiles = patch.ai_profiles;
+    }
+    if patch.ai_profile_models.is_some() {
+        cur.ai_profile_models = patch.ai_profile_models;
     }
     if patch.external_terminal.is_some() {
         cur.external_terminal = patch.external_terminal;
@@ -917,6 +948,7 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
             .institutional_login_url
             .filter(|v| !v.trim().is_empty());
     }
+    prune_ai_model_choice(cur);
 }
 
 // ===== 供其他模块读取的小入口（每次都从文件读，改动即时生效） =====
@@ -935,6 +967,7 @@ fn clear_profile_refs_at(path: &Path, id: &str) {
     let mut touched = false;
     if cur.ai_profile_id.as_deref() == Some(id) {
         cur.ai_profile_id = None;
+        cur.ai_model = None;
         touched = true;
     }
     if let Some(map) = &mut cur.ai_profiles {
@@ -946,6 +979,12 @@ fn clear_profile_refs_at(path: &Path, id: &str) {
         if map.is_empty() {
             cur.ai_profiles = None;
         }
+    }
+    let model_before = cur.ai_model.clone();
+    let models_before = cur.ai_profile_models.clone();
+    prune_ai_model_choice(&mut cur);
+    if cur.ai_model != model_before || cur.ai_profile_models != models_before {
+        touched = true;
     }
     // 「全局生效」追踪同样清引用：已删 profile 不该继续顶着「全局生效」徽标
     if let Some(map) = &mut cur.active_global_profiles {
@@ -1192,9 +1231,14 @@ mod tests {
         let p = tmp();
         let mut s = AppSettingsDto::default();
         s.ai_profile_id = Some("gone".into());
+        s.ai_model = Some("glm-5.3-flashx".into());
         s.ai_profiles = Some(BTreeMap::from([
-            ("claude-code".to_string(), "gone".to_string()),
-            ("codex".to_string(), "keep".to_string()),
+            ("commit".to_string(), "gone".to_string()),
+            ("summarize".to_string(), "keep".to_string()),
+        ]));
+        s.ai_profile_models = Some(BTreeMap::from([
+            ("commit".to_string(), "flash".to_string()),
+            ("summarize".to_string(), "keep-model".to_string()),
         ]));
         s.default_profiles = Some(BTreeMap::from([
             ("claude-code".to_string(), "gone".to_string()),
@@ -1209,9 +1253,20 @@ mod tests {
         clear_profile_refs_at(&p, "gone");
         let after = read_checked(&p).unwrap();
         assert_eq!(after.ai_profile_id, None);
+        assert_eq!(after.ai_model, None, "删掉专用配置时选中的模型一起清");
         assert_eq!(
             after.ai_profiles,
-            Some(BTreeMap::from([("codex".to_string(), "keep".to_string())]))
+            Some(BTreeMap::from([(
+                "summarize".to_string(),
+                "keep".to_string()
+            )]))
+        );
+        assert_eq!(
+            after.ai_profile_models,
+            Some(BTreeMap::from([(
+                "summarize".to_string(),
+                "keep-model".to_string()
+            )]))
         );
         assert_eq!(
             after.default_profiles,
@@ -1619,6 +1674,49 @@ mod tests {
         assert_eq!(full.ai_profiles.as_ref().unwrap().len(), 1);
         assert_eq!(with_defaults(AppSettingsDto::default()).ai_profiles, None);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn ai_model_follows_the_profile_it_belongs_to() {
+        let mut cur = AppSettingsDto::default();
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                ai_profile_id: Some("p-1".into()),
+                ai_model: Some("glm-5.3-flashx".into()),
+                ai_profiles: Some(BTreeMap::from([("commit".into(), "p-2".into())])),
+                ai_profile_models: Some(BTreeMap::from([
+                    ("commit".into(), "deepseek-v4.1-flash".into()),
+                    ("summarize".into(), "orphan".into()),
+                ])),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cur.ai_model.as_deref(), Some("glm-5.3-flashx"));
+        assert_eq!(
+            cur.ai_profile_models
+                .as_ref()
+                .unwrap()
+                .get("commit")
+                .map(String::as_str),
+            Some("deepseek-v4.1-flash")
+        );
+        assert!(
+            !cur.ai_profile_models
+                .as_ref()
+                .unwrap()
+                .contains_key("summarize"),
+            "没有对应功能配置的模型不保留"
+        );
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                ai_profile_id: Some("".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cur.ai_profile_id, None);
+        assert_eq!(cur.ai_model, None, "回到自动时不留上一次的模型");
     }
 
     #[test]
