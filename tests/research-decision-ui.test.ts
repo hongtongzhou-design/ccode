@@ -10,10 +10,15 @@ import { decisionGate, formatDecisionAnswer, parseDecisions } from "../src/step-
 test("手写依据 UI：不提供默认批准，保存原文与依据后才满足开工决定", async () => {
   const compiled = await build({
     stdin: { contents: `export { createElement, act } from 'react'; export { createRoot } from 'react-dom/client'; export { default as StepFlow } from './src/components/StepFlow';`, resolveDir: process.cwd(), loader: "tsx" },
+    // 组件图里的 monaco 会 import css：Node 测试不渲染样式，按空模块吞掉（css 空了，其中的字体 url 也不会再被解析）
+    loader: { ".css": "empty" },
     bundle: true, write: false, format: "cjs", platform: "node", jsx: "automatic",
     external: ["react", "react-dom/client", "react/jsx-runtime"],
     plugins: [{ name: "host-boundaries", setup(b) {
       const stubs: Record<string, string> = {
+        // Vite 专属的 ?worker/?url 导入（monaco/pdfjs 的 worker）：Node 测试里按空资产桩掉
+        // pdfjs 校验 workerSrc 必须是字符串；给个惰性 data: URL，测试不会真起 worker
+        asset: "export default \"data:text/javascript,\";",
         "../store": "const state={setPendingTerminal(){},setWorkspaceReviewRequest(){},setPage(){},setPreviewReq(){}}; export const useAppStore=Object.assign(fn=>fn(state),{getState:()=>state,setState(){},subscribe(){}});",
         "./HumanTasksList": "export const useHumanTasks = () => ({states:[],loading:false,error:null,dropHover:null,rowRefs:{current:new Map()},registerOffer:null}); export const RegisterOfferRow=()=>null;",
         "../pipeline-start": "export const buildWorkspaceTerminalRequest=async()=>({});",
@@ -23,6 +28,7 @@ test("手写依据 UI：不提供默认批准，保存原文与依据后才满�
       // bundle（无字体 loader 即失败）；真 store 在模块作用域读 localStorage，Node 下即崩
       const anyImporter = new Set(["../md-math", "../store"]);
       b.onResolve({ filter: /.*/ }, (args) => {
+        if (/\?(worker|url)$/.test(args.path)) return { path: "asset", namespace: "host-stub" };
         if (!(args.path in stubs)) return undefined;
         if (anyImporter.has(args.path)) return { path: args.path, namespace: "host-stub" };
         return args.importer.replaceAll("\\", "/").endsWith("/StepFlow.tsx")
@@ -35,7 +41,9 @@ test("手写依据 UI：不提供默认批准，保存原文与依据后才满�
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/" });
   const restore: Array<[string, PropertyDescriptor | undefined]> = [];
   for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
-    HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true })) {
+    HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true,
+    // pdfjs 模块初始化即 new DOMMatrix()（SCALE_MATRIX 常量）；JSDOM 没有该 API，测试又不渲染 PDF，空壳够用
+    DOMMatrix: class { multiplySelf() { return this; } preMultiplySelf() { return this; } invertSelf() { return this; } translateSelf() { return this; } scaleSelf() { return this; } multiply() { return this; } inverse() { return this; } } })) {
     restore.push([key, Object.getOwnPropertyDescriptor(globalThis, key)]);
     Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });
   }

@@ -65,6 +65,8 @@ test("审阅摘要只出示计数和筛选决定，不摊纳入表", async () =>
 test("检索步评审先出待确认与筛选决定，不重复摊 included.md", async () => {
   const bundle = await build({
     stdin: { contents: `export {createElement,act} from 'react'; export {createRoot} from 'react-dom/client'; export {default as Review} from './src/components/WorkspaceReviewView';`, resolveDir: process.cwd(), loader: "tsx" },
+    // WorkspaceReviewView 的图里有 monaco/katex 的 css：Node 测试不渲染样式，按空模块吞掉
+    loader: { ".css": "empty" },
     bundle: true, write: false, format: "cjs", platform: "node", jsx: "automatic",
     external: ["react", "react-dom/client", "react/jsx-runtime"],
     plugins: [{ name: "host", setup(b) {
@@ -73,9 +75,12 @@ test("检索步评审先出待确认与筛选决定，不重复摊 included.md",
       b.onResolve({ filter: /^\.\/WatchRunReview$/ }, () => ({ path: "watch", namespace: "stub" }));
       b.onResolve({ filter: /^\.\/OfficePreviewModal$/ }, () => ({ path: "preview", namespace: "stub" }));
       b.onResolve({ filter: /^\.\/ConfirmDialog$/ }, () => ({ path: "confirm", namespace: "stub" }));
+      // Vite 专属的 ?worker/?url 导入（monaco/pdfjs 的 worker）：Node 测试里按空资产桩掉
+      b.onResolve({ filter: /\?(worker|url)$/ }, () => ({ path: "asset", namespace: "stub" }));
       b.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({
         loader: "js",
-        contents: args.path === "confirm" ? "export const confirmDialog=async()=>true;"
+        contents: args.path === "asset" ? "export default \"data:text/javascript,\";"
+          : args.path === "confirm" ? "export const confirmDialog=async()=>true;"
           : args.path === "store" ? "export const useAppStore=Object.assign(fn=>fn(globalThis.__reviewStore),{getState:()=>globalThis.__reviewStore});"
           : args.path === "artifacts" ? "export const loadArtifactRows=async()=>[];"
           : "export default function Watch(){return null;}",
@@ -90,6 +95,8 @@ test("检索步评审先出待确认与筛选决定，不重复摊 included.md",
     HTMLElement: dom.window.HTMLElement, localStorage: dom.window.localStorage,
     sessionStorage: dom.window.sessionStorage, IS_REACT_ACT_ENVIRONMENT: true,
     IntersectionObserver: FakeObserver,
+    // pdfjs 模块初始化即 new DOMMatrix()（SCALE_MATRIX 常量）；JSDOM 没有该 API，测试又不渲染 PDF，空壳够用
+    DOMMatrix: class { multiplySelf() { return this; } preMultiplySelf() { return this; } invertSelf() { return this; } translateSelf() { return this; } scaleSelf() { return this; } multiply() { return this; } inverse() { return this; } },
     requestAnimationFrame: (fn: () => void) => { fn(); return 0; },
     cancelAnimationFrame: () => {},
     __reviewStore: { setPage() {}, setSelectProjectReq() {}, setFilePreviewReq() {}, setPendingTerminal() { throw new Error("no run expected"); }, runningScripts: {} },

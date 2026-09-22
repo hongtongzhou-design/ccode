@@ -6,17 +6,19 @@ import { JSDOM } from "jsdom";
 import { PIPELINE_TEMPLATES } from "../src/pipeline-presets.ts";
 
 test("实际评审页接入本步骤摘要/未决项和复现；只读历史不运行", async () => {
-  const bundle=await build({stdin:{contents:`export {createElement,act} from 'react'; export {createRoot} from 'react-dom/client'; export {default as Review} from './src/components/WorkspaceReviewView';`,resolveDir:process.cwd(),loader:'tsx'},bundle:true,write:false,format:'cjs',platform:'node',jsx:'automatic',external:['react','react-dom/client','react/jsx-runtime'],plugins:[{name:'host',setup(b){
+  const bundle=await build({stdin:{contents:`export {createElement,act} from 'react'; export {createRoot} from 'react-dom/client'; export {default as Review} from './src/components/WorkspaceReviewView';`,resolveDir:process.cwd(),loader:'tsx'},loader:{'.css':'empty'},bundle:true,write:false,format:'cjs',platform:'node',jsx:'automatic',external:['react','react-dom/client','react/jsx-runtime'],plugins:[{name:'host',setup(b){
     b.onResolve({filter:/^\.\.\/store$/},()=>({path:'store',namespace:'stub'}));
     b.onResolve({filter:/^\.\/ArtifactChecklist$/},()=>({path:'artifacts',namespace:'stub'}));
     b.onResolve({filter:/^\.\/WatchRunReview$/},()=>({path:'watch',namespace:'stub'}));
     b.onResolve({filter:/^\.\/OfficePreviewModal$/},()=>({path:'preview',namespace:'stub'}));
     b.onResolve({filter:/^\.\/ConfirmDialog$/},()=>({path:'confirm',namespace:'stub'}));
-    b.onLoad({filter:/.*/,namespace:'stub'},(args)=>({loader:'js',contents:args.path==='confirm'?'export const confirmDialog=async()=>true;':args.path==='store'?'export const useAppStore=Object.assign(fn=>fn(globalThis.__reviewStore),{getState:()=>globalThis.__reviewStore});':args.path==='artifacts'?'export const loadArtifactRows=async()=>[];':'export default function Watch(){return null;}'}));
+    // Vite 专属的 ?worker/?url 导入（monaco/pdfjs 的 worker）：Node 测试里按空资产桩掉
+    b.onResolve({filter:/\?(worker|url)$/},()=>({path:'asset',namespace:'stub'}));
+    b.onLoad({filter:/.*/,namespace:'stub'},(args)=>({loader:'js',contents:args.path==='asset'?'export default "data:text/javascript,";':args.path==='confirm'?'export const confirmDialog=async()=>true;':args.path==='store'?'export const useAppStore=Object.assign(fn=>fn(globalThis.__reviewStore),{getState:()=>globalThis.__reviewStore});':args.path==='artifacts'?'export const loadArtifactRows=async()=>[];':'export default function Watch(){return null;}'}));
   }}]});
   const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost',pretendToBeVisual:true});
   const restore:Array<[string,PropertyDescriptor|undefined]>=[];
-  for(const[key,value]of Object.entries({window:dom.window,document:dom.window.document,navigator:dom.window.navigator,HTMLElement:dom.window.HTMLElement,localStorage:dom.window.localStorage,sessionStorage:dom.window.sessionStorage,IS_REACT_ACT_ENVIRONMENT:true,__reviewStore:{setPage(){},setSelectProjectReq(){},setFilePreviewReq(){},setPendingTerminal(){throw new Error('no run expected');},runningScripts:{}}})){
+  for(const[key,value]of Object.entries({window:dom.window,document:dom.window.document,navigator:dom.window.navigator,HTMLElement:dom.window.HTMLElement,localStorage:dom.window.localStorage,sessionStorage:dom.window.sessionStorage,IS_REACT_ACT_ENVIRONMENT:true,DOMMatrix:class{multiplySelf(){return this}preMultiplySelf(){return this}invertSelf(){return this}translateSelf(){return this}scaleSelf(){return this}multiply(){return this}inverse(){return this}},__reviewStore:{setPage(){},setSelectProjectReq(){},setFilePreviewReq(){},setPendingTerminal(){throw new Error('no run expected');},runningScripts:{}}})){
     restore.push([key,Object.getOwnPropertyDescriptor(globalThis,key)]);Object.defineProperty(globalThis,key,{value,configurable:true,writable:true});
   }
   let reviewOnly=false;
