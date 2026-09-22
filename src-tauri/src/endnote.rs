@@ -151,7 +151,8 @@ fn mdfind_endnote_apps() -> Vec<PathBuf> {
 
 fn scan_endnote_install_dirs() -> Vec<PathBuf> {
     let mut apps = Vec::new();
-    let mut roots = Vec::new();
+    // 显式标注：push 都在 macos/windows 的 cfg 块里，Linux 上两块都不编译、推断不出元素类型
+    let mut roots: Vec<PathBuf> = Vec::new();
     #[cfg(target_os = "macos")]
     {
         roots.push(PathBuf::from("/Applications"));

@@ -246,6 +246,11 @@ impl BackgroundCommand {
         self.stdout(Stdio::piped()).stderr(Stdio::piped());
         self.spawn()?.wait_with_output()
     }
+
+    /// 等价 `Command::status()`：stdio 保持继承，起进程等退出；经 spawn() 保留进程追踪登记
+    pub fn status(&mut self) -> io::Result<ExitStatus> {
+        self.spawn()?.wait()
+    }
 }
 
 #[cfg(windows)]
