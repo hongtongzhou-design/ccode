@@ -3109,6 +3109,31 @@ function LiveWorkspaceReviewView({
               root={worktreePath}
               stepName={researchContext.step.name}
               projectRoot={researchContext.workspace.repoPath}
+              onPendingCleared={() => {
+                const step = researchContext.step.name;
+                const projectRoot = researchContext.workspace.repoPath;
+                const title = researchContext.step.humanTasks?.find((task) =>
+                  task.title.includes("待确认"),
+                )?.title;
+                if (!title) return;
+                void (async () => {
+                  try {
+                    const states = await invoke<HumanTaskStateDto[]>("list_human_task_states", {
+                      projectRoot,
+                    });
+                    const task = states.find((row) => row.step === step && row.title === title);
+                    if (task?.done || task?.explicitCancel) return;
+                    await invoke("set_human_task_check", {
+                      projectRoot,
+                      step,
+                      title,
+                      checked: true,
+                    });
+                  } catch {
+                    /* 勾不上时回到步骤卡仍可手勾 */
+                  }
+                })();
+              }}
               pane={reviewPane === "process" ? "process" : "list"}
               onOpenPdf={(path) => {
                 const projectRoot = researchContext.workspace.repoPath;

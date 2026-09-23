@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { DirEntryDto } from "./FileTree";
@@ -6,6 +6,7 @@ import { researchAbsolutePath } from "../research-report";
 import { readResearchFile } from "../research-report-load";
 import {
   appendEndnoteImportRecord,
+  appendZoteroImportRecord,
   appendToFetchEntry,
   confirmReason,
   includedMdLine,
@@ -17,6 +18,7 @@ import {
   parseIncludedRecords,
   patchIncludedJson,
   patchIncludedMd,
+  pendingConfirmCleared,
   type IncludedRecord,
 } from "../screening-review";
 
@@ -41,12 +43,15 @@ export default forwardRef<PendingConfirmHandle, {
   projectRoot: string;
   onOpenPdf?: (path: string) => void;
   onChanged?: () => void;
+  /** 清单里已经没有待确认时调用。人手取消过勾选的由调用方决定是否忽略。 */
+  onCleared?: () => void;
   onMeta?: (meta: { count: number; busy: boolean }) => void;
 }>(function PendingConfirmList({
   worktreePath,
   projectRoot,
   onOpenPdf,
   onChanged,
+  onCleared,
   onMeta,
 }, ref) {
   const roots = [...new Set([worktreePath, projectRoot].filter((p): p is string => Boolean(p)))];
@@ -60,6 +65,8 @@ export default forwardRef<PendingConfirmHandle, {
   const [mdText, setMdText] = useState<string | null>(null);
   const [mdRevision, setMdRevision] = useState<string | null>(null);
   const [pdfFiles, setPdfFiles] = useState<{ name: string; path: string }[]>([]);
+  const onClearedRef = useRef(onCleared);
+  onClearedRef.current = onCleared;
 
   async function load() {
     setError(null);
@@ -96,6 +103,7 @@ export default forwardRef<PendingConfirmHandle, {
       }
     }
     setPdfFiles(pdfs);
+    if (pendingConfirmCleared(parseIncludedRecords(json.file.text))) onClearedRef.current?.();
   }
 
   useEffect(() => {
@@ -139,7 +147,7 @@ export default forwardRef<PendingConfirmHandle, {
     const zotero = await readFirst([file.root, ...roots], "papers/to-fetch.ris");
     if (!zotero?.file.revision) return;
     let znext = zotero.file.text;
-    for (const row of rows) znext = appendEndnoteImportRecord(znext, row, source);
+    for (const row of rows) znext = appendZoteroImportRecord(znext, row, source);
     if (znext === zotero.file.text) return;
     await invoke<string>("save_file_preview", {
       path: researchAbsolutePath(zotero.root, "papers/to-fetch.ris"),
@@ -197,6 +205,7 @@ export default forwardRef<PendingConfirmHandle, {
         }
       }
       onChanged?.();
+      if (pendingConfirmCleared(parseIncludedRecords(nextJson))) onClearedRef.current?.();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -254,6 +263,7 @@ export default forwardRef<PendingConfirmHandle, {
         }
       }
       onChanged?.();
+      if (pendingConfirmCleared(parseIncludedRecords(nextJson))) onClearedRef.current?.();
     } catch (reason) {
       setError(String(reason));
     } finally {

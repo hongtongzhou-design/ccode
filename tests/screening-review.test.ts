@@ -7,11 +7,15 @@ import {
   groupReviewFiles,
   isScreeningReviewStep,
   appendEndnoteImportRecord,
+  appendZoteroImportRecord,
+  recordToEndnoteRis,
+  recordToZoteroRis,
   appendToFetchEntry,
   matchPaperPdf,
   paperHasDoiPdf,
   pdfNameFromReason,
   parseIncludedRecords,
+  pendingConfirmCleared,
   includeAllPendingJson,
   patchIncludedJson,
   patchIncludedMd,
@@ -30,6 +34,14 @@ import {
   shouldPrioritizeScreeningFiles,
   sortReviewPaths,
 } from "../src/screening-review.ts";
+
+test("待确认清完：每篇都是纳入或排除才算；空清单和空白判定不算", () => {
+  const row = (decision: string) => ({ ...emptyRecord, id: decision, title: decision, decision });
+  assert.equal(pendingConfirmCleared([row("included"), row("excluded")]), true);
+  assert.equal(pendingConfirmCleared([row("included"), row("pending")]), false);
+  assert.equal(pendingConfirmCleared([row("included"), row("")]), false);
+  assert.equal(pendingConfirmCleared([]), false);
+});
 
 test("检索步按工作区名或产物识别", () => {
   assert.equal(isScreeningReviewStep({ workspaceName: "lit-search" }), true);
@@ -261,7 +273,18 @@ test("纳入 JSON 计数与待拍板去重", () => {
   const added = appendEndnoteImportRecord("TY  - JOUR\r\nTI  - Old\r\nER  - \r\n", row);
   assert.match(added, /AU  - Zhang, Caicai\r\nAU  - Xu, Ao/);
   assert.match(added, /DO  - 10\.1016\/j\.jallcom\.2024\.1/);
+  assert.match(added, /M2  - 177309/);
+  assert.match(added, /M3  - Journal Article/);
+  assert.doesNotMatch(added, /JO  - /);
   assert.equal(appendEndnoteImportRecord(added, row), added);
+  const zotero = appendZoteroImportRecord("", row);
+  assert.match(zotero, /T2  - Journal of Alloys and Compounds/);
+  assert.match(zotero, /SP  - 177309/);
+  assert.doesNotMatch(zotero, /JO  - /);
+  assert.doesNotMatch(zotero, /M2  - /);
+  assert.doesNotMatch(zotero, /M3  - /);
+  assert.equal(recordToZoteroRis(row).includes("JO  -"), false);
+  assert.equal(recordToEndnoteRis(row).includes("M2  - 177309"), true);
   const source = [
     "TY  - JOUR",
     "TI  - Fresh Paper",

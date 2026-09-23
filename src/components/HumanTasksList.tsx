@@ -136,6 +136,21 @@ export function useHumanTasks({
     }
   }
 
+  /** 待确认篇目全部纳入或排除后勾上「核对待确认篇目」。
+   *  人手取消过的不覆盖。失败交给流程线已有错误行。 */
+  async function checkPendingConfirmIfOpen(title: string) {
+    const task = states?.find((row) => row.step === stepName && row.title === title);
+    if (!task || task.done || task.explicitCancel) return;
+    await toggle(task, true);
+  }
+
+  /** 学术检索 MCP 已添加且已登录时勾上。人手取消过的不覆盖。 */
+  async function checkAcademicMcpIfReady(title: string) {
+    const task = states?.find((row) => row.step === stepName && row.title === title);
+    if (!task || task.done || task.explicitCancel) return;
+    await toggle(task, true);
+  }
+
   /** 落点是否就是项目根（工作区是临时的，登记其中路径没意义） */
   function landedInProjectRoot(out: ImportDeliverableDto): boolean {
     const norm = (p: string) => p.replace(/[\\/]+$/, "");
@@ -293,6 +308,8 @@ export function useHumanTasks({
     busyTitle,
     dropHover,
     toggle,
+    checkPendingConfirmIfOpen,
+    checkAcademicMcpIfReady,
     pickFile,
     pickSearchResults,
     registerOffer,

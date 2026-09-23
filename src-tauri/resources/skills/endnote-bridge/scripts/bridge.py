@@ -350,16 +350,13 @@ def render(records, suffix):
                 result.append(line('AU', family_comma(author)))
             if r.get('title'):
                 result.append(line('TI', r['title']))
-            # EndNote 2025「RefMan (RIS) Export」期刊全称用 T2，缩写用 J2。
-            # JO/JF/JA 留给旧过滤器，和 T2/J2 写同一值。
+            # EndNote 2025 RefMan RIS：期刊全称 T2，缩写 J2。
+            # 不再写 JO/JF/JA。Zotero 会把 JO 放进期刊缩写；这份只给 EndNote。
             if r.get('journal'):
                 result.append(line('T2', r['journal']))
-                result.append(line('JO', r['journal']))
-                result.append(line('JF', r['journal']))
             short = r.get('journalAbbreviation') or ''
             if short and short.casefold() != (r.get('journal') or '').casefold():
                 result.append(line('J2', short))
-                result.append(line('JA', short))
             if r.get('year'):
                 result.append(line('PY', r['year']))
                 result.append(line('Y1', r['year']))

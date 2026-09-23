@@ -394,10 +394,13 @@ pub async fn endnote_export_xml(project_root: String) -> Result<String, String> 
             );
         };
         copy_path_to_clipboard(&ris);
+        if let Some(parent) = ris.parent() {
+            if parent.is_dir() {
+                let _ = tauri_plugin_opener::open_path(parent, None::<&str>);
+            }
+        }
         match launch_endnote_with_file(&ris) {
-            Ok(()) => Ok(
-                "已把 papers/endnote-import.ris 交给 EndNote。没进库就把产物里的这一份拖到图标上，不要拖进窗口。".into(),
-            ),
+            Ok(()) => Ok("已导入 EndNote。把打开的 PDF 拖进库，合并时留下 RIS 那条。".into()),
             Err(e) => Ok(format!(
                 "文件在 papers/endnote-import.ris。把它拖到 EndNote 图标上（不要拖进窗口）。{e}"
             )),

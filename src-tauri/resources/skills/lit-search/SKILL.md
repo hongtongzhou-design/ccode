@@ -120,8 +120,10 @@ Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索
 - `papers/included.md`：纳入清单（一行一篇，固定行格式；尚待确认单列，不冒充已决）
 - `papers/included.json`：与 included.md 一一对应的记录数组。每条有稳定非空字符串 `id`、`title`、`decision`、`reason`。decision 为 included / pending。**pending 与 included 同一套题录，检索时一次查全**，不要等纳入后再查：`authors`（数组，`姓, 名`）、`year`、`venue`、`volume`、`issue`、`pages`、`date`、`epubDate`、`articleType`、`issn`、`journalAbbreviation`、`abstract`、`keywords`、`language`、`doi`、`url`。查不到的写「待补」。人点纳入时 Mesa 把这条原样追加进 `endnote-import.ris` 和 `to-fetch.ris`，不再另查。空清单用 `[]`。不用修改 id 隐藏旧记录。
 - `papers/to-fetch.md`：仅 **已纳入（decision=included）** 且未获得全文的付费墙清单，**不得列入 pending**（2026-09-15 收紧格式——裸「标题 — DOI」堆叠没编号，用户无法对照追踪进度）：**编号列表，每行 `N. 标题 — DOI`，N 从 1 连续**，顺序与 to-fetch.ris 条目一致；补齐全文的行在编号后加 `✓`（如 `3. ✓ 标题 — DOI`），编号不重排；无待获取则注明为空
-- `papers/endnote-import.ris` 与 `papers/to-fetch.ris` 字段同一套，检索时一次写全，pending 的完整题录也写在 included.json 里。人把 pending 改成纳入后，Mesa 把这条追加进两份 RIS（同一 DOI 或标题已在则不重复）。排除的不写。不在纳入这一下重新检索。
-- `papers/to-fetch.ris`：to-fetch.md 的 RIS 2004 转换件（每篇 `TY  - JOUR`，CRLF，条目顺序与 to-fetch.md 编号一致）。**一位作者一条 `AU`**（`姓, 名`）；多位挤在同一条 `AU` 里，EndNote 会把整串当成一个人。有数据才写这些标签：`TI` 标题、`T2`/`JO` 期刊全称、`J2` 期刊缩写（与全称不同才写）、`PY` 四位年份、`DA` 出版日期、`ET` 网络出版日期、`VL` 卷、`IS` 期、`SP` 页、`M2` 起始页码、`EP` 结束页、`M3` 文章类型、`SN` ISSN、`DO` DOI、`KW` 关键词（一词一条）、`AB` 摘要、`UR` 链接。`N1` 只写文献本身的注释，不写筛选过程、来源库、出版商或「关键词来自 OpenAlex」这类流程说明。只给 TI/DO/UR 时，Zotero 的作者/年份/期刊列和 EndNote 的卷期页、摘要全是空的。确无数据的标签不写，不编造。与 to-fetch.md 同增删
+- 两份 RIS 同一批篇目、标签分开。pending 的完整题录写在 included.json。人把 pending 改成纳入后，Mesa 按各自标签追加（同一 DOI 或标题已在则不重复）。排除的不写。不在纳入这一下重新检索。
+- `papers/to-fetch.ris` 给 Zotero。RIS 2004、CRLF，顺序与 to-fetch.md 一致。一位作者一条 `AU`（`姓, 名`）。期刊全称只写 `T2`，缩写与全称不同才写 `J2`。再写 `PY`、`VL`、`IS`、`SP`、`EP`、`SN`、`DO`、`KW`（一词一条）、`AB`、`UR`。不要写 `JO`/`JF`/`JA`/`N1`/`N2`/`M1`：Zotero 把 `JO` 放进期刊缩写，把 `N1` 放进笔记。
+- `papers/endnote-import.ris` 给 EndNote 2025 的 RefMan RIS。期刊全称只写 `T2`，缩写写 `J2`。页写 `SP`，起始页码另写 `M2`（与 `SP` 同值），结束页写 `EP`，文章类型写 `M3`（没有就写 `Journal Article`）。再写 `PY`、`DA`、`ET`、`VL`、`IS`、`SN`、`DO`、`KW`、`AB`、`LA`、`UR`。不要写 `JO`/`JF`/`JA`/`M1`/`N1`。`M1` 不进任何格子，文章类型必须是 `M3`。
+- 两份都不写筛选日期、候选来源、出版商。没有的标签不写，不编造。只给 `TI`/`DO`/`UR` 时，两边的作者、期刊、卷期页、摘要都是空的。
 - **严格档追加 PRISMA-S 最小披露段**（screening.md 末尾）：各库完整检索式、检索日期、命中→去重→纳入计数、去重方法——这是最低留痕，不是完整 PRISMA-S 符合声明；系统综述逐项对照官方完整规范并记录适用性。
 
 ## 验收入口

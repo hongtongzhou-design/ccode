@@ -48,6 +48,7 @@
 - 开工确认在已有产物/输入区之后显示「先看方案，再决定」与「你的决定」。从当前步骤声明的必需/可选/任一输入报告读取明确的决策摘要/方案比较/待决事项，写作等步骤没有决策摘要时可展示上游原有验收摘要；不把 TASK.md 指令或代码块示例当结果。决定状态与说明分开：批准指定范围／仅允许准备／待补证据／不批准。硬暂停只在「批准」时允许正式开工，「仅允许准备」需二次确认后只做无依赖准备；待补、不批准、未选状态、旧纯文本均不能开工。清空就撤回该项；确认开工才由既有任务书链落盘，读取失败不代填批准。旧纯文本不得自动迁移为已批准。
 - 评审按科研工作区绑定步骤的 `expectedArtifacts` 显示验收摘要、质量状态/未决事项、复算与验证。来源路径/行号、原文入口、缺失/截断/错误可见；没有识别到标题的已读报告仍可打开原文。不解释自然语言为机器通过。只读 Run/定时历史不套当前工作区复现操作。
 - **检索步先拍 pending 再下载全文**：Agent 筛完后 `to-fetch` 与开放获取只针对 `decision=included`；pending 禁止进待获取。人工事项顺序为「核对待确认篇目」先于「下载付费墙文献全文」。有 pending 时写入 help-wanted，未回复不把 pending 当已纳入。已有项目不静默改档案卡，需在流程编辑器补该事项或本次评审先拍 pending。
+- **待确认拍完自动勾上**：`papers/included.json` 里已有篇目，且每篇 `decision` 都是 `included` 或 `excluded` 时，「核对待确认篇目」自动记为完成。空清单、空白判定或解析失败不算拍完。人手取消过（`explicitCancel`）的不覆盖。步骤卡清单和检索评审清单同一口径。已有项目改任务书后才带上新说明，勾选本身不依赖档案卡改写。
 - **检索/筛选步骤例外**（`workspaceName` 为 `lit-search` / `lit-survey-search`，或产物同时含 `papers/screening.md` 与纳入清单）：待确认与待获取在步骤卡决策。审阅在基础检查旁切换整页：清单（二次确认）／过程／文件。默认清单；过程里 Agent 未决不挡保存。可选收尾事项不计入审阅「待做」。付费全文和库授权放「稍后」。表在筛选决定之前；决定表单有 pending 时默认收起，不预填「退回」。Git 对照只在「文件」页签，不再从右侧拉对照抽屉。保存进项目不等于接受清单。
 - `research-report.ts` 提取纯文本章节，`research-report-load.ts` 有界只读加载（最多32个声明路径/40文件，精确文件优先，目录只展开一层）。默认不轮询，仅打开或人刷新读取；旧异步响应不得覆盖切换后的项目。HTML 和命令仅文本显示，不执行、不自动转为批准。
 - 自动报告读取在 `read_file_preview` 指定 `requireWithinRoot=true`，目录列举在 `list_dir` 指定 `root`；后端 canonicalize 校验并拒绝根外 symlink。原手动文件预览的根外 symlink 只读能力不变，省略新可选参数的旧调用保持兼容。
@@ -211,10 +212,15 @@
   expectedArtifacts 精确化；技能挂载按 18 个内置技能核对（research-paper 检索步 +lit-search、精读步 +lit-notes、结果分析/毕业论文
   实验步 +stats-check、毕业论文初稿/定稿 +quarto-render、data-eda 步 +stats-check；submission-rebuttal 摘除
   不存在的假技能 pre-submission-reviewer，投稿前自查口径内联进简报）；lit-search 链路步骤新增 before 人工事项
-  「（可选）配置学术检索 MCP」（流程线只留 Consensus/Undermind 预设入口 + 「去终端登录」，不写就地小字：
+  「（可选）配置学术检索 MCP」（流程线留 Consensus/Undermind 预设入口 + 「去终端登录」。
+  两家都已添加、Consensus 密钥已存、Undermind 已登录时这一项自动勾上；否则同行写一句现状
+  （还没添加 / 还没填密钥 / 未登录）。Undermind 登录认 Codex `mcp list --json` 的
+  `auth_status`（`o_auth` / `bearer_token`）、Claude `mcp get` 的 Connected，
+  以及 macOS 钥匙串服务名 `Codex MCP Credentials` 里账号以 `undermind` 开头的条目。
+  不读令牌。Mesa 连通体检的 401 仍不算配坏。人手取消过的不自动勾回。
   Consensus 在 MCP 页密钥栏填 API key，Mesa 注入 CONSENSUS_API_KEY，不必设系统环境变量；Undermind 登录在 CLI 里
   （「去终端登录」会带上 `codex mcp login undermind` / `claude mcp login undermind`），
-  Mesa 体检 401 也正常，授权后必须新开会话——点「开始」会注入检索、来不及登录。
+  授权后必须新开会话——点「开始」会注入检索、来不及登录。
   分发后**新开的检索会话**才能用；不配也能跑——OpenAlex/Semantic Scholar 免 key 兜底），
   付费墙文献全程有人工事项接应（落点 `papers/*.pdf`）。
   **接壤路径约定**：六套模板共享同一条科研流水线的产物约定，能衔接的相邻段，产物路径固定对齐——综述末步产 `manuscript/review-final.md`、
@@ -569,12 +575,12 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   统一重命名并勾掉 to-fetch.md 已补行；拿不准归属的不改名、标「待确认」。模板 guidance 必须写明
   「文件名随意」，不得暗示用户要自己整理命名。
 - **精读笔记是读后消化，不是覆盖索引（2026-09-18）**：写法 SSOT 为 `lit-notes` 技能。叙述用中文，材料名/离子/电解液/方法缩写/图表编号等惯用英文原词保留，不强翻；禁止把英文摘要整段贴进笔记。TASK 简报不得写「每篇产出笔记文件」当完成标准。机器验收 `same-ids` 只对 index 覆盖；`records` 不要求 `notePath` 非空。可逆准备 = 改名 / index 骨架 / bib 对账 / 合法 OA，不包括从摘要批量生成笔记正文。「按摘要记」= 根据摘要消化来写并标「仅摘要」。用户确认的核心篇有 PDF 却未写出精读时，质量状态不得高于「已生成待审」。已有项目不静默改 TASK.md，下一轮开步才带新简报；技能更新走内置技能「有新版」。
-- **to-fetch.ris 是文献库的待获取题录（2026-09-23 补字段）**：检索步产出 to-fetch.md 时同步产出 to-fetch.ris
-  （RIS 2004，CRLF）。一位作者一条 `AU`。有 DOI 时用 Crossref 补期刊全称（`T2`）、缩写（`J2`，与全称不同才写）、
-  卷（`VL`）、期（`IS`）、页（`SP`）、起始页码（`M2`）、结束页（`EP`）、日期（`DA`）、网络出版日（`ET`）、文章类型（`M3`）、ISSN（`SN`）、
-  关键词（`KW`）、摘要（`AB`）。OpenAlex / Semantic Scholar 只补 Crossref 没有的摘要和缩写。没有的标签不写，不编造。
-  这份 RIS 给 Zotero「同步到 Zotero」；「同步到 EndNote」另从 `references.bib` 经 `bridge.py` 生成
-  `papers/endnote-import.ris`，字段同一套。用户拖进 Zotero 或 EndNote 建成待获取列表；
+- **to-fetch.ris 给 Zotero，endnote-import.ris 给 EndNote（2026-09-23 分标签）**：检索步同时写两份 RIS 2004、CRLF。已生成的旧文件不改写。
+  Zotero 的 `papers/to-fetch.ris`：期刊全称只写 `T2`，缩写只写 `J2`，页只写 `SP`/`EP`。不写 `JO`（Zotero 会把它放进期刊缩写）、不写 `N1`（会进笔记）、不写 `M1`。
+  EndNote 2025 RefMan 的 `papers/endnote-import.ris`：全称 `T2`、缩写 `J2`、页 `SP`、起始页码 `M2`、结束页 `EP`、文章类型 `M3`。不写 `JO`/`M1`（`M1` 不进格子）。
+  有 DOI 时用 Crossref 补这些字段。OpenAlex / Semantic Scholar 只补 Crossref 没有的摘要和缩写。没有的标签不写，不编造。
+  「同步到 Zotero」打开 to-fetch.ris；「同步到 EndNote」打开 endnote-import.ris。定稿从 `references.bib` 再生成时，`zotero_rtf.py` 按 Zotero 标签，`bridge.py` 按 EndNote 标签。
+  同步成功后打开 `papers/`，人把 PDF 拖进库再合并。Mesa 不代点合并：Zotero 本机接口只读，主记录必须人选 RIS 那条，空字段才从另一条补、PDF 才挂过来。EndNote 合并只留一条且不自动并附件，也必须留下 RIS 那条。成功文案只留这一句。
   PDF 补进 Zotero 后回「文献与数据」重新导入即登记（只读引用不复制），再手动勾事项。
   **内核仍不直写用户 Zotero 库**——内核 `zotero_import` 只读快照并写项目；可选技能写库必须有用户明确意图和实机授权（锁库/同步冲突风险）。
 - **提交交付**：`import_human_deliverable`（卡片 checklist 行「提交产物」按钮 / 拖文件到该行）= 复制进落点
@@ -782,7 +788,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     sanitize、落 papers/ 重名 -2/-3、自动登记 project.toml `[[resources]]` type="paper"；非直链（出版商页）前端
     禁用并提示手动下载，付费墙文献仍走 watch-followup.md「待人工下载」。
   - **机构访问通道（2026-09-16，fetch_paper_fulltext 逐篇获取阶梯）**：形态是**人登录一次、系统复用会话**——
-    用户在设置 → 网络「学校图书馆」点「登录学校账号」（默认 CARSI，不摆地址框）完成学校
+    用户在检索步「下载付费墙文献全文」展开「待获取」后点「登录学校账号」（跳到设置 → 网络），或自己打开设置 → 网络「学校图书馆」点「登录学校账号」（默认 CARSI，不摆地址框）完成学校
     SSO（含 MFA），后端 `inst_access.rs` 读取登录窗 Cookie 落 0600 `inst-session.json`（与 keys.json 同纪律，
     值绝不出站）。获取入口三处：检索步付费墙事项的 to-fetch 清单条目、雷达卡「来源」态命中行、watch-followup
     待办行；按钮按 `canAttemptFulltext`（裸 DOI/doi.org 恒可试开放副本查证，其余落地页仅通道可用才摆）。

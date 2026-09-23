@@ -21,6 +21,15 @@ test("预设入口：Consensus 密钥、Undermind OAuth", () => {
   assert.equal(ACADEMIC_MCP_PRESETS[1]?.what.includes("语义"), true);
 });
 
+test("学术检索登录态只带是否就绪和一句现状", () => {
+  const ready = { ready: true, note: "" };
+  const missing = { ready: false, note: "Undermind 未登录" };
+  assert.equal(ready.ready, true);
+  assert.equal(ready.note, "");
+  assert.equal(missing.ready, false);
+  assert.match(missing.note, /未登录/);
+});
+
 test("去终端登录：按 Agent 给出 mcp login 命令，并要求新开会话", () => {
   assert.match(academicMcpLoginPrompt("codex"), /codex mcp login undermind/);
   assert.match(academicMcpLoginPrompt("claude-code"), /claude mcp login undermind/);

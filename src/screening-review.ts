@@ -303,6 +303,14 @@ export interface ScreeningCounts {
   toFetch: number;
 }
 
+/** 清单里每篇都已纳入或排除。空清单、空白判定不算拍完。 */
+export function pendingConfirmCleared(records: readonly IncludedRecord[]): boolean {
+  return (
+    records.length > 0 &&
+    records.every((row) => row.decision === "included" || row.decision === "excluded")
+  );
+}
+
 export function screeningCounts(
   records: readonly IncludedRecord[],
   toFetch: number,
@@ -643,7 +651,8 @@ export function sourceRisBlock(corpus: string, row: Pick<IncludedRecord, "id" | 
   return null;
 }
 
-const ENDNOTE_KEEP = ["AU", "TI", "T2", "JO", "JF", "J2", "JA", "PY", "Y1", "DA", "ET", "VL", "IS", "SP", "EP", "M2", "M3", "SN", "DO", "KW", "AB", "N2", "LA", "UR"];
+const ENDNOTE_KEEP = ["AU", "TI", "T2", "J2", "PY", "DA", "ET", "VL", "IS", "SP", "EP", "M2", "M3", "SN", "DO", "KW", "AB", "LA", "UR"];
+const ZOTERO_KEEP = ["AU", "TI", "T2", "J2", "PY", "DA", "VL", "IS", "SP", "EP", "SN", "DO", "KW", "AB", "UR"];
 
 /** 把原导出记录改写成 EndNote 2025 认的标签。起始页同时写 M2，文章类型没有时用 Journal Article。 */
 export function normalizeSourceRis(block: string): string {
@@ -673,33 +682,29 @@ function pushTag(lines: string[], tag: string, value: string) {
   if (text && text !== "待补") lines.push(`${tag}  - ${text}`);
 }
 
-/** 检索时写入 included.json 的完整题录，原样写成 RIS。不再另查。 */
-export function recordToRis(row: IncludedRecord): string {
+function risBody(row: IncludedRecord, target: "zotero" | "endnote"): string[] {
   const lines = ["TY  - JOUR"];
   for (const author of risAuthors(row.authors)) lines.push(`AU  - ${author}`);
   pushTag(lines, "TI", row.title);
   const journal = risValue(row.source);
-  if (journal && journal !== "待补") {
-    lines.push(`T2  - ${journal}`);
-    lines.push(`JO  - ${journal}`);
-  }
+  if (journal && journal !== "待补") lines.push(`T2  - ${journal}`);
   const short = risValue(row.journalAbbreviation);
   if (short && short !== "待补" && short.toLowerCase() !== journal.toLowerCase()) {
     lines.push(`J2  - ${short}`);
   }
   pushTag(lines, "PY", row.year);
-  pushTag(lines, "DA", row.date);
-  pushTag(lines, "ET", row.epubDate);
+  if (target === "endnote") pushTag(lines, "DA", row.date);
+  if (target === "endnote") pushTag(lines, "ET", row.epubDate);
   pushTag(lines, "VL", row.volume);
   pushTag(lines, "IS", row.issue);
   const pages = risValue(row.pages).replace(/[–—−]/g, "-");
   const parts = pages ? pages.split(/-+/, 2).map((part) => part.trim()) : [];
   if (parts[0]) {
     lines.push(`SP  - ${parts[0]}`);
-    lines.push(`M2  - ${parts[0]}`);
+    if (target === "endnote") lines.push(`M2  - ${parts[0]}`);
   }
   if (parts[1] && parts[1] !== parts[0]) lines.push(`EP  - ${parts[1]}`);
-  pushTag(lines, "M3", row.articleType);
+  if (target === "endnote") pushTag(lines, "M3", row.articleType || "Journal Article");
   pushTag(lines, "SN", row.issn);
   const doi = doiToken(row.id, row.url);
   if (doi) lines.push(`DO  - ${doi}`);
@@ -707,24 +712,69 @@ export function recordToRis(row: IncludedRecord): string {
     if (word.trim() && word.trim() !== "待补") lines.push(`KW  - ${word.trim()}`);
   }
   pushTag(lines, "AB", row.abstract);
-  pushTag(lines, "LA", row.language);
+  if (target === "endnote") pushTag(lines, "LA", row.language);
   const url = risValue(row.url) || (doi ? `https://doi.org/${doi}` : "");
   if (url) lines.push(`UR  - ${url}`);
   lines.push("ER  - ");
-  return lines.join("\r\n");
+  return lines;
 }
 
-/** 纳入后追加到导入文件。已有同一 DOI 或标题则不重复。
- *  优先用检索时写入 included.json 的完整题录；记录里没有卷期页时，再从原导出整条抄。 */
-export function appendEndnoteImportRecord(ris: string, row: IncludedRecord, source = ""): string {
+/** 给 Zotero 的 RIS。期刊全称只写 T2；缩写只写 J2。不写 JO（Zotero 会把它放进期刊缩写）。 */
+export function recordToZoteroRis(row: IncludedRecord): string {
+  return risBody(row, "zotero").join("\r\n");
+}
+
+/** 给 EndNote 2025 RefMan RIS 的记录。页写 SP，起始页码写 M2，文章类型写 M3。 */
+export function recordToEndnoteRis(row: IncludedRecord): string {
+  return risBody(row, "endnote").join("\r\n");
+}
+
+/** 检索时写入 included.json 的完整题录，写成 EndNote 认的 RIS。不再另查。 */
+export function recordToRis(row: IncludedRecord): string {
+  return recordToEndnoteRis(row);
+}
+
+function appendRisRecord(
+  ris: string,
+  row: IncludedRecord,
+  source: string,
+  target: "zotero" | "endnote",
+): string {
   const doi = doiToken(row.id, row.url);
   const title = risValue(row.title);
   if (doi && ris.toLowerCase().includes(doi.toLowerCase())) return ris;
   if (title && ris.toLowerCase().includes(title.toLowerCase())) return ris;
-  const stored = recordToRis(row);
   const thin = !risValue(row.volume) && !risValue(row.pages) && !risValue(row.abstract);
   const fromSource = thin && source ? sourceRisBlock(source, row) : null;
-  const block = fromSource ? normalizeSourceRis(fromSource) : stored;
+  const block = fromSource
+    ? target === "zotero"
+      ? zoteroRisFromSource(fromSource)
+      : normalizeSourceRis(fromSource)
+    : target === "zotero"
+      ? recordToZoteroRis(row)
+      : recordToEndnoteRis(row);
   const base = ris.replace(/\s*$/, "");
   return base ? `${base}\r\n\r\n${block}\r\n` : `${block}\r\n`;
+}
+
+/** 纳入后追加到 EndNote 导入文件。已有同一 DOI 或标题则不重复。 */
+export function appendEndnoteImportRecord(ris: string, row: IncludedRecord, source = ""): string {
+  return appendRisRecord(ris, row, source, "endnote");
+}
+
+/** 纳入后追加到 Zotero 的 to-fetch.ris。标签与 EndNote 那份分开。 */
+export function appendZoteroImportRecord(ris: string, row: IncludedRecord, source = ""): string {
+  return appendRisRecord(ris, row, source, "zotero");
+}
+
+/** 原导出记录改成 Zotero 认的标签。丢掉 JO 和筛选注释。 */
+export function zoteroRisFromSource(block: string): string {
+  const lines = block.replace(/\r\n/g, "\n").split("\n");
+  const kept = lines.filter((line) => {
+    const tag = line.slice(0, 2);
+    return ZOTERO_KEEP.includes(tag) && line.slice(2, 6) === "  - ";
+  });
+  kept.unshift("TY  - JOUR");
+  kept.push("ER  - ");
+  return kept.join("\r\n");
 }

@@ -2441,8 +2441,10 @@ pub struct HumanTaskStateDto {
     pub expected_count: Option<usize>,
     /// 后端采用的完成判定口径
     pub completion: String,
-    /// 人手动勾为完成；false 也可能表示显式取消，最终状态以 done 为准
+    /// 人手动勾为完成
     pub manual: bool,
+    /// 人手动取消（checked=0）。自动勾选必须跳过，避免取消后又被勾回来。
+    pub explicit_cancel: bool,
     /// 最终完成态（显式勾选/取消优先；无显式状态时回落 detected，前端不再重算）
     pub done: bool,
 }
@@ -2982,6 +2984,7 @@ pub(crate) fn list_human_task_states_at(root: &Path) -> Vec<HumanTaskStateDto> {
                 expected_count,
                 completion,
                 manual: manual_state == Some(true),
+                explicit_cancel: manual_state == Some(false),
                 done: match manual_state {
                     Some(v) => v,
                     None => detected,

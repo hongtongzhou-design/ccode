@@ -31,10 +31,10 @@ outputs: [papers/zotero-sync.md]
 
 ### 1. 进库（项目 → Zotero，必须用户明确要求）
 
-- 交付 `papers/to-fetch.ris`（RIS 2004，CRLF，与 to-fetch.md 同序）。字段与 EndNote 的 `papers/endnote-import.ris` 同一套：一位作者一条 `AU`（`姓, 名`），有数据才写 `TI`、`T2` 期刊全称、`J2` 缩写、`PY`、`DA` 日期、`ET` 网络出版日期、`VL` 卷、`IS` 期、`SP` 页、`M2` 起始页码、`EP` 结束页、`M3` 文章类型、`SN` ISSN、`DO`、`KW`、`AB` 摘要、`UR`。检索时一次查全，含当时还在待确认的篇目；人纳入后追加，不再另查。Zotero 原生导入 RIS/BibTeX/CSL JSON，不需要插件
+- 交付 `papers/to-fetch.ris`（RIS 2004，CRLF，与 to-fetch.md 同序）。这一份只给 Zotero：一位作者一条 `AU`（`姓, 名`），期刊全称只写 `T2`，缩写只写 `J2`。再写 `PY`、`VL`、`IS`、`SP`、`EP`、`SN`、`DO`、`KW`、`AB`、`UR`。不要写 `JO`（Zotero 会把它放进期刊缩写）、不要写 `N1`（会进笔记）。EndNote 用另一份 `papers/endnote-import.ris`，起始页码是 `M2`、文章类型是 `M3`。检索时一次查全；人纳入后按 Zotero 标签追加，不再另查。Zotero 原生导入 RIS/BibTeX/CSL JSON，不需要插件
 - 告诉用户用清单「同步到 Zotero」或把 RIS 拖进 Zotero。不要另开一条 API/BBT 写库
 - 不要代点按钮、不要循环导入。库里已有条目再导会重复——界面会按 DOI 提示
-- **PDF：** 用户不用 Zotero 时，不要要求把 PDF 拖进 Zotero。题录由检索/精读按 PDF 里的 DOI 写入 `references.bib`。用户自己在用 Zotero、且库里还没有这些篇时，可以把 `papers/` 的 PDF 拖进 Zotero：确认「自动检索 PDF 元数据」开着、「自动重命名附件文件」关着，它会读前几页并生成父条目。拖完再用「从 Zotero 导入」。已有条目时，拖进去一般会按元数据对上；对不上再拖到那一条上。禁止声称 Mesa 已自动建条目或挂附件。
+- **PDF：** 同步会打开 `papers/`。先导入 RIS，再把 PDF 拖进库，重复项合并时主记录选 RIS 那一条。选 PDF 那条会盖掉卷期页和摘要。关掉「自动重命名附件文件」。用户不用 Zotero 时不要要求拖 PDF。禁止声称 Mesa 已自动挂上附件或代为合并。
 - 未明确要求进库：只留 RIS，报告写明「未进库，文件已交」
 
 ### 2. 出库（Zotero → 项目，仅精读/用户明确要求时）

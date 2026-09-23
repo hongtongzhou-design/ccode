@@ -37,9 +37,10 @@ test("EndNote bridge converts XML/RIS/BibTeX and preserves stable keys without c
     assert.equal(records[0].pages, "1--8");
     const risText = readFileSync(ris, "utf8");
     assert.match(risText, /T2  - Research/);
+    assert.doesNotMatch(risText, /JO  - /);
     assert.match(risText, /VL  - 12/);
     assert.match(risText, /IS  - 3/);
-    assert.match(risText, /SP  - 1\r?\nEP  - 8/);
+    assert.match(risText, /SP  - 1\r\nM2  - 1\r\nEP  - 8/);
     assert.match(risText, /SN  - 123/);
     assert.match(risText, /AU  - Doe, Jane\r?\nAU  - Hong, Tongzhou/);
     const before = readFileSync(xml,"utf8");
@@ -169,7 +170,10 @@ test("Zotero 交稿写出可扫描的引用和对应 RIS，缺键不交稿", () 
     assert.equal(result.status, 0, result.stderr);
     assert.match(readFileSync(rtf, "utf8"), /\\\{Doe, 2020\\\}/);
     assert.match(readFileSync(ris, "utf8"), /ID  - Doe2020/);
-    assert.match(readFileSync(ris, "utf8"), /T2  - Research/);
+    const zoteroRis = readFileSync(ris, "utf8");
+    assert.match(zoteroRis, /T2  - Research/);
+    assert.doesNotMatch(zoteroRis, /JO  - /);
+    assert.doesNotMatch(zoteroRis, /M2  - /);
     writeFileSync(md, "See [@Missing].\n");
     const bad = join(root, "bad.rtf");
     result = run(script, ["--input", md, "--bib", bib, "--rtf", bad, "--ris", join(root, "bad.ris"), "--report", join(root, "bad.md")]);

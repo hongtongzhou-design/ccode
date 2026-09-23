@@ -2121,6 +2121,7 @@ fn s_get(v: &serde_json::Value, k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn stdio_server() -> McpServerDto {
         McpServerDto {
@@ -3510,6 +3511,57 @@ done
         assert!(captured.is_empty());
     }
 
+    fn academic_server_fixture(name: &str) -> McpServerDto {
+        let mut server = remote_server();
+        server.name = name.into();
+        server.enabled = true;
+        server
+    }
+
+    #[test]
+    fn academic_login_note_names_what_is_missing() {
+        let consensus = academic_server_fixture("consensus");
+        let undermind = academic_server_fixture("Undermind");
+        let secrets = HashSet::from(["CONSENSUS_API_KEY".to_string()]);
+        let ready = academic_mcp_login_from(
+            &[consensus.clone(), undermind.clone()],
+            &secrets,
+            true,
+        );
+        assert!(ready.ready);
+        assert!(ready.note.is_empty());
+        let missing_key = academic_mcp_login_from(
+            &[consensus.clone(), undermind.clone()],
+            &HashSet::new(),
+            true,
+        );
+        assert!(!missing_key.ready);
+        assert_eq!(missing_key.note, "Consensus 还没填密钥");
+        let missing_login =
+            academic_mcp_login_from(&[consensus, undermind], &secrets, false);
+        assert!(!missing_login.ready);
+        assert_eq!(missing_login.note, "Undermind 未登录");
+        let empty = academic_mcp_login_from(&[], &HashSet::new(), false);
+        assert!(!empty.ready);
+        assert!(empty.note.contains("Consensus"));
+        assert!(empty.note.contains("Undermind"));
+    }
+
+    #[test]
+    fn academic_login_parsers_only_accept_logged_in_states() {
+        assert!(codex_auth_is_logged_in("o_auth"));
+        assert!(codex_auth_is_logged_in("bearer_token"));
+        assert!(!codex_auth_is_logged_in("not_logged_in"));
+        assert!(!codex_auth_is_logged_in("unsupported"));
+        assert!(claude_status_is_logged_in("Status: ✔ Connected"));
+        assert!(!claude_status_is_logged_in(
+            "Status: ! Needs authentication"
+        ));
+        assert!(!claude_status_is_logged_in("no status here"));
+        assert!(codex_oauth_account_is("undermind|abc", "undermind"));
+        assert!(!codex_oauth_account_is("other|abc", "undermind"));
+    }
+
     #[test]
     fn remote_auth_error_distinguishes_oauth_from_missing_key() {
         assert!(
@@ -4213,6 +4265,217 @@ fn missing_env_refs_impl(
     }
     out.sort();
     out
+}
+
+/// 检索步「配置学术检索 MCP」的登录态。只报有没有登录，不带密钥、令牌或体检原文。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AcademicMcpLoginDto {
+    /// Consensus 与 Undermind 都已添加，且各自处于已登录。
+    pub ready: bool,
+    /// 还没配好时的一句现状；已登录为空串。
+    pub note: String,
+}
+
+fn academic_server<'a>(
+    servers: &'a [McpServerDto],
+    name: &str,
+) -> Option<&'a McpServerDto> {
+    servers.iter().find(|server| {
+        server.enabled && server.name.eq_ignore_ascii_case(name)
+    })
+}
+
+/// Codex `mcp list --json` 的 `auth_status`。`unsupported` 是 stdio，不算这两种远程库。
+fn codex_auth_is_logged_in(status: &str) -> bool {
+    matches!(
+        status.trim(),
+        "logged_in" | "bearer_token" | "o_auth" | "oauth"
+    )
+}
+
+fn claude_status_line(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let rest = trimmed
+            .strip_prefix("Status:")
+            .or_else(|| trimmed.strip_prefix("状态:"))?;
+        return Some(rest.trim().to_string());
+    }
+    None
+}
+
+/// Claude `mcp get` 的 Status 行。`Connected` 算已登录；`Needs authentication` 不算。
+fn claude_status_is_logged_in(text: &str) -> bool {
+    let Some(status) = claude_status_line(text) else {
+        return false;
+    };
+    let lower = status.to_ascii_lowercase();
+    if lower.contains("needs authentication") || lower.contains("需要") {
+        return false;
+    }
+    lower.contains("connected") || status.contains("已连接")
+}
+
+/// 钥匙串账号 `undermind` 或 `undermind|<hash>`。不读口令。
+fn codex_oauth_account_is(account: &str, server: &str) -> bool {
+    let account = account.trim();
+    account.eq_ignore_ascii_case(server)
+        || account
+            .split('|')
+            .next()
+            .is_some_and(|head| head.eq_ignore_ascii_case(server))
+}
+
+fn codex_keychain_has_oauth(server: &str) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = server;
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(output) = crate::process::background_command("security")
+            .args(["find-generic-password", "-s", "Codex MCP Credentials", "-g"])
+            .output()
+        else {
+            return false;
+        };
+        let text = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("{text}\n{stdout}");
+        for line in combined.lines() {
+            let Some(rest) = line.split("\"acct\"").nth(1) else {
+                continue;
+            };
+            let Some(blob) = rest.split("=\"").nth(1).and_then(|s| s.split('"').next()) else {
+                continue;
+            };
+            if codex_oauth_account_is(blob, server) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// 拉起 CLI 读登录状态。超时杀进程树。只返回文本，不含密钥。
+fn capture_cli_text(program: &Path, args: &[&str]) -> Option<String> {
+    let mut child = crate::process::background_command(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut buf);
+        buf
+    });
+    let started = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(8);
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        if started.elapsed() > limit {
+            crate::pty::kill_process_tree(child.id());
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let _ = child.wait();
+    let out = crate::process::join_with_timeout(out_handle, std::time::Duration::from_secs(1));
+    let err = crate::process::join_with_timeout(err_handle, std::time::Duration::from_secs(1));
+    Some(format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    ))
+}
+
+fn codex_auth_status(name: &str) -> Option<String> {
+    let bin = crate::agents::resolve_binary("codex")?;
+    let text = capture_cli_text(&bin, &["mcp", "list", "--json"])?;
+    let start = text.find('[')?;
+    let end = text.rfind(']')?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&text[start..=end]).ok()?;
+    rows.into_iter().find_map(|row| {
+        let row_name = row.get("name")?.as_str()?;
+        if !row_name.eq_ignore_ascii_case(name) {
+            return None;
+        }
+        row.get("auth_status")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    })
+}
+
+fn claude_mcp_logged_in(name: &str) -> Option<bool> {
+    let bin = crate::agents::resolve_binary("claude")?;
+    let text = capture_cli_text(&bin, &["mcp", "get", name])?;
+    if claude_status_line(&text).is_none() {
+        return None;
+    }
+    Some(claude_status_is_logged_in(&text))
+}
+
+fn oauth_logged_in(name: &str) -> bool {
+    if codex_auth_status(name).is_some_and(|status| codex_auth_is_logged_in(&status)) {
+        return true;
+    }
+    if claude_mcp_logged_in(name) == Some(true) {
+        return true;
+    }
+    codex_keychain_has_oauth(name)
+}
+
+fn academic_mcp_login_from(
+    servers: &[McpServerDto],
+    secrets: &HashSet<String>,
+    undermind_logged_in: bool,
+) -> AcademicMcpLoginDto {
+    let mut issues: Vec<String> = Vec::new();
+    let consensus = academic_server(servers, "consensus");
+    if consensus.is_none() {
+        issues.push("还没添加 Consensus".into());
+    } else if !secrets.contains("CONSENSUS_API_KEY") {
+        issues.push("Consensus 还没填密钥".into());
+    }
+    let undermind = academic_server(servers, "undermind");
+    if undermind.is_none() {
+        issues.push("还没添加 Undermind".into());
+    } else if !undermind_logged_in {
+        issues.push("Undermind 未登录".into());
+    }
+    AcademicMcpLoginDto {
+        ready: issues.is_empty(),
+        note: issues.join("；"),
+    }
+}
+
+#[tauri::command]
+pub async fn academic_mcp_login_status() -> Result<AcademicMcpLoginDto, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let servers = read_store()?;
+        let secrets: HashSet<String> = read_mcp_keys()?
+            .into_iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(name, _)| name)
+            .collect();
+        let logged_in = oauth_logged_in("undermind");
+        Ok(academic_mcp_login_from(&servers, &secrets, logged_in))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

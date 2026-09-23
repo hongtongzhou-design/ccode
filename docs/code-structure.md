@@ -24,7 +24,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 未存进历史软门（2026-09-20）：未提交改动与本步 inputs 相交（相交判定 src/kickoff-dirty-gate.ts）→ 列文件 +
                              # 就地「存进历史」（git_commit 只提交命中子集）/二击开工；不相交仍只是主仓提醒行（想法期实验改动留在主仓合法））、
                              # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态 + 产物冲突/跨步骤链路 ⚠ 警告行）、
-                             # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑）、StepFlow（步骤内协同流程线）、
+                             # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑；待确认清完且未手动取消才自动勾）、StepFlow（步骤内协同流程线；付费墙行「登录学校账号」跳设置网络分区）、
                              # ScheduleSection（定时任务：有流程在项目设置抽屉；无流程主区雷达下；编程/办公右侧会话栏）、
                              # LitWatchCard（「◔ 文献雷达」卡片：新命中/精读清单双页签 + 近 8 周趋势 + →精读/◈解读/↓全文 +
                              #   新命中默认两行对齐精读清单密度（摘要点开才见）+
@@ -291,10 +291,11 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   nav-capsule.ts             # 侧栏可配置胶囊入口（恢复侧栏始终保留，不在此列）
   project-context-load.ts    # 启动环境说明拼装：读档案卡和顶层目录，失败仍返回能用的短包
   research-report.ts         # 研究报告节抽取/相对路径解析（只认显式报告节，不认 TASK 指令或推断结论）
-  screening-review.ts        # 检索/筛选评审主面：计数/待拍板/筛选决定、表默认 pending、文件分组；included.md/json 不与表并列摊 diff（tests/screening-review.test.ts）
+  screening-review.ts        # 检索/筛选评审主面：计数/待拍板/筛选决定、表默认 pending、文件分组；included.md/json 不与表并列摊 diff；
+                             # pendingConfirmCleared = 有篇且无 pending，步骤卡据此自动勾「核对待确认篇目」（tests/screening-review.test.ts）
   review-file-groups.ts      # 精读/写作评审文件分组：笔记/稿件/引文/待获取/过程（tests/review-file-groups.test.ts）
   research-tools.ts          # 科研工具注入 withResearchTools；旧「文献主来源」设置键写回时剥除——来源只认 lit_source
-  academic-mcp.ts            # 检索步「配置学术检索 MCP」：预设名、登录注入（tests/academic-mcp.test.ts）
+  academic-mcp.ts            # 检索步「配置学术检索 MCP」：预设名、登录注入；登录态由 academic_mcp_login_status 回一句现状（tests/academic-mcp.test.ts）
   session-filter.ts          # 对话页筛选纯逻辑（tests/session-filter.test.ts）
   session-search.ts          # 对话搜索纯逻辑：分词、元数据即时过滤、正文命中合并排序
   session-transfer.ts        # 会话导入向导纯逻辑：状态文案、目标目录预填、可否执行

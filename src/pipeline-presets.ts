@@ -59,6 +59,7 @@ const LIT_SEARCH_ARTIFACTS = [
   "papers/included.json",
   "papers/to-fetch.md",
   "papers/to-fetch.ris",
+  "papers/endnote-import.ris",
   "papers/zotero-sync.md",
 ];
 
@@ -205,15 +206,16 @@ function litSearchHumanTasks(): HumanTaskDto[] {
   return [mcpLitSearchTask(), pendingConfirmTask(), paywallPdfTask("after")];
 }
 
-/** 待获取 RIS：EndNote / Zotero 都靠它建条目。作者必须一人一行，卷期页摘要随 bib 带上。 */
+/** 待获取 RIS 分两份。Zotero 与 EndNote 认的标签不同，不要写成同一套。 */
 const TO_FETCH_RIS =
-  "papers/to-fetch.ris 用 RIS 2004、CRLF：每篇 TY - JOUR，与 to-fetch.md 同序。" +
-  "待确认和已纳入同一套。有 DOI 时先向 Crossref 取正式字段，摘要和关键词没有再问 OpenAlex，期刊缩写按 ISSN 查 NLM Catalog，没有再用 Semantic Scholar。这些字段同时写入 included.json（含 pending）和 RIS，纳入时不再另查。再写：" +
-  "AU 每位作者单独一行（姓, 名；禁止把多人逗号串进同一条 AU）、TI、T2 期刊全称、J2 期刊缩写（与全称不同才写）、" +
-  "PY 四位年份、DA 出版日期、ET 网络出版日期、VL 卷、IS 期、SP 页、M2 起始页码、EP 结束页、M3 文章类型、SN ISSN、" +
-  "DO、KW 每个关键词一行、AB 摘要、UR。" +
-  "N1 只在有文献本身的注释时写；不写筛选日期、候选来源、出版商、关键词来自哪个库。" +
-  "筛选记录和 references.bib 里已有的这些字段一律写入；登记库没有的标签不写，不编造，不拿卷或页去填空着的期。";
+  "题录同时写入 included.json（含 pending）。有 DOI 时先向 Crossref 取正式字段，摘要和关键词没有再问 OpenAlex，期刊缩写按 ISSN 查 NLM Catalog，没有再用 Semantic Scholar。纳入时不再另查。" +
+  "papers/to-fetch.ris 给 Zotero，RIS 2004、CRLF，与 to-fetch.md 同序。每篇 TY - JOUR，AU 每位作者单独一行（姓, 名）。" +
+  "期刊全称只写 T2，缩写与全称不同才写 J2。再写 PY、VL、IS、SP 起始页、EP 结束页、SN、DO、KW 每个关键词一行、AB、UR。" +
+  "不要写 JO、JF、JA、N1、N2、M1。Zotero 会把 JO 放进期刊缩写，把 N1 放进笔记。" +
+  "papers/endnote-import.ris 给 EndNote 2025 的 RefMan RIS，同一批篇目、CRLF。期刊全称只写 T2，缩写写 J2。" +
+  "页写 SP，起始页码另写一条 M2（与 SP 同值），结束页写 EP，文章类型写 M3（没有就写 Journal Article）。" +
+  "再写 PY、DA、ET、VL、IS、SN、DO、KW、AB、LA、UR。不要写 JO、JF、JA、M1、N1、N2。" +
+  "两份都不写筛选日期、候选来源、出版商、关键词来自哪个库。登记库没有的标签不写，不编造，不拿卷或页去填空着的期。";
 
 /** 检索步：pending 必须先经人确认，才能进 to-fetch / 下载全文。 */
 const LIT_PENDING_BEFORE_FETCH =
@@ -242,7 +244,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "5. 纳入清单写入 papers/included.md（一行一篇：标题 — 作者, 年份 — 来源 — 链接/DOI），并同步写入 papers/included.json（每篇一条，至少含稳定唯一字符串 id、title、decision（included/pending）、reason；与 md 记录一一对应）；\n" +
       "6. " + LIT_PENDING_BEFORE_FETCH +
       "开放获取（arXiv/PMC/开放期刊/作者主页 preprint）直接下载到**项目根 papers/**（见上方「项目根」，文件名规范化：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得尝试绕过，在 included.md 该行末尾标注「需自行获取」，并汇总写入 papers/to-fetch.md（编号清单，见 lit-search 产出格式）等用户提供全文，同时把 to-fetch.md 转成 " + TO_FETCH_RIS + " 已有 references.bib 只补空着的卷、期、页、ISSN、摘要、关键词和期刊缩写，不覆盖、不改键。不在这一步默认写同步文件。文献来源或文献库选了 Zotero / EndNote 时，才按对应技能做导入和同步。已有 references.bib 不得覆盖。\n" +
-      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris 均存在（RIS 允许有效空文件，其他文件非空；无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。\n" +
+      "完成标准：papers/screening.md、papers/included.md、papers/to-fetch.md、papers/to-fetch.ris、papers/endnote-import.ris 均存在（两份 RIS 允许有效空文件，其他文件非空；无付费文献则 to-fetch.md 说明无待获取，两份 RIS 保留合法零条目空文件），每条记录无空缺字段（未知则标「待补」），筛选记录含检索日期与覆盖缺口、能让第三人按标准复现每条判定。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     optionalInputs: ["references.bib"],
     expectedArtifacts: LIT_SEARCH_ARTIFACTS.filter((path) => path !== "papers/zotero-sync.md"),
@@ -251,6 +253,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "machine:file:papers/included.md",
       "machine:file:papers/to-fetch.md",
       "machine:optional-empty:papers/to-fetch.ris",
+      "machine:optional-empty:papers/endnote-import.ris",
       "machine:contains:papers/screening.md::检索日期",
       "machine:records-allow-empty:papers/included.json::id,title,decision,reason",
     ],
@@ -421,7 +424,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "1. 检索与筛选按 lit-search 技能：**先粗检一轮报数再定标准**（OpenAlex 命中约 N 篇与建议标准写入 .ccode/help-wanted.md，未回复仅做无依赖、可逆准备）；产出 papers/screening.md（标准 + 各库检索式、检索日期与命中数 + 每篇判定理由；拿不准相关性的一律保留为 pending 候选并标注「待确认」，不冒充已决纳入）与 papers/included.md；用户导入的检索结果先解析去重——看项目根 papers/imports/、工作区 papers/imports/、以及「项目资源」「提货单」里的绝对路径；\n" +
       "2. " + LIT_PENDING_BEFORE_FETCH +
       "开放获取直接下载到**项目根 papers/**（文件名：作者年份-短标题.pdf），不要下载到本工作区；付费墙不得绕过，汇总写入 papers/to-fetch.md 并转 " + TO_FETCH_RIS + " 清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖，只补空着的卷、期、页、ISSN、摘要、关键词和期刊缩写。\n" +
-      "完成标准：六件套均已提交（无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件；未启用或回落时 zotero-sync.md 写明原因），筛选记录含检索日期与覆盖缺口、可复现。\n" +
+      "完成标准：检索交付件均已提交（无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 与 endnote-import.ris 保留合法零条目空文件；未启用或回落时 zotero-sync.md 写明原因），筛选记录含检索日期与覆盖缺口、可复现。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     optionalInputs: ["notes/", "references.bib", "papers/included.md"],
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
@@ -430,6 +433,7 @@ const RESEARCH_PAPER_STEPS: ProjectStepDto[] = [
       "machine:file:papers/included.md",
       "machine:file:papers/to-fetch.md",
       "machine:optional-empty:papers/to-fetch.ris",
+      "machine:optional-empty:papers/endnote-import.ris",
       "machine:file:papers/zotero-sync.md",
       "machine:contains:papers/screening.md::检索日期",
       "machine:records-allow-empty:papers/included.json::id,title,decision,reason",
@@ -892,7 +896,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "4. " + LIT_PENDING_BEFORE_FETCH +
       "开放获取全文下载到**项目根 papers/**；付费墙写入 papers/to-fetch.md，并按 " + TO_FETCH_RIS + " 写 papers/to-fetch.ris。清单落盘后按 zotero-sync 记录通道并写 papers/zotero-sync.md；未明确要求进库则不写用户 Zotero 库，通道不可用则只留 RIS/bib。已有 references.bib 时不得覆盖，只补空着的卷、期、页、ISSN、摘要、关键词和期刊缩写。\n" +
       "零结果也交付 included.json=[] 与说明，禁止造条目；没有可精读证据时后续只允许准备，不宣称完成研究。\n" +
-      "完成标准：检索交付件存在（无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 保留合法零条目空文件；未启用或回落时 zotero-sync.md 写明原因），每条记录无空缺字段，筛选可复现。\n" + QUESTION_GATE + QUALITY_STATUS,
+      "完成标准：检索交付件存在（无付费文献则 to-fetch.md 说明无待获取，to-fetch.ris 与 endnote-import.ris 保留合法零条目空文件；未启用或回落时 zotero-sync.md 写明原因），每条记录无空缺字段，筛选可复现。\n" + QUESTION_GATE + QUALITY_STATUS,
     optionalInputs: ["notes/", "references.bib", "papers/included.md"],
     expectedArtifacts: [...LIT_SEARCH_ARTIFACTS],
     acceptanceCriteria: [
@@ -900,6 +904,7 @@ const THESIS_STEPS: ProjectStepDto[] = [
       "machine:file:papers/included.md",
       "machine:file:papers/to-fetch.md",
       "machine:optional-empty:papers/to-fetch.ris",
+      "machine:optional-empty:papers/endnote-import.ris",
       "machine:file:papers/zotero-sync.md",
       "machine:contains:papers/screening.md::检索日期",
       "machine:records-allow-empty:papers/included.json::id,title,decision,reason",

@@ -457,6 +457,11 @@ MCP 页（第八页，⌘6）：Ccode 自有统一清单（`<config>/ccode/mcp-s
 
 ## 10. 决策记录
 
+- **同步后打开 papers/（2026-09-24）**：Zotero / EndNote 导入成功后打开 PDF 所在目录，成功文案只留「已导入。把打开的 PDF 拖进库，合并时留下 RIS 那条。」不代点合并。Zotero 本机接口只读；主记录选错会盖掉卷期页和摘要。未在两边实机点过。
+- **Zotero 与 EndNote 的 RIS 分标签（2026-09-23）**：下一次检索各写一份。Zotero 的 `to-fetch.ris` 期刊全称只写 `T2`、缩写只写 `J2`，不写 `JO` 和 `N1`。EndNote 的 `endnote-import.ris` 页写 `SP`、起始页码写 `M2`、文章类型写 `M3`，不写 `M1`。已生成的旧文件不改写。纳入追加也按目标文件选标签。定稿的 `zotero_rtf.py` 与 `bridge.py` 同样分开。未在 Zotero 或 EndNote 里点过导入。
+- **学术检索 MCP 配好且已登录才自动勾上（2026-09-23）**：检索步「配置学术检索 MCP」在 Consensus 与 Undermind 都已添加、Consensus 密钥已存、Undermind 已登录时自己勾上。缺哪一项，步骤卡上写一句现状。登录态只认 CLI 状态和钥匙串账号名，不读令牌，也不把 Mesa 体检的 401 当成已登录。人手取消过的保持取消。未做 Mesa Dev 实机界面验收。
+- **付费墙事项就地登录学校账号（2026-09-23）**：检索步「下载付费墙文献全文」展开「待获取」后出现「登录学校账号」，跳到设置 → 网络。收起时不显示。登录仍只在设置里完成。未做 Mesa Dev 实机界面验收。
+- **待确认拍完自动勾上（2026-09-23）**：检索步「核对待确认篇目」在 `included.json` 已有篇目、且每篇都是纳入或排除时自己勾上。空清单和空白判定不算拍完。人手取消过的保持取消。步骤卡和检索评审清单同一口径。已有项目不改档案卡。未做 Mesa Dev 实机界面验收。
 - **EndNote 导入带上卷期页和作者全名（2026-09-23）**：检索和精读有 DOI 时向 Crossref 取作者全名、期刊、卷、期、页、日期、ISSN、摘要、关键词、期刊缩写，写入 `references.bib` 和 `papers/to-fetch.ris`。OpenAlex 只补 Crossref 没有的摘要和缩写。没有的字段留空。检索写 `papers/endnote-import.ris` 时一次写全。EndNote 2025 的 RefMan RIS 过滤器里：页是 `SP`，起始页码是 `M2`，文章类型是 `M3`，期刊缩写是 `J2`。缩写按 ISSN 查 NLM Catalog，没有再用 Semantic Scholar 的期刊别名。点「同步到 EndNote」只打开这一份，不再重新检索。定稿自动交差仍只转 bib，不联网。未在本机 EndNote 里点过导入。
 - **Zotero 与 EndNote 都能导入、同步、交稿（2026-09-22）**：导入在文献来源（Zotero 读库；EndNote 用导出的 XML/RIS，不读 .enl）。同步在待获取清单（同步到 Zotero / 同步到 EndNote）。交稿在定稿，按「文献库」选一份：`output/zotero.rtf` 或 `output/endnote.docx`。写作源稿仍是 `[@键]` 与 `references.bib`。
 - **文献库把 Zotero 与 EndNote 收成同一种选择（2026-09-22）**：项目设置「文献库」为不使用 / Zotero / EndNote，一篇只接一个。定稿才交稿：Zotero 写 `output/zotero.rtf`（导入 RIS 后 RTF Scan 一次），EndNote 写 `output/endnote.docx`（Update 一次）。文献来源已是 Zotero 时不再另交 EndNote。写作源稿仍是 `[@键]` 与 `references.bib`。

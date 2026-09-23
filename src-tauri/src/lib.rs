@@ -334,6 +334,7 @@ pub fn run() {
             mcp::check_all_mcp_servers,
             mcp::mcp_missing_env_refs,
             mcp::list_mcp_env_secrets,
+            mcp::academic_mcp_login_status,
             mcp::mcp_agent_status,
             mcp::discover_mcp_servers,
             mcp::import_mcp_from_agent,

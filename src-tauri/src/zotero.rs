@@ -1358,10 +1358,13 @@ pub async fn zotero_open_import(path: String, root: String) -> Result<String, St
         tauri_plugin_opener::open_path(&path_c, Some("Zotero"))
             .or_else(|_| tauri_plugin_opener::open_path(&path_c, None::<&str>))
             .map_err(|e| format!("没法交给 Zotero 打开: {e}"))?;
-        Ok(
-            "已交给 Zotero 导入。确认即可。PDF 直接拖进 Zotero，一般会按元数据对上已有条目。"
-                .into(),
-        )
+        // 题录交给 Zotero 后打开 papers/，人把 PDF 拖进库再合并。
+        // 不代点合并：Zotero 本机接口只读，主记录必须人选 RIS 那条。
+        let papers = root_c.join("papers");
+        if papers.is_dir() {
+            let _ = tauri_plugin_opener::open_path(&papers, None::<&str>);
+        }
+        Ok("已导入 Zotero。把打开的 PDF 拖进库，重复项合并时留下 RIS 那条。".into())
     })
     .await
     .map_err(|e| format!("{e}"))?

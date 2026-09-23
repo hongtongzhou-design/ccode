@@ -807,8 +807,10 @@ export interface HumanTaskStateDto {
   expectedCount?: number;
   /** 后端采用的完成判定口径 */
   completion?: "exists" | "manual" | "all" | "no_placeholders";
-  /** 人手动勾过（勾了系统不再追问；取消勾选回到纯检测口径） */
+  /** 人手动勾成完成（勾了系统不再追问） */
   manual: boolean;
+  /** 人手动取消过。自动完成不得把它勾回来。 */
+  explicitCancel: boolean;
   done: boolean;
 }
 

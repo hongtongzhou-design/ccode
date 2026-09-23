@@ -54,6 +54,7 @@ import {
   ACADEMIC_MCP_PRESETS,
   academicMcpLoginPrompt,
   isAcademicMcpTaskTitle,
+  type AcademicMcpLogin,
 } from "../academic-mcp";
 import {
   instOpenTarget,
@@ -316,6 +317,8 @@ export default function StepFlow({
     busyTitle,
     dropHover,
     toggle,
+    checkPendingConfirmIfOpen,
+    checkAcademicMcpIfReady,
     pickFile,
     registerOffer,
     registerOffered,
@@ -330,6 +333,7 @@ export default function StepFlow({
   const setPendingMcpPreset = useAppStore((s) => s.setPendingMcpPreset);
   const setFilePreviewReq = useAppStore((s) => s.setFilePreviewReq);
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
+  const setSettingsSectionReq = useAppStore((s) => s.setSettingsSectionReq);
 
   /** 已经有文献库的项目：落点在 papers/ 的事项不该再劝人把 PDF 往项目里塞——
    *  文献的唯一出处是那个库，往 papers/ 另放一份之后两边各自漂移。
@@ -416,6 +420,7 @@ export default function StepFlow({
   const [pendingListOpen, setPendingListOpen] = useState(true);
   const pendingListRef = useRef<PendingConfirmHandle>(null);
   const [pendingMeta, setPendingMeta] = useState({ count: 0, busy: false });
+  const [academicMcp, setAcademicMcp] = useState<AcademicMcpLogin | null>(null);
   const [paywallListOpen, setPaywallListOpen] = useState(() =>
     readPaywallListOpen(projectPath),
   );
@@ -474,6 +479,31 @@ export default function StepFlow({
   );
   const browserSpotlightAway = useRef(false);
   const toFetchListRef = useRef<HTMLUListElement>(null);
+  const stepHasAcademicMcp = (step.humanTasks ?? []).some((task) =>
+    isAcademicMcpTaskTitle(task.title),
+  );
+  useEffect(() => {
+    if (!stepHasAcademicMcp) return;
+    let stale = false;
+    void invoke<AcademicMcpLogin>("academic_mcp_login_status")
+      .then((status) => {
+        if (stale) return;
+        setAcademicMcp(status);
+        if (!status.ready) return;
+        const title = (step.humanTasks ?? []).find((task) =>
+          isAcademicMcpTaskTitle(task.title),
+        )?.title;
+        if (title) void checkAcademicMcpIfReady(title);
+      })
+      .catch(() => {
+        if (!stale) setAcademicMcp(null);
+      });
+    return () => {
+      stale = true;
+    };
+    // 步骤卡挂上时查一次。登录发生在终端或 MCP 页，回到本页会重新挂载。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectPath, step.name, stepHasAcademicMcp]);
   function focusToFetchLine(line: number) {
     browserSpotlightAway.current = false;
     setBrowserSpotlight(line);
@@ -1902,6 +1932,9 @@ export default function StepFlow({
               >
                 去终端登录
               </button>
+              {academicMcp && !academicMcp.ready && academicMcp.note && (
+                <span className="min-w-0 text-micro text-l4">{academicMcp.note}</span>
+              )}
             </div>
           )}
         {node.kind === "human" &&
@@ -1953,6 +1986,9 @@ export default function StepFlow({
                         onChanged?.();
                         void loadPaywallList();
                       }}
+                      onCleared={() => {
+                        if (human) void checkPendingConfirmIfOpen(human.title);
+                      }}
                     />
                   </div>
                 )}
@@ -1993,6 +2029,7 @@ export default function StepFlow({
                   不再在清单上下各写一段说明书。 */}
               {isPaywallTaskTitle(human.title) && !node.done && (
                 <div className="mt-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => void togglePaywallList()}
@@ -2007,8 +2044,20 @@ export default function StepFlow({
                         ? `待获取（还缺 ${missingToFetchCount(paywallList.text, toFetchDone)} 篇）`
                         : "待获取"}
                   </button>
+                  </div>
                   {paywallListOpen && (
                     <div className="mt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSettingsSectionReq("network");
+                          setPage("settings");
+                        }}
+                        className="mb-1 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
+                        title="打开设置 → 网络，登录学校账号。登录一次后，清单里点浏览器即可下载"
+                      >
+                        登录学校账号
+                      </button>
                       {paywallList.error ? (
                         <p className="text-micro text-l4">
                           {paywallList.error}

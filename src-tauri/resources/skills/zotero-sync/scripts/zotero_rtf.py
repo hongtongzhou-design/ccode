@@ -121,7 +121,6 @@ def main(argv: list[str] | None = None) -> int:
             ris_lines.append(f"PY  - {rec['year']}")
         if rec["journal"]:
             ris_lines.append(f"T2  - {rec['journal']}")
-            ris_lines.append(f"JO  - {rec['journal']}")
         short = rec["journalabbreviation"]
         if short and short.casefold() != rec["journal"].casefold():
             ris_lines.append(f"J2  - {short}")
@@ -133,10 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         parts = [part.strip() for part in pages.split("--" if "--" in pages else "-", 1)] if pages else []
         if parts and parts[0]:
             ris_lines.append(f"SP  - {parts[0]}")
-            ris_lines.append(f"M2  - {parts[0]}")
         if len(parts) == 2 and parts[1] and parts[1] != parts[0]:
             ris_lines.append(f"EP  - {parts[1]}")
-        ris_lines.append("M3  - Journal Article")
         if rec["date"]:
             ris_lines.append(f"DA  - {rec['date']}")
         if rec["issn"]:

@@ -287,6 +287,7 @@ test("lit-search 与返修步骤的核心产物契约完整且按轮次隔离", 
             "papers/included.md",
             "papers/to-fetch.md",
             "papers/to-fetch.ris",
+            "papers/endnote-import.ris",
           ]) {
             assert.ok(
               step.expectedArtifacts.includes(artifact),

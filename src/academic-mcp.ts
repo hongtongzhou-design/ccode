@@ -22,6 +22,11 @@ export function isAcademicMcpTaskTitle(title: string): boolean {
   return title.includes("学术检索 MCP");
 }
 
+export interface AcademicMcpLogin {
+  ready: boolean;
+  note: string;
+}
+
 /** 「去终端登录」注入给 Agent 的第一句：按当前 Agent 给出可执行的 mcp login。 */
 export function academicMcpLoginPrompt(agentId?: string | null): string {
   const cmd =

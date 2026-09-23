@@ -33,6 +33,7 @@ function ht(partial: Partial<HumanTaskStateDto>): HumanTaskStateDto {
     timing: "during",
     detected: false,
     manual: false,
+    explicitCancel: false,
     done: false,
     ...partial,
   };

@@ -612,7 +612,7 @@ Zotero 和 EndNote 做同样三件事。
 
 ### 先登录一次学校账号
 
-在 **设置 → 网络 → 学校图书馆**。
+在 **下载付费墙文献全文** 展开 **待获取** 后，点 **登录学校账号**，会打开 **设置 → 网络 → 学校图书馆**。也可以自己从侧栏进设置，再点 **网络**。
 
 主按钮只有一个：**登录学校账号**。默认打开 CARSI，选你的学校，完成账号和二次验证。Mesa **不保存账号密码**。登录发生在你的浏览器里，一次可长期有效。
 
@@ -634,9 +634,11 @@ Zotero 和 EndNote 做同样三件事。
 
 ### 和 Zotero 一起用
 
-待获取会附带一份 `papers/to-fetch.ris`：作者每人一行，有期刊、卷、期、页、摘要才写进去。点 **同步到 Zotero** 会用 Zotero 打开它（Zotero 自己识 RIS，不需要 Better BibTeX）。点 **同步到 EndNote** 会先问是否仍要导入，确认后打开已经写好的 `papers/endnote-import.ris`，这一下不再重新检索。点 **同步到 Zotero** 在库里已有相同 DOI 时也会先问。
+待获取会附带两份 RIS，下一次检索才按各自认的标签写。已有的旧文件不改。
 
-**不能**指望按钮自动把 PDF 挂到条目上（Zotero 9 的本机接口是只读的）。把 `papers/` 里的 PDF 拖到对应条目上即可。
+`papers/to-fetch.ris` 给 Zotero。点 **同步到 Zotero**，题录交给 Zotero，同时打开 `papers/`。把里面的 PDF 拖进库。重复项合并时留下 RIS 那条，卷期页和摘要才还在。
+
+`papers/endnote-import.ris` 给 EndNote。点 **同步到 EndNote** 同样打开 `papers/`。合并时也留下 RIS 那条，再把 PDF 挂上。
 
 ---
 
@@ -820,6 +822,8 @@ Zotero 和 EndNote 做同样三件事。
 
 - **Consensus**：在 MCP 页用预设添加，把 API 密钥填到密钥栏（不要把密钥写进命令本身）  
 - **Undermind**：同样用预设，然后「去终端登录」做一次浏览器授权  
+
+检索步 **配置学术检索 MCP** 这一行：两家都添加好、Consensus 密钥已填、Undermind 已登录，勾会自己勾上。还差哪一步，旁边会写一句，例如「Undermind 未登录」。
 
 不配这两家，检索步仍然可以用 OpenAlex 等免密钥来源。配了只是多一个库，不是替代筛选标准。
 

@@ -22,6 +22,7 @@ export default function ScreeningReviewPanel({
   projectRoot,
   onOpenPdf,
   onChanged,
+  onPendingCleared,
   pane = "list",
   children,
 }: {
@@ -30,6 +31,8 @@ export default function ScreeningReviewPanel({
   projectRoot?: string;
   onOpenPdf?: (path: string) => void;
   onChanged?: () => void;
+  /** 待确认已经全部纳入或排除。步骤卡用来自动勾上「核对待确认篇目」。 */
+  onPendingCleared?: () => void;
   onOpenFile?: (path: string) => void;
   pane?: "list" | "process";
   children?: ReactNode;
@@ -163,6 +166,7 @@ export default function ScreeningReviewPanel({
                   setReload((n) => n + 1);
                   onChanged?.();
                 }}
+                onCleared={onPendingCleared}
               />
             </div>
           )}
