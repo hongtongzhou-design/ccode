@@ -21,6 +21,8 @@ pub struct ComboSurfaceDto {
     pub output: i64,
     /// 状态栏是否展示 CLI 原生 /effort（启动时选中模型求交）
     pub show_native_effort: bool,
+    /// 网关里勾选的可切换档。空 = 用 CLI 自己的整张档位表。
+    pub effort_levels: Vec<String>,
     /// 启动注入是否写入 effort（通道 supported 且体检未失败且用户存了值时由 launch 再判）
     pub inject_effort_allowed: bool,
     pub inject_temperature_allowed: bool,
@@ -158,6 +160,7 @@ pub fn surface_for(
         false,
         binding_models,
         missing_slot,
+        &[],
     )
 }
 
@@ -172,6 +175,7 @@ pub fn surface_for_agents(
     stored_max: bool,
     binding_models: &[String],
     missing_slot: bool,
+    effort_levels: &[String],
 ) -> ComboSurfaceDto {
     let gid = gateway.map(|g| g.id.as_str());
     let thinking = model_registry::model_thinking_for(model, gid);
@@ -262,6 +266,7 @@ pub fn surface_for_agents(
         probe_temperature: probe_temp.as_str(),
         probe_headers: probe_headers.as_str(),
         probe_note: probe_note_for(gateway, probe_effort),
+        effort_levels: effort_levels.to_vec(),
         policy_channel_note: {
             let mut notes: Vec<&str> = agents
                 .iter()
@@ -335,6 +340,9 @@ pub fn surface_for_profile(profile: &Profile, model: Option<&str>) -> ComboSurfa
         stored_max,
         &profile.models,
         profile.slot_missing,
+        &gm.and_then(|m| m.reasoning_effort.as_deref())
+            .map(crate::agent_specs::reasoning_effort_levels)
+            .unwrap_or_default(),
     )
 }
 
@@ -394,6 +402,9 @@ pub fn combo_surface_for_gateway(
         gm.and_then(|m| m.max_output_tokens).is_some(),
         &binding_models,
         false,
+        &gm.and_then(|m| m.reasoning_effort.as_deref())
+            .map(crate::agent_specs::reasoning_effort_levels)
+            .unwrap_or_default(),
     ))
 }
 
@@ -572,6 +583,7 @@ mod tests {
             false,
             &["claude-opus-4".into()],
             false,
+            &[],
         );
         assert!(dto.inject_effort_allowed);
         assert!(!dto.effort_readonly);
@@ -593,6 +605,7 @@ mod tests {
             false,
             &["kimi-k3".into()],
             false,
+            &[],
         );
         assert!(!kimi_openai.inject_effort_allowed);
         assert_eq!(kimi_openai.channel_effort, "unknown");
@@ -608,6 +621,7 @@ mod tests {
             false,
             &["kimi-k3".into()],
             false,
+            &[],
         );
         assert!(kimi_native.inject_effort_allowed);
         assert_eq!(kimi_native.channel_effort, "inject");
@@ -627,6 +641,7 @@ mod tests {
             false,
             &["qwen3-coder".into()],
             false,
+            &[],
         );
         assert!(!dto.inject_temperature_allowed);
         assert_eq!(dto.channel_temperature, "persist");

@@ -1,3 +1,5 @@
+import { isSettingPlaceholder, uniqueRuleLines } from "./project-context.ts";
+
 /** TASK.md「文献来源」段的单一出处：模板拼装（renderTaskMd）与就地同步（upsert）共用。
  *  独立成纯模块（不依赖 tauri API），供 node --test 直接覆盖。 */
 
@@ -25,14 +27,38 @@ export function litSourceSectionLines(
   ];
 }
 
-/** 把「文献来源」段就地同步进已有 TASK.md 内容（v3.90）：内容文件一旦被编辑/播种就是快照，
- *  项目配置里改文献来源不再自动反映——这段是改变检索步骤性质的硬前提，必须跟着配置走。
- *  有段替换、无段插入（优先「已定方向」/「预期产物」之前，与 renderTaskMd 相对位置一致；都没有则补到末尾）、
- *  search 时删除该段。无变化时原样返回（调用方据此判断是否写盘）。 */
-export function upsertLitSourceSection(text: string, litSource: string): string {
+/** 已存任务书里的「待确认的全局设定」跟着项目规则走。带括号或冒号后为空的留下，已填的删掉。 */
+export function upsertPendingSettingsSection(
+  text: string,
+  settings: readonly string[],
+): string {
+  const pending = uniqueRuleLines(settings).filter((line) =>
+    isSettingPlaceholder(line),
+  );
+  const section =
+    pending.length === 0
+      ? null
+      : [
+          "## 待确认的全局设定",
+          ...pending.map((line) => `- ${line}`),
+          "这些还没有由人确定。先逐项问人，说明括号里可以怎么填。人确定一项后，把 .ccode/project.toml 的 settings 里对应那一行改成「名称：答案」，再按答案做。确定之前不得把括号里的提示当成已经决定的口径，也不得写进正文。",
+        ];
+  return replaceSection(text, "## 待确认的全局设定", section, [
+    "## 文献来源",
+    "## 已定方向",
+    "## 决策暂停策略",
+    "## 本步骤输入",
+  ]);
+}
+
+function replaceSection(
+  text: string,
+  heading: string,
+  section: string[] | null,
+  insertBefore: string[],
+): string {
   const lines = text.split("\n");
-  // 已有段的行区间 [start, end)：到下一个「## 」小节或文末
-  const start = lines.findIndex((l) => l.trim() === "## 文献来源");
+  const start = lines.findIndex((line) => line.trim() === heading);
   let end = -1;
   if (start >= 0) {
     end = lines.length;
@@ -43,7 +69,6 @@ export function upsertLitSourceSection(text: string, litSource: string): string 
       }
     }
   }
-  const section = litSourceSectionLines(litSource);
   if (!section) {
     if (start < 0) return text;
     lines.splice(start, end - start);
@@ -53,10 +78,21 @@ export function upsertLitSourceSection(text: string, litSource: string): string 
     lines.splice(start, end - start, ...section, "");
     return lines.join("\n");
   }
-  let at = lines.findIndex(
-    (l) => l.startsWith("## 已定方向") || l.startsWith("## 预期产物"),
+  let at = lines.findIndex((line) =>
+    insertBefore.some((marker) => line.startsWith(marker)),
   );
   if (at < 0) at = lines.length;
   lines.splice(at, 0, ...section, "");
   return lines.join("\n");
+}
+
+/** 把「文献来源」段就地同步进已有 TASK.md 内容（v3.90）：内容文件一旦被编辑/播种就是快照，
+ *  项目配置里改文献来源不再自动反映——这段是改变检索步骤性质的硬前提，必须跟着配置走。
+ *  有段替换、无段插入（优先「已定方向」/「预期产物」之前，与 renderTaskMd 相对位置一致；都没有则补到末尾）、
+ *  search 时删除该段。无变化时原样返回（调用方据此判断是否写盘）。 */
+export function upsertLitSourceSection(text: string, litSource: string): string {
+  return replaceSection(text, "## 文献来源", litSourceSectionLines(litSource), [
+    "## 已定方向",
+    "## 预期产物",
+  ]);
 }

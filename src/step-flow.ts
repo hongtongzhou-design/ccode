@@ -240,7 +240,7 @@ export function buildStepFlow(args: {
       section: "optional",
       label: "导入到 EndNote",
       hint: runStatus === "done"
-        ? "点「生成RIS并导入」后，把下载里的 Mesa-EndNote-import.ris 拖到 EndNote 图标上（Dock 或应用程序，不要拖进窗口）。导入完再勾选。"
+        ? "点「同步到 EndNote」把已经写好的 papers/endnote-import.ris 交给 EndNote。也可以把产物里的这一份拖到图标上，不要拖进窗口。导入完再勾选。"
         : "先保存进项目，再生成RIS并导入。",
       done: false,
       skipCurrent: true,
@@ -366,6 +366,14 @@ export function formatZoteroDuplicatePrompt(m: {
 }): string | null {
   if (!m.reachable || m.present <= 0 || m.total <= 0) return null;
   return `Zotero 库里已有 ${m.present} 篇（对照清单 ${m.total} 个 DOI）。再导入可能重复。仍要打开 to-fetch.ris？`;
+}
+
+/** EndNote 没有本机查重接口。打开前确认篇数，取消则不交给 EndNote。 */
+export function formatEndnoteOpenPrompt(count: number): string {
+  if (count > 0) {
+    return `把 papers/endnote-import.ris 交给 EndNote，约 ${count} 篇。库里已有的可能重复。仍要打开？`;
+  }
+  return "把 papers/endnote-import.ris 交给 EndNote？库里已有的可能重复。";
 }
 
 /** 「同步到 Zotero」结果：界面只留一句摘要，失败明细进悬浮。 */

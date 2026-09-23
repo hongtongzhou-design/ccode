@@ -29,6 +29,7 @@ import type {
   WorkspaceDto,
 } from "../types";
 import { isSettingPlaceholder } from "../project-context";
+import { upsertPendingSettingsSection } from "../task-md-sections";
 import { researchToolAskFieldsForStep, researchToolsFromSettings } from "../research-tools";
 import { statusBadgeTitle } from "../git-status-groups";
 import {
@@ -508,7 +509,12 @@ export default function TaskCardsSection({
       { projectRoot: projectPath, stepName: step.name },
     );
     const raw = cur?.text?.trim() ?? "";
-    if (raw && !isTaskMdStub(raw)) return { text: cur?.text ?? "", revision: cur?.revision ?? null };
+    if (raw && !isTaskMdStub(raw)) {
+      return {
+        text: upsertPendingSettingsSection(cur?.text ?? "", cfg.settings ?? []),
+        revision: cur?.revision ?? null,
+      };
+    }
     return {
       text: resolveTaskMdSource(raw, await buildTaskMdPreview(projectPath, step, cfg)),
       revision: cur?.revision ?? null,

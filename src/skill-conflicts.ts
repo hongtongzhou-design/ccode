@@ -102,6 +102,8 @@ export function skillChainWarnings(
   lib: SkillDto[],
   supply: string[],
   expectedArtifacts: string[],
+  /** 本步合同实际要写的文件。给了就只对这批做产物检查，技能声明里别的阶段不报。 */
+  stepOutputs?: string[],
 ): SkillChainWarning[] {
   const byName = new Map(lib.map((s) => [s.name, s]));
   const out: SkillChainWarning[] = [];
@@ -123,23 +125,33 @@ export function skillChainWarnings(
       }
     }
     if (expectedArtifacts.length > 0) {
-      const outputs = skill.outputs ?? [];
+      const declared = skill.outputs ?? [];
+      const outputs = stepOutputs ?? declared;
       const covered = outputs.filter((output) =>
         expectedArtifacts.some(
           (a) => pathCovered(output, a) || pathCovered(a, output),
         ),
       );
-      // 多阶段技能（综述写作含大纲+稿件）挂在其中一步时，对上了本步产物即可，
-      // 其余是别的阶段的产出，不拿「建议补进步骤定义」挡内置模板。
-      if (covered.length === 0) {
-        for (const output of outputs) {
-          out.push({
-            skill: name,
-            kind: "output",
-            path: normalizeOutput(output),
-            inferred,
-          });
-        }
+      // 多阶段技能挂在其中一步时，对上了本步产物即可。
+      // 调用方给了本步实际产出时，只报这一批里没进预期产物的，不拿别的阶段挡开工。
+      const missing =
+        stepOutputs != null
+          ? outputs.filter(
+              (output) =>
+                !expectedArtifacts.some(
+                  (a) => pathCovered(output, a) || pathCovered(a, output),
+                ),
+            )
+          : covered.length === 0
+            ? declared
+            : [];
+      for (const output of missing) {
+        out.push({
+          skill: name,
+          kind: "output",
+          path: normalizeOutput(output),
+          inferred,
+        });
       }
     }
   }

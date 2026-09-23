@@ -30,6 +30,12 @@ test("分级树：本层文件与子文件夹并列，剥默认目录后不再�
     { rel: "Bob.md", name: "Bob.md" },
   ];
   const tree = buildFolderTree(items, (x) => x.rel);
+  const outside = buildFolderTree(
+    [{ rel: "/Users/tongzhouhong/Zotero/storage/HN29M4KG/paper.pdf" }],
+    (x) => x.rel,
+  );
+  assert.equal(outside.folders.length, 0);
+  assert.equal(outside.files[0].rel.endsWith("paper.pdf"), true);
   assert.equal(treeHasFolders(tree), true);
   assert.deepEqual(tree.files.map((f) => f.name), ["Bob.md"]);
   assert.deepEqual(tree.folders.map((f) => f.name), ["AI4Paper", "Bob"]);

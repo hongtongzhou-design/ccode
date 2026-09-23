@@ -13,6 +13,7 @@ import {
   buildStepFlow,
   discussChatLabel,
   doiFromToFetchUrl,
+  formatEndnoteOpenPrompt,
   formatZoteroDuplicatePrompt,
   isEndnoteTaskTitle,
   isPaywallTaskTitle,
@@ -58,7 +59,7 @@ import {
   instOpenTarget,
   type FetchedFulltextDto,
 } from "../inst-access";
-import PendingConfirmList from "./PendingConfirmList";
+import PendingConfirmList, { type PendingConfirmHandle } from "./PendingConfirmList";
 import type { ProjectStepDto, WorkspaceDto } from "../types";
 import type { StepRunStatus } from "../step-flow";
 
@@ -413,6 +414,8 @@ export default function StepFlow({
   // 首次点开才读文件，收起不清缓存（agent 不会在展示期间改它）。
   // 位置口径：agent 的产出落在步骤工作区，评审合并后才进项目根——先读工作区再回落项目根
   const [pendingListOpen, setPendingListOpen] = useState(true);
+  const pendingListRef = useRef<PendingConfirmHandle>(null);
+  const [pendingMeta, setPendingMeta] = useState({ count: 0, busy: false });
   const [paywallListOpen, setPaywallListOpen] = useState(() =>
     readPaywallListOpen(projectPath),
   );
@@ -432,6 +435,8 @@ export default function StepFlow({
     detail?: string;
   } | null>(null);
   const [endnoteOpenNote, setEndnoteOpenNote] = useState<string | null>(null);
+  const [endnoteSyncing, setEndnoteSyncing] = useState(false);
+  const [endnoteSyncResult, setEndnoteSyncResult] = useState<string | null>(null);
   const [endnoteChecked, setEndnoteChecked] = useState(false);
   const [continueNotesChecked, setContinueNotesChecked] = useState(false);
   const [toFetchBusy, setToFetchBusy] = useState<
@@ -721,14 +726,30 @@ export default function StepFlow({
   }
 
   async function openEndnoteImport() {
-    setEndnoteOpenNote("正在从 references.bib 生成 RIS…");
+    if (endnoteSyncing) return;
+    const count = paywallRisFile ? toFetchItems.length : 0;
+    if (!(await confirmDialog(formatEndnoteOpenPrompt(count), {
+      confirmText: "仍要导入",
+      focusCancel: true,
+    }))) {
+      return;
+    }
+    setEndnoteSyncing(true);
+    const note = "正在交给 EndNote…";
+    setEndnoteOpenNote(note);
+    setEndnoteSyncResult(note);
     try {
       const msg = await invoke<string>("endnote_export_xml", {
         projectRoot: projectPath,
       });
       setEndnoteOpenNote(msg);
+      setEndnoteSyncResult(msg);
     } catch (e) {
-      setEndnoteOpenNote(String(e));
+      const msg = String(e);
+      setEndnoteOpenNote(msg);
+      setEndnoteSyncResult(msg);
+    } finally {
+      setEndnoteSyncing(false);
     }
   }
 
@@ -1128,12 +1149,12 @@ export default function StepFlow({
               onClick={() => void openEndnoteImport()}
               title={
                 ready
-                  ? "生成下载里的 Mesa-EndNote-import.ris，并打开 EndNote"
-                  : "先保存进项目，再生成RIS并导入"
+                  ? "把已经写好的 papers/endnote-import.ris 交给 EndNote。也可以把产物里的这一份拖到图标上"
+                  : "先保存进项目，再同步"
               }
               className="ml-auto shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
             >
-              生成RIS并导入
+              同步到 EndNote
             </button>
           );
         }
@@ -1292,11 +1313,6 @@ export default function StepFlow({
       <li
         key={node.key}
         data-node-key={node.key}
-        title={
-          node.kind === "human" && human?.guidance && (dense || !isCurrent)
-            ? human.guidance
-            : undefined
-        }
         data-human-task={
           node.kind === "human" && node.human?.target
             ? node.human.title
@@ -1321,11 +1337,12 @@ export default function StepFlow({
                 "relative pl-1.5 before:absolute before:bottom-1 before:left-[7px] before:top-[22px] before:w-0.5 before:bg-cta before:content-['']"
               : "pl-1.5"
         } ${
-          // 还轮不到（after 档且 agent 未产出/未跑完）：整行压暗，不写「等 agent」那种话
+          // 还轮不到才压暗。待确认清单已经挂在这一行上，不因为检索会话还没标完成就发灰。
           node.kind === "human" &&
           human?.timing === "after" &&
           !afterReady(human) &&
-          !node.done
+          !node.done &&
+          !isPendingConfirmTaskTitle(human.title)
             ? "opacity-45"
             : ""
         }`}
@@ -1376,6 +1393,11 @@ export default function StepFlow({
             />
           ) : null}
           <span
+            title={
+              node.kind === "human" && human?.guidance && (dense || !isCurrent)
+                ? human.guidance
+                : undefined
+            }
             className={`min-w-0 flex-1 truncate ${
               dense ? "text-xs" : "text-sm"
             } ${
@@ -1395,14 +1417,11 @@ export default function StepFlow({
           {node.section === "main" &&
             node.kind === "human" &&
             human?.optional &&
-            !node.done && (
+            !node.done &&
+            !isPaywallTaskTitle(human.title) && (
             <span
               className="shrink-0 rounded-sm bg-raised px-1.5 py-0.5 text-micro text-l4"
-              title={
-                isPaywallTaskTitle(human.title)
-                  ? "可选：不做也能跑完这一步。跳过的篇目下一篇按摘要记"
-                  : "可选：不做也能跑完这一步"
-              }
+              title="可选：不做也能跑完这一步"
             >
               可选
             </span>
@@ -1431,6 +1450,18 @@ export default function StepFlow({
                 : ""}
             </span>
           ) : null}
+          {node.section === "main" &&
+            node.kind === "human" &&
+            human?.optional &&
+            !node.done &&
+            isPaywallTaskTitle(human.title) && (
+            <span
+              className="shrink-0 rounded-sm bg-raised px-1.5 py-0.5 text-micro text-l4"
+              title="可选：不做也能跑完这一步。跳过的篇目下一篇按摘要记"
+            >
+              可选
+            </span>
+          )}
           {nodeActions(node)}
         </div>
         {/* 当前节点的引导与展开操作：种子 chips / 落点说明。
@@ -1881,19 +1912,34 @@ export default function StepFlow({
             <div className="mt-1 pl-9 text-micro leading-5 text-l4">
               <p>{PENDING_HINT}</p>
               <div className="mt-1.5">
-                <button
-                  type="button"
-                  onClick={() => setPendingListOpen((open) => !open)}
-                  aria-expanded={pendingListOpen}
-                  className="flex items-center gap-1 text-xs text-l3 hover:text-l1"
-                  title="Agent 拿不准的篇目，点纳入或排除"
-                >
-                  <FoldMark open={pendingListOpen} />
-                  待确认清单
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPendingListOpen((open) => !open)}
+                    aria-expanded={pendingListOpen}
+                    className="flex items-center gap-1 text-xs text-l3 hover:text-l1"
+                    title="Agent 拿不准的篇目，点纳入或排除"
+                  >
+                    <FoldMark open={pendingListOpen} />
+                    待确认清单
+                  </button>
+                  {pendingListOpen && pendingMeta.count > 0 && (
+                    <button
+                      type="button"
+                      disabled={pendingMeta.busy}
+                      onClick={() => pendingListRef.current?.includeAll()}
+                      className="rounded-sm border border-cta-bd bg-cta px-1.5 py-0.5 text-micro text-cta-text disabled:opacity-50"
+                      title={`把 ${pendingMeta.count} 篇待确认全部改为纳入。没有 PDF 的会追加到待获取。`}
+                    >
+                      {pendingMeta.busy ? "纳入中…" : "全部纳入"}
+                    </button>
+                  )}
+                </div>
                 {pendingListOpen && (
                   <div className="mt-1">
                     <PendingConfirmList
+                      ref={pendingListRef}
+                      onMeta={setPendingMeta}
                       worktreePath={ws?.worktreePath}
                       projectRoot={projectPath}
                       onOpenPdf={(path) =>
@@ -2154,10 +2200,11 @@ export default function StepFlow({
                         <button
                           type="button"
                           onClick={() => void openEndnoteImport()}
-                          title="从 references.bib 生成 RIS，交给 EndNote 导入。不要把文件拖进 EndNote 窗口。"
+                          disabled={endnoteSyncing}
+                          title="把已经写好的 papers/endnote-import.ris 交给 EndNote。字段在检索时一次写全，这里不再重新检索。"
                           className={`${ghostActionClass} shrink-0`}
                         >
-                          同步到 EndNote
+                          {endnoteSyncing ? "打开中…" : "同步到 EndNote"}
                         </button>
                         <button
                           type="button"
@@ -2173,6 +2220,14 @@ export default function StepFlow({
                             title={zoteroSyncResult.detail || zoteroSyncResult.line}
                           >
                             {zoteroSyncResult.line}
+                          </span>
+                        )}
+                        {endnoteSyncResult && (
+                          <span
+                            className={`min-w-0 truncate text-micro ${/失败|找不到|无法|没法/.test(endnoteSyncResult) ? "text-err-text" : "text-l4"}`}
+                            title={endnoteSyncResult}
+                          >
+                            {endnoteSyncResult}
                           </span>
                         )}
                       </div>

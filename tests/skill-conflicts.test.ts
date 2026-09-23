@@ -141,6 +141,26 @@ test("skillChainWarnings：未入库/无接口技能不参与；预期产物为�
   assert.deepEqual(skillChainWarnings(["w"], lib2, [], []), []);
 });
 
+test("skillChainWarnings：本步只写导入文件时，不报技能声明里的交稿文件", () => {
+  const lib = [
+    iface("endnote-bridge", [], [
+      "papers/endnote-report.json",
+      "output/endnote.docx",
+      "papers/endnote-cite-report.md",
+    ]),
+  ];
+  assert.deepEqual(
+    skillChainWarnings(
+      ["endnote-bridge"],
+      lib,
+      [],
+      ["papers/screening.md", "papers/endnote-import.ris"],
+      ["papers/endnote-import.ris"],
+    ),
+    [],
+  );
+});
+
 test("skillChainWarnings：路径归一化后判定（./ 前缀、反斜杠）", () => {
   const lib = [iface("s", ["./papers\\included.md"], [])];
   assert.deepEqual(

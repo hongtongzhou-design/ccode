@@ -5,6 +5,7 @@ import { AGENTS, AGENT_PROTOCOLS } from "../types";
 import { PROVIDER_PRESETS, type ProviderPreset } from "../presets";
 import { mergeGatewayCatalog } from "../gateway-catalog";
 import { Checkbox, fieldClass, FoldMark, primaryActionClass, searchFieldClass, secondaryActionClass } from "./PageFrame";
+import { parseReasoningEffort, reasoningEffortValue } from "../reasoning-effort";
 import { confirmDialog } from "./ConfirmDialog";
 import { policyFieldHint, policyFieldMode } from "../combo-field";
 import {
@@ -182,6 +183,63 @@ function VendorModelSections({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+const REASONING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+function ReasoningEffortPicker({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: string | null;
+  disabled: boolean;
+  onChange: (next: string | null) => void;
+}) {
+  const parsed = parseReasoningEffort(value);
+  return (
+    <div className="mt-0.5 space-y-1">
+      <div className="flex flex-wrap gap-x-2 gap-y-1">
+        {REASONING_LEVELS.map((level) => (
+          <Checkbox
+            key={level}
+            checked={parsed.levels.includes(level)}
+            disabled={disabled}
+            label={<span className="font-mono text-micro">{level}</span>}
+            onChange={(on) => {
+              const levels = on
+                ? [...parsed.levels, level]
+                : parsed.levels.filter((item) => item !== level);
+              const ordered = REASONING_LEVELS.filter((item) => levels.includes(item));
+              const launch =
+                parsed.launch && ordered.includes(parsed.launch)
+                  ? parsed.launch
+                  : ordered.includes("high")
+                    ? "high"
+                    : (ordered[0] ?? null);
+              onChange(reasoningEffortValue(ordered, launch));
+            }}
+          />
+        ))}
+      </div>
+      {parsed.levels.length > 1 && (
+        <label className="block text-micro text-l4">
+          开场默认
+          <select
+            className={`${fieldClass} mt-0.5 w-full`}
+            disabled={disabled}
+            value={parsed.launch ?? parsed.levels[0]}
+            onChange={(e) => onChange(reasoningEffortValue(parsed.levels, e.target.value))}
+          >
+            {parsed.levels.map((level) => (
+              <option key={level} value={level}>{level}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      <p className="text-[11px] text-l4">勾选的档位可在会话里切换。开场只用其中一档。</p>
     </div>
   );
 }
@@ -1334,14 +1392,10 @@ export default function GatewayLibrary({
                                     stored: m.reasoningEffort != null,
                                   })}</span>
                                 )}
-                                <input
-                                  className={`${fieldClass} mt-0.5 w-full`}
+                                <ReasoningEffortPicker
+                                  value={m.reasoningEffort}
                                   disabled={effortMode === "readonly"}
-                                  placeholder="none / minimal / low / medium / high / xhigh / max"
-                                  value={m.reasoningEffort ?? ""}
-                                  onChange={(e) =>
-                                    patchModel(m.id, { reasoningEffort: e.target.value || null })
-                                  }
+                                  onChange={(next) => patchModel(m.id, { reasoningEffort: next })}
                                 />
                               </label>
                             )}

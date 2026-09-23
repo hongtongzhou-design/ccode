@@ -35,11 +35,10 @@ outputs: [papers/endnote-report.json, output/endnote.docx, papers/endnote-cite-r
 
 ### 1. 出库桥接（references.bib → EndNote）
 
-- 产出 `papers/endnote-import.xml`（EndNote XML 格式，EndNote 首选导入格式，字段保真最好；这是本技能主产物）：
-  - 最小字段集：ref-type（Journal Article=17，其余类型按 EndNote XML 对照表）、authors（`姓, 名` 逐作者一个 author 元素；「名 姃」无逗号源串（OpenAlex 等）自动翻转为末词作姓，末词为缩写（PubMed 风格 `Smith JM`）时首词作姓，已带逗号者不动；回流 .bib 输出保持源格式）、
-    title、secondary-title（期刊名）、year、volume/number/pages、electronic-resource-num（DOI）、urls
+- 产出 `papers/endnote-import.xml`（EndNote XML，字段保真最好；本技能主产物）和同内容的 `papers/endnote-import.ris`。Mesa 的「同步到 EndNote」交的是这份 RIS：拖到 EndNote 图标上，选 Reference Manager (RIS)。XML 仍给 File → Import → EndNote XML。
+  - bib 里有的字段都要写进导入文件，没有的留空，不编造。期刊文献对应 EndNote 里这些格子：作者（`姓, 名`，一位一个 author / 一条 `AU`；「名 姓」无逗号源串翻转为末词作姓，末词为缩写如 `Smith JM` 时首词作姓）、年份、标题、期刊（secondary-title / `T2`+`JO`）、卷、期、页、起始页码、日期、网络出版日期（RIS 的 `ET`；XML 的 `edition`）、文章类型、其他形式的期刊名（与全称不同才写：`periodical/abbr-1` 与 `titles/alt-title`，RIS 为 `J2`）、ISSN、DOI、关键词（一词一条）、摘要、URL。注释只写文献本身的内容，不写筛选过程、来源库或出版商。
   - 附件：项目 `papers/` 下已配对的 PDF 写进 `pdf-urls`（用 absolute file URL），导入后人工核对附件是否成功绑定，不能假定每个版本/路径都自动成功
-  - 生成脚本放 `analysis/`（可复现、`main()` 入口）；bib 解析用现成库（如 Python bibtexparser），缺字段留空不编造
+  - 转换用随包 `scripts/bridge.py`。bib 里的 `journalabbreviation`、`issn`、`abstract`、`keywords`、`date`、`epubdate`、`language`、`note` 会进上面这些格子。回流 .bib 保持源作者格式。
 - 最小骨架（字段名和层级不可省略；每条记录按此结构生成）：
   ```xml
   <xml><records><record>
@@ -51,7 +50,7 @@ outputs: [papers/endnote-report.json, output/endnote.docx, papers/endnote-cite-r
     <urls><pdf-urls><url>file:///C:/project/papers/example.pdf</url></pdf-urls></urls>
   </record></records></xml>
   ```
-- 备选：用户环境导不进 XML 时改产 `papers/endnote-import.ris`（TY/ID/AU/TI/JO/PY/DO/UR，RIS 2004 口径；`ID` 载 citation key，EndNote 导入后回流才能接上 `--existing` 保键）
+- RIS 与 XML 一起生成（`TY`/`ID`/`AU`/`TI`/`T2`/`J2`/`PY`/`DA`/`ET`/`VL`/`IS`/`SP`/`M2`/`EP`/`M3`/`SN`/`DO`/`KW`/`AB`/`N1`/`UR`，CRLF，无 BOM）。`ID` 载 citation key。对照 EndNote 2025 的 RefMan RIS 过滤器：期刊全称 `T2`，其他形式的期刊名 `J2`，页 `SP`，起始页码 `M2`，文章类型 `M3`，网络出版日期 `ET`（XML 写在 `edition`）。写文件时一次查全：有 DOI 就向 Crossref 取正式字段，摘要和关键词缺了再问 OpenAlex，期刊缩写按 ISSN 查 NLM Catalog 的 Medline 缩写，没有再用 Semantic Scholar 的期刊别名。两处都没有就留空，不让 Agent 现编缩写。点「同步到 EndNote」只把这份已经写好的 RIS 交给 EndNote，不再重新检索。
 - 导入动作本身是人工：报告里写清指引——双击文件或 EndNote「File → Import」，XML 选「EndNote generated XML / EndNote XML」、RIS 选「Reference Manager (RIS)」；具体名称与附件解析须在实际版本验证
 
 ### 2. Word 侧人工步骤（供人工事项引用）

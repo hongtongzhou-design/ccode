@@ -878,6 +878,10 @@ pub(crate) fn policy_channel_note(agent: &str) -> Option<&'static str> {
     }
 }
 
+/// Grok 1.0.x 校验 `models.default_reasoning_effort` 的闭集（启动报错原文）。
+pub const GROK_REASONING_EFFORTS: [&str; 7] =
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 /// 逐 agent 的 reasoningEffort 已知档位（与 request_policy_support 同实证口径）
 pub(crate) fn effort_options(agent: &str) -> Vec<&'static str> {
     match agent {
@@ -887,11 +891,86 @@ pub(crate) fn effort_options(agent: &str) -> Vec<&'static str> {
         // 端点不支持时仍由其自身协议返回错误或忽略。
         "codex" => vec!["low", "medium", "high", "xhigh", "ultra", "max"],
         "opencode" => vec!["none", "minimal", "low", "medium", "high"],
-        "grok" => vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        "grok" => GROK_REASONING_EFFORTS.to_vec(),
         // kimi 合法值随模型 catalog 漂移（low/medium/high/xhigh/max/on/off），env 通道无闭集
         // 校验且官方明确原样透传——自由输入反而更准，不给下拉
         _ => vec![],
     }
+}
+
+const KNOWN_REASONING_EFFORTS: [&str; 10] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "ultra", "max", "on", "off",
+];
+
+/// 网关逐模型思考档：逗号分隔的多档（会话里可切）+ 可选 `@默认档`。
+/// 斜杠串和拼写错误整段丢掉，否则会原样写进 Grok 的 `default_reasoning_effort`。
+/// 单词旧值（`high`）原样保留。
+pub(crate) fn canonical_reasoning_effort(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.contains(',') && !trimmed.contains('@') {
+        let v = trimmed.to_ascii_lowercase();
+        return KNOWN_REASONING_EFFORTS
+            .contains(&v.as_str())
+            .then_some(v);
+    }
+    let (list, default) = trimmed
+        .rsplit_once('@')
+        .map(|(list, default)| (list, Some(default.trim())))
+        .unwrap_or((trimmed, None));
+    let mut levels: Vec<String> = Vec::new();
+    for part in list.split(',') {
+        let v = part.trim().to_ascii_lowercase();
+        if v.is_empty() || !KNOWN_REASONING_EFFORTS.contains(&v.as_str()) {
+            continue;
+        }
+        if !levels.iter().any(|x| x == &v) {
+            levels.push(v);
+        }
+    }
+    if levels.is_empty() {
+        return None;
+    }
+    let default = default
+        .map(|s| s.to_ascii_lowercase())
+        .filter(|s| levels.iter().any(|x| x == s));
+    let mut out = levels.join(",");
+    if let Some(d) = default {
+        if levels.len() > 1 {
+            out.push('@');
+            out.push_str(&d);
+        }
+    }
+    Some(out)
+}
+
+/// 开场写入 CLI 的那一档：多选时取 `@` 后的默认，没有则取名单第一档。
+pub(crate) fn launch_reasoning_effort(raw: &str) -> Option<String> {
+    let stored = canonical_reasoning_effort(raw)?;
+    let (list, default) = stored
+        .rsplit_once('@')
+        .map(|(list, default)| (list.to_string(), Some(default.to_string())))
+        .unwrap_or((stored, None));
+    default.or_else(|| {
+        list.split(',')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// 会话内可切换的档位。单词旧值视为「只开这一档」。
+pub(crate) fn reasoning_effort_levels(raw: &str) -> Vec<String> {
+    let Some(stored) = canonical_reasoning_effort(raw) else {
+        return Vec::new();
+    };
+    let list = stored.split('@').next().unwrap_or("");
+    list.split(',')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1597,6 +1676,21 @@ mod tests {
         assert_eq!(grok_dto2.request_policy.temperature, "inject");
         assert_eq!(grok_dto2.request_policy.custom_headers, "inject");
         assert_eq!(grok_dto2.request_policy.reasoning_effort, "inject");
+        assert_eq!(canonical_reasoning_effort(" High "), Some("high".into()));
+        assert_eq!(canonical_reasoning_effort("hign/xhign"), None);
+        assert_eq!(canonical_reasoning_effort("off"), Some("off".into()));
+        assert_eq!(
+            canonical_reasoning_effort("low, high, xhigh@high"),
+            Some("low,high,xhigh@high".into())
+        );
+        assert_eq!(
+            launch_reasoning_effort("low,high,xhigh@xhigh").as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            reasoning_effort_levels("low,high,xhigh@high"),
+            vec!["low".to_string(), "high".into(), "xhigh".into()]
+        );
         assert_eq!(grok_dto2.request_policy.max_output_tokens, "inject");
         assert_eq!(grok_dto2.request_policy.top_p, "inject");
         assert_eq!(claude_dto.skill_dist.mode, "symlinkOrCopy");

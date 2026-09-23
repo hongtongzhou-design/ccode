@@ -163,6 +163,38 @@ test("会话尾部 done/confirm 立刻停转圈并卸武装", () => {
   );
 });
 
+test("还在等回复时，半段助手正文和终端静默都不得停转圈", () => {
+  assert.deepEqual(
+    applyTailAttention({
+      prev: "working",
+      tail: "working",
+      armed: true,
+      turnSettled: true,
+      pendingReply: true,
+    }),
+    { attention: "working", armed: true },
+  );
+  assert.deepEqual(
+    applyTailAttention({
+      prev: "working",
+      tail: "done",
+      armed: false,
+      pendingReply: true,
+    }),
+    { attention: "working", armed: false },
+  );
+  assert.deepEqual(
+    onPtyWorkingSilence({
+      prev: "working",
+      armed: false,
+      hadPtyWorkingOutput: true,
+      pendingReply: true,
+      silenceMs: 10_000,
+    }),
+    { attention: "working", armed: true, clearHadOutput: false },
+  );
+});
+
 test("PTY 还在出字时，会话文件中途 done 不得停转圈", () => {
   assert.deepEqual(
     applyTailAttention({

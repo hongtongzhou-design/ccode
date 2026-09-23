@@ -761,7 +761,7 @@ fn patch_kimi_config(
 /// `reasoning_efforts` 时 Grok 不出 `/effort`；只写 `[models].default_reasoning_effort`
 /// 也不出菜单。字段形状与内置 grok-4.6 一致（`value`/`label`/`description`，
 /// 旧 `{ effort = "..." }` 整段被忽略）。已有 `reasoning_efforts` 不覆盖；
-/// 显式 `supports_reasoning_effort = false` 不改。
+/// 中转目录把模型标成 `supports_reasoning_effort = false` 时改回 true，否则菜单写了也不出。
 /// [mcp_servers] 等其他段与用户手写的 [model.*] 其他字段一律不动。
 fn patch_grok_config(
     existing: Option<&str>,
@@ -793,7 +793,12 @@ fn patch_grok_config(
     if let Some(v) = policy.max_output_tokens {
         models_tbl["max_completion_tokens"] = value(v as i64);
     }
-    if let Some(v) = policy.reasoning_effort.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(v) = policy
+        .reasoning_effort
+        .as_deref()
+        .and_then(crate::agent_specs::canonical_reasoning_effort)
+        .filter(|s| crate::agent_specs::GROK_REASONING_EFFORTS.contains(&s.as_str()))
+    {
         models_tbl["default_reasoning_effort"] = value(v);
     }
     if !policy.header_env.is_empty() {
@@ -822,64 +827,94 @@ fn patch_grok_config(
         let Some(table) = entry.as_table_mut() else {
             return Err(format!("模型 {m} 的配置段不是表，已停止写入"));
         };
-        write_grok_reasoning_menu(table);
+        write_grok_reasoning_menu(table, grok_menu_levels(profile, m).as_deref());
     }
     Ok(doc.to_string())
+}
+
+fn grok_menu_levels(profile: &Profile, model: &str) -> Option<Vec<String>> {
+    let raw = profile
+        .gateway_id
+        .as_deref()
+        .and_then(crate::gateway_store::find_gateway)
+        .and_then(|g| g.models.into_iter().find(|row| row.id == model))
+        .and_then(|row| row.reasoning_effort)?;
+    let levels = crate::agent_specs::reasoning_effort_levels(&raw);
+    (!levels.is_empty()).then_some(levels)
 }
 
 /// Grok 1.0.40 推理强度菜单：与内置 grok-4.6 同形（`value`/`label`/`description`）。
 /// 自定义端点的模型目录通常不带 `reasoning_efforts`，不写这段则 `/effort` 不出。
 /// 用户已写过菜单则保留，避免每次设为全局覆盖手改档位。
-fn write_grok_reasoning_menu(entry: &mut toml_edit::Table) {
+/// 中转目录常把第三方模型标成 `supports_reasoning_effort = false`，
+/// 这个 false 会让 Grok 丢掉后面补上的菜单，所以设为全局时改回 true。
+fn write_grok_reasoning_menu(entry: &mut toml_edit::Table, levels: Option<&[String]>) {
     use toml_edit::{value, ArrayOfTables, Item, Table};
-    // 显式关掉的模型不补菜单，避免把用户的 false 改回 true
     if entry
         .get("supports_reasoning_effort")
         .and_then(|v| v.as_bool())
-        == Some(false)
+        != Some(true)
     {
-        return;
-    }
-    if entry.get("supports_reasoning_effort").is_none() {
         entry["supports_reasoning_effort"] = value(true);
     }
     if entry.get("reasoning_efforts").is_some() {
         return;
     }
-    if entry.get("reasoning_effort").is_none() {
-        entry["reasoning_effort"] = value("high");
-    }
-    // 四档对齐内置 grok-4.6；none/minimal/max 不在这张菜单里
-    let rows: [(&str, &str, &str, bool); 4] = [
+    let chosen: Vec<String> = levels
+        .filter(|rows| !rows.is_empty())
+        .map(|rows| rows.to_vec())
+        .unwrap_or_else(|| {
+            ["xhigh", "high", "medium", "low"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        });
+    let labels = [
+        ("none", "None", "No extra reasoning"),
+        ("minimal", "Minimal Effort", "Smallest reasoning budget"),
+        ("low", "Low Effort", "Quick, fast implementations"),
         (
-            "xhigh",
-            "Extra High Effort",
-            "Highest effort and reasoning level",
-            false,
+            "medium",
+            "Medium Effort",
+            "Balanced effort with standard implementation and testing",
         ),
         (
             "high",
             "High Effort",
             "Higher implementation quality with extensive reasoning",
-            true,
         ),
         (
-            "medium",
-            "Medium Effort",
-            "Balanced effort with standard implementation and testing",
-            false,
+            "xhigh",
+            "Extra High Effort",
+            "Highest effort and reasoning level",
         ),
-        (
-            "low",
-            "Low Effort",
-            "Quick, fast implementations",
-            false,
-        ),
+        ("max", "Max Effort", "Maximum reasoning budget"),
     ];
+    if entry.get("reasoning_effort").is_none() {
+        let fallback = chosen
+            .iter()
+            .find(|s| s.as_str() == "high")
+            .or_else(|| chosen.first())
+            .map(String::as_str)
+            .unwrap_or("high");
+        entry["reasoning_effort"] = value(fallback);
+    }
+    let default_level = entry
+        .get("reasoning_effort")
+        .and_then(|v| v.as_str())
+        .filter(|s| chosen.iter().any(|row| row == s))
+        .unwrap_or(chosen.first().map(String::as_str).unwrap_or("high"))
+        .to_string();
     let mut tables = ArrayOfTables::new();
-    for (effort, label, description, is_default) in rows {
+    for effort in &chosen {
+        let (label, description) = labels
+            .iter()
+            .find(|(value, _, _)| *value == effort.as_str())
+            .map(|(_, label, description)| (*label, *description))
+            .unwrap_or((effort.as_str(), "Reasoning effort"));
+        let is_default = effort == &default_level;
         let mut row = Table::new();
-        row.insert("value", value(effort));
+        row.insert("value", value(effort.as_str()));
         row.insert("label", value(label));
         row.insert("description", value(description));
         if is_default {
@@ -2982,6 +3017,11 @@ mod tests {
         assert_eq!(efforts.get(1).unwrap()["value"].as_str(), Some("high"));
         assert_eq!(efforts.get(1).unwrap()["default"].as_bool(), Some(true));
         assert_eq!(efforts.get(3).unwrap()["value"].as_str(), Some("low"));
+        // 斜杠串不是一个档位，不能写进 default_reasoning_effort（Grok 会拒启动）
+        p.request_policy.reasoning_effort = Some("hign/xhign".into());
+        let out = patch_grok_config(Some(existing), Some("xai-secret"), &p).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert!(doc["models"].get("default_reasoning_effort").is_none());
     }
 
     #[test]
@@ -3066,11 +3106,18 @@ supports_reasoning_effort = false
             doc["model"]["grok-4.7"]["reasoning_effort"].as_str(),
             Some("low")
         );
+        // 中转目录的显式 false 会压掉菜单，设为全局时改回 true 并补档位
         assert_eq!(
             doc["model"]["no-think"]["supports_reasoning_effort"].as_bool(),
-            Some(false)
+            Some(true)
         );
-        assert!(doc["model"]["no-think"].get("reasoning_efforts").is_none());
+        assert_eq!(
+            doc["model"]["no-think"]["reasoning_efforts"]
+                .as_array_of_tables()
+                .unwrap()
+                .len(),
+            4
+        );
         assert_eq!(
             doc["model"]["fresh"]["reasoning_efforts"]
                 .as_array_of_tables()

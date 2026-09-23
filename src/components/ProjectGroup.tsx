@@ -35,12 +35,12 @@ import { useAppStore } from "../store";
 import { RESOURCE_TYPE_LABELS, settingsForTemplateApply } from "../pipeline-presets";
 import { startPipelineStep } from "../pipeline-start";
 import type { KickoffLaunch } from "../kickoff-launch";
-import { upsertLitSourceSection } from "../task-md-sections";
+import { upsertLitSourceSection, upsertPendingSettingsSection } from "../task-md-sections";
 import { isTaskMdStub } from "../step-decisions";
 import { demoReadPaperResource } from "../step-flow";
 import { normSep } from "../path-utils";
 import { beginAskAi } from "./AskAiModal";
-import { projectAgentPrefs } from "../project-agents";
+import { projectAgentPrefs, projectNeedsDefaultAgent } from "../project-agents";
 import {
   runIdForPath,
   workspaceHasLiveAgent,
@@ -356,6 +356,7 @@ export default function ProjectGroup({
   pageVisible,
   chromeReq,
   onIdentityAction,
+  onOpenAgents,
   onChromeConsumed,
 }: {
   /** null = 未注册分组（仅按工作区 repo 归组） */
@@ -395,6 +396,8 @@ export default function ProjectGroup({
   pageVisible?: boolean;
   chromeReq?: { action: string; token: number } | null;
   onIdentityAction?: (action: "rename" | "topic") => void;
+  /** 刚添加的项目还没设默认 Agent 时，欢迎条上的「设默认」切到 Agents 页 */
+  onOpenAgents?: () => void;
   /** 顶栏 ⋯ 的打开请求消费后清掉，避免切页/切页签后组件重挂又把编辑器打开。 */
   onChromeConsumed?: () => void;
 }) {
@@ -991,7 +994,10 @@ export default function ProjectGroup({
         );
         const raw = cur?.text?.trim() ?? "";
         if (!raw || isTaskMdStub(raw)) continue;
-        const nextText = upsertLitSourceSection(cur?.text ?? "", target);
+        const nextText = upsertPendingSettingsSection(
+          upsertLitSourceSection(cur?.text ?? "", target),
+          cfg.settings ?? [],
+        );
         if (nextText !== cur?.text) {
           await invoke("write_task_draft", {
             projectRoot: project.path,
@@ -1019,7 +1025,9 @@ export default function ProjectGroup({
       if (dataDir) setZoteroDir(dataDir);
       setZoteroLib(lib);
     } catch (reason) {
-      setZoteroMsg(String(reason));
+      const message = String(reason);
+      setZoteroMsg(message);
+      if (!dataDir && message.includes("没找到")) void pickZoteroDir();
     } finally {
       setZoteroBusy(false);
     }
@@ -1030,7 +1038,7 @@ export default function ProjectGroup({
     const picked = await open({
       directory: true,
       multiple: false,
-      title: "选择 Zotero 数据目录（含 zotero.sqlite）",
+      title: "选 Zotero 数据目录：里面要有 zotero.sqlite。不要选 storage 里的那些短码文件夹",
     });
     if (typeof picked === "string") await openZotero(picked);
   }
@@ -1523,39 +1531,24 @@ export default function ProjectGroup({
         </NoticeBar>
       )}
 
+      {registered && freshGitGuide && project && projectNeedsDefaultAgent(project) && onOpenAgents && (
+        <div className="ccode-well mb-2 flex items-center gap-3 rounded-lg px-3 py-2 text-xs text-l2">
+          <span className="min-w-0 flex-1">先定这个项目默认用哪家、哪个模型。</span>
+          <button type="button" className={ctaSm} onClick={onOpenAgents}>
+            设默认
+          </button>
+        </div>
+      )}
+
       {registered && freshGitGuide && (
-        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-sm ccode-well p-2 text-xs text-l2">
-          <span>还不是 git 仓库的话，初始化后才能建工作区。</span>
-          {/* 注册时已自动扫过一遍资源，结果要在**详情页**说出来（v3.87 修）：
-              原先只在「文献与数据」面板的折叠头里显示，而那个面板 v3.85 搬进了设置抽屉，
-              新项目自动展开变成「在关着的抽屉里展开」——用户根本看不到扫描发生过 */}
-          {cfg && (
-            <span className="text-l3">
-              已扫到 {resourceSummary}
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsOpen(true);
-                  setResOpen(true);
-                  requestAnimationFrame(() =>
-                    resPanelRef.current?.scrollIntoView({
-                      behavior: "smooth",
-                      block: "center",
-                    }),
-                  );
-                }}
-                className="ml-1 underline decoration-dotted underline-offset-2 hover:text-l1"
-              >
-                查看 / 补充
-              </button>
-            </span>
-          )}
-          {gitMsg && (
-            <span>
-              <span className="mr-1 text-ok-text">✓</span>
-              {gitMsg}
-            </span>
-          )}
+        <div className="ccode-well mb-3 flex items-center gap-3 rounded-lg px-3 py-2 text-xs text-l2">
+          <span className="min-w-0 flex-1">
+            初始化 git 后才能建工作区。
+            {cfg && (cfg.resources.length > 0) && (
+              <span className="text-l3"> 已扫到 {resourceSummary}。</span>
+            )}
+            {gitMsg && <span className="text-ok-text"> ✓ {gitMsg}</span>}
+          </span>
           <button
             type="button"
             className={ctaSm}
@@ -1564,11 +1557,25 @@ export default function ProjectGroup({
           >
             {gitBusy ? "初始化中…" : "初始化 git"}
           </button>
-          <button
-            type="button"
-            className={actionBtn}
-            onClick={onDismissGitGuide}
-          >
+          {cfg && cfg.resources.length > 0 && (
+            <button
+              type="button"
+              className={actionBtn}
+              onClick={() => {
+                setSettingsOpen(true);
+                setResOpen(true);
+                requestAnimationFrame(() =>
+                  resPanelRef.current?.scrollIntoView({
+                    behavior: "smooth",
+                    block: "center",
+                  }),
+                );
+              }}
+            >
+              查看文献
+            </button>
+          )}
+          <button type="button" className="shrink-0 text-l3 hover:text-l1" onClick={onDismissGitGuide}>
             知道了
           </button>
         </div>
@@ -2120,6 +2127,7 @@ export default function ProjectGroup({
                   {{
                     search: "让 agent 检索",
                     zotero: "我有 Zotero 库",
+                    endnote: "我有 EndNote 库",
                     folder: "我已有 PDF / 题录",
                   }[cfg.litSource?.trim() || "search"] ?? "让 agent 检索"}
                 </span>
@@ -2267,7 +2275,11 @@ export default function ProjectGroup({
               )}
               {zoteroMsg && (
                 <div className="mt-2 flex items-start gap-2 rounded-md ccode-well px-3 py-2.5 text-xs leading-5 text-l2">
-                  <span className="min-w-0 flex-1">{zoteroMsg}</span>
+                  <span className="min-w-0 flex-1">
+                    {zoteroMsg}
+                    {zoteroMsg.includes("没找到") &&
+                      " 选含 zotero.sqlite 的那一层，通常是「Zotero」。storage 里 5GJUJ4V2 这种短码是它存 PDF 的内部目录，不是库。"}
+                  </span>
                   {zoteroMsg.includes("没找到") && (
                     <button
                       type="button"

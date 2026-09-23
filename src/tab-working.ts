@@ -61,17 +61,20 @@ export function applyTailAttention(input: {
   armed: boolean;
   turnSettled?: boolean;
   ptyLive?: boolean;
+  /** 聊天层还在等这一轮的下一条回复。会话文件里的半段正文不算回合结束。 */
+  pendingReply?: boolean;
 }): { attention: TabAttention; armed: boolean } {
   if (input.tail === "confirm") return { attention: "confirm", armed: false };
-  const fileSaysOver = input.tail === "done" || Boolean(input.turnSettled);
+  const fileSaysOver =
+    !input.pendingReply && (input.tail === "done" || Boolean(input.turnSettled));
   if (fileSaysOver) {
     if (input.ptyLive && (input.armed || input.prev === "working")) {
       return { attention: "working", armed: input.armed };
     }
     return { attention: "done", armed: false };
   }
-  if (input.tail === "working") {
-    if (input.armed || input.prev === "working") {
+  if (input.tail === "working" || input.pendingReply) {
+    if (input.armed || input.prev === "working" || input.pendingReply) {
       return { attention: "working", armed: input.armed };
     }
     return { attention: input.prev, armed: false };
@@ -104,11 +107,18 @@ export function onPtyWorkingSilence(input: {
       clearHadOutput: false,
     };
   }
-  if (input.armed) {
-    if ((input.silenceMs ?? 0) >= PTY_ARMED_SILENCE_CAP_MS) {
+  if (input.armed || input.pendingReply) {
+    if (
+      !input.pendingReply &&
+      (input.silenceMs ?? 0) >= PTY_ARMED_SILENCE_CAP_MS
+    ) {
       return { attention: null, armed: true, clearHadOutput: true };
     }
-    return { attention: "working", armed: true, clearHadOutput: false };
+    return {
+      attention: "working",
+      armed: input.armed || Boolean(input.pendingReply),
+      clearHadOutput: false,
+    };
   }
   return { attention: null, armed: false, clearHadOutput: true };
 }

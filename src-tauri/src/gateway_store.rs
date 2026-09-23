@@ -461,7 +461,10 @@ pub fn materialize(
         request_policy.temperature = m.temperature;
         request_policy.top_p = m.top_p;
         request_policy.max_output_tokens = m.max_output_tokens;
-        request_policy.reasoning_effort = m.reasoning_effort.clone();
+        request_policy.reasoning_effort = m
+            .reasoning_effort
+            .as_deref()
+            .and_then(crate::agent_specs::launch_reasoning_effort);
     }
 
     let (connection_status, model_sync_status, model_sync_note) =
@@ -1364,6 +1367,62 @@ mod tests {
             Some("high")
         );
         assert_eq!(second.request_policy.temperature, Some(0.9));
+    }
+
+    #[test]
+    fn materialize_drops_slash_reasoning_effort() {
+        let mut gw = Gateway {
+            id: "g".into(),
+            name: "G".into(),
+            no_auth: false,
+            key_hint: None,
+            wallet_user_id: None,
+            wallet_key_hint: None,
+            slots: ProtocolSlots::default(),
+            header_env: Default::default(),
+            models: vec![GatewayModel {
+                id: "gpt-6-sol".into(),
+                source: "fetched".into(),
+                status: "available".into(),
+                last_seen_at: None,
+                catalog_slot: Some("openai".into()),
+                temperature: None,
+                top_p: None,
+                max_output_tokens: None,
+                reasoning_effort: Some("hign/xhign".into()),
+            }],
+            catalog_fetched_at: None,
+            catalog_from_slot: None,
+            last_probe: Vec::new(),
+            slot_probes: Vec::new(),
+            revision: String::new(),
+        };
+        let b = Binding {
+            id: "b".into(),
+            agent: "grok".into(),
+            name: "GPT".into(),
+            kind: BindingKind::Api,
+            gateway_id: Some("g".into()),
+            protocol: None,
+            api_backend: None,
+            models: vec!["gpt-6-sol".into()],
+            extra_env: HashMap::new(),
+            last_used_at: None,
+        };
+        let profile = materialize(&b, Some(&gw), None);
+        assert!(profile.request_policy.reasoning_effort.is_none());
+        gw.models[0].reasoning_effort = Some(" High ".into());
+        let profile = materialize(&b, Some(&gw), None);
+        assert_eq!(
+            profile.request_policy.reasoning_effort.as_deref(),
+            Some("high")
+        );
+        gw.models[0].reasoning_effort = Some("low,high,xhigh@xhigh".into());
+        let profile = materialize(&b, Some(&gw), None);
+        assert_eq!(
+            profile.request_policy.reasoning_effort.as_deref(),
+            Some("xhigh")
+        );
     }
 
     #[test]

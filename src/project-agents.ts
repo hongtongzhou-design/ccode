@@ -174,6 +174,13 @@ export function projectAgentsHint(_workMode: string | null | undefined): string 
   return "默认选择仅对本项目生效。";
 }
 
+/** 刚添加的项目还没指定默认 Agent。提示只在这一次出现。 */
+export function projectNeedsDefaultAgent(
+  project: { defaultAgent?: string | null } | null | undefined,
+): boolean {
+  return !project?.defaultAgent?.trim();
+}
+
 /** 名册上不逐家重复空状态；整页没有目标时才说一次。 */
 export function projectAgentsEmptyWorkHint(
   workMode: string | null | undefined,

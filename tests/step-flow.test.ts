@@ -7,6 +7,7 @@ import {
   discussChatLabel,
   doiFromToFetchUrl,
   formatZoteroAttachSummary,
+  formatEndnoteOpenPrompt,
   formatZoteroDuplicatePrompt,
   isEndnoteTaskTitle,
   isPaywallTaskTitle,
@@ -558,6 +559,10 @@ test("formatZoteroDuplicatePrompt：没开或 0 命中不出确认", () => {
   });
   assert.ok(line?.includes("21"));
   assert.ok(line?.includes("89"));
+  const endnote = formatEndnoteOpenPrompt(12);
+  assert.match(endnote, /12/);
+  assert.match(endnote, /仍要打开/);
+  assert.match(formatEndnoteOpenPrompt(0), /endnote-import\.ris/);
 });
 
 test("formatZoteroAttachSummary：界面只留一句，失败明细另放", () => {

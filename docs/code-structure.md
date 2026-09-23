@@ -55,7 +55,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   components/StepEvidenceChip.tsx # 步骤卡证据徽标：读当前步骤报告，显示质量状态与未决标记计数（解析在 step-evidence.ts）
   components/QuickChatHistoryMenu.tsx # 侧栏「快速开聊」右键的 scratch 历史浮层（继续上次）
                              # 记住选择后左键直达、右键回看；行样式与弹层「继续上次」一致
+  reasoning-effort.ts        # 网关思考档：逗号多选 + @开场默认；单词旧值=单档（tests/reasoning-effort.test.ts）
   components/GatewayLibrary.tsx # 连接页网关库：五槽/密钥/获取模型/按槽体检/逐模型策略三态；
+                             # 思考档勾多档，开场默认单选（reasoning-effort.ts）
                              # Base URL 主输入（2026-08-31）：空槽与仍等于旧主值的槽跟随主输入、手改即脱离；
                              # 全部测速按 URL 去重（同址只探一次，摘要前端镜像给同址槽）
   components/HoverTip.tsx      # 应用内 tooltip 共享件（v3.93 提取自 ProjectGroup）：useHoverTip + HoverTip，
@@ -414,7 +416,8 @@ src-tauri/src/
                              #   权威层上下文再写 api_backend/context_window——api_backend 在 Mesa 侧的唯一通道
                              #   （overlay 白名单不放行 [model.*]）。同段补推理菜单（1.0.40）：
                              #   supports_reasoning_effort + reasoning_efforts（value/label/description，
-                             #   四档对齐内置 grok-4.6；已有菜单不覆盖，显式 false 不改）。
+                             #   四档对齐内置 grok-4.6；已有菜单不覆盖）。中转目录把模型标成
+                             #   supports_reasoning_effort=false 时改回 true，否则菜单写了也不出。
                              #   中转目录不带 reasoning_efforts 时不写这段则 /effort 不出
   projects.rs                # 项目档案卡（§11.3）：project.toml 读写、注册、资源登记/发现、一键开步、append_workspace_inbox、
                              # 稳定项目身份（档案卡顶层 `id` 跟随文件夹；register_at 同一 id 新路径 = 移动重连
@@ -677,6 +680,9 @@ src-tauri/src/
                              # journal_metrics_status（含 downloadedAt：两份 CSV 取较新 mtime）+ check_journal_metrics_update
                              # （GitHub commits API 按数据目录查最近 commit，与本地 mtime 比对出 hasUpdate，前端静默失败）
   research_quality.rs        # 科研复现运行记录与验收决定：独立输出 ~/ccode/reproductions/；验收写 .ccode/research-acceptance.json，不替代 Git 合并
+  endnote.rs                 # EndNote 出库：references.bib 经 endnote-bridge/scripts/bridge.py 生成
+                             # papers/endnote-import.xml、.ris、.enw。RIS 作者一人一行，期刊/缩写/卷/期/页/日期/ISSN/摘要/关键词
+                             # 随 bib 字段写入；没有的不编造。按钮「同步到 EndNote」把 RIS 放到下载并 open -a 交给 EndNote。
   research_tools.rs          # 科研外部工具开工 preflight（research_tool_preflight）：Zotero 本地通道 / Origin 平台门槛
                              #   （只做 Windows 实机，非 Windows 必需技能=阻塞）/ Blender 探测 / EndNote 桥；
                              #   只探测，不安装、不写个人库、不启动 GUI

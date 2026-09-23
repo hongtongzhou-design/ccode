@@ -44,6 +44,8 @@ export interface ComboSurfaceDto {
   context: number;
   output: number;
   showNativeEffort: boolean;
+  /** 网关勾选的可切换档。空 = 用 CLI 整张档位表。 */
+  effortLevels: string[];
   injectEffortAllowed: boolean;
   injectTemperatureAllowed: boolean;
   injectTopPAllowed: boolean;

@@ -569,8 +569,12 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   统一重命名并勾掉 to-fetch.md 已补行；拿不准归属的不改名、标「待确认」。模板 guidance 必须写明
   「文件名随意」，不得暗示用户要自己整理命名。
 - **精读笔记是读后消化，不是覆盖索引（2026-09-18）**：写法 SSOT 为 `lit-notes` 技能。叙述用中文，材料名/离子/电解液/方法缩写/图表编号等惯用英文原词保留，不强翻；禁止把英文摘要整段贴进笔记。TASK 简报不得写「每篇产出笔记文件」当完成标准。机器验收 `same-ids` 只对 index 覆盖；`records` 不要求 `notePath` 非空。可逆准备 = 改名 / index 骨架 / bib 对账 / 合法 OA，不包括从摘要批量生成笔记正文。「按摘要记」= 根据摘要消化来写并标「仅摘要」。用户确认的核心篇有 PDF 却未写出精读时，质量状态不得高于「已生成待审」。已有项目不静默改 TASK.md，下一轮开步才带新简报；技能更新走内置技能「有新版」。
-- **to-fetch.ris 是 Zotero 闭环的导出物（v3.97）**：检索步产出 to-fetch.md 时同步产出 to-fetch.ris
-  （RIS 2004，TY/TI/DO/UR 尽力而为、缺字段留空不编造），用户拖进 Zotero 自动建成待获取列表；
+- **to-fetch.ris 是文献库的待获取题录（2026-09-23 补字段）**：检索步产出 to-fetch.md 时同步产出 to-fetch.ris
+  （RIS 2004，CRLF）。一位作者一条 `AU`。有 DOI 时用 Crossref 补期刊全称（`T2`）、缩写（`J2`，与全称不同才写）、
+  卷（`VL`）、期（`IS`）、页（`SP`）、起始页码（`M2`）、结束页（`EP`）、日期（`DA`）、网络出版日（`ET`）、文章类型（`M3`）、ISSN（`SN`）、
+  关键词（`KW`）、摘要（`AB`）。OpenAlex / Semantic Scholar 只补 Crossref 没有的摘要和缩写。没有的标签不写，不编造。
+  这份 RIS 给 Zotero「同步到 Zotero」；「同步到 EndNote」另从 `references.bib` 经 `bridge.py` 生成
+  `papers/endnote-import.ris`，字段同一套。用户拖进 Zotero 或 EndNote 建成待获取列表；
   PDF 补进 Zotero 后回「文献与数据」重新导入即登记（只读引用不复制），再手动勾事项。
   **内核仍不直写用户 Zotero 库**——内核 `zotero_import` 只读快照并写项目；可选技能写库必须有用户明确意图和实机授权（锁库/同步冲突风险）。
 - **提交交付**：`import_human_deliverable`（卡片 checklist 行「提交产物」按钮 / 拖文件到该行）= 复制进落点

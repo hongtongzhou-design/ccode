@@ -1,4 +1,4 @@
-import { researchToolContractMatches } from "../research-tools";
+import { researchToolArtifacts, researchToolContractMatches } from "../research-tools";
 import { appendUpstreamAcceptance, type UpstreamAcceptance } from "../research-acceptance";
 import UpstreamResearchAcceptance from "./UpstreamResearchAcceptance";
 import ResearchToolPreflight from "./ResearchToolPreflight";
@@ -32,6 +32,7 @@ import {
   expectedDeliverNames,
   formatKickoffChip,
   isFlowDeclaredPath,
+  isOwnDeliverable,
   type KickoffInputChip,
 } from "../kickoff-inputs";
 import {
@@ -629,12 +630,14 @@ export default function KickoffConfirmDialog({
             </div>
           ) : null;
         })()}
-        {inputChips && inputChips.length > 0 && (
+        {inputChips && inputChips.some((chip) => formatKickoffChip(chip)) && (
           <div className="mb-3">
-            <p className="mb-1 text-micro text-l4">上一步接到</p>
+            <p className="mb-1 text-micro text-l4">已有材料</p>
             <div className="flex flex-wrap gap-1">
               {inputChips.map((chip) => {
+                if (isOwnDeliverable(chip.pattern, stepNow.expectedArtifacts)) return null;
                 const view = formatKickoffChip(chip);
+                if (!view) return null;
                 return (
                   <button
                     key={`${chip.role}:${chip.pattern}`}
@@ -929,6 +932,20 @@ export default function KickoffConfirmDialog({
             <div className="mt-1.5 flex items-center gap-2">
               <button
                 type="button"
+                disabled={resSaving}
+                onClick={() =>
+                  setResChecked((cur) =>
+                    cur.size === resCandidates.length
+                      ? new Set()
+                      : new Set(resCandidates.map((item) => item.path)),
+                  )
+                }
+                className="rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+              >
+                {resChecked.size === resCandidates.length ? "取消全选" : "全选"}
+              </button>
+              <button
+                type="button"
                 disabled={resChecked.size === 0 || resSaving}
                 onClick={() => void registerResources()}
                 className="rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
@@ -985,6 +1002,7 @@ export default function KickoffConfirmDialog({
           skillLib={skillLib}
           chainSupply={chainSupply}
           expectedArtifacts={stepNow.expectedArtifacts}
+          stepOutputs={researchToolArtifacts(stepNow.brief)}
           onChange={(next) => void onSkillsChange(next)}
         />
         {skillError && (

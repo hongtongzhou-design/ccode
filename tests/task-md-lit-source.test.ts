@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   litSourceSectionLines,
   upsertLitSourceSection,
+  upsertPendingSettingsSection,
 } from "../src/task-md-sections.ts";
 
 test("search/空：无「文献来源」段", () => {
@@ -17,6 +18,20 @@ test("zotero/folder：段内容分版本", () => {
   assert.match(litSourceSectionLines("folder")!.join("\n"), /EndNote/);
   assert.match(litSourceSectionLines("endnote")!.join("\n"), /不读 \.enl/);
   assert.match(litSourceSectionLines("endnote")!.join("\n"), /同步到 EndNote/);
+});
+
+test("已存任务书补上还没填的全局设定，已填的不进这一节", () => {
+  const text = "# 步骤\n\n## 项目规则\n\n- 去向：EES期刊\n\n## 文献来源\n\n已有库。\n";
+  const out = upsertPendingSettingsSection(text, [
+    "去向：EES期刊",
+    "综述角度：（领域全景 / 聚焦某个子问题）",
+  ]);
+  assert.match(out, /## 待确认的全局设定/);
+  assert.match(out, /综述角度：/);
+  assert.doesNotMatch(out.split("## 待确认的全局设定")[1] ?? "", /EES期刊/);
+  assert.ok(out.indexOf("## 待确认的全局设定") < out.indexOf("## 文献来源"));
+  const cleared = upsertPendingSettingsSection(out, ["综述角度：聚焦某个子问题"]);
+  assert.doesNotMatch(cleared, /## 待确认的全局设定/);
 });
 
 test("无段时插入：优先落在「已定方向」之前", () => {

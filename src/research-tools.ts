@@ -103,6 +103,23 @@ export function researchToolAskFieldsForStep(
 }
 const START = "<!-- mesa-research-tools ";
 const END = "<!-- /mesa-research-tools -->";
+
+/** 本步合同实际要写的文件。没有工具段时返回 undefined，检查回落到技能声明。 */
+export function researchToolArtifacts(brief: string): string[] | undefined {
+  const start = brief.indexOf(START);
+  const end = brief.indexOf(END, start);
+  if (start < 0 || end < start) return undefined;
+  const header = brief.indexOf(" -->", start);
+  if (header < 0 || header > end) return undefined;
+  try {
+    const saved = JSON.parse(brief.slice(start + START.length, header)) as {
+      artifacts?: string[];
+    };
+    return saved.artifacts ?? [];
+  } catch {
+    return undefined;
+  }
+}
 interface Added {
   skills: string[]; required: string[]; artifacts: string[]; human: string[];
   replaced?: Partial<Record<"inputs" | "anyOfInputs" | "expectedArtifacts" | "run" | "skills" | "requiredSkills", { before: unknown; after: unknown }>>;

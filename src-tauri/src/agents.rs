@@ -486,7 +486,11 @@ fn grok_config_overlay(profile: &Profile, model: Option<&str>) -> Option<serde_j
     if let Some(v) = policy.max_output_tokens {
         models.insert("max_completion_tokens".into(), serde_json::json!(v));
     }
-    if let Some(v) = policy.reasoning_effort.as_deref() {
+    if let Some(v) = policy
+        .reasoning_effort
+        .as_deref()
+        .and_then(crate::agent_specs::canonical_reasoning_effort)
+    {
         models.insert("default_reasoning_effort".into(), serde_json::json!(v));
     }
     if !policy.header_env.is_empty() {
@@ -902,10 +906,11 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
             .request_policy
             .reasoning_effort
             .as_deref()
-            .filter(|e| !e.trim().is_empty())
+            .and_then(crate::agent_specs::canonical_reasoning_effort)
+            .filter(|e| crate::agent_specs::GROK_REASONING_EFFORTS.contains(&e.as_str()))
         {
             plan.args.push("--reasoning-effort".into());
-            plan.args.push(effort.into());
+            plan.args.push(effort);
         }
     }
     // CodeBuddy 的 effort 是 CLI flag，不是环境变量；只在启动时携带，避免伪造配置文件字段。
@@ -3696,6 +3701,17 @@ api_backend = "responses"
             v["models"]["extra_headers"],
             serde_json::json!({ "X-Tenant": "$TENANT_TOKEN" })
         );
+        p.request_policy.reasoning_effort = Some("hign/xhign".into());
+        let plan = launch_plan(&p, Some("xai-secret".into()), Some("gpt-6-sol"));
+        let grok_config = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "GROK_CONFIG")
+            .map(|(_, v)| v.clone())
+            .expect("温度等策略仍在，overlay 还要注入");
+        let v: serde_json::Value = serde_json::from_str(&grok_config).unwrap();
+        assert!(v["models"].get("default_reasoning_effort").is_none());
+        assert!(!plan.args.iter().any(|a| a == "--reasoning-effort"));
         // 无策略、无模型 → 完全不注
         let bare = profile("grok", Some("https://relay.example.com/v1"));
         let plan = launch_plan(&bare, None, None);

@@ -6,6 +6,11 @@
 export function relFileSegments(rel: string, stripPrefix?: string): string[] {
   let p = rel.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
   if (!p) return [];
+  // 项目外的绝对路径（Zotero storage 等）不是项目文件夹，只留文件名。
+  if (p.startsWith("/") || /^[A-Za-z]:\//.test(p)) {
+    const name = p.slice(p.lastIndexOf("/") + 1);
+    return name ? [name] : [];
+  }
   if (stripPrefix) {
     const pre = stripPrefix.replace(/\/+$/, "");
     if (p === pre) return [];

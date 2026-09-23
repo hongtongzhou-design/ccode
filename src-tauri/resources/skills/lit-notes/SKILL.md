@@ -55,7 +55,16 @@ outputs: [notes/, references.bib, papers/to-fetch.md]
 
 ### 3. 同步引文库
 
-每篇在 `references.bib` 检查 DOI/版本与键，复用匹配条目，缺失才追加一条 BibTeX：作者、年份、标题、出处、DOI 齐全；缺字段标「待补」，不得编造。字段齐全但未经权威源核对的标「待核」；有条件时用 CrossRef/DBLP 核对作者/出处/年份（以正式发表版为准，不用 preprint 信息），核对通过再去掉标记。
+每篇在 `references.bib` 检查 DOI/版本与键，复用匹配条目，缺失才追加一条 BibTeX。有 DOI 时先向 Crossref 取正式发表版（不用 preprint 顶替）。OpenAlex 只补 Crossref 没有的摘要。期刊缩写按 ISSN 查 NLM Catalog 的 Medline 缩写，没有再用 Semantic Scholar 的期刊别名；两处都没有就写「待补」，不自己编。条目要带上登记库里实际有的这些字段：
+
+- `author`：全名，`and` 分隔；「名 姓」翻成 `姓, 名`；被截成前三人或同一人重复的名单，改用 Crossref 完整名单
+- `year`、`title`、`journal`、`doi`
+- `volume`、`number`（期）、`pages`（`起始--结束`；只有文章号时 pages 写文章号）
+- `date`（出版日期）、`epubdate`（与出版日期不同的网络出版日才写）
+- `journalabbreviation`（与期刊全称不同才写）
+- `issn`、`abstract`、`keywords`（分号分隔）
+
+缺的字段写「待补」，不得编造，也不许用卷号或页码去填空着的期。字段写了但没和 Crossref 对过的标「待核」，核对通过再去掉标记。已有条目只补空字段，不改键、不覆盖人改过的作者和标题。
 
 ### 复核入口
 

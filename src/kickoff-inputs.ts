@@ -26,9 +26,10 @@ export function chipFileName(pattern: string): string {
 export function formatKickoffChip(chip: KickoffInputChip): {
   label: string;
   missing: boolean;
-} {
+} | null {
   const base = chipFileName(chip.pattern);
   if (!chip.present || chip.count <= 0) {
+    if (chip.role !== "required") return null;
     return { label: `${base} · 还没有`, missing: true };
   }
   const unit = unitForPattern(chip.pattern);
@@ -53,6 +54,12 @@ export function expectedDeliverLine(expected: readonly string[]): string {
   const names = expectedDeliverNames(expected);
   if (names.length === 0) return "按任务书交付本步产物";
   return `本步要交：${names.join("、")}`;
+}
+
+/** 这一步自己要交的文件，不是上一步该已经有的输入。 */
+export function isOwnDeliverable(pattern: string, expected: readonly string[]): boolean {
+  const name = chipFileName(pattern);
+  return expectedDeliverNames(expected).includes(name);
 }
 
 /** 文件是否已经是本步骤声明要读的输入（含可选 / 任一组）。

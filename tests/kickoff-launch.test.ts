@@ -156,6 +156,15 @@ test("formatKickoffChip：included 用篇、缺的标还没有", () => {
     }),
     { label: "outline.md · 还没有", missing: true },
   );
+  assert.equal(
+    formatKickoffChip({
+      pattern: "notes/",
+      role: "optional",
+      present: false,
+      count: 0,
+    }),
+    null,
+  );
 });
 
 test("isDeclaredStepInput：精读步 papers/*.pdf 已在上一步接到，不算陌生未登记", () => {

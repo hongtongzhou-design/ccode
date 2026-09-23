@@ -17,7 +17,7 @@ fn wants_endnote_export(project_root: &Path) -> bool {
     text.contains("科研工具/libraryExport：endnote")
 }
 
-/// 项目选了 EndNote 交差且有 bib 时生成 xml；未选或没有 bib 则跳过。
+/// 离线转换，不访问 Crossref。定稿交差用它，避免收尾时被网络拖住。
 pub fn export_if_configured(project_root: &Path) -> Result<Option<PathBuf>, String> {
     if !wants_endnote_export(project_root) {
         return Ok(None);
@@ -39,11 +39,29 @@ fn run_bridge(
     report: &Path,
     root: &Path,
 ) -> Result<(), String> {
+    run_bridge_args(py, script, bib, papers, stamp, kind, dest, report, root, false)
+}
+
+fn run_bridge_args(
+    py: &Path,
+    script: &Path,
+    bib: &Path,
+    papers: &Path,
+    stamp: &uuid::Uuid,
+    kind: &str,
+    dest: &Path,
+    report: &Path,
+    root: &Path,
+    enrich: bool,
+) -> Result<(), String> {
     let out_tmp = papers.join(format!(".ccode-endnote-{stamp}.{kind}"));
     let report_tmp = papers.join(format!(".ccode-endnote-{stamp}-{kind}.json"));
     let mut cmd = crate::process::background_command(py);
-    cmd.arg(script)
-        .arg("--input")
+    cmd.arg(script);
+    if enrich {
+        cmd.arg("--enrich");
+    }
+    cmd.arg("--input")
         .arg(bib)
         .arg("--output")
         .arg(&out_tmp)
@@ -72,6 +90,15 @@ fn run_bridge(
 }
 
 pub fn export_xml(project_root: &Path) -> Result<PathBuf, String> {
+    export_xml_with(project_root, false)
+}
+
+/// 按 DOI 向 Crossref 补全后再生成。只在人点「同步到 EndNote」时用。
+pub fn export_xml_enriched(project_root: &Path) -> Result<PathBuf, String> {
+    export_xml_with(project_root, true)
+}
+
+fn export_xml_with(project_root: &Path, enrich: bool) -> Result<PathBuf, String> {
     let root =
         crate::paths::canonicalize_plain(project_root).map_err(|e| format!("项目目录无效: {e}"))?;
     let bib = root.join("references.bib");
@@ -88,16 +115,35 @@ pub fn export_xml(project_root: &Path) -> Result<PathBuf, String> {
     crate::storage::atomic_write(&script, BRIDGE_PY.as_bytes(), true)?;
     let py = python_bin()?;
     let enw = papers.join("endnote-import.enw");
+    // 有 DOI 的条目先按 Crossref 补作者全名、期刊、卷期页、ISSN、摘要。
+    // 补全失败则用原 bib，不挡住导入。
+    let enriched = papers.join(format!(".ccode-endnote-{stamp}.bib"));
+    let source = if !enrich {
+        bib.clone()
+    } else {
+        match run_bridge_args(
+        &py, &script, &bib, &papers, &stamp, "bib", &enriched, &report, &root, true,
+    ) {
+        Ok(()) if enriched.is_file() => enriched.clone(),
+        _ => {
+            let _ = std::fs::remove_file(&enriched);
+            bib.clone()
+        }
+    }
+    };
     run_bridge(
-        &py, &script, &bib, &papers, &stamp, "xml", &xml, &report, &root,
+        &py, &script, &source, &papers, &stamp, "xml", &xml, &report, &root,
     )?;
     run_bridge(
-        &py, &script, &bib, &papers, &stamp, "ris", &ris, &report, &root,
+        &py, &script, &source, &papers, &stamp, "ris", &ris, &report, &root,
     )?;
     run_bridge(
-        &py, &script, &bib, &papers, &stamp, "enw", &enw, &report, &root,
+        &py, &script, &source, &papers, &stamp, "enw", &enw, &report, &root,
     )?;
     let _ = std::fs::remove_file(&script);
+    if source != bib {
+        let _ = std::fs::remove_file(&source);
+    }
     if !xml.is_file() {
         return Err("转换结束但没有 papers/endnote-import.xml".into());
     }
@@ -275,7 +321,7 @@ fn copy_path_to_clipboard(path: &Path) {
 
 fn launch_endnote_with_file(file: &Path) -> Result<(), String> {
     let app = find_endnote_app().ok_or_else(|| {
-        "找不到 EndNote。把下载里的 Mesa-EndNote-import.ris 拖到 EndNote 图标上（不要拖进窗口）。".to_string()
+        "找不到 EndNote。把产物里的 papers/endnote-import.ris 拖到 EndNote 图标上（不要拖进窗口）。".to_string()
     })?;
     #[cfg(target_os = "macos")]
     {
@@ -288,7 +334,7 @@ fn launch_endnote_with_file(file: &Path) -> Result<(), String> {
             .map_err(|e| format!("没法打开 EndNote: {e}"))?;
         if !status.success() {
             return Err(
-                "请把下载里的 Mesa-EndNote-import.ris 拖到 Dock 或「应用程序」里的 EndNote 图标上。".into(),
+                "请把产物里的 papers/endnote-import.ris 拖到 Dock 或「应用程序」里的 EndNote 图标上。".into(),
             );
         }
         Ok(())
@@ -300,32 +346,60 @@ fn launch_endnote_with_file(file: &Path) -> Result<(), String> {
             .status()
             .map_err(|e| format!("没法打开 EndNote: {e}"))?;
         if !status.success() {
-            return Err("请把下载里的 Mesa-EndNote-import.ris 拖到 EndNote 图标上。".into());
+            return Err("请把产物里的 papers/endnote-import.ris 拖到 EndNote 图标上。".into());
         }
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (app, file);
-        Err("请把 Mesa-EndNote-import.ris 拖到 EndNote 图标上。".into())
+        Err("请把 papers/endnote-import.ris 拖到 EndNote 图标上。".into())
     }
+}
+
+/// 项目根或当前步骤工作区里已经写好的导入文件。同步不重新检索。
+fn find_import_ris(project_root: &Path) -> Option<PathBuf> {
+    let direct = project_root.join("papers/endnote-import.ris");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let conn = crate::workspaces::db().ok()?;
+    let rows = crate::workspaces::query_workspaces(&conn).ok()?;
+    let root_key = crate::paths::path_key(&project_root.to_string_lossy());
+    let mut found = Vec::new();
+    for row in rows {
+        if crate::paths::path_key(&row.repo_path) != root_key {
+            continue;
+        }
+        if row.status == "archived" {
+            continue;
+        }
+        let ris = Path::new(&row.worktree_path).join("papers/endnote-import.ris");
+        if ris.is_file() {
+            found.push((row.created_at, ris));
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().next().map(|(_, path)| path)
 }
 
 #[tauri::command]
 pub async fn endnote_export_xml(project_root: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = crate::sessions::expand_tilde(&project_root);
-        let xml = export_xml(Path::new(&root))?;
-        let ris = Path::new(&root).join("papers/endnote-import.ris");
-        let handy = copy_to_downloads(&ris, "Mesa-EndNote-import.ris")
-            .unwrap_or_else(|| ris.clone());
-        copy_path_to_clipboard(&handy);
-        match launch_endnote_with_file(&handy) {
+        let Some(ris) = find_import_ris(Path::new(&root)) else {
+            return Err(
+                "还没有 papers/endnote-import.ris。检索保存进项目后才会有这一份，同步只打开它，不再重新检索。"
+                    .into(),
+            );
+        };
+        copy_path_to_clipboard(&ris);
+        match launch_endnote_with_file(&ris) {
             Ok(()) => Ok(
-                "已把导入文件交给 EndNote（相当于拖到图标上）。若没进库：把下载里的 Mesa-EndNote-import.ris 拖到 EndNote 图标上，不要拖进窗口。".into(),
+                "已把 papers/endnote-import.ris 交给 EndNote。没进库就把产物里的这一份拖到图标上，不要拖进窗口。".into(),
             ),
             Err(e) => Ok(format!(
-                "文件已放到下载：Mesa-EndNote-import.ris。把它拖到 EndNote 图标上（不要拖进窗口）。{e}"
+                "文件在 papers/endnote-import.ris。把它拖到 EndNote 图标上（不要拖进窗口）。{e}"
             )),
         }
     })
@@ -391,6 +465,70 @@ mod tests {
         assert!(ris.contains("AU  - Behm, R. Jurgan"), "{ris}");
         assert!(ris.contains("AU  - Doe, Jane"), "{ris}");
         assert!(ris.contains("AU  - Smith, JM"), "{ris}");
+        assert!(
+            !ris.lines().any(|line| line.starts_with("AU  - ") && line.matches(',').count() > 1),
+            "{ris}"
+        );
+    }
+
+    #[test]
+    fn ris_carries_journal_issue_pages_abstract_and_abbreviation() {
+        let dir = std::env::temp_dir().join(format!("ccode-endnote-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("papers")).unwrap();
+        std::fs::write(
+            dir.join("references.bib"),
+            r#"@article{c,
+  title = {Full record},
+  author = {Zhang, Caicai and Xu, Ao},
+  year = {2024},
+  date = {October 30, 2024},
+  journal = {Journal of Alloys and Compounds},
+  journalabbreviation = {J Alloy Compd},
+  articletype = {Journal Article},
+  volume = {1010},
+  pages = {177309},
+  issn = {0925-8388},
+  doi = {10.1016/j.jallcom.2024.177309},
+  abstract = {Sulfur rich spheres.},
+  keywords = {Magnesium; Sulfur},
+  epubdate = {October 30, 2024},
+  url = {https://doi.org/10.1016/j.jallcom.2024.177309},
+}
+"#,
+        )
+        .unwrap();
+        let xml = export_xml(&dir);
+        let ris = std::fs::read_to_string(dir.join("papers/endnote-import.ris")).ok();
+        let xml_text = std::fs::read_to_string(dir.join("papers/endnote-import.xml")).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        if xml.is_err() && xml.as_ref().unwrap_err().contains("找不到 python") {
+            return;
+        }
+        let ris = ris.expect("ris");
+        for line in [
+            "AU  - Zhang, Caicai",
+            "AU  - Xu, Ao",
+            "T2  - Journal of Alloys and Compounds",
+            "J2  - J Alloy Compd",
+            "VL  - 1010",
+            "SP  - 177309",
+            "M2  - 177309",
+            "M3  - Journal Article",
+            "DA  - October 30, 2024",
+            "ET  - October 30, 2024",
+            "SN  - 0925-8388",
+            "AB  - Sulfur rich spheres.",
+            "KW  - Magnesium",
+            "KW  - Sulfur",
+        ] {
+            assert!(ris.contains(line), "{line} missing in {ris}");
+        }
+        assert!(!ris.contains("IS  -"), "{ris}");
+        let xml_text = xml_text.expect("xml");
+        assert!(xml_text.contains("<abbr-1>J Alloy Compd</abbr-1>"), "{xml_text}");
+        assert!(xml_text.contains("<alt-title>J Alloy Compd</alt-title>"), "{xml_text}");
+        assert!(xml_text.contains("<volume>1010</volume>"), "{xml_text}");
+        assert!(xml_text.contains("Sulfur rich spheres."), "{xml_text}");
     }
 
     #[test]

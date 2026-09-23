@@ -219,7 +219,10 @@ export default function TerminalStatusBar({
     comboReady && combo?.showNativeEffort === true ? effort : null;
 
   // 思考强度 step 滑块：隐形原生 range 负责拖动/键盘，自定义轨道负责视觉；松手才写命令
-  const levels = effortLive?.levels ?? [];
+  const levels =
+    combo?.effortLevels && combo.effortLevels.length > 0
+      ? combo.effortLevels
+      : (effortLive?.levels ?? []);
   const [effortIdxRaw, setEffortIdx] = useState(() =>
     Math.min(1, Math.max(0, levels.length - 1)),
   );

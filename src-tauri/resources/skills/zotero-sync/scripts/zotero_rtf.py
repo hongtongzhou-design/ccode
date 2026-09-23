@@ -52,6 +52,14 @@ def bib_records(text: str) -> dict[str, dict]:
             "author": author,
             "doi": fields.get("doi", ""),
             "journal": fields.get("journal") or fields.get("booktitle", ""),
+            "journalabbreviation": fields.get("journalabbreviation", ""),
+            "volume": fields.get("volume", ""),
+            "number": fields.get("number", ""),
+            "pages": fields.get("pages", ""),
+            "issn": fields.get("issn", ""),
+            "abstract": fields.get("abstract", ""),
+            "keywords": fields.get("keywords", ""),
+            "date": fields.get("date", ""),
         }
     return records
 
@@ -113,8 +121,32 @@ def main(argv: list[str] | None = None) -> int:
             ris_lines.append(f"PY  - {rec['year']}")
         if rec["journal"]:
             ris_lines.append(f"T2  - {rec['journal']}")
+            ris_lines.append(f"JO  - {rec['journal']}")
+        short = rec["journalabbreviation"]
+        if short and short.casefold() != rec["journal"].casefold():
+            ris_lines.append(f"J2  - {short}")
+        if rec["volume"]:
+            ris_lines.append(f"VL  - {rec['volume']}")
+        if rec["number"]:
+            ris_lines.append(f"IS  - {rec['number']}")
+        pages = rec["pages"].replace("–", "-").replace("—", "-")
+        parts = [part.strip() for part in pages.split("--" if "--" in pages else "-", 1)] if pages else []
+        if parts and parts[0]:
+            ris_lines.append(f"SP  - {parts[0]}")
+            ris_lines.append(f"M2  - {parts[0]}")
+        if len(parts) == 2 and parts[1] and parts[1] != parts[0]:
+            ris_lines.append(f"EP  - {parts[1]}")
+        ris_lines.append("M3  - Journal Article")
+        if rec["date"]:
+            ris_lines.append(f"DA  - {rec['date']}")
+        if rec["issn"]:
+            ris_lines.append(f"SN  - {rec['issn']}")
         if rec["doi"]:
             ris_lines.append(f"DO  - {rec['doi']}")
+        for word in [part.strip() for part in rec["keywords"].split(";") if part.strip()]:
+            ris_lines.append(f"KW  - {word}")
+        if rec["abstract"]:
+            ris_lines.append(f"AB  - {rec['abstract']}")
         ris_lines.append("ER  - ")
         ris_lines.append("")
     Path(args.ris).parent.mkdir(parents=True, exist_ok=True)

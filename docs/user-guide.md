@@ -408,7 +408,19 @@ Claude Code、Codex、Gemini、CodeBuddy、Cursor、Grok 支持。
 
 设为全局会改 CLI 自己的配置文件，Mesa 会先备份。可「撤销上次写入」，也可以「恢复初始状态」（回到 Mesa 第一次改之前）。
 
-Grok 走中转时，设为全局会给每个绑定模型写上推理强度菜单（Extra High / High / Medium / Low）。中转目录自己不报档位时，不写这段，Grok 里就选不了推理强度。你已经手写过的档位 Mesa 不会覆盖。写完要新开一次 Grok 会话才看得到。
+网关库里每个模型的思考档可以勾多档。勾上的档是会话里能切的范围，开场只用其中一档。斜杠串和拼写错误存不进去。
+
+各家会话里怎么切：
+
+| 客户端 | 会话里切换 | 中转不报档位时 |
+|---|---|---|
+| Claude Code、Qwen | 终端底栏思考滑块，或输入 `/effort` | 菜单是客户端自带的，不看中转目录 |
+| Codex | 在 Codex 自己的模型选择器里改推理档。Mesa 底栏没有滑块 | 启动时写入的模型目录自带 low 到 max |
+| Kimi | 底栏只有开 / 关 | 不看中转目录 |
+| OpenCode | 在 OpenCode 里改。思考模型会标成可推理 | 不看中转目录 |
+| CodeBuddy | 只有开场那一档，会话里没有切换 | 不看中转目录 |
+| Gemini、Cursor | 没有思考档入口 | — |
+| Grok | `/effort`，或底栏滑块 | 中转不报档位时菜单出不来。设为全局会把勾选档写成这个模型的菜单。已有菜单不覆盖。写完新开一次会话才看得到 |
 
 本机如果还装着 cc-switch 一类切换工具，点「设为全局」会先提醒你不要两边同时改。Codex 的「设为全局」**不会**去改 `auth.json`。
 
@@ -515,7 +527,7 @@ Grok 走中转时，设为全局会给每个绑定模型写上推理强度菜单
 Zotero 和 EndNote 做同样三件事。
 
 - **导入**：不用 Zotero、也不用 EndNote 时，PDF 留在项目里。检索和精读按 PDF 里的 DOI 写入 `references.bib`，不经过任何文献库软件。用了 Zotero 的人，可以先关掉「自动重命名附件文件」、打开「自动检索 PDF 元数据」，把 PDF 拖进一个分类。Zotero 会读前几页并生成条目，再点「从 Zotero 导入」。拖进去默认是复制一份；要和项目里的 PDF 保持同一份文件，用「链接到文件」，并把链接附件根目录指到项目的 `papers/`。用了 EndNote 的人，在 EndNote 里导出 XML 或 RIS，放进 `papers/imports/`。不要把项目的 `papers/` 设成 EndNote 的自动导入文件夹，它可能把 PDF 搬走。Mesa 不读 `.enl`，也不把 Zotero 库再倒一遍进 EndNote。
-- **同步**：待获取清单上有「同步到 Zotero」和「同步到 EndNote」。把项目里的题录送进对应的库。
+- **同步**：待获取清单上有「同步到 Zotero」和「同步到 EndNote」。Zotero 打开 `papers/to-fetch.ris`。EndNote 打开产物 `papers/endnote-import.ris`。这一份在检索时一次写全，点同步只是马上交给 EndNote，不再重新检索。拖产物里的同一份也一样。不要把文件拖进 EndNote 窗口。
 - **交稿**：项目设置「文献库」选一个。定稿只交一份：Zotero 是 `output/zotero.rtf`（导入 RIS 后做一次 RTF Scan）；EndNote 是 `output/endnote.docx`（点一次 **Update Citations and Bibliography**）。
 
 写作仍用 `[@键]` 和 `references.bib`。普通 `draft.docx` 换不了这两个软件的样式。
@@ -622,7 +634,7 @@ Zotero 和 EndNote 做同样三件事。
 
 ### 和 Zotero 一起用
 
-待获取会附带一份 `papers/to-fetch.ris`。点 **同步到 Zotero** 会用 Zotero 打开它（Zotero 自己识 RIS，不需要 Better BibTeX）。
+待获取会附带一份 `papers/to-fetch.ris`：作者每人一行，有期刊、卷、期、页、摘要才写进去。点 **同步到 Zotero** 会用 Zotero 打开它（Zotero 自己识 RIS，不需要 Better BibTeX）。点 **同步到 EndNote** 会先问是否仍要导入，确认后打开已经写好的 `papers/endnote-import.ris`，这一下不再重新检索。点 **同步到 Zotero** 在库里已有相同 DOI 时也会先问。
 
 **不能**指望按钮自动把 PDF 挂到条目上（Zotero 9 的本机接口是只读的）。把 `papers/` 里的 PDF 拖到对应条目上即可。
 

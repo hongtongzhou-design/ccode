@@ -2298,6 +2298,7 @@ const TerminalView = memo(function TerminalView({
           armed: ptyWorkingArmedRef.current,
           turnSettled,
           ptyLive,
+          pendingReply: pendingReplyRef.current,
         });
         ptyWorkingArmedRef.current = next.armed;
         if (fileSaysOver && ptyLive && next.attention === "working") {

@@ -179,6 +179,18 @@ export interface IncludedRecord {
   year: string;
   source: string;
   url: string;
+  /** 检索时一次查全，纳入时原样追加，不再另查。 */
+  volume: string;
+  issue: string;
+  pages: string;
+  date: string;
+  epubDate: string;
+  articleType: string;
+  issn: string;
+  journalAbbreviation: string;
+  abstract: string;
+  keywords: string;
+  language: string;
 }
 
 function stringField(rec: Record<string, unknown>, keys: string[]): string {
@@ -187,6 +199,14 @@ function stringField(rec: Record<string, unknown>, keys: string[]): string {
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return "";
+}
+
+function keywordsOf(rec: Record<string, unknown>): string {
+  const direct = stringField(rec, ["keywords", "keyword"]);
+  if (direct) return direct;
+  const list = rec.keywords;
+  if (!Array.isArray(list)) return "";
+  return list.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean).join("; ");
 }
 
 function authorsOf(rec: Record<string, unknown>): string {
@@ -260,6 +280,17 @@ export function parseIncludedRecords(text: string): IncludedRecord[] {
       year: yearOf(rec),
       source: stringField(rec, ["source", "venue", "journal", "container"]),
       url: urlOf(rec, id),
+      volume: stringField(rec, ["volume", "vl"]),
+      issue: stringField(rec, ["issue", "number"]),
+      pages: stringField(rec, ["pages", "page"]),
+      date: stringField(rec, ["date", "published"]),
+      epubDate: stringField(rec, ["epubDate", "epubdate", "publishedOnline"]),
+      articleType: stringField(rec, ["articleType", "articletype", "type"]),
+      issn: stringField(rec, ["issn", "isbn"]),
+      journalAbbreviation: stringField(rec, ["journalAbbreviation", "journalabbreviation", "shortJournal"]),
+      abstract: stringField(rec, ["abstract"]),
+      keywords: keywordsOf(rec),
+      language: stringField(rec, ["language"]),
     });
   }
   return out;
@@ -407,7 +438,7 @@ export function includedRecordKey(row: Pick<IncludedRecord, "id" | "title">): st
 }
 
 export function doiToken(id: string, url: string): string {
-  const m = `${id} ${url}`.match(/10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i);
+  const m = `${id} ${url}`.match(/10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/i);
   return m ? m[0].replace(/[.,;]+$/, "") : "";
 }
 
@@ -478,6 +509,15 @@ export function confirmReason(decision: "included" | "excluded", previous: strin
   return rest ? `${prefix}。${rest}` : prefix;
 }
 
+function patchIncludedRow(
+  rec: Record<string, unknown>,
+  decision: string,
+  reason: string,
+) {
+  rec.decision = decision;
+  rec.reason = reason;
+}
+
 export function patchIncludedJson(
   text: string,
   key: string,
@@ -493,11 +533,27 @@ export function patchIncludedJson(
     const id = typeof rec.id === "string" ? rec.id : "";
     const title = typeof rec.title === "string" ? rec.title : "";
     if (id !== key && title !== key) continue;
-    rec.decision = decision;
-    rec.reason = reason;
+    patchIncludedRow(rec, decision, reason);
     found = true;
   }
   if (!found) throw new Error("清单里找不到这篇");
+  return `${JSON.stringify(data, null, 2)}\n`;
+}
+
+/** 一次把全部 pending 改成纳入。reason 按每条原理由生成。 */
+export function includeAllPendingJson(text: string): string {
+  const data = JSON.parse(text) as unknown;
+  const rows = asRows(data);
+  let found = 0;
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as Record<string, unknown>;
+    if (rec.decision !== "pending") continue;
+    const previous = typeof rec.reason === "string" ? rec.reason : "";
+    patchIncludedRow(rec, "included", confirmReason("included", previous));
+    found += 1;
+  }
+  if (found === 0) throw new Error("没有待确认篇目");
   return `${JSON.stringify(data, null, 2)}\n`;
 }
 
@@ -549,4 +605,126 @@ export function appendToFetchEntry(md: string, row: IncludedRecord): string {
   const line = `${n}. ${row.title} — ${doi}`;
   if (!md.trim()) return `# 待获取全文\n\n${line}\n`;
   return `${md.replace(/\s*$/, "")}\n${line}\n`;
+}
+
+function risValue(value: string): string {
+  return value.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function risAuthors(authors: string): string[] {
+  const text = authors.trim();
+  if (!text) return [];
+  const parts = text.includes(" and ")
+    ? text.split(/\s+and\s+/)
+    : text.includes(";")
+      ? text.split(";")
+      : [text];
+  return parts.map((part) => risValue(part)).filter(Boolean);
+}
+
+function risBlocks(text: string): string[] {
+  return text.replace(/\r\n/g, "\n").split(/(?:^|\n)TY  -/i).slice(1).map((part) => `TY  -${part}`);
+}
+
+function blockField(block: string, tag: string): string {
+  const line = block.split("\n").find((row) => row.startsWith(`${tag}  -`));
+  return line ? risValue(line.slice(6)) : "";
+}
+
+/** 按 DOI 或标题从已有 RIS（通常是 papers/imports 里的 EndNote 导出）取出整条。 */
+export function sourceRisBlock(corpus: string, row: Pick<IncludedRecord, "id" | "title" | "url">): string | null {
+  const doi = doiToken(row.id, row.url).toLowerCase();
+  const title = risValue(row.title).toLowerCase();
+  for (const block of risBlocks(corpus)) {
+    const blockDoi = doiToken("", blockField(block, "DO")).toLowerCase();
+    const blockTitle = blockField(block, "TI").toLowerCase();
+    if ((doi && blockDoi === doi) || (title && blockTitle === title)) return block.trim();
+  }
+  return null;
+}
+
+const ENDNOTE_KEEP = ["AU", "TI", "T2", "JO", "JF", "J2", "JA", "PY", "Y1", "DA", "ET", "VL", "IS", "SP", "EP", "M2", "M3", "SN", "DO", "KW", "AB", "N2", "LA", "UR"];
+
+/** 把原导出记录改写成 EndNote 2025 认的标签。起始页同时写 M2，文章类型没有时用 Journal Article。 */
+export function normalizeSourceRis(block: string): string {
+  const lines = block.replace(/\r\n/g, "\n").split("\n");
+  const kept: string[] = [];
+  let start = "";
+  let hasType = false;
+  for (const line of lines) {
+    const tag = line.slice(0, 2);
+    if (!ENDNOTE_KEEP.includes(tag) || line.slice(2, 6) !== "  - ") continue;
+    if (tag === "SP" || tag === "M2") start = start || risValue(line.slice(6));
+    if (tag === "M3") hasType = true;
+    kept.push(line.trimEnd());
+  }
+  if (start && !kept.some((line) => line.startsWith("M2  -"))) {
+    const at = kept.findIndex((line) => line.startsWith("SP  -"));
+    kept.splice(at + 1, 0, `M2  - ${start}`);
+  }
+  if (!hasType) kept.push("M3  - Journal Article");
+  kept.unshift("TY  - JOUR");
+  kept.push("ER  - ");
+  return kept.join("\r\n");
+}
+
+function pushTag(lines: string[], tag: string, value: string) {
+  const text = risValue(value);
+  if (text && text !== "待补") lines.push(`${tag}  - ${text}`);
+}
+
+/** 检索时写入 included.json 的完整题录，原样写成 RIS。不再另查。 */
+export function recordToRis(row: IncludedRecord): string {
+  const lines = ["TY  - JOUR"];
+  for (const author of risAuthors(row.authors)) lines.push(`AU  - ${author}`);
+  pushTag(lines, "TI", row.title);
+  const journal = risValue(row.source);
+  if (journal && journal !== "待补") {
+    lines.push(`T2  - ${journal}`);
+    lines.push(`JO  - ${journal}`);
+  }
+  const short = risValue(row.journalAbbreviation);
+  if (short && short !== "待补" && short.toLowerCase() !== journal.toLowerCase()) {
+    lines.push(`J2  - ${short}`);
+  }
+  pushTag(lines, "PY", row.year);
+  pushTag(lines, "DA", row.date);
+  pushTag(lines, "ET", row.epubDate);
+  pushTag(lines, "VL", row.volume);
+  pushTag(lines, "IS", row.issue);
+  const pages = risValue(row.pages).replace(/[–—−]/g, "-");
+  const parts = pages ? pages.split(/-+/, 2).map((part) => part.trim()) : [];
+  if (parts[0]) {
+    lines.push(`SP  - ${parts[0]}`);
+    lines.push(`M2  - ${parts[0]}`);
+  }
+  if (parts[1] && parts[1] !== parts[0]) lines.push(`EP  - ${parts[1]}`);
+  pushTag(lines, "M3", row.articleType);
+  pushTag(lines, "SN", row.issn);
+  const doi = doiToken(row.id, row.url);
+  if (doi) lines.push(`DO  - ${doi}`);
+  for (const word of risValue(row.keywords).split(/[;；]/)) {
+    if (word.trim() && word.trim() !== "待补") lines.push(`KW  - ${word.trim()}`);
+  }
+  pushTag(lines, "AB", row.abstract);
+  pushTag(lines, "LA", row.language);
+  const url = risValue(row.url) || (doi ? `https://doi.org/${doi}` : "");
+  if (url) lines.push(`UR  - ${url}`);
+  lines.push("ER  - ");
+  return lines.join("\r\n");
+}
+
+/** 纳入后追加到导入文件。已有同一 DOI 或标题则不重复。
+ *  优先用检索时写入 included.json 的完整题录；记录里没有卷期页时，再从原导出整条抄。 */
+export function appendEndnoteImportRecord(ris: string, row: IncludedRecord, source = ""): string {
+  const doi = doiToken(row.id, row.url);
+  const title = risValue(row.title);
+  if (doi && ris.toLowerCase().includes(doi.toLowerCase())) return ris;
+  if (title && ris.toLowerCase().includes(title.toLowerCase())) return ris;
+  const stored = recordToRis(row);
+  const thin = !risValue(row.volume) && !risValue(row.pages) && !risValue(row.abstract);
+  const fromSource = thin && source ? sourceRisBlock(source, row) : null;
+  const block = fromSource ? normalizeSourceRis(fromSource) : stored;
+  const base = ris.replace(/\s*$/, "");
+  return base ? `${base}\r\n\r\n${block}\r\n` : `${block}\r\n`;
 }

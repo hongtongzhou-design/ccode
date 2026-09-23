@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { IncludedRecord } from "../src/screening-review.ts";
 import {
   blockerPrimaryText,
   extraDecisionsFromSummary,
   groupReviewFiles,
   isScreeningReviewStep,
+  appendEndnoteImportRecord,
   appendToFetchEntry,
   matchPaperPdf,
   paperHasDoiPdf,
   pdfNameFromReason,
   parseIncludedRecords,
+  includeAllPendingJson,
   patchIncludedJson,
   patchIncludedMd,
   defaultScreeningTableFilter,
@@ -95,6 +98,28 @@ test("同时有 screening 与 included 时按筛选排文件", () => {
   );
 });
 
+const emptyRecord: IncludedRecord = {
+  id: "",
+  title: "",
+  decision: "included",
+  reason: "",
+  authors: "",
+  year: "",
+  source: "",
+  url: "",
+  volume: "",
+  issue: "",
+  pages: "",
+  date: "",
+  epubDate: "",
+  articleType: "",
+  issn: "",
+  journalAbbreviation: "",
+  abstract: "",
+  keywords: "",
+  language: "",
+};
+
 test("纳入 JSON 计数与待拍板去重", () => {
   const records = parseIncludedRecords(JSON.stringify({
     items: [
@@ -174,25 +199,17 @@ test("纳入 JSON 计数与待拍板去重", () => {
     "/p/papers/" + named,
   );
   const fetchMd = appendToFetchEntry("# 待获取全文\n\n1. Old — 10.0/aaa\n", {
+    ...emptyRecord,
     id: "doi:10.0/bbb",
     title: "New Paper",
-    decision: "included",
-    reason: "",
-    authors: "",
-    year: "",
-    source: "",
     url: "https://doi.org/10.0/bbb",
   });
   assert.match(fetchMd, /2\. New Paper — /);
   assert.equal(
     appendToFetchEntry(fetchMd, {
+      ...emptyRecord,
       id: "doi:10.0/bbb",
       title: "New Paper",
-      decision: "included",
-      reason: "",
-      authors: "",
-      year: "",
-      source: "",
       url: "https://doi.org/10.0/bbb",
     }),
     fetchMd,
@@ -218,6 +235,56 @@ test("纳入 JSON 计数与待拍板去重", () => {
     ["B"],
   );
   assert.equal(defaultScreeningTableFilter({ total: 2, included: 2, pending: 0, toFetch: 0 }), "included");
+  const all = includeAllPendingJson(JSON.stringify([
+    { id: "doi:1", title: "A", decision: "included", reason: "已定" },
+    { id: "doi:2", title: "B", decision: "pending", reason: "相邻" },
+    { id: "doi:3", title: "C", decision: "pending", reason: "" },
+  ]));
+  const rows = JSON.parse(all) as { id: string; decision: string; reason: string }[];
+  assert.equal(rows[0].reason, "已定");
+  assert.equal(rows[1].decision, "included");
+  assert.match(rows[1].reason, /^纳入：评审确认/);
+  assert.equal(rows[2].decision, "included");
+  assert.equal(rows[2].reason, "纳入：评审确认");
+  const row = {
+    ...emptyRecord,
+    id: "doi:10.1016/j.jallcom.2024.1",
+    title: "Fresh Paper",
+    authors: "Zhang, Caicai; Xu, Ao",
+    year: "2024",
+    source: "Journal of Alloys and Compounds",
+    url: "https://doi.org/10.1016/j.jallcom.2024.1",
+    volume: "1010",
+    pages: "177309",
+    abstract: "Already stored at search time.",
+  };
+  const added = appendEndnoteImportRecord("TY  - JOUR\r\nTI  - Old\r\nER  - \r\n", row);
+  assert.match(added, /AU  - Zhang, Caicai\r\nAU  - Xu, Ao/);
+  assert.match(added, /DO  - 10\.1016\/j\.jallcom\.2024\.1/);
+  assert.equal(appendEndnoteImportRecord(added, row), added);
+  const source = [
+    "TY  - JOUR",
+    "TI  - Fresh Paper",
+    "AU  - Zhang, Caicai",
+    "T2  - Journal of Alloys and Compounds",
+    "J2  - J. Alloys Compd.",
+    "PY  - 2024",
+    "VL  - 1010",
+    "IS  - 2",
+    "SP  - 177309",
+    "EP  - 177320",
+    "SN  - 0925-8388",
+    "DO  - 10.1016/j.jallcom.2024.1",
+    "AB  - Sulfur rich spheres.",
+    "ER  - ",
+  ].join("\n");
+  const thin = { ...row, volume: "", pages: "", abstract: "" };
+  const copied = appendEndnoteImportRecord("", thin, source);
+  assert.match(copied, /VL  - 1010/);
+  assert.match(copied, /M2  - 177309/);
+  assert.match(copied, /J2  - J\. Alloys Compd\./);
+  assert.match(copied, /AB  - Sulfur rich spheres\./);
+  assert.match(copied, /M3  - Journal Article/);
 });
 
 test("Git 拦截直接写原因，不报问题计数", () => {

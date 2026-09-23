@@ -45,7 +45,8 @@ outputs: [papers/]
 - **Consensus / Undermind MCP（挂了就必须用，2026-09-15 实测被跳过后收紧）**：开工第一件事盘点本会话可用工具——只要存在 mcp__undermind / mcp__consensus 类工具就各跑至少一轮检索（Undermind = 语义深搜补漏，围绕课题先跑一轮；Consensus = 按研究问题搜同行评议论文）。命中并进候选池，检索日志「库」写 Consensus / Undermind，去重与纳排与其他库同一套；**不替代** OpenAlex / Semantic Scholar，也不另写一份清单。**工具在而没检索 = 违规**，必须在覆盖缺口里写明原因；只有工具不存在或调用失败才允许跳过并声明，不中断检索；
 - 检索日志用固定六字段表头，逐库一行记入 `papers/screening.md`：**日期 / 库 / 完整检索式 / 命中数 / 去重后数 / 筛后保留数**，保证检索过程可复现；
 - 各库结果合并去重后，同一篇（DOI 或标题归一判定）被 ≥2 个库命中的，在记录上标「**多源命中**」——这是优先阅读的提示，不是纳入标准；
-- 每篇记录：标题、作者、年份、来源、链接或 DOI。字段未知一律标「待补」，不得留空或猜测。
+- 每篇记录：标题、作者（全名，一位一行）、年份、期刊全称、卷、期、页码、出版日期、文章类型、ISSN、DOI、链接。有摘要、关键词、期刊缩写一并记下。字段未知一律标「待补」，不得留空或猜测。
+- **有 DOI 就用 Crossref 把上面这些字段补全再写入筛选记录和 RIS**（`https://api.crossref.org/works/<DOI>`，礼貌 User-Agent）。Crossref 没有摘要时再用 OpenAlex。期刊缩写不拿 Crossref 的 short-container-title 当缩写（它经常等于全称）：按 ISSN 查 NLM Catalog 的 `MedlineTA`（`esearch` `db=nlmcatalog` + `efetch`），目录没有再用 Semantic Scholar 的 `publicationVenue.alternate_names` 里短于全称的那条。两处都没有就标「待补」，不自己编缩写。没有期、没有独立网络出版日也标「待补」，不把卷、页或创建日期挪去填。作者以 Crossref 的 `family`/`given` 为准，写成 `姓, 名`，一人一行；来源名单被截成「前三人, et al.」或同一人重复出现时，用 Crossref 的完整名单替换，不沿用截断名单。
 
 #### 外部 AI 检索站导出导入（人肉中转）
 
@@ -117,9 +118,10 @@ Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索
 
 - `papers/screening.md`：固定结构——深度档与假设 → 纳入/排除标准 → 概念块与检索词 → 检索日志表（六字段）→ 逐条判定（含「待确认」「多源命中」标注）→ 引用扩展轮次记录 → **覆盖缺口声明**（哪些库没检、意味着什么缺失，如「未检 CNKI，中文核心期刊覆盖缺失」「WoS 无订阅未检」）
 - `papers/included.md`：纳入清单（一行一篇，固定行格式；尚待确认单列，不冒充已决）
-- `papers/included.json`：与 included.md 一一对应的记录数组，每条稳定非空字符串 `id`、`title`、`decision`、`reason`；decision 为 included / pending，写明全文和版本状态，空清单用 `[]` 并说明为何不能进入综合。不用修改 id 隐藏旧记录。
+- `papers/included.json`：与 included.md 一一对应的记录数组。每条有稳定非空字符串 `id`、`title`、`decision`、`reason`。decision 为 included / pending。**pending 与 included 同一套题录，检索时一次查全**，不要等纳入后再查：`authors`（数组，`姓, 名`）、`year`、`venue`、`volume`、`issue`、`pages`、`date`、`epubDate`、`articleType`、`issn`、`journalAbbreviation`、`abstract`、`keywords`、`language`、`doi`、`url`。查不到的写「待补」。人点纳入时 Mesa 把这条原样追加进 `endnote-import.ris` 和 `to-fetch.ris`，不再另查。空清单用 `[]`。不用修改 id 隐藏旧记录。
 - `papers/to-fetch.md`：仅 **已纳入（decision=included）** 且未获得全文的付费墙清单，**不得列入 pending**（2026-09-15 收紧格式——裸「标题 — DOI」堆叠没编号，用户无法对照追踪进度）：**编号列表，每行 `N. 标题 — DOI`，N 从 1 连续**，顺序与 to-fetch.ris 条目一致；补齐全文的行在编号后加 `✓`（如 `3. ✓ 标题 — DOI`），编号不重排；无待获取则注明为空
-- `papers/to-fetch.ris`：to-fetch.md 的 RIS 2004 转换件（每篇 `TY - JOUR`，条目顺序与 to-fetch.md 编号一致），字段从筛选记录/included 行取全再写：`TI` 标题、`AU` 作者每位一行（`姓, 名` 格式）、`PY` 四位年份、`T2` 来源期刊/会议、`DO` DOI、`UR` 链接——只给 TI/DO/UR 会让 Zotero 里作者、年份、出版物列全空，没法按作者/年份核对；确无数据的字段才允许留空，不得编造。与 to-fetch.md 同增删
+- `papers/endnote-import.ris` 与 `papers/to-fetch.ris` 字段同一套，检索时一次写全，pending 的完整题录也写在 included.json 里。人把 pending 改成纳入后，Mesa 把这条追加进两份 RIS（同一 DOI 或标题已在则不重复）。排除的不写。不在纳入这一下重新检索。
+- `papers/to-fetch.ris`：to-fetch.md 的 RIS 2004 转换件（每篇 `TY  - JOUR`，CRLF，条目顺序与 to-fetch.md 编号一致）。**一位作者一条 `AU`**（`姓, 名`）；多位挤在同一条 `AU` 里，EndNote 会把整串当成一个人。有数据才写这些标签：`TI` 标题、`T2`/`JO` 期刊全称、`J2` 期刊缩写（与全称不同才写）、`PY` 四位年份、`DA` 出版日期、`ET` 网络出版日期、`VL` 卷、`IS` 期、`SP` 页、`M2` 起始页码、`EP` 结束页、`M3` 文章类型、`SN` ISSN、`DO` DOI、`KW` 关键词（一词一条）、`AB` 摘要、`UR` 链接。`N1` 只写文献本身的注释，不写筛选过程、来源库、出版商或「关键词来自 OpenAlex」这类流程说明。只给 TI/DO/UR 时，Zotero 的作者/年份/期刊列和 EndNote 的卷期页、摘要全是空的。确无数据的标签不写，不编造。与 to-fetch.md 同增删
 - **严格档追加 PRISMA-S 最小披露段**（screening.md 末尾）：各库完整检索式、检索日期、命中→去重→纳入计数、去重方法——这是最低留痕，不是完整 PRISMA-S 符合声明；系统综述逐项对照官方完整规范并记录适用性。
 
 ## 验收入口

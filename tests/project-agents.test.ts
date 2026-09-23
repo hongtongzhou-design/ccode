@@ -7,6 +7,7 @@ import {
   projectAgentPrefs,
   projectAgentsEmptyWorkHint,
   projectAgentsHint,
+  projectNeedsDefaultAgent,
   projectBoundProfileId,
   resolveProfileModel,
   resolvedTaskAgentId,
@@ -183,6 +184,8 @@ test("hints stay short and never promise routing", () => {
   for (const mode of ["office", "coding", "research"]) {
     assert.equal(projectAgentsHint(mode), "默认选择仅对本项目生效。");
   }
+  assert.equal(projectNeedsDefaultAgent({ defaultAgent: "" }), true);
+  assert.equal(projectNeedsDefaultAgent({ defaultAgent: "claude" }), false);
   assert.equal(projectAgentsEmptyWorkHint("research"), "新建目标或开步时指定谁干。");
   assert.equal(projectAgentsEmptyWorkHint("office"), "新建目标时指定谁写文档。");
   assert.equal(projectAgentsEmptyWorkHint("coding"), "在工作树里选谁开工。");

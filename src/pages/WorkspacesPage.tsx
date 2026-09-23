@@ -276,13 +276,12 @@ function AddProjectModal({
               })
             : [];
         const fresh = found.filter((d) => !d.exists);
-        const AUTO_MAX = 60;
         const next = {
           ...read.config,
           workMode: chosen,
           resources: [
             ...read.config.resources,
-            ...fresh.slice(0, AUTO_MAX).map((d) => ({
+            ...fresh.map((d) => ({
               name: d.path.split(/[\\/]/).pop() ?? d.path,
               path: d.path,
               type: d.type,
@@ -291,7 +290,7 @@ function AddProjectModal({
             })),
           ],
         };
-        autoAdded = Math.min(fresh.length, AUTO_MAX);
+        autoAdded = fresh.length;
         totalResources = next.resources.length;
         await invoke("write_project_config", { path, config: next });
       } catch (reason) {
@@ -2519,6 +2518,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             onError={setError}
             chromeReq={identityChrome}
             onIdentityAction={requestIdentityChrome}
+            onOpenAgents={() => selectProjectSurface("agents")}
             onChromeConsumed={consumeIdentityChrome}
           >
             {(wsView) => {

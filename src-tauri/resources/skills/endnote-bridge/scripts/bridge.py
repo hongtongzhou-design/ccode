@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -107,8 +108,20 @@ def bib_records(text):
         record['authors'] = re.split(r'\s+and\s+', record.pop('author', '')) if record.get('author') else []
         record['journal'] = record.get('journal') or record.get('booktitle', '')
         record['authors'] = [decode_bib_text(a) for a in record['authors']]
+        keywords = record.pop('keywords', '')
+        if keywords:
+            record['keywords'] = [part.strip() for part in re.split(r'\s*;\s*|\s+and\s+', keywords) if part.strip()]
+        # BibTeX 字段名全小写；EndNote 侧用这几个内部名。
+        for src, dest in (
+            ('journalabbreviation', 'journalAbbreviation'),
+            ('shortjournal', 'journalAbbreviation'),
+            ('epubdate', 'epubDate'),
+            ('articletype', 'articleType'),
+        ):
+            if record.get(src) and not record.get(dest):
+                record[dest] = record.pop(src)
         for key, value in list(record.items()):
-            if key not in ('authors', 'id', 'type') and isinstance(value, str):
+            if key not in ('authors', 'keywords', 'id', 'type') and isinstance(value, str):
                 record[key] = decode_bib_text(value)
         records.append(record)
     return records
@@ -131,19 +144,36 @@ def load(path):
             def value(name):
                 el = item.find(name)
                 return ''.join(el.itertext()).strip() if el is not None else ''
+            pages = value('pages')
+            start = (item.find('pages').get('start') or '').strip() if item.find('pages') is not None else ''
+            end = (item.find('pages').get('end') or '').strip() if item.find('pages') is not None else ''
+            if start and end and '--' not in pages and '-' in pages:
+                pages = start + '--' + end
+            keywords = [''.join(k.itertext()).strip() for k in item.findall('keywords/keyword')]
+            keywords = [k for k in keywords if k]
             result.append({'id': value('label'), 'sourceRecordNumber': value('rec-number'), 'type': {'17': 'article', '6': 'book', '5': 'incollection', '47': 'inproceedings', '32': 'phdthesis'}.get(value('ref-type'), 'misc'),
                 'title': value('titles/title'), 'journal': value('titles/secondary-title'),
+                'journalAbbreviation': value('periodical/abbr-1') or value('titles/alt-title'),
                 'authors': [''.join(a.itertext()).strip() for a in item.findall('contributors/authors/author')],
-                'year': value('dates/year'), 'doi': value('electronic-resource-num'),
-                'volume': value('volume'), 'number': value('number'), 'pages': value('pages'),
-                'url': value('urls/web-urls/url'), 'isbn': value('isbn'),
+                'year': value('dates/year'), 'date': value('dates/pub-dates/date'),
+                'epubDate': value('edition'), 'doi': value('electronic-resource-num'),
+                'volume': value('volume'), 'number': value('number'), 'pages': pages,
+                'articleType': value('work-type'), 'abstract': value('abstract'), 'notes': value('notes'),
+                'language': value('language'), 'keywords': keywords,
+                'url': value('urls/web-urls/url'), 'issn': value('isbn'),
                 'attachments': [''.join(a.itertext()).strip() for a in item.findall('urls/pdf-urls/url')], 'sourceXml': ET.tostring(item,encoding='unicode')})
         if not result and root.tag != 'xml':
             raise ValueError('Not EndNote XML')
         return result
     if path.suffix.lower() == '.ris':
         result, current, last = [], None, None
-        fields = {'TI':'title', 'T1':'title', 'JO':'journal', 'JF':'journal', 'T2':'journal', 'PY':'year', 'Y1':'year', 'DO':'doi', 'VL':'volume', 'IS':'number', 'SP':'pages', 'UR':'url', 'ID':'id', 'SN':'isbn'}
+        fields = {
+            'TI':'title', 'T1':'title', 'JO':'journal', 'JF':'journal', 'T2':'journal',
+            'JA':'journalAbbreviation', 'J2':'journalAbbreviation', 'J1':'journalAbbreviation',
+            'PY':'year', 'Y1':'year', 'DA':'date', 'DO':'doi', 'VL':'volume', 'IS':'number',
+            'SP':'pages', 'UR':'url', 'ID':'id', 'SN':'issn', 'AB':'abstract', 'N2':'abstract',
+            'N1':'notes', 'M3':'articleType', 'LA':'language', 'ET':'epubDate',
+        }
         for line in text.splitlines():
             if not line.strip():
                 continue
@@ -166,6 +196,8 @@ def load(path):
                 raise ValueError('RIS record missing TY')
             elif tag in ('AU', 'A1'):
                 current['authors'].append(value); last = None
+            elif tag == 'KW':
+                current.setdefault('keywords', []).append(value); last = None
             elif tag == 'L1':
                 current['attachments'].append(value); last = None
             elif tag == 'EP':
@@ -183,6 +215,41 @@ def load(path):
 
 def escape_bib(value):
     return ''.join('\\'+c if c in '&%_#{}$' else c for c in str(value))
+
+
+def clean(value):
+    if value is None:
+        return ''
+    return re.sub(r'\s+', ' ', str(value).replace('\r', ' ').replace('\n', ' ')).strip()
+
+
+def split_pages(pages):
+    text = str(pages).replace('–', '-').replace('—', '-').replace('−', '-')
+    # 区间分隔符按「横线串」切：BibTeX 页码是 1--8（双横线），按单 - 切会把
+    # -8 当页尾，回程 EP 再拼 -- 变 1---8
+    parts = re.split(r'-+', text, 1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        return parts[0].strip(), parts[1].strip()
+    return text.strip(), ''
+
+
+def xml_date(parent, tag, value):
+    text = clean(value)
+    match = re.match(r'(?:([A-Za-z]+)\s+)?(?:(\d{1,2}),\s+)?(\d{4})$', text)
+    months = {
+        'january': '1', 'february': '2', 'march': '3', 'april': '4', 'may': '5', 'june': '6',
+        'july': '7', 'august': '8', 'september': '9', 'october': '10', 'november': '11', 'december': '12',
+    }
+    el = ET.SubElement(parent, tag)
+    el.text = text
+    if match and match.group(3):
+        el.set('year', match.group(3))
+        month = months.get((match.group(1) or '').lower())
+        if month:
+            el.set('month', month)
+        if match.group(2):
+            el.set('day', str(int(match.group(2))))
+    return el
 
 
 def family_comma(author):
@@ -226,44 +293,81 @@ def render(records, suffix):
             for author in r.get('authors', []): put('contributors/authors/author', family_comma(author))
             if r.get('title'): put('titles/title', r['title'])
             if r.get('journal'): put('titles/secondary-title', r['journal'])
-            if r.get('pages'): put('pages', r['pages'])
+            short = r.get('journalAbbreviation') or ''
+            if short and short.casefold() != (r.get('journal') or '').casefold():
+                # EndNote.dtd 里期刊缩写在 periodical/abbr-1。EndNote 2025 期刊类型的
+                # 「其他形式的期刊名」是 Field 29（Generic 的 Alternate Title = titles/alt-title）。
+                # 两处都写：XML 导入认 abbr-1，界面字段认 alt-title。
+                put('periodical/abbr-1', short)
+                put('titles/alt-title', short)
+            # EndNote.dtd 的 record 子元素顺序：pages → volume → number → keywords → dates
+            # → isbn → abstract → notes → work-type → urls → electronic-resource-num → language。
+            # 插错顺序时 EndNote 会整份拒绝。
+            if r.get('pages'):
+                start, end = split_pages(r['pages'])
+                put('pages', f'{start}-{end}' if end else start, {'start': start, **({'end': end} if end else {})})
             if r.get('volume'): put('volume', r['volume'])
             if r.get('number'): put('number', r['number'])
-            if r.get('year'): put('dates/year', r['year'])
-            if r.get('isbn'): put('isbn', r['isbn'])
+            # 期刊类型里 Field 14 从 Edition 改名为「网络出版日期」，元素仍是 edition。
+            if r.get('epubDate'): put('edition', r['epubDate'])
+            for word in r.get('keywords') or []:
+                put('keywords/keyword', word)
+            if r.get('year') or r.get('date'):
+                dates = ET.SubElement(item, 'dates')
+                if r.get('year'):
+                    xml_date(dates, 'year', r['year'])
+                if r.get('date'):
+                    xml_date(ET.SubElement(dates, 'pub-dates'), 'date', r['date'])
+            if r.get('issn') or r.get('isbn'): put('isbn', r.get('issn') or r.get('isbn'))
+            if r.get('abstract'): put('abstract', r['abstract'])
+            # label 在 DTD 里位于 abstract 与 notes 之间
             put('label', r['id'])
-            if r.get('url'): put('urls/web-urls/url', r['url'])
-            for attachment in r.get('attachments', []): put('urls/pdf-urls/url', attachment)
+            if r.get('notes'): put('notes', r['notes'])
+            if r.get('articleType'): put('work-type', r['articleType'])
+            if r.get('url') or r.get('attachments'):
+                urls = ET.SubElement(item, 'urls')
+                if r.get('url'):
+                    web = ET.SubElement(urls, 'web-urls')
+                    ET.SubElement(web, 'url').text = clean(r['url'])
+                if r.get('attachments'):
+                    pdfs = ET.SubElement(urls, 'pdf-urls')
+                    for attachment in r['attachments']:
+                        ET.SubElement(pdfs, 'url').text = clean(attachment)
             if r.get('doi'): put('electronic-resource-num', r['doi'])
+            if r.get('language'): put('language', r['language'])
         return ET.tostring(root, encoding='unicode', xml_declaration=True) + '\n'
     if suffix == '.ris':
         def line(tag, value):
-            return f'{tag}  - {str(value).replace(chr(13), " ").replace(chr(10), " ")}'
-        def split_pages(pages):
-            s = str(pages).replace('–', '-').replace('—', '-').replace('−', '-')
-            # 区间分隔符按「横线串」切：BibTeX 页码是 1--8（双横线），按单 - 切会把
-            # -8 当页尾，回程 EP 再拼 -- 变 1---8
-            parts = re.split(r'-+', s, 1)
-            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-                return parts[0].strip(), parts[1].strip()
-            return s.strip(), ''
+            return f'{tag}  - {clean(value)}'
         result = []
         for r in records:
             result.append(line('TY', {'article':'JOUR','book':'BOOK','incollection':'CHAP','inproceedings':'CONF','phdthesis':'THES'}.get(r.get('type'), 'JOUR')))
             # RIS Reference ID 载 citation key（XML 走 <label>、.enw 走 %F 的同一职责）：
             # 不写这条，键出了 RIS 就丢，回程只能重生成 ref<hash>，--existing 也接不上
             result.append(line('ID', r['id']))
+            # 一位作者一行。逗号串进同一条 AU 会被 EndNote 当成一个人。
             for author in r.get('authors', []):
                 result.append(line('AU', family_comma(author)))
             if r.get('title'):
                 result.append(line('TI', r['title']))
+            # EndNote 2025「RefMan (RIS) Export」期刊全称用 T2，缩写用 J2。
+            # JO/JF/JA 留给旧过滤器，和 T2/J2 写同一值。
             if r.get('journal'):
-                result.append(line('JO', r['journal']))
                 result.append(line('T2', r['journal']))
+                result.append(line('JO', r['journal']))
+                result.append(line('JF', r['journal']))
+            short = r.get('journalAbbreviation') or ''
+            if short and short.casefold() != (r.get('journal') or '').casefold():
+                result.append(line('J2', short))
+                result.append(line('JA', short))
             if r.get('year'):
                 result.append(line('PY', r['year']))
-            if r.get('doi'):
-                result.append(line('DO', r['doi']))
+                result.append(line('Y1', r['year']))
+            if r.get('date'):
+                result.append(line('DA', r['date']))
+            if r.get('epubDate'):
+                # ET 对应 edition；期刊文献里这一格显示为网络出版日期。
+                result.append(line('ET', r['epubDate']))
             if r.get('volume'):
                 result.append(line('VL', r['volume']))
             if r.get('number'):
@@ -271,9 +375,27 @@ def render(records, suffix):
             if r.get('pages'):
                 start, end = split_pages(r['pages'])
                 if start:
+                    # EndNote 2025 RefMan RIS：SP 进「页」，M2 才进「起始页码」。
                     result.append(line('SP', start))
+                    result.append(line('M2', start))
                 if end:
                     result.append(line('EP', end))
+            if r.get('articleType'):
+                # M3 进「文章类型」。M1 在这套过滤器里不进任何格子。
+                result.append(line('M3', r['articleType']))
+            if r.get('issn') or r.get('isbn'):
+                result.append(line('SN', r.get('issn') or r.get('isbn')))
+            if r.get('doi'):
+                result.append(line('DO', r['doi']))
+            for word in r.get('keywords') or []:
+                result.append(line('KW', word))
+            if r.get('abstract'):
+                result.append(line('AB', r['abstract']))
+                result.append(line('N2', r['abstract']))
+            if r.get('notes'):
+                result.append(line('N1', r['notes']))
+            if r.get('language'):
+                result.append(line('LA', r['language']))
             if r.get('url'):
                 result.append(line('UR', r['url']))
             for attachment in r.get('attachments', []):
@@ -283,14 +405,6 @@ def render(records, suffix):
         # EndNote 认 CRLF。不要加 BOM：带 BOM 时不认 TY 行，会跳过格式选择、静默导入 0 条。
         return '\r\n'.join(result) + '\r\n'
     if suffix == '.enw':
-        def split_pages(pages):
-            s = str(pages).replace('–', '-').replace('—', '-').replace('−', '-')
-            # 区间分隔符按「横线串」切：BibTeX 页码是 1--8（双横线），按单 - 切会把
-            # -8 当页尾，回程 EP 再拼 -- 变 1---8
-            parts = re.split(r'-+', s, 1)
-            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-                return parts[0].strip(), parts[1].strip()
-            return s.strip(), ''
         type_name = {'article':'Journal Article','book':'Book','incollection':'Book Section','inproceedings':'Conference Paper','phdthesis':'Thesis'}
         result = []
         for r in records:
@@ -298,29 +412,46 @@ def render(records, suffix):
             for author in r.get('authors', []):
                 result.append('%A ' + family_comma(author))
             if r.get('year'):
-                result.append('%D ' + str(r['year']).replace('\n', ' '))
+                result.append('%D ' + clean(r['year']))
+            if r.get('date'):
+                result.append('%8 ' + clean(r['date']))
             if r.get('title'):
-                result.append('%T ' + str(r['title']).replace('\n', ' '))
+                result.append('%T ' + clean(r['title']))
             if r.get('journal'):
-                result.append('%J ' + str(r['journal']).replace('\n', ' '))
+                result.append('%J ' + clean(r['journal']))
+            short = r.get('journalAbbreviation') or ''
+            if short and short.casefold() != (r.get('journal') or '').casefold():
+                result.append('%B ' + clean(short))
             if r.get('volume'):
-                result.append('%V ' + str(r['volume']))
+                result.append('%V ' + clean(r['volume']))
             if r.get('number'):
-                result.append('%N ' + str(r['number']))
+                result.append('%N ' + clean(r['number']))
             if r.get('pages'):
                 start, end = split_pages(r['pages'])
                 result.append('%P ' + (f'{start}-{end}' if end else start))
+            if r.get('issn') or r.get('isbn'):
+                result.append('%@ ' + clean(r.get('issn') or r.get('isbn')))
+            if r.get('abstract'):
+                result.append('%X ' + clean(r['abstract']))
+            for word in r.get('keywords') or []:
+                result.append('%K ' + clean(word))
+            if r.get('notes'):
+                result.append('%Z ' + clean(r['notes']))
             if r.get('doi'):
-                result.append('%R ' + str(r['doi']))
+                result.append('%R ' + clean(r['doi']))
             if r.get('url'):
-                result.append('%U ' + str(r['url']))
+                result.append('%U ' + clean(r['url']))
             result.append('%F ' + r['id'])
             result.append('')
         return '\r\n'.join(result) + '\r\n'
     if suffix == '.bib':
         result = []
         for r in records:
-            fields = {k:r[k] for k in ('title','journal','year','doi','volume','number','pages','url','isbn') if r.get(k)}
+            fields = {k:r[k] for k in ('title','journal','year','doi','volume','number','pages','url','isbn','issn','abstract','date','language','notes') if r.get(k)}
+            if r.get('journalAbbreviation'): fields['journalabbreviation'] = r['journalAbbreviation']
+            if r.get('epubDate'): fields['epubdate'] = r['epubDate']
+            if r.get('articleType'): fields['articletype'] = r['articleType']
+            if r.get('keywords'): fields['keywords'] = '; '.join(r['keywords'])
             if r.get('authors'): fields['author'] = ' and '.join(r['authors'])
             if any('\n@' in str(v) or str(v).count('{') != str(v).count('}') for v in fields.values()):
                 raise ValueError('Unsafe/unbalanced BibTeX value; inspect proposal JSON')
@@ -360,7 +491,7 @@ def main():
             changes.append({'id':raw,'identity':key,'status':'changed' if prior and delta else 'unchanged' if prior else 'new','fields':delta})
             for field in ('year','authors','doi'):
                 if not r.get(field):warnings.append({'id':raw,'missing':field})
-            supported={'id','type','title','authors','journal','booktitle','year','doi','volume','number','pages','url','isbn','attachments','sourceRecordNumber'}
+            supported={'id','type','title','authors','journal','journalAbbreviation','booktitle','year','date','epubDate','doi','volume','number','pages','url','isbn','issn','abstract','keywords','notes','articleType','language','attachments','sourceRecordNumber','risFields'}
             extras={k:v for k,v in r.items() if k not in supported}
             if extras: warnings.append({'id':raw,'notMappedFields':extras})
             if a.output.suffix.lower()=='.bib' and r.get('attachments'):warnings.append({'id':raw,'attachmentsInReportOnly':r['attachments']})
@@ -375,4 +506,336 @@ def main():
     except (OSError, ValueError, ET.ParseError) as e:
         print(str(e),file=sys.stderr);return 1
 
-if __name__=='__main__':sys.exit(main())
+MONTHS = {
+    1: 'January', 2: 'February', 3: 'March', 4: 'April', 5: 'May', 6: 'June',
+    7: 'July', 8: 'August', 9: 'September', 10: 'October', 11: 'November', 12: 'December',
+}
+TYPE_LABEL = {
+    'journal-article': 'Journal Article',
+    'proceedings-article': 'Conference Paper',
+    'posted-content': 'Preprint',
+    'book-chapter': 'Book Section',
+    'book': 'Book',
+    'dissertation': 'Thesis',
+    'report': 'Report',
+}
+
+
+def http_json(url, timeout=40, attempts=4):
+    import urllib.error
+    import urllib.request
+    last = None
+    for i in range(attempts):
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'MesaEndnote/1.0 (bibliography; mailto:local)',
+            'Accept': 'application/json',
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as err:
+            last = err
+            if err.code in (429, 500, 502, 503, 504):
+                time.sleep(1.2 * (i + 1))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError) as err:
+            last = err
+            time.sleep(1.2 * (i + 1))
+    raise last
+
+
+def date_parts(node):
+    if not isinstance(node, dict):
+        return None
+    parts = (node.get('date-parts') or [None])[0]
+    return parts or None
+
+
+def fmt_date(parts):
+    if not parts:
+        return ''
+    year = str(parts[0])
+    if len(parts) == 1:
+        return year
+    month = MONTHS.get(parts[1], '')
+    if len(parts) == 2 or not month:
+        return f'{month} {year}'.strip()
+    return f'{month} {int(parts[2])}, {year}'.strip()
+
+
+def pick_issn(message):
+    printed = ''
+    for item in message.get('issn-type') or []:
+        value = clean(item.get('value'))
+        if item.get('type') == 'print' and value:
+            printed = value
+    if printed:
+        return printed
+    for value in message.get('ISSN') or []:
+        if clean(value):
+            return clean(value)
+    return ''
+
+
+def crossref_fill(doi):
+    import urllib.parse
+    message = http_json('https://api.crossref.org/works/' + urllib.parse.quote(doi))['message']
+    issued = date_parts(message.get('issued')) or date_parts(message.get('published'))
+    online = date_parts(message.get('published-online'))
+    printed = date_parts(message.get('published-print'))
+    container = message.get('container-title') or []
+    short = message.get('short-container-title') or []
+    page = clean(message.get('page')) or clean(message.get('article-number'))
+    if not meaningful(page):
+        page = ''
+    authors = []
+    for author in message.get('author') or []:
+        family = clean(author.get('family'))
+        given = clean(author.get('given'))
+        name = clean(author.get('name'))
+        if family and given:
+            authors.append(f'{family}, {given}')
+        elif family or name:
+            authors.append(family or name)
+    journal = clean(container[0]) if container else ''
+    abbrev = clean(short[0]) if short else ''
+    if abbrev.casefold() == journal.casefold():
+        abbrev = ''
+    abstract = clean(message.get('abstract'))
+    keywords = [clean(s) for s in (message.get('subject') or []) if clean(s)]
+    return {
+        'title': clean((message.get('title') or [''])[0]),
+        'authors': authors,
+        'year': str(issued[0]) if issued else (str(online[0]) if online else ''),
+        'date': fmt_date(issued or online or printed),
+        'epubDate': fmt_date(online) if printed and online and online != issued else '',
+        'journal': journal,
+        'journalAbbreviation': abbrev,
+        'volume': clean(message.get('volume')) if meaningful(message.get('volume')) else '',
+        'number': clean(message.get('issue')) if meaningful(message.get('issue')) else '',
+        'pages': page,
+        'issn': pick_issn(message),
+        'doi': clean(message.get('DOI') or doi),
+        'url': clean(message.get('URL') or f'https://doi.org/{doi}'),
+        'abstract': abstract if meaningful(abstract) else '',
+        'keywords': keywords,
+        'articleType': TYPE_LABEL.get(message.get('type') or '', ''),
+        'language': clean(message.get('language')),
+        'publisher': clean(message.get('publisher')),
+    }
+
+
+_nlm_cache = {}
+
+
+def http_text(url, timeout=40, attempts=4):
+    import urllib.error
+    import urllib.request
+    last = None
+    for i in range(attempts):
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'MesaEndnote/1.0 (bibliography; mailto:local)',
+            'Accept': 'application/xml, application/json, text/plain',
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode('utf-8', 'replace')
+        except urllib.error.HTTPError as err:
+            last = err
+            if err.code in (429, 500, 502, 503, 504):
+                time.sleep(1.2 * (i + 1))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError) as err:
+            last = err
+            time.sleep(1.2 * (i + 1))
+    raise last
+
+
+def nlm_abbreviation(issn):
+    """NLM Catalog 的 MedlineTA。按 ISSN 查，同一期刊只查一次。没有记录就返回空。"""
+    key = clean(issn)
+    if not key:
+        return ''
+    if key in _nlm_cache:
+        return _nlm_cache[key]
+    import urllib.parse
+    term = urllib.parse.quote(f'{key}[ISSN]')
+    found = http_json(
+        'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi'
+        f'?db=nlmcatalog&term={term}&retmode=json'
+    )
+    ids = ((found.get('esearchresult') or {}).get('idlist') or [])
+    abbr = ''
+    if ids:
+        xml = http_text(
+            'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
+            f'?db=nlmcatalog&id={urllib.parse.quote(ids[0])}&retmode=xml'
+        )
+        root = ET.fromstring(xml)
+        node = root.find('.//MedlineTA')
+        abbr = clean(node.text if node is not None else '')
+    _nlm_cache[key] = abbr
+    time.sleep(0.34)
+    return abbr
+
+
+def s2_abbreviation(doi):
+    """Semantic Scholar 的 alternate_names 里才有 ISO 式短名；Crossref 常把全称再写一遍。"""
+    import urllib.parse
+    url = (
+        'https://api.semanticscholar.org/graph/v1/paper/DOI:'
+        + urllib.parse.quote(doi)
+        + '?fields=publicationVenue'
+    )
+    row = http_json(url)
+    venue = row.get('publicationVenue') or {}
+    full = clean(venue.get('name')).casefold()
+    for name in venue.get('alternate_names') or []:
+        text = clean(name)
+        if text and text.casefold() != full and len(text) <= 28:
+            return text
+    return ''
+
+
+def openalex_fill(doi):
+    import urllib.parse
+    work = http_json('https://api.openalex.org/works/doi:' + urllib.parse.quote(doi))
+    if not isinstance(work, dict) or work.get('error'):
+        return {}
+    source = ((work.get('primary_location') or {}).get('source') or {})
+    biblio = work.get('biblio') or {}
+    index = work.get('abstract_inverted_index') or {}
+    slots = {}
+    for word, positions in index.items():
+        for pos in positions:
+            slots[pos] = word
+    abstract = ' '.join(slots[i] for i in sorted(slots)) if slots else ''
+    first = clean(biblio.get('first_page'))
+    last = clean(biblio.get('last_page'))
+    pages = f'{first}-{last}' if first and last and first != last else (first or last)
+    keywords = []
+    for item in work.get('keywords') or []:
+        name = clean(item.get('display_name'))
+        if name and (item.get('score') or 0) >= 0.4:
+            keywords.append(name)
+    abbrev = clean(source.get('abbreviated_title'))
+    journal = clean(source.get('display_name'))
+    if abbrev.casefold() == journal.casefold():
+        abbrev = ''
+    authors = []
+    seen = set()
+    for item in work.get('authorships') or []:
+        raw = clean(item.get('raw_author_name')) or clean((item.get('author') or {}).get('display_name'))
+        if raw and raw.casefold() not in seen:
+            seen.add(raw.casefold())
+            authors.append(family_comma(raw))
+    return {
+        'authors': authors,
+        'journal': journal,
+        'journalAbbreviation': abbrev,
+        'volume': clean(biblio.get('volume')),
+        'number': clean(biblio.get('issue')),
+        'pages': pages,
+        'issn': clean((source.get('issn') or [''])[0]) if source.get('issn') else '',
+        'abstract': clean(abstract),
+        'keywords': keywords[:12],
+        'year': str(work.get('publication_year') or ''),
+        'language': clean(work.get('language')),
+    }
+
+
+def meaningful(value):
+    if value is None:
+        return False
+    if isinstance(value, list):
+        return any(meaningful(item) for item in value)
+    text = clean(value)
+    return bool(text) and text.casefold() not in ('none', 'null', '待补')
+
+
+def blank(record, field):
+    return not meaningful(record.get(field))
+
+
+def enrich_records(records):
+    """按 DOI 补 Crossref 上实际有的字段。查不到的保持原记录。"""
+    for record in records:
+        doi = re.sub(r'^https?://(?:dx\.)?doi\.org/', '', clean(record.get('doi')), flags=re.I)
+        if not doi:
+            continue
+        try:
+            filled = crossref_fill(doi)
+        except Exception:
+            filled = {}
+        if not filled.get('abstract') or not filled.get('journalAbbreviation'):
+            try:
+                extra = openalex_fill(doi)
+            except Exception:
+                extra = {}
+            for field in ('abstract', 'journalAbbreviation', 'keywords', 'issn', 'number', 'volume', 'pages', 'journal', 'year', 'language'):
+                if blank(filled, field) and not blank(extra, field):
+                    filled[field] = extra[field]
+
+            if len(filled.get('authors') or []) < 2 and len(extra.get('authors') or []) > len(filled.get('authors') or []):
+                filled['authors'] = extra['authors']
+        journal_name = clean(filled.get('journal'))
+        short_name = clean(filled.get('journalAbbreviation'))
+        if not short_name or short_name.casefold() == journal_name.casefold():
+            try:
+                short_name = nlm_abbreviation(filled.get('issn'))
+            except Exception:
+                short_name = ''
+            if short_name and short_name.casefold() != journal_name.casefold():
+                filled['journalAbbreviation'] = short_name
+        if not filled.get('journalAbbreviation') or clean(filled.get('journalAbbreviation')).casefold() == journal_name.casefold():
+            try:
+                short = s2_abbreviation(doi)
+            except Exception:
+                short = ''
+            if short:
+                filled['journalAbbreviation'] = short
+        if not filled:
+            continue
+        # 作者以出版商登记为准：原名单经常被截成前三人或同一人写两次。
+        # 作者按出版商名单替换：原文件常把多人挤在一行，或把同一人写两次。
+        # 其余字段只补空位，不改已有年份和标题。
+        if filled.get('authors'):
+            record['authors'] = filled['authors']
+        for field in (
+            'title', 'year', 'date', 'epubDate', 'journal', 'journalAbbreviation', 'volume', 'number',
+            'pages', 'issn', 'doi', 'url', 'abstract', 'keywords', 'articleType', 'language',
+        ):
+            if blank(record, field) and not blank(filled, field):
+                record[field] = filled[field]
+        time.sleep(0.15)
+    return records
+
+
+def enrich_main():
+    p = argparse.ArgumentParser(description='Fill a BibTeX file from Crossref by DOI. Writes a new file.')
+    p.add_argument('--input', type=Path, required=True)
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--report', type=Path)
+    a = p.parse_args()
+    try:
+        if a.output.exists() or a.output.is_symlink():
+            raise ValueError('Output exists; choose a new path')
+        records = load(a.input)
+        enrich_records(records)
+        text = render(records, '.bib')
+        a.output.parent.mkdir(parents=True, exist_ok=True)
+        with a.output.open('x', encoding='utf-8', newline='\n') as handle:
+            handle.write(text)
+        return 0
+    except (OSError, ValueError, ET.ParseError) as err:
+        print(str(err), file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    if '--enrich' in sys.argv:
+        sys.argv.remove('--enrich')
+        sys.exit(enrich_main())
+    sys.exit(main())

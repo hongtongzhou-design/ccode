@@ -24,6 +24,7 @@ export default function StepSkillsChips({
   onRequiredChange,
   chainSupply,
   expectedArtifacts,
+  stepOutputs,
   hint,
 }: {
   /** 步骤当前挂载的技能名（project.toml steps[].skills） */
@@ -46,6 +47,8 @@ export default function StepSkillsChips({
   chainSupply?: string[];
   /** 本步骤预期产物（链路校验：技能 outputs 未进清单时提示；空数组 = 不检 output 侧） */
   expectedArtifacts?: string[];
+  /** 本步合同实际要写的文件。给了就只检查这批，不拿技能声明里别的阶段来报。 */
+  stepOutputs?: string[];
   /** 标题旁小字；false = 不写（开工弹层用 tooltip 承担） */
   hint?: string | false;
 }) {
@@ -59,7 +62,7 @@ export default function StepSkillsChips({
   const outputConflicts = skillLib ? skillOutputConflicts(skills, skillLib) : [];
   const chainWarnings =
     skillLib && chainSupply && expectedArtifacts
-      ? skillChainWarnings(skills, skillLib, chainSupply, expectedArtifacts)
+      ? skillChainWarnings(skills, skillLib, chainSupply, expectedArtifacts, stepOutputs)
       : [];
   if (skills.length === 0 && !editable) return null;
   return (
