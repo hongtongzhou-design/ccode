@@ -172,6 +172,7 @@ test("EndNote 交差在精读保存后出现，不挡开工、不靠项目设置
     endnoteExport: true,
   });
   const endnote = done.nodes.find((n) => n.key === "endnote-export");
+  assert.equal(endnote?.label, "同步到文献库");
   assert.equal(endnote?.section, "optional");
   assert.ok(
     done.nodes.findIndex((n) => n.kind === "review") <

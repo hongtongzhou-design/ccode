@@ -455,7 +455,11 @@ test("综述初稿：不以词数为完成标准，扩写必须回笔记或原�
   assert.match(draft.brief, /PDF 首页可读/);
   assert.match(draft.brief, /G1 不准进稿件/);
   assert.match(draft.brief, /摘要只放全文撑得住/);
-  assert.match(draft.brief, /禁止「待绘制」占位/);
+  assert.match(draft.brief, /禁止「待绘制」/);
+  assert.ok(draft.expectedArtifacts?.includes("figures/README.md"));
+  assert.ok(
+    draft.acceptanceCriteria?.includes("machine:not-contains:manuscript/draft.md::待绘制"),
+  );
   assert.match(draft.brief, /摘要级来源/);
   assert.ok(
     (draft.acceptanceCriteria ?? []).some((c) => /首页必须能读出/.test(c)),

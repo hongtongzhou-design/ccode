@@ -31,7 +31,7 @@ import type {
 import { isSettingPlaceholder } from "../project-context";
 import { upsertPendingSettingsSection } from "../task-md-sections";
 import { researchToolAskFieldsForStep, researchToolsFromSettings } from "../research-tools";
-import { statusBadgeTitle } from "../git-status-groups";
+import { statusBadgeTitle, userDirtyFiles } from "../git-status-groups";
 import {
   historySaveBlockedReason,
   historySaveMessage,
@@ -243,7 +243,7 @@ export default function TaskCardsSection({
     )
       .then((status) => {
         if (stale) return;
-        setDirtyFiles(status.isRepo ? status.files : []);
+        setDirtyFiles(status.isRepo ? userDirtyFiles(status.files) : []);
         setDirtyMerging(status.merging === true);
       })
       .catch((reason) => {
@@ -703,7 +703,6 @@ export default function TaskCardsSection({
             话题{cards && cards.length > 0 ? `（${cards.length}）` : ""}
           </span>
         )}
-        {/* 主仓改动：就地展开名单并一键存进历史，不跳运行页。只提醒不阻断。 */}
         {mainDirty !== null && mainDirty > 0 && (
           <button
             type="button"

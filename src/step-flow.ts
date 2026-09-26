@@ -93,7 +93,7 @@ export function buildStepFlow(args: {
   pendingDecisions?: number;
   /** 本步要问的科研工具。稿件载体是开工前提，排在 agent 前；其余不挡主动作，沉到可选区。 */
   toolAsks?: Array<{ key: string; label: string }>;
-  /** 精读/投稿步：保存进项目之后出现「导入到 EndNote」，不写进 TASK.md，点一下才生成。 */
+  /** 精读保存后出现文献库同步。检索步的 RIS 还不齐，不在那里同步。 */
   endnoteExport?: boolean;
   /** 精读步：保存进项目之后，EndNote 底下出现「继续精读笔记」，进沉浸阅读。不是人工事项。 */
   continueNotes?: boolean;
@@ -238,10 +238,10 @@ export function buildStepFlow(args: {
       key: "endnote-export",
       kind: "human",
       section: "optional",
-      label: "导入到 EndNote",
+      label: "同步到文献库",
       hint: runStatus === "done"
-        ? "点「同步到 EndNote」把已经写好的 papers/endnote-import.ris 交给 EndNote。也可以把产物里的这一份拖到图标上，不要拖进窗口。导入完再勾选。"
-        : "先保存进项目，再生成RIS并导入。",
+        ? "按 references.bib 重写两份 RIS 再打开。PDF 点「打开 papers」，拖到库里对应的那一条上。"
+        : "先保存进项目，才可以同步。",
       done: false,
       skipCurrent: true,
     });
@@ -293,8 +293,18 @@ export function isPaywallTaskTitle(title: string): boolean {
   return title.includes("付费");
 }
 
+/**
+ * 「核对待确认篇目」——文献筛选的 pending 判定入口。
+ *
+ * 判据是**裸词**「待确认」，不能只看 substring：数据类模板把这三个字当正文术语用
+ * （「解答「待确认」字段的业务含义」「拍板 [待确认] 清洗规则」，都是必办事项），
+ * 它们要的是普通引导文案，不是文献篇目核对入口。旧实现 `title.includes("待确认")`
+ * 会把这两条也判进来，给它们挂上「逐篇纳入或排除」的提示与清单面板。
+ * 区分点是形态：包在引号/方括号里的「待确认」是内容术语，裸露的才是这件事本身。
+ */
+const QUOTED_PENDING = /[「『\[【]待确认[」』\]】]/;
 export function isPendingConfirmTaskTitle(title: string): boolean {
-  return title.includes("待确认");
+  return title.includes("待确认") && !QUOTED_PENDING.test(title);
 }
 
 export function isEndnoteTaskTitle(title: string): boolean {

@@ -141,7 +141,7 @@ const LIT_NOTES_WRITE =
   "可逆准备只含 PDF 改名、index 骨架、bib 对账、合法 OA 尝试，不包括批量生成笔记正文。" +
   "「按摘要记」= 根据摘要消化来写并标「仅摘要」，不是贴英文。" +
   "分批读写时每批已读的写真笔记、可中途 git 提交；提交后立刻继续：先写完已确认核心篇（有 PDF 的写精读），再按摘要写完非核心，不要每批停下来等人。" +
-  "有全文的笔记在可引用点末列可引用图（Fig./Table 编号｜画了什么｜可拼或仅引用）；仅摘要写无可引用图，不臆造图号。" +
+  "有全文的笔记在可引用点末列可引用图（Fig./Table 编号｜画了什么｜可拼或仅引用）。图号和图注以 PDF 文本层为准，不要求把页面渲成图片再看。仅摘要写无可引用图，不臆造图号。" +
   "pending 只留给待确认、或摘要和题录都不足以写笔记的篇，不是「先写一批再汇报」的许可。\n";
 
 const LIT_NOTES_INDEX_RECORDS =
@@ -208,7 +208,7 @@ function litSearchHumanTasks(): HumanTaskDto[] {
 
 /** 待获取 RIS 分两份。Zotero 与 EndNote 认的标签不同，不要写成同一套。 */
 const TO_FETCH_RIS =
-  "题录同时写入 included.json（含 pending）。有 DOI 时先向 Crossref 取正式字段，摘要和关键词没有再问 OpenAlex，期刊缩写按 ISSN 查 NLM Catalog，没有再用 Semantic Scholar。纳入时不再另查。" +
+  "题录同时写入 included.json（含 pending）。有 DOI 时先向 Crossref 取正式字段，摘要和关键词没有再问 OpenAlex。期刊缩写用 ISO 4、每个缩写词后加句点（Adv. Mater.），按期刊全称查，不要用 NLM 的 ISSN 结果（不带句点，还会对错刊）。表里没有、或现有缩写是全称、缺句点、对不上全称的，写成「待补」，再按期刊官网或 ISO 4 补上；一词刊名（Nature、Small）不缩。不要自己编。纳入时不再另查。" +
   "papers/to-fetch.ris 给 Zotero，RIS 2004、CRLF，与 to-fetch.md 同序。每篇 TY - JOUR，AU 每位作者单独一行（姓, 名）。" +
   "期刊全称只写 T2，缩写与全称不同才写 J2。再写 PY、VL、IS、SP 起始页、EP 结束页、SN、DO、KW 每个关键词一行、AB、UR。" +
   "不要写 JO、JF、JA、N1、N2、M1。Zotero 会把 JO 放进期刊缩写，把 N1 放进笔记。" +
@@ -272,19 +272,24 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "输入：上一步产物 papers/included.md 与 papers/to-fetch.md（已随 main 合并在本工作区内）。全程按 lit-notes 技能执行。\n" +
       LIT_NOTES_WRITE +
       "1. 先整理人工补投：项目根 papers/（见上方「项目根」，含未进本工作区的文件，按绝对路径读）中命名不符「作者年份-短标题.pdf」的 PDF，对照 included.md/to-fetch.md 判定归属后重命名规范，并在 to-fetch.md 勾掉已补行（拿不准归属的不改名、标注「待确认」）；再按 included.md 处理已确认纳入项（清单缺失或为空时在报告中说明并停止，不要自行换题或自行补清单）；\n" +
-      "2. 精读范围先给依据：**先粗读 included.md 全部条目的标题与摘要，把「共 N 篇、全文到位 M 篇、我建议核心精读 K 篇（列篇目）其余按摘要记」写进 .ccode/help-wanted.md 问用户一句**（附兜底：未回复只做可逆准备；不默认排除关键全文或降低核心证据要求）；\n" +
+      "2. 有全文 PDF 的全部按八段精读，不另提一份核心篇名单等人拍板。没有 PDF 的按摘要写短记并标「仅摘要·待全文」；摘要也拿不到的标「题录·待全文」，不编正文。\n" +
       "3. 全文来源优先级（写死）：「项目资源」已登记 PDF 绝对路径（只读，不改名）→ 项目根 papers/ 已有 PDF（含人工补投）→ 开放获取补下到项目根 papers/（arXiv/PMC/作者主页 preprint）→ 仍缺按摘要写笔记并标注「仅摘要·待全文」，不得装作读过全文；\n" +
-      "4. 用户确认的核心篇：有 PDF 的读正文按技能八段写笔记。上下文写不下可分批，提交后立刻继续，直到确认过的核心篇（有 PDF 的）都写成精读，并且非核心也按摘要写完短记。index pending 只留给待确认或无法按摘要写的篇。有实际 PDF 时笔记开头记来源锚点行「> 来源 PDF：<项目内相对路径或已登记只读资源绝对路径>.pdf」，无 PDF 改记 DOI/URL，不造虚假路径；\n" +
-      "5. 每篇先按 DOI/版本/键匹配 references.bib，缺失才追加一条 BibTeX。有 DOI 就用 Crossref 补全作者全名（姓, 名）、年份、标题、期刊、卷、期、页、出版日期、网络出版日期、期刊缩写、ISSN、摘要、关键词；OpenAlex / Semantic Scholar 只补 Crossref 没有的摘要和缩写。缺的标「待补」，没对过 Crossref 的标「待核」，不得编造，不得用卷或页填空着的期。已有条目只补空字段，不改键、不覆盖人改过的作者和标题；\n" +
+      "4. 上下文写不下可分批，提交后立刻继续，直到有 PDF 的都写成精读、没有 PDF 的都写成短记。index pending 只留给待确认或题录都不足以写的篇。有实际 PDF 时笔记开头记来源锚点行「> 来源 PDF：<项目内相对路径或已登记只读资源绝对路径>.pdf」，无 PDF 改记 DOI/URL，不造虚假路径。笔记、index、references.bib 写在本工作区；临时脚本和接口缓存放本工作区 artifacts/，不写项目根。\n" +
+      "5. 每篇先按 DOI/版本/键匹配 references.bib，缺失才追加一条 BibTeX。有 DOI 就用 Crossref 补全作者全名（姓, 名）、年份、标题、期刊、卷、期、页、出版日期、网络出版日期、ISSN、摘要、关键词。期刊缩写用 ISO 4、每个缩写词后加句点，按期刊全称查 JabRef，没有再用 Mesa 兜底表。两处都没有才按期刊官网或 ISO 4 补进 journalabbreviation，一词刊名的缩写就写全称，不要留空。OpenAlex 只补 Crossref 没有的摘要。缺的标「待补」，没对过 Crossref 的标「待核」，不得编造，不得用卷或页填空着的期。已有条目只补空字段，不改键、不覆盖人改过的作者和标题；\n" +
       "6. 收尾前复查：notes/ 中「仅摘要」笔记对应的全文若已出现在项目根 papers/（人工补投），重读全文并更新该笔记、去掉标记；仍未补的保持标注并在报告末尾计数说明。\n" +
+      "7. 写 notes/handoff.md，只给下一步用。两节：\n" +
+      "「## 写作约束」：仅摘要或题录的 bib 键（下游不得写成已确立）；库内要并列的机制分歧；图只核对了文本层图注、拼图时再核；期刊缩写留空的刊名。每条一行，没有就写无。\n" +
+      "「## 不由下一步做」：补全文、登录、授权。这些留在 .ccode/help-wanted.md，不写进大纲任务。\n" +
+      "不在这一步写 papers/endnote-import.ris。同步按钮会按 references.bib 重写两份 RIS。\n" +
       "完成标准：notes/index.json 与 included.json 全部 id 对齐（仅待确认或无法按摘要写的篇 notePath 可空）；已写笔记符合 lit-notes 写法；确认过的核心篇未写完、或已确认要按摘要记的非核心还没写完，则不得结束本轮等人，验收摘要写明剩余篇数，质量状态不得高于已生成待审。清单全有文件不等于完成。\n" +
       QUALITY_STATUS,
     inputs: ["papers/included.md", "papers/included.json", "papers/to-fetch.md"],
     optionalInputs: ["papers/*.pdf"],
-    expectedArtifacts: ["notes/*.md", "notes/index.json", "references.bib", "papers/to-fetch.md"],
+    expectedArtifacts: ["notes/*.md", "notes/index.json", "references.bib", "papers/to-fetch.md", "notes/handoff.md"],
     acceptanceCriteria: [
       "machine:count:notes/*.md>=1",
       "machine:file:references.bib",
+      "machine:contains:notes/handoff.md::写作约束",
       "machine:contains:papers/included.md::—",
       LIT_NOTES_INDEX_RECORDS,
       "machine:same-ids:papers/included.json::notes/index.json",
@@ -303,7 +308,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
     role: "you",
     workspaceName: "outline",
     brief:
-      "输入：notes/ 全部笔记、papers/included.md 与 references.bib（已随 main 合并在本工作区内）。框架构造全程按 review-framework 技能执行（空白清单 → 范式卡片 → 融合）：\n" +
+      "输入：notes/ 全部笔记、notes/handoff.md、papers/included.md 与 references.bib（已随 main 合并在本工作区内）。先读 handoff 的「写作约束」：仅摘要不得写成已确立，机制分歧并列，图按笔记锚点再核。「不由下一步做」不要接手。框架构造全程按 review-framework 技能执行（空白清单 → 范式卡片 → 融合）：\n" +
       "1. 提炼研究空白清单：通读 notes/ 各笔记的「局限」与「可引用点」，最新一批精读文献回到原文前言核对作者自述的 gap（是待检主张，须用最邻近工作与反例核验）；每条空白标注来源笔记/bib 键，多条指向同一空白时合并；仅凭单篇文献主观抱怨的标「孤证」；\n" +
       "2. 拆解范式卡片：从 papers/included.md 选择足以比较候选框架的综述（篇数按问题，不凑数量）（问题相关性与方法透明度优先；期刊/被引仅为发现线索，不作证据权重；清单里没有综述类文献时如实说明并跳过本步，不虚构范式），每篇拆「结构逻辑 / 详略配比 / 论证顺序」三项；\n" +
       "3. **先报候选再融合**：把拆出的范式卡片连同「我建议以哪篇为骨架（按核心问题、证据分歧与读者需求给理由）+ 建议的综述卖点（想让读者读完记住的一句话）」写进 .ccode/help-wanted.md 问用户一句（附兜底：未回复仅保留候选框架，不锁定论证），写完仅推进无依赖、可逆的准备。；\n" +
@@ -314,7 +319,7 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       "完成标准：outline.md 结构完整，每节要点/引用键/章节作用齐全，「框架推演」段三块内容齐备；每章拟引用分可写正文与仅线索，可写键均在证据综合表且非题录级；表内论断编号全部定义；图表占位写明已有数据来源（无现成数据则改示意图，禁止空许诺计数）；每章/小节有用图计划（拼或仅引用）。质量状态在拟引用未分档、论断编号未闭集或用图计划缺源时不得高于已生成待审。\n" +
       QUESTION_GATE + QUALITY_STATUS,
     expectedArtifacts: ["outline.md"],
-    inputs: ["notes/", "papers/included.md", "papers/included.json", "references.bib"],
+    inputs: ["notes/", "notes/handoff.md", "papers/included.md", "papers/included.json", "references.bib"],
     skills: ["review-framework"],
     run: [],
     humanTasks: [
@@ -341,17 +346,23 @@ const REVIEW_STEPS: ProjectStepDto[] = [
       `写作范围由你按笔记判断：${DRAFT_EVIDENCE_DEFAULT}。人在审阅初稿时拍板，开工前不再问范围。\n` +
       "1. 按 outline.md 用规范学术英文撰写综述初稿，产出 manuscript/draft.md。**词数不是完成标准**（项目/大纲里的篇幅数字是读者预期，禁止改写成「以 N 词为目标」）。某节薄只回 notes/ 对应笔记的方法/结果/可引用点；笔记有来源 PDF 且非仅摘要时打开该 PDF 核对原文位置再补一句可定位证据；没有更多证据就保持短并标 [待核实]。禁止同义复述、空转场、防御性套话为凑字数。中心论点引言一次、结论一次。标题不要手写序号（Quarto 会再编号）；空白编号 G1 不准进稿件。全局设定为严格档时，Methods 须写检索策略（库、日期、式、筛选流程），并如实声明方法类型、单人筛选及实际复核范围，不把严格检索当作系统综述质量证明；\n" +
       "2. 引用一律用 [@bib键] 形式，且只能引用 references.bib 中已存在的键——严禁编造文献、严禁新造键。大纲「仅线索」/摘要级来源：定量句必须 [待核实] 或改成「摘要报告了」；不得把方法段的「32 篇全文」当许可，把其余文献写成已确立。\n" +
-      "3. 对照表用 markdown 真表。按 outline.md 用图计划走 review-figures：能拼则从全文 PDF 裁源图、脚本组 panel 写入 figures/figN.png（图注 Adapted from）；裁不到或不能拼则只标记「见 [@键] Fig.n」。禁止「待绘制」占位。撑主论点的图没有数据就改口。不臆造图号、不把整页当图、不非等比拉伸；\n" +
+      "3. 对照表用 markdown 真表。先读 outline.md 每一条用图计划，再按 review-figures 出图，写正文之前做完。计划写「拼」：从全文 PDF 裁源图，至少两块裁到才用脚本拼成 figures/figN.png，图注写 Adapted from，正文插入该图。只裁到一块、题注对不上、或会裁成整页：不猜，正文改成「见 [@键] Fig.n」，并在 figures/README.md 写原因。计划写「仅引用」的不插图。禁止「待绘制」「Figure N（待绘制）」和空的图片占位。撑主论点的图没有数据就改口。不臆造图号、不把整页当图、不非等比拉伸；\n" +
       "4. 没有文献支撑的论断不得下。摘要只放全文撑得住的主张，禁止摘要里出现 [待核实] 或未测的近端动作（operando/软包等放 outlook 并标明是建议）。范围点名的主题后文必须展开，否则从范围删除。结论只写本综述论证了什么。\n" +
       "5. 用本步骤 run 脚本先渲 docx、再渲 PDF（环境检查、编号引用 YAML、产物登记按 quarto-render 技能：按项目 PDF 写出 manuscript/citation-style.md（编号、作者-年、按期刊），人在「选定：」后填写才渲，不设默认样式）。PDF 若 lualatex 无日志空转，按技能停掉改 xelatex，不要空等。产物写入本工作区 output/（评审合并后进项目根）。\n" +
       "6. 交稿前自检：打开 output/draft.pdf 第一页，必须能读出英文标题和段落；乱码、空心方框、目录页码变成字母 = 渲染失败，质量状态不得高于已生成待审，docx 仍交人审。图裁不到就改成「见 [@键] Fig.n」，禁止用「待绘制」充产出。正文不得留 G1/任务编号、内部清单号。作者「待补」写进验收摘要等人填，不假装齐套。\n" +
       SECTION_STATUS +
-      "完成标准：manuscript/draft.md 覆盖大纲全部章节；引用键全部可在 references.bib 中解析；扩写能回溯到笔记或原文；不以词数判定完成；PDF 首页可读或已如实报渲染失败；人尚未审阅初稿前不得进入润色。\n" +
+      "完成标准：manuscript/draft.md 覆盖大纲全部章节；引用键全部可在 references.bib 中解析；扩写能回溯到笔记或原文；不以词数判定完成。用图计划里每一条「拼」要么有 figures/figN.png 且正文插了这张图，要么已改成「见 [@键] Fig.n」并在 figures/README.md 写明原因；正文不得出现「待绘制」。PDF 首页可读或已如实报渲染失败；人尚未审阅初稿前不得进入润色。\n" +
       QUALITY_STATUS,
-    expectedArtifacts: ["manuscript/draft.md", "manuscript/section-status.md", "output/draft.pdf", "output/draft.docx"],
-    acceptanceCriteria: ["machine:contains:manuscript/section-status.md::要回答", "machine:contains:manuscript/section-status.md::允许集"],
     inputs: ["outline.md", "notes/", "references.bib"],
+    optionalInputs: ["papers/*.pdf"],
     skills: ["review-writing", "review-figures", "quarto-render"],
+    expectedArtifacts: ["manuscript/draft.md", "manuscript/section-status.md", "figures/README.md", "output/draft.pdf", "output/draft.docx"],
+    acceptanceCriteria: [
+      "machine:contains:manuscript/section-status.md::要回答",
+      "machine:contains:manuscript/section-status.md::允许集",
+      "machine:file:figures/README.md",
+      "machine:not-contains:manuscript/draft.md::待绘制",
+    ],
     run: [
       { name: "export-docx", command: "quarto render manuscript/draft.md --to docx --output-dir output", default: true },
       { name: "render-draft", command: "quarto render manuscript/draft.md --to pdf --output-dir output", default: true },

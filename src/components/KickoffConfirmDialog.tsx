@@ -22,6 +22,7 @@ import { AGENTS, type GitFileDto } from "../types";
 import { officialModelAllowed } from "../model-switch";
 import { historySaveBlockedReason, historySaveMessage } from "../main-history-save";
 import { dirtyInputHits } from "../kickoff-dirty-gate";
+import { userDirtyFiles } from "../git-status-groups";
 import { loadAskAiRemembered, saveAskAiRemembered } from "../ask-ai";
 import {
   kickoffLaunchLabel,
@@ -151,15 +152,11 @@ export default function KickoffConfirmDialog({
     decisions: { q: string; answer: string }[];
     upstream: UpstreamAcceptance[];
   } | null>(null);
-  // 主仓未提交改动数（null = 非 git 仓库/读取失败，不渲染提醒行）
-  const [mainDirty, setMainDirty] = useState<number | null>(null);
-  // 未提交改动明细（开工软门用：与本步输入相交才升级成软门，而非只留顶部提醒行）
   const [mainDirtyFiles, setMainDirtyFiles] = useState<GitFileDto[] | null>(
     null,
   );
   const [mainDirtyMerging, setMainDirtyMerging] = useState(false);
   // 开工软门二击态 + 就地「存进历史」（与上一步收尾软门同款交互）
-  const [dirtyAcked, setDirtyAcked] = useState(false);
   const [dirtySaving, setDirtySaving] = useState(false);
   const [dirtySaveError, setDirtySaveError] = useState<string | null>(null);
   // 人工事项状态（HumanTasksList 回传）：开工前（before）未完成的提醒用
@@ -355,8 +352,8 @@ export default function KickoffConfirmDialog({
     invoke<GitStatusBrief>("git_status", { cwd: projectPath })
       .then((status) => {
         if (stale) return;
-        setMainDirty(status.isRepo ? status.files.length : null);
-        setMainDirtyFiles(status.isRepo ? status.files : null);
+        const dirty = status.isRepo ? userDirtyFiles(status.files) : [];
+        setMainDirtyFiles(status.isRepo ? dirty : null);
         setMainDirtyMerging(status.merging === true);
       })
       .catch(() => {});
@@ -566,11 +563,11 @@ export default function KickoffConfirmDialog({
         : [],
     [mainDirtyFiles, stepNow],
   );
-  async function saveDirtyHits() {
-    const blocked = historySaveBlockedReason(mainDirtyFiles ?? [], mainDirtyMerging);
+  async function saveDirtyHits(): Promise<boolean> {
+    const blocked = historySaveBlockedReason(dirtyHits, mainDirtyMerging);
     if (blocked) {
       setDirtySaveError(blocked);
-      return;
+      return false;
     }
     setDirtySaving(true);
     setDirtySaveError(null);
@@ -585,19 +582,20 @@ export default function KickoffConfirmDialog({
       const status = await invoke<GitStatusBrief>("git_status", {
         cwd: projectPath,
       });
-      setMainDirty(status.isRepo ? status.files.length : null);
-      setMainDirtyFiles(status.isRepo ? status.files : null);
+      const dirty = status.isRepo ? userDirtyFiles(status.files) : [];
+      setMainDirtyFiles(status.isRepo ? dirty : null);
       setMainDirtyMerging(status.merging === true);
-      setDirtyAcked(false);
+      return true;
     } catch (reason) {
       setDirtySaveError(String(reason));
+      return false;
     } finally {
       setDirtySaving(false);
     }
   }
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 ccode-fade"
+      className="fixed inset-0 z-60 flex items-center justify-center bg-black/40 p-4 ccode-fade"
       onClick={() => {
         if (!busy) onCancel();
       }}
@@ -822,50 +820,13 @@ export default function KickoffConfirmDialog({
           </p>
         )}
 
-        {/* 主仓改动协同（只提醒不阻断）：想法期实验性改动留在主仓是合法的。
-            改动与本步输入相交时升级成软门：列文件 + 就地存进历史 + 二击确认——
-            否则人工精读的修改进不了新工作区，白改 */}
-        {dirtyHits.length > 0 ? (
-          <div className="mb-3 rounded-md ccode-well px-2.5 py-2 text-xs leading-5 text-l2">
-            <p>
-              <span className="mr-1 text-warn-text">!</span>
-              你改过 {dirtyHits.length}{" "}
-              个本步要读的文件，还没存入历史——新工作区只能看到已保存的版本：
-            </p>
-            <ul className="mt-1 max-h-24 space-y-0.5 overflow-auto">
-              {dirtyHits.map((f) => (
-                <li key={f.path} className="truncate text-micro text-l3" title={f.path}>
-                  {f.path}
-                </li>
-              ))}
-            </ul>
-            <div className="mt-1.5 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={dirtySaving}
-                onClick={() => void saveDirtyHits()}
-                className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-micro text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
-              >
-                {dirtySaving ? "保存中…" : "存进历史"}
-              </button>
-              {dirtySaveError && (
-                <p className="min-w-0 text-micro text-err-text">{dirtySaveError}</p>
-              )}
-            </div>
-            <p className="mt-1 text-micro text-l4">
-              {dirtyAcked
-                ? "再点一次「仍要开工」即继续。"
-                : "保存后再开工即可带上这些修改；确认跳过就点「确认开始」，按钮会再问你一次。"}
-            </p>
-          </div>
-        ) : (
-          mainDirty !== null &&
-          mainDirty > 0 && (
-            <p className="mb-3 rounded-md ccode-well px-2.5 py-1.5 text-xs leading-5 text-l2">
-              <span className="mr-1 text-warn-text">!</span>
-              项目里有 {mainDirty} 处改动还没存入历史。Agent 只看得到上次存入的内容。
-            </p>
-          )
+        {dirtyHits.length > 0 && (
+          <p className="mb-3 text-xs leading-5 text-l3">
+            开始时会先记下 {dirtyHits.length} 个这一步要读的文件，再开工。
+            {dirtySaveError && (
+              <span className="mt-1 block text-err-text">{dirtySaveError}</span>
+            )}
+          </p>
         )}
 
         {/* 旧版简报兜底（只提醒不阻断）：新口径沉淀走任务书草稿，旧 brief-*.md 不再自动带入 */}
@@ -1104,7 +1065,7 @@ export default function KickoffConfirmDialog({
           </button>
           <button
             type="button"
-            disabled={busy || !editorReady || !launch || gate.blocked || staleTools || (stepNow.skills.length > 0 && toolsBlocked)}
+            disabled={busy || dirtySaving || !editorReady || !launch || gate.blocked || staleTools || (stepNow.skills.length > 0 && toolsBlocked)}
             onClick={() => {
               if (needsDecisionAck) {
                 setDecisionAck(decisionSignature);
@@ -1114,8 +1075,16 @@ export default function KickoffConfirmDialog({
                 setClosingAcked(true);
                 return;
               }
-              if (dirtyHits.length > 0 && !dirtyAcked) {
-                setDirtyAcked(true);
+              if (dirtyHits.length > 0) {
+                void saveDirtyHits().then((saved) => {
+                  if (!saved) return;
+                  if (launch && useDefault) {
+                    saveAskAiRemembered({ ...launch, useDefault: true });
+                  } else if (launch) {
+                    saveAskAiRemembered({ ...launch, useDefault });
+                  }
+                  onConfirm(editor.text, launch, gate.needsAck && !needsDecisionAck);
+                });
                 return;
               }
               if (launch && useDefault) {
@@ -1127,16 +1096,17 @@ export default function KickoffConfirmDialog({
             }}
             className={primaryActionClass}
           >
-            {busy
+            {busy || dirtySaving
               ? "开始中…"
               : !launch
                 ? "先加连接"
                 : gate.needsAck && !needsDecisionAck
                   ? gate.prepareOnly ? "仅开始准备" : "先做无依赖工作"
-                  : (prevClosing.length > 0 && closingAcked) ||
-                      (dirtyHits.length > 0 && dirtyAcked)
+                  : prevClosing.length > 0 && closingAcked
                   ? "仍要开工"
-                  : "确认开始"}
+                  : dirtyHits.length > 0
+                    ? "记下并开始"
+                    : "确认开始"}
           </button>
         </div>
       </div>

@@ -12,15 +12,10 @@ import { Checkbox, FoldMark, ghostActionClass, inlineActionClass } from "./PageF
 import {
   buildStepFlow,
   discussChatLabel,
-  doiFromToFetchUrl,
-  formatEndnoteOpenPrompt,
-  formatZoteroDuplicatePrompt,
-  isEndnoteTaskTitle,
   isPaywallTaskTitle,
   isPendingConfirmTaskTitle,
   missingToFetchCount,
   parseToFetchItems,
-  reviewActionVisible,
   recalledToFetchDone,
   rememberToFetchDone,
   toFetchPaperRel,
@@ -33,6 +28,7 @@ import {
   type ResearchToolField,
   type ResearchTools,
 } from "../research-tools";
+import { stepNodeAction, stepNodeReady } from "../step-node-actions.ts";
 import {
   DECISION_STATUS,
   DECISION_STATUS_ASK,
@@ -337,18 +333,13 @@ export default function StepFlow({
 
   /** 已经有文献库的项目：落点在 papers/ 的事项不该再劝人把 PDF 往项目里塞——
    *  文献的唯一出处是那个库，往 papers/ 另放一份之后两边各自漂移。
-   *  只影响文案与按钮，不改事项本身的完成口径（落点检测照旧） */
-  const hasLibrary = litSource === "zotero" || litSource === "endnote" || litSource === "folder";
-  /** 落点在 papers/ 的事项 = 文献类交付，统一引到「文献与数据」 */
-  const isPapersTarget = (target: string | undefined) =>
-    (target ?? "").replace(/\\/g, "/").startsWith("papers/");
-  /** agent 已经产出了东西（待评审或已合并）：after 档事项到这时才有的做。
-   *  v3.97 放宽（用户实测：agent 跑完但没提交时步骤停在「进行中」，入口永远不出现）——
-   *  单个 after 事项的就绪口径见 afterReady()：会话尾部判定 done（agent 跑完在等你）、
-   *  或该事项的待获取清单已现算到（to-fetch.md 存在 = agent 已列出要补什么） */
-  const agentProduced = runStatus === "review" || runStatus === "done";
+   *  只影响文案与按钮，不改事项本身的完成口径（落点检测照旧）。
+   *  这个判断随动作一起在 step-node-actions.ts 里算（descriptor 带 hasLibrary），
+   *  这里不再留第二份。 */
+  /** after 档事项的就绪口径与压暗口径**同一出处**（见 step-node-actions.ts）：
+   *  分叉就会出现「压暗的行里躺着可点的按钮」 */
   const afterReady = (h: { expectedCount?: number }) =>
-    agentProduced || agentAttention === "done" || h.expectedCount != null;
+    stepNodeReady(runStatus, agentAttention, h);
 
   // ===== 决策项（可枚举的拍板点）：点一下就答完，不开会话 =====
   // 答案存在草稿的「已定方向」小节里（草稿是开工合同，不另立一份状态），选中态由它回填
@@ -429,11 +420,6 @@ export default function StepFlow({
     error: string | null;
     from: string | null;
   }>({ text: null, error: null, from: null });
-  // 同源 to-fetch.ris：同步到 Zotero = 交给 Zotero 原生导入（RIS/BibTeX，不需要插件）
-  const [paywallRisFile, setPaywallRisFile] = useState<{
-    path: string;
-    root: string;
-  } | null>(null);
   const [zoteroSyncing, setZoteroSyncing] = useState(false);
   const [zoteroSyncResult, setZoteroSyncResult] = useState<{
     line: string;
@@ -700,44 +686,14 @@ export default function StepFlow({
     return () => un?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectPath]);
-  /** 用 Zotero 打开 to-fetch.ris：原生支持 RIS/BibTeX。库里已有 DOI 则先确认。 */
+  /** 按 references.bib 重写 to-fetch.ris，再交给 Zotero。不依赖待获取清单是否已展开。 */
   async function syncToZotero() {
-    if (!paywallRisFile) {
-      setZoteroSyncResult({
-        line: "还没有 to-fetch.ris，筛完检索后会生成；也可把已有 RIS/BibTeX 拖进 Zotero",
-      });
-      return;
-    }
-    const dois = toFetchItems
-      .map((i) => doiFromToFetchUrl(i.url))
-      .filter((d): d is string => Boolean(d));
-    if (dois.length) {
-      try {
-        const match = await invoke<{
-          reachable: boolean;
-          present: number;
-          total: number;
-        }>("zotero_match_dois", { dois });
-        const prompt = formatZoteroDuplicatePrompt(match);
-        if (
-          prompt &&
-          !(await confirmDialog(prompt, {
-            confirmText: "仍要导入",
-            focusCancel: true,
-          }))
-        ) {
-          return;
-        }
-      } catch {
-        // 对照失败不挡导入
-      }
-    }
     setZoteroSyncing(true);
-    setZoteroSyncResult(null);
+    setZoteroSyncResult({ line: "正在按引文库生成…" });
     try {
       const line = await invoke<string>("zotero_open_import", {
-        path: paywallRisFile.path,
-        root: paywallRisFile.root,
+        path: `${projectPath.replace(/[\\/]+$/, "")}/papers/to-fetch.ris`,
+        root: projectPath,
       });
       setZoteroSyncResult({ line });
     } catch (e) {
@@ -757,15 +713,8 @@ export default function StepFlow({
 
   async function openEndnoteImport() {
     if (endnoteSyncing) return;
-    const count = paywallRisFile ? toFetchItems.length : 0;
-    if (!(await confirmDialog(formatEndnoteOpenPrompt(count), {
-      confirmText: "仍要导入",
-      focusCancel: true,
-    }))) {
-      return;
-    }
     setEndnoteSyncing(true);
-    const note = "正在交给 EndNote…";
+    const note = "正在按引文库生成…";
     setEndnoteOpenNote(note);
     setEndnoteSyncResult(note);
     try {
@@ -859,32 +808,6 @@ export default function StepFlow({
           root: c.root,
         });
         setPaywallList({ text: p.text, error: null, from: c.from });
-        {
-          const seen = new Set<string>();
-          const risTries = [
-            { path: `${projectPath}/papers/to-fetch.ris`, root: projectPath },
-            {
-              path: c.path.replace(/to-fetch\.md$/, "to-fetch.ris"),
-              root: c.root,
-            },
-          ];
-          let ris: { path: string; root: string } | null = null;
-          for (const t of risTries) {
-            if (seen.has(t.path)) continue;
-            seen.add(t.path);
-            try {
-              await invoke<{ text: string }>("read_file_preview", {
-                path: t.path,
-                root: t.root,
-              });
-              ris = t;
-              break;
-            } catch {
-              // 试下一份
-            }
-          }
-          setPaywallRisFile(ris);
-        }
         return;
       } catch {
         // 试下一个位置
@@ -1096,7 +1019,7 @@ export default function StepFlow({
     pendingDecisions: decisionGaps.length,
     toolAsks: toolAskFields.map((field) => ({ key: field.key, label: field.label })),
     endnoteExport:
-      (step.skills.includes("lit-notes") && step.workspaceName !== "lit-notes") ||
+      step.workspaceName === "lit-notes" ||
       step.workspaceName === "journal-format" ||
       step.workspaceName === "submission-materials" ||
       /^rebuttal-r\d+$/.test(step.workspaceName ?? ""),
@@ -1149,121 +1072,117 @@ export default function StepFlow({
     return { text: num, cls: "text-l4" };
   }
 
+  /** 动作选择在纯函数里（step-node-actions.ts，有测试钉住）；这里只把动作翻成长相。
+   *  样式留在组件是故意的：颜色/间距改了看得见，「什么时候给入口」改错了只会静默消失。 */
   function nodeActions(node: StepFlowNode) {
-    switch (node.kind) {
-      case "human": {
-        if (node.key === "continue-notes") {
-          const ready = runStatus === "done";
-          return (
+    const action = stepNodeAction(node, {
+      runStatus,
+      agentAttention,
+      litSource,
+      hasWorkspace: !!ws,
+      reviewConflict: !!reviewConflict,
+      canRestore: !!onRestore,
+      readPaper: !!onReadPaper,
+      readPaperPrimary,
+    });
+    if (!action) return null;
+    const outline =
+      "shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1";
+    const primary =
+      "shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110";
+    switch (action.kind) {
+      case "continue-notes":
+        return (
+          <button
+            type="button"
+            disabled={!action.enabled}
+            onClick={openContinueNotes}
+            title={
+              action.enabled
+                ? "到文件页打开 notes/，自己点要读的那篇"
+                : "先保存进项目，再去笔记夹"
+            }
+            className={`ml-auto ${outline} disabled:opacity-50`}
+          >
+            去笔记夹
+          </button>
+        );
+      case "endnote-sync":
+        return (
+          <span className="ml-auto flex shrink-0 gap-1">
             <button
               type="button"
-              disabled={!ready}
-              onClick={openContinueNotes}
-              title={
-                ready
-                  ? "到文件页打开 notes/，自己点要读的那篇"
-                  : "先保存进项目，再去笔记夹"
-              }
-              className="ml-auto shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+              disabled={!action.enabled || zoteroSyncing}
+              onClick={() => void syncToZotero()}
+              className={`${outline} disabled:opacity-50`}
             >
-              去笔记夹
+              {zoteroSyncing ? "打开中…" : "同步到 Zotero"}
             </button>
-          );
-        }
-        if (node.key === "endnote-export" || (node.human && isEndnoteTaskTitle(node.human.title))) {
-          const ready = runStatus === "done";
-          return (
             <button
               type="button"
-              disabled={!ready}
+              disabled={!action.enabled || endnoteSyncing}
               onClick={() => void openEndnoteImport()}
-              title={
-                ready
-                  ? "把已经写好的 papers/endnote-import.ris 交给 EndNote。也可以把产物里的这一份拖到图标上"
-                  : "先保存进项目，再同步"
-              }
-              className="ml-auto shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+              className={`${outline} disabled:opacity-50`}
             >
-              同步到 EndNote
+              {endnoteSyncing ? "打开中…" : "同步到 EndNote"}
             </button>
-          );
-        }
-        const papersTarget = isPapersTarget(node.human!.target);
-        // after 档事项依赖 agent 的产出才知道要做什么（付费墙清单是 agent 筛完才列出来的）。
-        // 就绪口径放宽到「agent 跑完/清单已产出」（afterReady），不再死等 git 待评审——
-        // 否则 agent 没提交时入口永远不出现（用户实测「没看见补充入口」）。
-        // 未就绪时不给操作入口，也不写一句「等 agent」——节点排在 agent 之后，先后顺序看位置就知道。
-        // 「还轮不到」由整行降透明度表达（见下方 li 的 dimmed）
-        if (node.human!.timing === "after" && !afterReady(node.human!)) return null;
-        // 文献类交付统一去「文献与数据」：那里三个进料口齐全（Zotero / 题录 / 扫目录），
-        // 在每个事项行再复制一套入口，等于把同一件事摆三个地方。
-        // 付费墙事项例外：清单行内获取/浏览器/关联才是入口，导入钮会抢右缘。
-        if (papersTarget) {
-          if (isPaywallTaskTitle(node.human!.title) || isPendingConfirmTaskTitle(node.human!.title)) return null;
-          return node.done ? null : (
             <button
               type="button"
-              // 按文献来源高亮对应进料口（与「确定文献来源」节点的落地口径一致），
-              // 免得跳过去之后不知道点哪个（用户实测「和确定文献来源一样，没说清怎么导入」）
-              onClick={() =>
-                onOpenResources?.(
-                  litSource === "zotero"
-                    ? "zotero"
-                    : litSource === "folder" || litSource === "endnote"
-                      ? "files"
-                      : undefined,
-                )
-              }
-              title={
-                hasLibrary
-                  ? "新文献加进你的文献库后，到「文献与数据」重新导入即可——不必往项目里另放一份"
-                  : "到「文献与数据」导入：可从 Zotero 导入、导入 RIS/BibTeX 题录，或把文件放进项目目录后重新扫描"
-              }
-              className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
+              disabled={!action.enabled}
+              onClick={() => void openPapersDir()}
+              className={`${outline} disabled:opacity-50`}
             >
-              到「文献与数据」导入
+              打开 papers
             </button>
-          );
-        }
-        // 非文献类交付（学校格式规范、审稿意见原文等）保留直接提交
-        return node.human!.target && !node.done ? (
+          </span>
+        );
+      case "papers-import":
+        return (
+          <button
+            type="button"
+            // 按文献来源高亮对应进料口（与「确定文献来源」节点的落地口径一致），
+            // 免得跳过去之后不知道点哪个（用户实测「和确定文献来源一样，没说清怎么导入」）
+            onClick={() => onOpenResources?.(action.focus)}
+            title={
+              action.hasLibrary
+                ? "新文献加进你的文献库后，到「文献与数据」重新导入即可——不必往项目里另放一份"
+                : "到「文献与数据」导入：可从 Zotero 导入、导入 RIS/BibTeX 题录，或把文件放进项目目录后重新扫描"
+            }
+            className={outline}
+          >
+            到「文献与数据」导入
+          </button>
+        );
+      case "submit-deliverable":
+        return (
           <button
             type="button"
             disabled={busyTitle !== null}
             onClick={() => void pickFile(node.human!.title)}
             title={`选文件提交到落点 ${node.human!.target}；也可直接把文件拖到这一行`}
-            className="shrink-0 rounded-sm border border-field px-1.5 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+            className={`${outline} disabled:opacity-50`}
           >
             {busyTitle === node.human!.title ? "提交中…" : "提交产物"}
           </button>
-        ) : null;
-      }
-      case "agent":
-        // 「开始」不受当前节点门控（口径：开始始终可用，讨论种子/开始前事项只提醒不拦，
-        // 与 KickoffConfirmDialog 一致）；active 时「去终端看看」同理常显
-        // 工作区已归档：主入口换成「恢复工作区」（归档工作区不能再开工）
-        if (runStatus === "pending" && onRestore) {
-          return (
-            <button
-              type="button"
-              onClick={onRestore}
-              className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110"
-            >
-              恢复工作区
-            </button>
-          );
-        }
-        return runStatus === "pending" ? (
+        );
+      case "restore-workspace":
+        return (
+          <button type="button" onClick={onRestore} className={primary}>
+            恢复工作区
+          </button>
+        );
+      case "start":
+        return (
           // 唯一主路径（v3.89）：上面那些题都不拦着开工，所以「开始」必须比它们显眼一档。
           // 仅示例课题精读：主按钮改成「开读这一篇」，开始仍可用。普通模板不应传入 onReadPaper。
           <span className="flex shrink-0 items-center gap-1.5">
-            {onReadPaper && (
+            {action.readPaper && (
               <button
                 type="button"
                 onClick={onReadPaper}
                 title="打开沉浸阅读：笔记｜PDF｜终端"
                 className={
-                  readPaperPrimary
+                  action.readPaperPrimary
                     ? "shrink-0 rounded-sm border border-cta-bd bg-cta px-3 py-1 text-sm text-cta-text hover:brightness-110"
                     : "shrink-0 rounded-sm border border-field px-2 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
                 }
@@ -1276,7 +1195,7 @@ export default function StepFlow({
               onClick={onStart}
               title="直接开工也行，AI 会在对话里问你缺的信息"
               className={
-                onReadPaper && readPaperPrimary
+                action.readPaperPrimary
                   ? "shrink-0 rounded-sm border border-field px-2 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
                   : "shrink-0 rounded-sm border border-cta-bd bg-cta px-3 py-1 text-sm text-cta-text hover:brightness-110"
               }
@@ -1284,13 +1203,13 @@ export default function StepFlow({
               开始
             </button>
           </span>
-        ) : runStatus === "active" ? (
+        );
+      case "go-terminal":
+        return (
           // agent 已跑完（会话尾部判定 done，大圆角标同一口径）：按钮旁给完成提示，
           // 行为不变——点进去看产出/提交情况；状态翻转仍走 git 派生（提交→待评审）
           <span className="flex shrink-0 items-center gap-1.5">
-            {agentAttention === "done" && (
-              <span className="text-xs text-l3">Agent 已跑完</span>
-            )}
+            {action.agentDone && <span className="text-xs text-l3">Agent 已跑完</span>}
             <button
               type="button"
               onClick={goTerminal}
@@ -1299,28 +1218,13 @@ export default function StepFlow({
               去终端看看
             </button>
           </span>
-        ) : null;
-      case "review":
-        if (
-          !ws ||
-          !reviewActionVisible(
-            runStatus,
-            agentAttention === "working" || agentAttention === "confirm",
-          )
-        ) {
-          return null;
-        }
+        );
+      case "go-review":
         return (
-          <button
-            type="button"
-            onClick={goReview}
-            className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110"
-          >
-            {reviewConflict ? "去处理冲突" : "去评审"}
+          <button type="button" onClick={goReview} className={primary}>
+            {action.conflict ? "去处理冲突" : "去评审"}
           </button>
         );
-      default:
-        return null;
     }
   }
 
@@ -1505,8 +1409,8 @@ export default function StepFlow({
             node.key === "continue-notes") &&
           node.hint && (
           <p className="mt-1 pl-9 text-micro leading-5 text-l4">
-            {node.key === "endnote-export" && endnoteOpenNote
-              ? endnoteOpenNote
+            {node.key === "endnote-export" && (endnoteOpenNote || zoteroSyncResult || endnoteSyncResult)
+              ? [node.hint, endnoteOpenNote, zoteroSyncResult?.line, endnoteSyncResult].filter(Boolean).join(" ")
               : node.hint}
           </p>
         )}
@@ -2239,46 +2143,12 @@ export default function StepFlow({
                       <div className="mt-1 flex min-w-0 items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => void syncToZotero()}
-                          disabled={zoteroSyncing}
-                          title="用 Zotero 打开 papers/to-fetch.ris（原生 RIS / BibTeX）。库里已有 DOI 会先问是否仍要导入"
-                          className={`${ghostActionClass} shrink-0`}
-                        >
-                          {zoteroSyncing ? "打开中…" : "同步到 Zotero"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void openEndnoteImport()}
-                          disabled={endnoteSyncing}
-                          title="把已经写好的 papers/endnote-import.ris 交给 EndNote。字段在检索时一次写全，这里不再重新检索。"
-                          className={`${ghostActionClass} shrink-0`}
-                        >
-                          {endnoteSyncing ? "打开中…" : "同步到 EndNote"}
-                        </button>
-                        <button
-                          type="button"
                           onClick={() => void openPapersDir()}
-                          title="打开项目 papers/。不用文献库时，PDF 留在这里，由这一步写成题录。若你用 Zotero，把 PDF 拖进去它会检索并生成条目；已有条目时一般会对上"
+                          title="打开课题的 papers/。PDF 在这里，拖进 Zotero 或 EndNote"
                           className={`${ghostActionClass} shrink-0`}
                         >
                           打开 papers/
                         </button>
-                        {zoteroSyncResult && (
-                          <span
-                            className={`min-w-0 truncate text-micro ${/失败|只读|连不上|未开启|打不开|无法/.test(zoteroSyncResult.line) ? "text-err-text" : "text-l4"}`}
-                            title={zoteroSyncResult.detail || zoteroSyncResult.line}
-                          >
-                            {zoteroSyncResult.line}
-                          </span>
-                        )}
-                        {endnoteSyncResult && (
-                          <span
-                            className={`min-w-0 truncate text-micro ${/失败|找不到|无法|没法/.test(endnoteSyncResult) ? "text-err-text" : "text-l4"}`}
-                            title={endnoteSyncResult}
-                          >
-                            {endnoteSyncResult}
-                          </span>
-                        )}
                       </div>
                     </div>
                   )}
