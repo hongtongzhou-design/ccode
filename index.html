@@ -14,6 +14,13 @@
         height: 100%;
         background: #11131a;
       }
+      /* React 挂上后交给 App.css：壳层透明，桌面磨砂从侧栏透出。
+         这里的实心底只挡住启动白闪，不能盖过已挂载的页面。 */
+      html:has(#root > :not(.boot-splash)),
+      html:has(#root > :not(.boot-splash)) body,
+      html:has(#root > :not(.boot-splash)) #root {
+        background: transparent;
+      }
       /* 加载占位：呼吸感，React 挂载后自动被替换 */
       .boot-splash {
         height: 100%;
@@ -53,7 +60,7 @@
 
   <body>
     <div id="root">
-      <div class="boot-splash">CCODE</div>
+      <div class="boot-splash">Mesa</div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

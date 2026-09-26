@@ -7,13 +7,19 @@
     "devUrl": "http://127.0.0.1:17576"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Mesa Dev - 热更新 :17576",
         "width": 1100,
         "height": 720,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": false
+        "hiddenTitle": false,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["underWindowBackground", "mica"],
+          "state": "followsWindowActiveState"
+        }
       }
     ]
   }

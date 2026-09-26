@@ -1,4 +1,8 @@
-export const NAV_CAPSULE_DELAYS = [500, 1000, 2000, 5000] as const;
+/* 收起延时档位。0 = 立即：指针一离开就收，不做等待。
+   0 走的是普通分支而非特例——collapseLater 里 setTimeout(fn, 0) 排的是下一个宏任务，
+   指针从岛边掠过时 mouseleave 排的任务会被 mouseenter 的 clearHideTimer 取消，
+   反而比"同步收起再展开"少一次闪烁。 */
+export const NAV_CAPSULE_DELAYS = [0, 500, 1000, 2000, 5000] as const;
 export type NavCapsuleDelayMs = (typeof NAV_CAPSULE_DELAYS)[number];
 
 export const NAV_CAPSULE_DISPLAY_MODES = ["both", "icons", "labels"] as const;
@@ -97,4 +101,84 @@ export function toggleChromeHiddenState(state: NavShellState): NavShellState {
 export function cycleBrandState(state: NavShellState): NavShellState {
   if (state.chromeHidden) return exitChromeHidden(state);
   return { ...state, navCollapsed: !state.navCollapsed };
+}
+
+/* ---------------------------------------------------------------------------
+   完全隐藏侧栏时的顶部灵动岛。
+
+   旧结构是「幽灵胶囊」：一条隐形热区 + 悬停唤出、随后自己跑掉。全收起后窗口顶部
+   是空的，用户不主动去摸就以为导航没了。现在胶囊常驻，只在两态之间收缩/展开：
+
+     dormant（休眠） 只有「恢复侧栏」，始终可见
+     expanded        完整导航（分组、快速开聊、恢复侧栏），悬停/聚焦时展开
+
+   休眠态刻意只留一个元素。先前是「恢复侧栏 + 当前页高亮块」，两个圆图标并排塞进
+   小胶囊里读起来像开关；而且那个块没有点击语义（点回当前页是把页面设成它自己），
+   当前页信息页头本来也有，不必在岛上再报一次。
+
+   状态机是纯函数，命名与 nav-capsule 其余部分一致：reconcileIsland 收口所有事件，
+   reducer 只负责按事件改瞬时标志，避免「悬停中却因为定时器到点而收起」这类竞态。
+--------------------------------------------------------------------------- */
+
+export type NavIslandPhase = "dormant" | "expanded";
+
+export interface NavIslandState {
+  phase: NavIslandPhase;
+  /** 指针是否停在岛上。收起前的等待期靠它兜住「鼠标刚离开又回来」。 */
+  pointerInside: boolean;
+  /** 岛内是否有键盘焦点。 */
+  focused: boolean;
+}
+
+export const INITIAL_NAV_ISLAND: NavIslandState = {
+  phase: "dormant",
+  pointerInside: false,
+  focused: false,
+};
+
+export type NavIslandEvent =
+  | "pointer-enter"
+  | "pointer-leave"
+  | "focus"
+  | "blur"
+  /** 离开后的等待期到点：无人再指向岛上时收起。 */
+  | "delay-expired"
+  /** Esc / 点击岛外：立刻收起。 */
+  | "close";
+
+/**
+ * 岛是否应当处于展开态。聚焦与悬停共用一条判据——
+ * 「指针在岛上」「键盘焦点在岛上」任一成立即展开，两者都退出才允许收起。
+ */
+export function isIslandExpanded(state: NavIslandState): boolean {
+  return state.focused || state.pointerInside;
+}
+
+/**
+ * 岛状态机。只按事件改瞬时标志，收不收由 delay-expired 当场看标志决定——
+ * 这样「悬停中定时器到点」不会误收，也不需要外部再判一遍。
+ *
+ * 注意这里没有「选中后立刻收起」事件：鼠标在岛上时它本来就该保持展开，
+ * 键盘焦点在岛上时更要保持（否则焦点会落进非活动面）。收起统一交给
+ * 指针/焦点离开后的等待期。
+ */
+export function reconcileIsland(
+  state: NavIslandState,
+  event: NavIslandEvent,
+): NavIslandState {
+  switch (event) {
+    case "close":
+      return INITIAL_NAV_ISLAND;
+    case "pointer-enter":
+      return { ...state, pointerInside: true, phase: "expanded" };
+    case "focus":
+      return { ...state, focused: true, phase: "expanded" };
+    // 收起只在全部退出标志都清空后才生效，中途重新指向会把这几个事件打断
+    case "pointer-leave":
+      return { ...state, pointerInside: false };
+    case "blur":
+      return { ...state, focused: false };
+    case "delay-expired":
+      return isIslandExpanded(state) ? state : { ...state, phase: "dormant" };
+  }
 }

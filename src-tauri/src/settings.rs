@@ -10,6 +10,7 @@ pub const DEFAULT_SCROLLBACK: u32 = 5000;
 pub const DEFAULT_RATE_USD_CNY: f64 = 7.2;
 pub const DEFAULT_BREW_MIRROR: bool = true;
 pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
+pub const DEFAULT_NAV_CAPSULE_RUN_ANNOUNCE: bool = true;
 pub const DEFAULT_THEME: &str = "midnight";
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 /// 全局快捷键默认绑定（前端 hotkeys.ts 解析；mod = macOS ⌘ / 其他平台 Ctrl）
@@ -17,6 +18,9 @@ pub const DEFAULT_HOTKEY_PALETTE: &str = "mod+k";
 pub const DEFAULT_HOTKEY_HIDE_CHROME: &str = "mod+\\";
 pub const DEFAULT_HOTKEY_PAGE_SWITCH: bool = true;
 pub const DEFAULT_NAV_CAPSULE_HIDE_DELAY_MS: u32 = 1000;
+/// 侧栏 / 顶栏罩色的透明度系数（百分比，100 = 各主题本来的罩色，越小越透）。
+/// 挡位不是范围：见 KNOWN_CHROME_OPACITIES 的说明。
+pub const DEFAULT_CHROME_OPACITY: u32 = 100;
 const KNOWN_THEMES: [&str; 16] = [
     "midnight",
     "terracotta",
@@ -76,7 +80,21 @@ const KNOWN_EXTERNAL_TERMINALS: [&str; 10] = [
     "xterm",
 ];
 const KNOWN_STARTUP_NAV_MODES: [&str; 3] = ["expanded", "collapsed", "hidden"];
-const KNOWN_NAV_CAPSULE_DELAYS_MS: [u32; 4] = [500, 1000, 2000, 5000];
+/// 顶部岛自动收起延时档位。必须与前端 src/nav-capsule.ts 的 NAV_CAPSULE_DELAYS 一致：
+/// 这里是入库存真值的白名单，不在表里的值会被静默落回默认，前端再怎么加选项都不生效。
+/// 0 = 立即（指针一离开就收），是合法取值而不是「没设置」——Option 的 None 才表示没设置。
+const KNOWN_NAV_CAPSULE_DELAYS_MS: [u32; 5] = [0, 500, 1000, 2000, 5000];
+/// 侧栏 / 顶栏罩色的档位（百分比）。**这是各主题自己的罩色基数上的倍率，不是不透明度**：
+/// 100 = 各主题本来的样子（深色侧栏 42%、浅色 78%、图标态 28%），0 = 完全不铺罩色、
+/// 直接透出壁纸。两端含义在三套基数下一致，中间档则同一档在深浅主题里浓淡不同——
+/// 这正是要在 hint 里讲清楚的事，否则用户会以为 50% 在哪都是一半。
+///
+/// 为什么是挡位表而不是 min/max 钳制：深浅与图标态三套基数不同，能看清侧栏文字的下限
+/// 只能一档一档比出来，连续值没有可判断的落点。
+/// 为什么允许到 0：亮壁纸上本来就是「想更实」，暗壁纸/照片壁纸才是「想更透」，
+/// 只允许单向会让另一半用户没法调。0 有对比度风险，由 hint 讲明，不做硬拦——
+/// 这是外观设置，用户看得见自己调坏的样子，也能立刻调回来。
+const KNOWN_CHROME_OPACITIES: [u32; 6] = [0, 25, 50, 75, 85, 100];
 const KNOWN_NAV_CAPSULE_DISPLAY_MODES: [&str; 3] = ["both", "icons", "labels"];
 const KNOWN_NAV_CAPSULE_ITEMS: [&str; 10] = [
     "quick-chat",
@@ -211,6 +229,10 @@ pub struct AppSettingsDto {
     /// 长任务 OS 通知开关（注意力跃迁且窗口未聚焦时发系统通知）
     pub notifications_enabled: Option<bool>,
     pub theme: Option<String>,
+    /// 侧栏 / 顶栏罩色透明度（百分比挡位，见 KNOWN_CHROME_OPACITIES）。
+    /// 乘在各主题自己的罩色基数上，所以这一个值同时管侧栏和顶栏、深浅两套；
+    /// 100 = 各主题原有观感，是默认值，也就是「没调过和以前一模一样」。
+    pub chrome_opacity: Option<u32>,
     /// 自定义主题三色（左栏/画布/强调）。theme 为 custom / custom-light 时由前端派生全套令牌
     pub custom_theme: Option<CustomThemeDto>,
     /// 另存的可点色卡（最多 12 套）
@@ -242,6 +264,9 @@ pub struct AppSettingsDto {
     pub nav_capsule_display_mode: Option<String>,
     /// 顶部导航胶囊中显示的入口 id；缺省 = 全部显示
     pub nav_capsule_visible_items: Option<Vec<String>>,
+    /// 顶部岛的跑完/跑挂播报开关。
+    /// 关掉不影响系统通知与收件箱——那两条各自独立，这里只管岛上那一行字。
+    pub nav_capsule_run_announce: Option<bool>,
     /// 「停用」的 profile id 列表（字段名沿用旧称 hidden_profiles，不改存储）：软停用 =
     /// 不被自动路径挑中（启动栏预选/兜底、恢复会话 pickResumeProfile、AI 功能最近使用回落），
     /// 手动指定仍可用。**不删数据、不改任何启动行为**——已选中它的标签照常工作，配置页照常列出。
@@ -754,6 +779,11 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
             .notifications_enabled
             .or(Some(DEFAULT_NOTIFICATIONS_ENABLED)),
         theme: Some(theme),
+        chrome_opacity: Some(
+            s.chrome_opacity
+                .filter(|pct| KNOWN_CHROME_OPACITIES.contains(pct))
+                .unwrap_or(DEFAULT_CHROME_OPACITY),
+        ),
         custom_theme,
         custom_themes,
         custom_theme_card_id,
@@ -781,6 +811,9 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
                 .filter(|id| KNOWN_NAV_CAPSULE_ITEMS.contains(&id.as_str()))
                 .collect()
         }),
+        nav_capsule_run_announce: s
+            .nav_capsule_run_announce
+            .or(Some(DEFAULT_NAV_CAPSULE_RUN_ANNOUNCE)),
         hidden_profiles: s.hidden_profiles,
         // 后端维护的「设为全局」追踪：原样透传，不做默认值填充
         active_global_profiles: s.active_global_profiles,
@@ -872,6 +905,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
         cur.ai_model = patch.ai_model.filter(|v| !v.trim().is_empty());
     }
     // 按功能配置整图覆盖（前端每次提交完整 map；空 map = 全部跟随默认）
+    if patch.chrome_opacity.is_some() {
+        cur.chrome_opacity = patch.chrome_opacity;
+    }
     if patch.start_page.is_some() {
         cur.start_page = patch.start_page;
     }
@@ -886,6 +922,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.nav_capsule_visible_items.is_some() {
         cur.nav_capsule_visible_items = patch.nav_capsule_visible_items;
+    }
+    if patch.nav_capsule_run_announce.is_some() {
+        cur.nav_capsule_run_announce = patch.nav_capsule_run_announce;
     }
     if patch.hidden_profiles.is_some() {
         cur.hidden_profiles = patch.hidden_profiles;
@@ -1333,6 +1372,8 @@ mod tests {
         assert_eq!(full.rate_usd_cny, Some(7.2));
         assert_eq!(full.brew_mirror, Some(true));
         assert_eq!(full.theme.as_deref(), Some("midnight"));
+        // 100 = 各主题原有罩色，是「没调过和以前一模一样」的那一档
+        assert_eq!(full.chrome_opacity, Some(100));
         assert_eq!(full.startup_nav_mode, None);
         assert_eq!(full.nav_capsule_hide_delay_ms, Some(1000));
         assert_eq!(full.nav_capsule_display_mode, None);
@@ -1398,6 +1439,7 @@ mod tests {
             AppSettingsDto {
                 startup_nav_mode: Some("nope".into()),
                 nav_capsule_hide_delay_ms: Some(999),
+                chrome_opacity: Some(999),
                 nav_capsule_display_mode: Some("text".into()),
                 nav_capsule_visible_items: Some(vec!["workbench".into(), "unknown".into()]),
                 ..Default::default()
@@ -1407,9 +1449,27 @@ mod tests {
         assert_eq!(invalid_full.startup_nav_mode, None);
         assert_eq!(invalid_full.nav_capsule_hide_delay_ms, Some(1000));
         assert_eq!(invalid_full.nav_capsule_display_mode, None);
+        assert_eq!(invalid_full.chrome_opacity, Some(100));
         assert_eq!(
             invalid_full.nav_capsule_visible_items,
             Some(vec!["workbench".into()])
+        );
+
+        // 0 = 立即，是合法档位而非「未设置」：前端加这一档时 Rust 白名单没跟上，
+        // 0 被判非法后静默落回 1000，用户看到的就是「选了立即还是 1 秒」。
+        // 这条断言把两侧白名单钉在一起，任何一边漏加都会在这里红。
+        let mut zero = read_from(&p);
+        merge(
+            &mut zero,
+            AppSettingsDto {
+                nav_capsule_hide_delay_ms: Some(0),
+                ..Default::default()
+            },
+        );
+        write_to(&p, &zero).unwrap();
+        assert_eq!(
+            with_defaults(read_from(&p)).nav_capsule_hide_delay_ms,
+            Some(0)
         );
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }

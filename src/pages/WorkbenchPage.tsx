@@ -153,6 +153,8 @@ function WorkbenchPage({
     {},
   );
   const [userTasks, setUserTasks] = useState<TaskDto[]>([]);
+  /** 「待你处理」默认只列 5 条，展开后全列出（页内展开，不跳收件箱浮层） */
+  const [inboxExpanded, setInboxExpanded] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
@@ -777,7 +779,7 @@ function WorkbenchPage({
             }
           />
           <div className="space-y-0.5">
-            {inboxItems.slice(0, 5).map((item) => (
+            {(inboxExpanded ? inboxItems : inboxItems.slice(0, 5)).map((item) => (
               <div
                 key={item.key}
                 className="group flex min-h-10 items-center gap-2 rounded-md px-2.5 transition-colors hover:bg-hover"
@@ -795,6 +797,20 @@ function WorkbenchPage({
                 </button>
               </div>
             ))}
+            {inboxItems.length > 5 && (
+              // 截断必须留出口：早先只挂个「6」的数字徽标，用户看不到第 6 条是什么、
+              // 也不知道去哪找。展开控制在页内，不跳到标题栏的收件箱浮层。
+              <button
+                type="button"
+                className={`${rowActionClass} mt-0.5 w-full justify-start px-2.5 text-l3`}
+                aria-expanded={inboxExpanded}
+                onClick={() => setInboxExpanded((v) => !v)}
+              >
+                {inboxExpanded
+                  ? "收起"
+                  : `还有 ${inboxItems.length - 5} 条`}
+              </button>
+            )}
           </div>
         </section>
         )}
