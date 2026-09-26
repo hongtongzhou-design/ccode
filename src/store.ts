@@ -1,8 +1,10 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { type Effect } from "@tauri-apps/api/window";
+import { IS_WINDOWS } from "./hotkeys";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { isCustomThemeId, isLightTheme } from "./themes";
+import { isCustomThemeId } from "./themes";
 import {
   applyCustomThemeVars,
   clearCustomThemeVars,
@@ -109,12 +111,20 @@ export interface AppSettings {
   startPage?: string;
   /** 启动时的导航形态；缺省时尊重旧 navCollapsed 偏好 */
   startupNavMode?: "expanded" | "collapsed" | "hidden";
+  /** 侧栏 / 顶栏罩色透明度（百分比挡位，见 Rust KNOWN_CHROME_OPACITIES）。
+   *  乘在各主题自己的罩色基数上，一个值同时管侧栏与顶栏、深浅两套；
+   *  100 = 各主题原有观感，也是缺省值。 */
+  chromeOpacity?: number;
   /** 顶部导航胶囊离开后的自动隐藏延迟（毫秒） */
   navCapsuleHideDelayMs?: number;
-  /** 顶部导航胶囊内容显示：both（符号+文字）/icons（仅符号）/labels（仅文字） */
+  /** 顶部导航胶囊**展开面**的内容显示：both（符号+文字）/icons（仅符号）/labels（仅文字）。
+   *  只管展开态那排导航项；休眠面（「恢复侧栏」）恒带文字，不跟随此设置。 */
   navCapsuleDisplayMode?: "both" | "icons" | "labels";
   /** 顶部导航胶囊中显示的入口 id；缺省 = 全部显示 */
   navCapsuleVisibleItems?: string[];
+  /** 顶部岛的跑完/跑挂播报开关（默认开）。关掉只影响岛上那一行字，
+      系统通知与收件箱各自独立。 */
+  navCapsuleRunAnnounce?: boolean;
   /** 「停用」的 profile id（字段名沿用旧称）：软停用 = 不被自动路径挑中，手动指定仍可用 */
   hiddenProfiles?: string[];
   /** 「设为全局」追踪：agent id → 上次由 Mesa 写入该 agent 全局配置的 profile id
@@ -151,6 +161,17 @@ export interface AppSettings {
   institutionalLoginUrl?: string | null;
 }
 
+/** Windows 整窗 Mica 跟着 Mesa 主题走。配置里的 mica 只跟系统外观，
+ *  深色主题配系统浅色时侧栏罩色会对不上。macOS 材质由窗口配置固定，这里不改。 */
+function syncWindowsMica(light: boolean) {
+  if (!IS_WINDOWS) return;
+  void getCurrentWebviewWindow()
+    .setEffects({
+      effects: [(light ? "micaLight" : "micaDark") as Effect],
+    })
+    .catch(() => {});
+}
+
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；
  *  同时同步原生窗口外观——原生 <select> 下拉/滚动条按 NSWindow appearance 渲染，
  *  只改 CSS 变量时深色主题下弹出的仍是系统浅色列表 */
@@ -166,17 +187,20 @@ export function applyTheme(
     );
     root.dataset.theme = derived.themeId;
     applyCustomThemeVars(root, derived.tokens);
-    void getCurrentWindow()
-      .setTheme(derived.light ? "light" : "dark")
+    // 窗口外观保持深色。切成浅色时 macOS 会把桌面磨砂染浅，顶栏就不再是 0909 那种透法。
+    // 原生下拉仍按网页 color-scheme 走，不靠窗口外观。
+    void getCurrentWebviewWindow()
+      .setTheme("dark")
       .catch(() => {});
+    syncWindowsMica(false);
     return;
   }
   const theme = id || "midnight";
   root.dataset.theme = theme;
-  const light = isLightTheme(theme);
-  void getCurrentWindow()
-    .setTheme(light ? "light" : "dark")
+  void getCurrentWebviewWindow()
+    .setTheme("dark")
     .catch(() => {});
+  syncWindowsMica(false);
 }
 
 /** 工作区页 → 终端页的交接：新开一个标签，预填 cwd + 注入 env（如端口段） */

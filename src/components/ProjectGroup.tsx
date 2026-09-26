@@ -37,6 +37,7 @@ import { startPipelineStep } from "../pipeline-start";
 import type { KickoffLaunch } from "../kickoff-launch";
 import { upsertLitSourceSection, upsertPendingSettingsSection } from "../task-md-sections";
 import { isTaskMdStub } from "../step-decisions";
+import { userDirtyFiles } from "../git-status-groups";
 import { demoReadPaperResource } from "../step-flow";
 import { normSep } from "../path-utils";
 import { beginAskAi } from "./AskAiModal";
@@ -60,6 +61,7 @@ import type {
   WorkspaceDriftDto,
   WorkspaceHealthDto,
   AcceptanceLogEntryDto,
+  GitFileDto,
 } from "../types";
 
 const actionBtn = inlineActionClass;
@@ -476,11 +478,11 @@ export default function ProjectGroup({
       setMainDirty(null);
       return;
     }
-    invoke<{ isRepo: boolean; files: unknown[] }>("git_status", {
+    invoke<{ isRepo: boolean; files: GitFileDto[] }>("git_status", {
       cwd: project.path,
     })
       .then((status) => {
-        setMainDirty(status.isRepo ? status.files.length : null);
+        setMainDirty(status.isRepo ? userDirtyFiles(status.files).length : null);
       })
       .catch(() => {});
   }, [project]);
@@ -492,11 +494,11 @@ export default function ProjectGroup({
       return;
     }
     let stale = false;
-    invoke<{ isRepo: boolean; files: unknown[] }>("git_status", {
+    invoke<{ isRepo: boolean; files: GitFileDto[] }>("git_status", {
       cwd: project.path,
     })
       .then((status) => {
-        if (!stale) setMainDirty(status.isRepo ? status.files.length : null);
+        if (!stale) setMainDirty(status.isRepo ? userDirtyFiles(status.files).length : null);
       })
       .catch(() => {});
     return () => {

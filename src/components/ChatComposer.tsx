@@ -339,7 +339,7 @@ export default function ChatComposer({
                     type="button"
                     onClick={() => removeAttachment(a.path)}
                     aria-label="移除图片"
-                    className="absolute -right-1.5 -top-1.5 flex size-4 cursor-pointer items-center justify-center rounded-full border border-field bg-raised text-[10px] leading-none text-l3 hover:text-l1"
+                    className="absolute -right-1.5 -top-1.5 flex size-4 cursor-pointer items-center justify-center rounded-full border border-field bg-raised text-micro leading-none text-l3 hover:text-l1"
                   >
                     ×
                   </button>

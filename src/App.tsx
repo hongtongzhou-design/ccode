@@ -27,6 +27,14 @@ import { LoadingRows, rowActionClass } from "./components/PageFrame";
 import "./App.css";
 import { useAppStore, runInboxAction, visibleInboxItems } from "./store";
 import { groupInbox, type InboxCategory } from "./inbox";
+import {
+  RUN_ANNOUNCE_LINGER_MS,
+  announceLabel,
+  mergeAnnouncements,
+  runFinished,
+  type RunAnnouncement,
+} from "./run-announce";
+import type { RunOverviewInput } from "./run-overview";
 import { runDoneNotifyBody, runDoneNotifyTitle } from "./schedule-tasks";
 import type { SchedulerRunDonePayload, SessionMetaDto } from "./types";
 import {
@@ -38,7 +46,9 @@ import {
 } from "./hotkeys";
 import { NAV_ICONS } from "./navigation-icons";
 import { NAV_GROUPS, NAV_BOTTOM } from "./navigation";
+import { isLightTheme } from "./themes";
 import { normalizeNavCapsuleDelay, resolveStartupNavMode } from "./nav-capsule";
+import { chromeOpacityScale } from "./chrome-opacity";
 import { macOverlayPadClass, useMacFullscreen } from "./mac-titlebar";
 import ToastHost from "./components/ToastHost";
 import { toast } from "./toast";
@@ -269,6 +279,95 @@ function App() {
   const runningCount = useAppStore((s) => Object.keys(s.liveSessions).length);
   const visibleRunningCount = terminalRunInputs.filter((input) => input.running)
     .length || runningCount;
+
+  const [islandExpanded, setIslandExpanded] = useState(false);
+  /* 岛收起 / 切回有侧栏时归位。有侧栏（!chromeHidden）时岛整个不挂载，
+     它卸载时的回调会把这里清成 false；这一条兜住另一个方向：切形态这一帧
+     chromeHidden 先变、岛后卸载，中间会留一帧淡着的两侧。 */
+  useEffect(() => {
+    if (!chromeHidden) setIslandExpanded(false);
+  }, [chromeHidden]);
+
+  /* 跑完 / 跑挂播报。检测放这里而不是 TerminalPage：那边是懒挂载页，
+     让一个「可能没打开过」的页面持有全应用的事件检测，等于把功能的成立条件
+     押在别人身上。terminalRunInputs 是标签状态的实时镜像，跟页面可见性无关，
+     谁在这读都一样，而在 App 读就与「用户此刻在哪一页」彻底解耦。
+
+     基线 ref 存上一次的 attention/running，与 TerminalPage 里系统通知那条
+     （attentionPrevRef）同构：首帧只建基线不播报，否则开机会把历史状态全报一遍。 */
+  const announceEnabled = useAppStore(
+    (s) => s.settings?.navCapsuleRunAnnounce !== false,
+  );
+  const [announcements, setAnnouncements] = useState<RunAnnouncement[]>([]);
+  const runBaselineRef = useRef(new Map<string, RunOverviewInput>());
+  const announceTimersRef = useRef(new Map<string, number>());
+  useEffect(() => {
+    const seen = runBaselineRef.current;
+    const live = new Set<string>();
+    const arrived: RunAnnouncement[] = [];
+    for (const input of terminalRunInputs) {
+      live.add(input.tabId);
+      const prev = seen.get(input.tabId);
+      seen.set(input.tabId, input);
+      const outcome = runFinished(prev, input);
+      if (!outcome) continue;
+      arrived.push({
+        kind: "run",
+        outcome,
+        label: announceLabel(input.title, input.cwd),
+        tabId: input.tabId,
+        count: 1,
+        at: Date.now(),
+      });
+    }
+    // 关掉的标签清掉基线，防 id 复用时沿用旧状态（同 attentionPrevRef 口径）
+    for (const id of [...seen.keys()]) if (!live.has(id)) seen.delete(id);
+    if (!arrived.length || !announceEnabled) return;
+    setAnnouncements((cur) =>
+      arrived.reduce(
+        (acc, item) => mergeAnnouncements(acc, item, item.at),
+        cur,
+      ),
+    );
+  }, [terminalRunInputs, announceEnabled]);
+  // 每条播报到期自清。停留时长用 run-announce 自己的常量，不跟用户的收起延时——
+  // 那个档位是导航的节奏，选「立即」时会把刚出来的播报一并瞬杀掉。
+  useEffect(() => {
+    const timers = announceTimersRef.current;
+    for (const item of announcements) {
+      const key = `${item.tabId}:${item.at}`;
+      if (timers.has(key)) continue;
+      timers.set(
+        key,
+        window.setTimeout(() => {
+          timers.delete(key);
+          setAnnouncements((cur) =>
+            cur.filter((a) => !(a.tabId === item.tabId && a.at === item.at)),
+          );
+        }, RUN_ANNOUNCE_LINGER_MS),
+      );
+    }
+    for (const [key, timer] of [...timers]) {
+      if (!announcements.some((a) => `${a.tabId}:${a.at}` === key)) {
+        window.clearTimeout(timer);
+        timers.delete(key);
+      }
+    }
+  }, [announcements]);
+  useEffect(() => {
+    const timers = announceTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+  /* 抑制规则：岛只在收侧栏时存在（chromeHidden 由渲染门控兜住），运行页自己就在
+     跑这件事、不会再需要岛报一次；窗口失焦时 OS 通知已经在喊，岛是被挡在后面的。
+     只留最新一条——岛上是「刚发生了什么」，不是队列。 */
+  const runAnnouncement =
+    chromeHidden && page !== "terminal" && announcements.length > 0
+      ? announcements[announcements.length - 1]
+      : null;
   // 「待你处理」收件箱：业务条目由 WorkspacesPage 写入，应用更新由 visibleInboxItems 现算合并
   const rawInboxItems = useAppStore((s) => s.inboxItems);
   const appUpdate = useAppStore((s) => s.appUpdate);
@@ -332,6 +431,7 @@ function App() {
   // 隐藏/显示侧栏（默认 ⌘\）、页切逐页绑定（默认 ⌘1–⌘9，hotkeyPages 按页覆盖 + 整组总开关）。
   // 空串 = 禁用；⌘F 已被终端搜索占用故不用。
   const settings = useAppStore((s) => s.settings);
+  const lightChrome = isLightTheme(settings?.theme);
   const navCapsuleDelay = normalizeNavCapsuleDelay(
     settings?.navCapsuleHideDelayMs,
   );
@@ -752,7 +852,20 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="ccode-app-shell relative flex h-full flex-col overflow-hidden bg-rail text-l2">
+      <div
+        className="ccode-app-shell relative flex h-full flex-col overflow-hidden text-l2"
+        data-nav={collapsed ? "icons" : "expanded"}
+        data-chrome={lightChrome ? "light" : "dark"}
+        data-nav-hidden={chromeHidden ? "true" : undefined}
+        /* 侧栏 / 顶栏罩色的系数。只写这一个变量，各主题的基数留在 App.css 里乘——
+           深浅、图标态三套基数不同，JS 不该持有它们（见 chrome-opacity.ts）。
+           值经 normalize 过：存量配置里可能是白名单外的数，直接乘会让罩色跑飞。 */
+        style={
+          {
+            "--ccode-chrome-scale": chromeOpacityScale(settings?.chromeOpacity),
+          } as React.CSSProperties
+        }
+      >
         {/* 收货反馈横幅：成功自动消失，失败/需注意常驻可处理（见 RelayToasts 注释） */}
         <RelayToasts
           toasts={relayToasts}
@@ -764,62 +877,70 @@ function App() {
             窗口标题不在界面渲染（用户拍板删除，标题字符串仍保留在 tauri 配置里供自动化定位窗口）。
             Windows/Linux 用原生标题栏；客户端上下文栏仍统一承载项目、运行、命令面板与收件箱。
             执行态（chromeHidden）下也必须保留这条栏：窗口态 Overlay 红绿灯靠 pl-[78px] 让位；
-            全屏时系统收起三个按钮，让位取消（否则左边空一块）。整条隐藏会导致胶囊消失。
-            执行态只省略底部分隔线，栏体保留以承接红绿灯与收件箱胶囊。 */}
+            全屏时系统收起三个按钮，让位取消（否则左边空一块）。整条隐藏会导致岛消失。
+            顶栏横贯整窗、压在侧栏上方（原结构），高度 h-9。侧栏是圆角玻璃，顶上给红绿灯留空。
+            定位上下文与层级（position: relative + z-index）由 App.css 的 .ccode-titlebar 提供：
+            导航岛嵌在这条栏里绝对定位居中，栏不构成层叠上下文时岛会掉进页面内容的层级里。 */}
         <header
           data-tauri-drag-region={IS_MAC ? true : undefined}
-          className={`ccode-titlebar flex h-10 shrink-0 items-center gap-2.5 bg-rail pr-3 ${macOverlayPadClass(
+          data-island={
+            chromeHidden ? (islandExpanded ? "expanded" : "hidden") : undefined
+          }
+          className={`ccode-titlebar flex h-9 shrink-0 items-center gap-2.5 pr-3 ${macOverlayPadClass(
             IS_MAC,
             macFullscreen,
             "pl-3",
           )}`}
         >
-            {/* 全局上下文栏：macOS Overlay 与 Windows/Linux 原生标题栏都承载。
-                左=我在哪、右=在跑什么 + 等我处理什么。
-                命令面板只保留这里一个可见入口，输入框仍只在面板打开后出现。
-                执行态（⌘\）下左中两段隐藏，只留红绿灯让位与收件箱胶囊。 */}
-            {!chromeHidden && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setPage("workspaces")}
-                  title={
-                    contextLabel
-                      ? `当前项目：${contextLabel.project}（点击回项目页）`
-                      : "还没有选中项目"
-                  }
-                  className="flex h-6 min-w-0 shrink items-center gap-1.5 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
-                >
-                  <NAV_ICONS.workspaces
-                    size={14}
-                    strokeWidth={1.8}
-                    className="shrink-0 text-l4"
-                    aria-hidden="true"
-                  />
-                  <span className="min-w-0 truncate">
-                    {contextLabel?.project ?? "Mesa"}
-                  </span>
-                  {contextLabel?.step && (
-                    <>
-                      <span className="shrink-0 text-l4">·</span>
-                      <span className="min-w-0 truncate">{contextLabel.step}</span>
-                    </>
-                  )}
-                </button>
-                {visibleRunningCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setPage("terminal")}
-                    title={`${visibleRunningCount} 个 agent 正在运行（点击去运行）`}
-                    className="flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
-                  >
-                    <span className="text-l4">⑂</span>
-                    {visibleRunningCount} 运行中
-                  </button>
-                )}
-              </>
+          {/* 项目上下文与运行数在两种外壳态下都常驻：执行态下它们曾被我一起门掉，
+              理由是岛浮在内容上、悬停会盖住顶栏——岛嵌进栏内居中后这个理由不成立，
+              而"我在哪个项目、几个 agent 在跑"恰是收起侧栏后最需要留在眼前的两条。
+              层级：这两个按钮在岛之下（岛 z-1），展开时会被盖住；右组 z-3 在岛之上，
+              命令面板与收件箱永不被挡。
+              两组的让位由 CSS 统一处理（.ccode-titlebar 上 data-island=expanded 时的
+              兄弟选择器）：岛一展开两侧一起淡出并停止接受指针。这不是为了躲播报——
+              展开面本来就宽，左组被盖、右组盖住岛的右端，这两件事与播报无关。
+              既然岛压着的时候它们本来也点不到，就别继续以可点的样子亮着。 */}
+          <div className="ccode-titlebar-side relative flex min-w-0 shrink items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setPage("workspaces")}
+              title={
+                contextLabel
+                  ? `当前项目：${contextLabel.project}（点击回项目页）`
+                  : "还没有选中项目"
+              }
+              className="flex h-6 min-w-0 shrink items-center gap-1.5 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
+            >
+              <NAV_ICONS.workspaces
+                size={14}
+                strokeWidth={1.8}
+                className="shrink-0 text-l4"
+                aria-hidden="true"
+              />
+              <span className="min-w-0 truncate">
+                {contextLabel?.project ?? "Mesa"}
+              </span>
+              {contextLabel?.step && (
+                <>
+                  <span className="shrink-0 text-l4">·</span>
+                  <span className="min-w-0 truncate">{contextLabel.step}</span>
+                </>
+              )}
+            </button>
+            {visibleRunningCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setPage("terminal")}
+                title={`${visibleRunningCount} 个 agent 正在运行（点击去运行）`}
+                className="flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-micro text-l3 hover:bg-hover hover:text-l1"
+              >
+                <span className="text-l4">⑂</span>
+                {visibleRunningCount} 运行中
+              </button>
             )}
-            <div className="ml-auto flex min-w-0 items-center gap-1.5">
+          </div>
+          <div className="ccode-titlebar-side relative z-3 ml-auto flex min-w-0 shrink-0 items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => setPaletteOpen(true)}
@@ -863,8 +984,6 @@ function App() {
                             <span className="min-w-0 flex-1 truncate text-l2">
                               {item.text}
                             </span>
-                            {/* 忽略：help: 走原有的按来源屏蔽，其余六类走通用条目屏蔽
-                                （v3.88；两者都以「状态变化即复现」为口径，忽略 ≠ 漏掉） */}
                             <button
                               type="button"
                               title="忽略（状态变化后会重新出现）"
@@ -899,42 +1018,38 @@ function App() {
                 </div>
               )}
             </div>
+          {/* 导航岛嵌在标题栏内部居中：栏本身始终横贯整窗，隐藏侧栏只改内容区，
+              栏宽不变，岛因此不会挪位；岛也不越出栏高，内容区不必再让位。 */}
+          {chromeHidden && (
+            <TopNavCapsule
+              page={page}
+              onPage={setPage}
+              onQuickChat={() => {
+                if (quickChatSkipEnabled()) {
+                  void launchQuickChatDirect().then((ok) => {
+                    if (!ok) setQuickChatOpen(true);
+                  });
+                } else {
+                  setQuickChatOpen(true);
+                }
+              }}
+              onQuickChatContextMenu={(e) => void openQuickChatMenu(e)}
+              onRestore={exitChromeHidden}
+              runningCount={visibleRunningCount}
+              inboxCount={inboxCount}
+              hideDelayMs={navCapsuleDelay}
+              displayMode={settings?.navCapsuleDisplayMode}
+              visibleItems={settings?.navCapsuleVisibleItems}
+              announcement={runAnnouncement}
+              onAnnouncementClick={() => setPage("terminal")}
+              onExpandedChange={setIslandExpanded}
+            />
+          )}
         </header>
-        {chromeHidden && (
-          <TopNavCapsule
-            page={page}
-            onPage={setPage}
-            onQuickChat={() => {
-              if (quickChatSkipEnabled()) {
-                void launchQuickChatDirect().then((ok) => {
-                  if (!ok) setQuickChatOpen(true);
-                });
-              } else {
-                setQuickChatOpen(true);
-              }
-            }}
-            onQuickChatContextMenu={(e) => void openQuickChatMenu(e)}
-            onRestore={exitChromeHidden}
-            runningCount={visibleRunningCount}
-            inboxCount={inboxCount}
-            hideDelayMs={navCapsuleDelay}
-            displayMode={settings?.navCapsuleDisplayMode}
-            visibleItems={settings?.navCapsuleVisibleItems}
-          />
-        )}
-        {titleInboxCat !== null && (
-          <div
-            className="fixed inset-0 z-20"
-            onClick={() => setTitleInboxCat(null)}
-          />
-        )}
-        {/* 顶部不留缝：画布直接顶到标题栏下沿（标题栏是功能头部不是留白），
-            右/下/左各 8px 深缝把圆角画布衬成浮层面板 */}
-        <div className="flex min-h-0 flex-1 gap-2 bg-rail pb-2 pr-2">
-        {/* 执行态（⌘\）：侧栏整体隐藏，页面 chrome 让位给终端/评审 */}
+        <div className="flex min-h-0 flex-1 gap-[5px] px-[5px] pb-[5px]">
         {!chromeHidden && (
         <aside
-          className={`ccode-app-rail flex shrink-0 flex-col bg-rail transition-[width] duration-150 ${
+          className={`ccode-app-rail flex min-h-0 shrink-0 flex-col overflow-hidden rounded-lg transition-[width] duration-150 ${
             collapsed ? "w-14" : "w-48"
           }`}
         >
@@ -951,7 +1066,6 @@ function App() {
               {collapsed ? "M" : "Mesa"}
             </span>
           </button>
-
           <nav className="ccode-app-nav min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-2">
             {NAV_GROUPS.map((group, groupIndex) => (
               <div key={group.label} className={groupIndex > 0 ? "mt-3" : ""}>
@@ -960,10 +1074,6 @@ function App() {
                     {group.label}
                   </div>
                 )}
-                {/* 「快速开聊」是动作不是页面：放在「工作」组首位，回答「我就想随便聊聊」——
-                    其余入口全是项目/流程优先，进来先要建项目太重。
-                    记住过选择则跳过弹层直接落终端；勾了「每次都先问我」或 ⌘K 永远开弹层。
-                    右键 = 随手聊历史（scratch 里的对话） */}
                 {group.label === "工作" && (
                   <RailTooltip label="快速开聊" collapsed={collapsed}>
                     <button
@@ -1029,8 +1139,6 @@ function App() {
               </div>
             ))}
           </nav>
-
-          {/* 底部管理区与导航之间只留一根隐约细线（5% 白 + 0.5px），不完全消失 */}
           <div className="shrink-0 border-t border-white/5 px-1.5 py-2">
             {NAV_BOTTOM.map((n) => (
               <RailTooltip key={n.id} label={n.label} collapsed={collapsed}>
@@ -1061,7 +1169,13 @@ function App() {
           </div>
         </aside>
         )}
-        <main className="ccode-app-main h-full min-h-0 min-w-0 flex-1">
+        {titleInboxCat !== null && (
+          <div
+            className="fixed inset-0 z-20"
+            onClick={() => setTitleInboxCat(null)}
+          />
+        )}
+        <main className="ccode-app-main min-h-0 min-w-0 flex-1">
           {/* 页面保持挂载，切换标签不销毁终端；未访问过的页不挂载（懒加载） */}
           <div className={page === "workbench" ? "h-full overflow-auto" : "hidden"}>
             {visited.has("workbench") && (
@@ -1154,13 +1268,13 @@ function App() {
             onClose={() => setQuickChatMenu(null)}
           />
         )}
-        {/* 全局确认框宿主（confirmDialog）：z-[70]，压过一切覆盖层 */}
+        {/* 全局确认框宿主（confirmDialog）：z-70，压过一切覆盖层 */}
         <ConfirmDialogHost />
         <ToastHost />
         {/* 待确认跳转提醒条：通知正文点击无回调（桌面插件限制）的补位——
             窗口激活时有待确认就出现在右下角，点「去处理」直达终端标签 */}
         {confirmHint && (
-          <div className="pointer-events-none fixed bottom-5 right-5 z-[100] flex flex-col items-end">
+          <div className="pointer-events-none fixed bottom-5 right-5 z-100 flex flex-col items-end">
             <div className="pointer-events-auto flex items-center gap-2.5 rounded-lg border border-field bg-raised px-3.5 py-2.5 shadow-lg">
               <span className="size-2 shrink-0 animate-pulse rounded-full bg-warn-text" />
               <button

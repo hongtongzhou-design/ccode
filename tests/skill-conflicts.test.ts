@@ -131,6 +131,19 @@ test("skillChainWarnings：读入无供给与产出未进预期产物分别报 i
   ]);
 });
 
+test("skillChainWarnings：本步预期产物不算上游缺失", () => {
+  const lib = [iface("endnote-bridge", ["references.bib"], [])];
+  assert.deepEqual(
+    skillChainWarnings(
+      ["endnote-bridge"],
+      lib,
+      ["papers/included.md"],
+      ["notes/*.md", "references.bib"],
+    ),
+    [],
+  );
+});
+
 test("skillChainWarnings：未入库/无接口技能不参与；预期产物为空不检 output 侧", () => {
   const lib = [iface("plain")];
   assert.deepEqual(

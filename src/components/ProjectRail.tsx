@@ -238,7 +238,7 @@ function ProjectRail({
         >
           {stepName ? (
             <span
-              className="flex h-4 min-w-5 shrink-0 items-center justify-center rounded-sm bg-inset px-1 font-mono text-[10px] leading-none text-l4"
+              className="flex h-4 min-w-5 shrink-0 items-center justify-center rounded-sm bg-inset px-1 font-mono text-micro leading-none text-l4"
               title={`研究流程第 ${stepOrders[sec.repo]?.[w.name] ?? ""} 步`}
             >
               {String(stepOrders[sec.repo]?.[w.name] ?? "·").padStart(2, "0")}

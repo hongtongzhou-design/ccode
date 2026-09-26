@@ -72,7 +72,7 @@ export function alertDialog(message: string): Promise<void> {
   });
 }
 
-/** 宿主组件：在 App 根部挂载一次；z-[70] 压过评审覆盖层内的 z-[60] 弹层 */
+/** 宿主组件：在 App 根部挂载一次；z-70 压过评审覆盖层内的 z-60 弹层 */
 export function ConfirmDialogHost() {
   const req = useSyncExternalStore(subscribe, () => current);
   const dialogRef = useRef<HTMLElement>(null);
@@ -134,7 +134,7 @@ export function ConfirmDialogHost() {
   if (!req) return null;
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-6 ccode-fade"
+      className="fixed inset-0 z-70 flex items-center justify-center bg-black/40 p-6 ccode-fade"
       onClick={() => settle(false)}
     >
       <section

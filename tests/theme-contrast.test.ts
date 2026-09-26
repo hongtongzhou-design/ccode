@@ -299,3 +299,80 @@ test("科研步骤与流程遮罩接入共享底色，工作树和目标继续�
   }
   assert.match(source("components/ProjectAgentsView.tsx"), /row.isProjectDefault \? "bg-seg-sel" : "ccode-well"/);
 });
+
+/**
+ * 滚动条拇指的对比度闸门。
+ *
+ * 拇指是「用户界面组件」——WCAG 2.1 SC 1.4.11 要求 3:1（非文本）。早先深色
+ * `rgba(255,255,255,0.12)`、浅色 `rgba(0,0,0,0.16)` 实测最差只有 1.35:1 / 1.43:1，
+ * 是全站唯一没被任何测试覆盖的硬性对比度失败。拇指是半透明的，必须先在每一套
+ * 主题的每个表面色上合成出真实颜色，再算对比度——直接拿 alpha 比是错的。
+ */
+function over(alpha: number, white: boolean, bg: string): string {
+  const h = bg.replace("#", "");
+  const ch = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const target = white ? 255 : 0;
+  return (
+    "#" +
+    ch
+      .map((c) => Math.round(alpha * target + (1 - alpha) * c))
+      .map((v) => v.toString(16).padStart(2, "0"))
+      .join("")
+  );
+}
+
+/** 拇指铺在哪些表面上：滚动条可能出现在任意一层，取全部表面令牌取最差 */
+const SCROLLBAR_SURFACES = [
+  "canvas", "strip", "inset", "raised", "rail", "rail2",
+];
+
+function alphaFrom(rule: RegExp): number {
+  const m = rule.exec(css);
+  assert.ok(m, "找不到滚动条拇指规则");
+  const a = Number(m[1]);
+  assert.ok(Number.isFinite(a) && a > 0 && a <= 1, `非法 alpha：${m[1]}`);
+  return a;
+}
+
+test("滚动条拇指在全部十四套主题上都过 3:1（WCAG 非文本）", () => {
+  const darkAlpha = alphaFrom(
+    /::-webkit-scrollbar-thumb\s*\{\s*background:\s*rgba\(255,\s*255,\s*255,\s*([\d.]+)\)/,
+  );
+  const lightAlpha = alphaFrom(
+    /\[data-theme\$="-light"\]\s*::-webkit-scrollbar-thumb\s*\{\s*background:\s*rgba\(0,\s*0,\s*0,\s*([\d.]+)\)/,
+  );
+  assert.ok(lightAlpha > 0 && darkAlpha > 0);
+
+  // 主题清单从 THEMES 取，不手抄——手抄过一次就漏了 terracotta、混进了不存在的 charcoal。
+  // 沉浸黑（midnight）没有独立的 `[data-theme]` 块，它继承 `@theme` 默认值，故用 null。
+  const themeIds: (string | null)[] = [
+    null,
+    ...THEMES.map((t) => t.id).filter((id) => id !== "midnight"),
+  ];
+  assert.equal(
+    themeIds.length,
+    THEMES.length,
+    "@theme 只喂 midnight 一套，其余主题必须都有自己的块",
+  );
+  const failures: string[] = [];
+  for (const id of themeIds) {
+    const palette = tokens(id);
+    const light = (id ?? "").endsWith("-light");
+    const alpha = light ? lightAlpha : darkAlpha;
+    for (const surface of SCROLLBAR_SURFACES) {
+      const bg = palette[surface];
+      if (!bg) continue;
+      const ratio = contrast(over(alpha, !light, bg), bg);
+      if (ratio < 3) {
+        failures.push(
+          `${id ?? "@theme"}/${surface}: ${ratio.toFixed(2)}:1`,
+        );
+      }
+    }
+  }
+  assert.deepEqual(
+    failures,
+    [],
+    `滚动条拇指低于 3:1：\n${failures.join("\n")}`,
+  );
+});

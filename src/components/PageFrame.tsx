@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown } from "lucide-react";
 import { HoverTip, useHoverTip } from "./HoverTip";
+import { nextTabIndex, tabNavDelta, tabStopIndex } from "../tab-keys";
 
 const WIDTHS = {
   narrow: "max-w-2xl",
@@ -287,25 +288,19 @@ export function SegTabs<T extends string>({
       role="tablist"
       onKeyDown={(event) => {
         if (!items.length) return;
-        const current = selectedIndex < 0 ? 0 : selectedIndex;
-        const delta =
-          event.key === "ArrowRight" || event.key === "ArrowDown"
-            ? 1
-            : event.key === "ArrowLeft" || event.key === "ArrowUp"
-              ? -1
-              : 0;
+        const delta = tabNavDelta(event.key);
         if (!delta) return;
         event.preventDefault();
-        onChange(items[(current + delta + items.length) % items.length].id);
+        onChange(items[nextTabIndex(selectedIndex, delta, items.length)].id);
       }}
     >
-      {items.map((item) => (
+      {items.map((item, index) => (
         <button
           key={item.id}
           type="button"
           role="tab"
           aria-selected={value === item.id}
-          tabIndex={value === item.id ? 0 : -1}
+          tabIndex={tabStopIndex(index, selectedIndex)}
           onClick={() => onChange(item.id)}
           onFocus={() => {
             if (value !== item.id) onChange(item.id);

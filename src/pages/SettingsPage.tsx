@@ -1,5 +1,7 @@
 import BackgroundTasksPanel from "../components/BackgroundTasksPanel";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Search, X } from "lucide-react";
+import { searchSettings, type SettingSectionId } from "../settings-search.ts";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -94,6 +96,11 @@ import {
   type CustomThemeSeeds,
 } from "../custom-theme";
 import { NAV_GROUPS, NAV_BOTTOM } from "../navigation";
+import {
+  CHROME_OPACITIES,
+  chromeOpacityLabel,
+  normalizeChromeOpacity,
+} from "../chrome-opacity";
 import { toast } from "../toast";
 
 // 调色板清单单一出处在 ../terminal-palettes（PALETTE_LIST，含亮暗标记）
@@ -234,7 +241,11 @@ function formatBytes(n: number): string {
   return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
 }
 
-const SETTING_NAV: { id: string; label: string; group: "basic" | "management" }[] = [
+const SETTING_NAV: {
+  id: SettingSectionId;
+  label: string;
+  group: "basic" | "management";
+}[] = [
   { id: "appearance", label: "外观", group: "basic" },
   { id: "startup", label: "启动行为", group: "basic" },
   { id: "hotkeys", label: "快捷键", group: "basic" },
@@ -822,6 +833,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   const autoOpenedUpdate = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState("appearance");
+  /** 设置页搜索：只筛左侧分区，不做逐行高亮（见 settings-search.ts 的说明） */
+  const [sectionQuery, setSectionQuery] = useState("");
+  /** 命中的分区 id（按相关度）。空查询 = 全部。 */
+  const matchedSections = useMemo(
+    () => searchSettings(sectionQuery).map((hit) => hit.id),
+    [sectionQuery],
+  );
   const contentRef = useRef<HTMLDivElement>(null);
   // 数值输入的本地草稿（失焦/回车才提交，避免每击键一次 IPC）
   const [fontSize, setFontSize] = useState("");
@@ -1612,17 +1630,44 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       <div className="@container">
         <div className="grid min-w-0 gap-5 @min-[48rem]:grid-cols-[11rem_minmax(0,1fr)] @min-[48rem]:gap-7">
           <nav aria-label="设置分区" className="self-start @min-[48rem]:sticky @min-[48rem]:top-16">
+            <div className="mb-3 flex h-8 items-center gap-2 rounded-md border border-field bg-canvas px-2">
+              <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
+              <input
+                value={sectionQuery}
+                onChange={(event) => setSectionQuery(event.target.value)}
+                placeholder="找设置…"
+                aria-label="搜索设置"
+                className="min-w-0 flex-1 bg-transparent text-xs text-l2 outline-none placeholder:text-l4"
+              />
+              {sectionQuery && (
+                <button
+                  type="button"
+                  aria-label="清除搜索"
+                  onClick={() => setSectionQuery("")}
+                  className="shrink-0 text-l4 hover:text-l1"
+                >
+                  <X aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
             <div className="flex flex-wrap gap-x-6 gap-y-4 @min-[48rem]:flex-col @min-[48rem]:gap-5">
               {([
                 { id: "basic", label: "常用" },
                 { id: "management", label: "管理" },
-              ] as const).map((group) => (
+              ] as const).map((group) => {
+                // 搜索只筛显示的档，不隐藏分组标题：标题消失会让剩下的项看起来
+                // 不知属于哪一类，而分组本身没有搜索语义
+                const items = SETTING_NAV.filter(
+                  (nav) => nav.group === group.id && matchedSections.includes(nav.id),
+                );
+                if (items.length === 0) return null;
+                return (
                 <div key={group.id} className="min-w-0">
                   <p id={`settings-group-${group.id}`} className="mb-1.5 px-2.5 text-micro font-medium text-l3">
                     {group.label}
                   </p>
                   <ul aria-labelledby={`settings-group-${group.id}`} className="flex flex-wrap gap-1 @min-[48rem]:flex-col">
-                    {SETTING_NAV.filter((item) => item.group === group.id).map(({ id, label }) => (
+                    {items.map(({ id, label }) => (
                       <li key={id} className="min-w-0">
                         <button
                           id={`settings-nav-${id}`}
@@ -1648,8 +1693,15 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                     ))}
                   </ul>
                 </div>
-              ))}
+                );
+              })}
             </div>
+            {sectionQuery.trim() && matchedSections.length === 0 && (
+              // 空结果要说一句：没这句，用户只看到左栏空了，会以为设置页坏了
+              <p role="status" className="px-2.5 text-xs text-l4">
+                没有匹配的设置
+              </p>
+            )}
           </nav>
           <div
             ref={contentRef}
@@ -1891,6 +1943,25 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             </p>
           )}
         </div>
+
+        <Row
+          label="侧栏 / 顶栏透明度"
+          hint="立即生效。100% 是各主题本来的样子，0% 则完全不铺罩色、文字直接压在壁纸上。侧栏选中行的底色也跟着一起变淡，最透时只剩文字和图标变色。深浅主题与图标态各有自己的底色，同一个百分数看起来的浓淡会不同"
+        >
+          <select
+            className={fieldClass + " w-36"}
+            value={normalizeChromeOpacity(settings?.chromeOpacity)}
+            onChange={(e) =>
+              void patch({ chromeOpacity: Number(e.target.value) })
+            }
+          >
+            {CHROME_OPACITIES.map((pct) => (
+              <option key={pct} value={pct}>
+                {chromeOpacityLabel(pct)}
+              </option>
+            ))}
+          </select>
+        </Row>
 
         <Row
           label="终端渲染"
@@ -2204,12 +2275,12 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           >
             <option value="expanded">展开侧栏</option>
             <option value="collapsed">图标侧栏</option>
-            <option value="hidden">完全隐藏 + 顶部导航胶囊</option>
+            <option value="hidden">完全隐藏 + 顶部灵动岛</option>
           </select>
         </Row>
         <Row
-          label="顶部导航自动隐藏"
-          hint="完全隐藏时，鼠标移动到上下文栏下方即可呼出顶部导航"
+          label="顶部岛自动收起"
+          hint="完全隐藏时，岛始终停在顶部，只留「恢复侧栏」；鼠标移入或键盘聚焦展开完整导航，移开后按此延时收起。选「立即」适合只借岛点一下就走，不留停在半开的岛"
         >
           <select
             className={fieldClass + " w-28"}
@@ -2218,6 +2289,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               void patch({ navCapsuleHideDelayMs: Number(e.target.value) })
             }
           >
+            <option value={0}>立即</option>
             <option value={500}>0.5 秒</option>
             <option value={1000}>1 秒</option>
             <option value={2000}>2 秒</option>
@@ -2225,8 +2297,18 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           </select>
         </Row>
         <Row
-          label="顶部导航内容"
-          hint="完全隐藏时控制胶囊显示符号、文字，设置修改后立即生效"
+          label="顶部岛跑完播报"
+          hint="Agent 跑完一个回合或进程断开时，在休眠态那一行报一句，4 秒后自己消失。只报这两种「刚发生的事」——等待确认、冲突等待处理属于收件箱，岛不重复持有它们的计数"
+        >
+          <Toggle
+            label="顶部岛跑完播报"
+            checked={settings?.navCapsuleRunAnnounce !== false}
+            onChange={(v) => void patch({ navCapsuleRunAnnounce: v })}
+          />
+        </Row>
+        <Row
+          label="顶部岛导航内容"
+          hint="完全隐藏时控制展开态里显示符号、文字，设置修改后立即生效"
         >
           <select
             className={fieldClass + " w-40"}

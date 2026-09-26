@@ -117,7 +117,7 @@ export default function SessionImportModal({
       title="导入会话"
       onClose={onClose}
       size="md"
-      panelClassName="z-[60] max-h-[min(640px,90vh)]"
+      panelClassName="z-60 max-h-[min(640px,90vh)]"
       contentClassName="min-h-0 flex-1 overflow-y-auto text-sm"
       footer={
         <>

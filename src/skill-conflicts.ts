@@ -112,6 +112,10 @@ export function skillChainWarnings(
     if (!skill) continue;
     const inferred = skill.interfaceInferred ?? false;
     for (const input of skill.inputs ?? []) {
+      const producedHere = expectedArtifacts.some(
+        (artifact) => pathCovered(input, artifact) || pathCovered(artifact, input),
+      );
+      if (producedHere) continue;
       const covered = supply.some(
         (s) => pathCovered(input, s) || pathCovered(s, input),
       );

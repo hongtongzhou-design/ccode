@@ -49,6 +49,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # FuseDraftModal（「◈ 融合进任务书」预览编辑弹层：AI 融合稿可改后确认才写草稿）、
                              # TerminalStatusBar（终端底部常驻状态栏：未启动只留状态点 + 📂 目录胶囊；
                              #   进程起来后才有模型/思考档可点切 + git 芯片/保存/推送 + 时长/token） 等
+  App.tsx                    # 应用壳：标题栏、侧栏、九页挂载。壳与标题栏/侧栏/缝透明，桌面磨砂从窗口底透上来
+  App.css                    # 主题令牌与壳层样式。侧栏罩色：展开 42%、图标态 28%、选中行 88%；Linux 与减少透明度回落实心
   components/CommandPalette.tsx # ⌘K 面板
   components/LaunchMenu.tsx  # 启动栏下拉菜单组件：portal 到 body、分组标题、键盘导航，替代原生 select
                              # （Agent/配置/模型三段共用；隐藏配置沉「已停用（可手选）」组）
@@ -292,6 +294,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   project-context-load.ts    # 启动环境说明拼装：读档案卡和顶层目录，失败仍返回能用的短包
   research-report.ts         # 研究报告节抽取/相对路径解析（只认显式报告节，不认 TASK 指令或推断结论）
   screening-review.ts        # 检索/筛选评审主面：计数/待拍板/筛选决定、表默认 pending、文件分组；included.md/json 不与表并列摊 diff；
+                             # 接口缓存、脚本、.gitignore 进「过程」，不进非 Git 产物清单；
                              # pendingConfirmCleared = 有篇且无 pending，步骤卡据此自动勾「核对待确认篇目」（tests/screening-review.test.ts）
   review-file-groups.ts      # 精读/写作评审文件分组：笔记/稿件/引文/待获取/过程（tests/review-file-groups.test.ts）
   research-tools.ts          # 科研工具注入 withResearchTools；旧「文献主来源」设置键写回时剥除——来源只认 lit_source
@@ -301,7 +304,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   session-transfer.ts        # 会话导入向导纯逻辑：状态文案、目标目录预填、可否执行
   step-decisions.ts          # 决策项：答案落任务书草稿固定小节；isTaskMdStub = 空/仅决策/仅评审沉淀不算可执行正文，resolveTaskMdSource 走模板拼装并接沉淀（decisionGate/orderedAnswers/parseDecisions，tests/step-decisions.test.ts）
   terminal-resume.ts         # 终端会话恢复的标签复用与配置挑选纯逻辑（2026-09-08 审计修复）
-  store.ts                   # zustand 状态
+  terminal-geometry.ts       # 启动前收不收栏、没量到格子就不起进程、起来之后谁可以改行列
+  store.ts                   # zustand 状态。applyTheme 同步原生窗口外观；Windows 上同时把整窗 Mica 切到 micaDark/micaLight
 src-tauri/src/
   agent_specs.rs             # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/
                              #   model_switch 运行中切模型（claude/gemini/kimi/grok 带参直切；codex/opencode 唤选择器——两家 CLI 无带参直切：
@@ -350,6 +354,13 @@ src-tauri/src/
                              # 显式 false 只在数据源如实给出时生效）；kimi capabilities/max_context_size、
                              # codex catalog、opencode reasoning/limit/modalities 全从这条链出；
                              # limit.output 兜底 8192（1.18 起 schema 必填）；宁缺毋滥（收错比漏报有害）；
+                             # **声明层访问器（2026-09-26）**：model_context_size_declared_for /
+                             #   model_output_limit_declared_for / model_supports_vision_declared_for /
+                             #   model_thinking_declared_for——只认链上显式值，兜底层（fallback_context_size、
+                             #   关键词 thinking、内置表确知多模态清单）不算。写进别人家 CLI 配置的值一律走这批，
+                             #   分流：可省略的未知就不写（codex catalog 三键、codex -c 两键、kimi env 上下文），
+                             #   必填的写保守下限（kimi config.toml max_context_size、opencode limit.*）；
+                             #   确知多模态清单已收进 BUILTIN_CAPS（capsv），「不在表里」= 不知道而非纯文本；
                              # 字段新增 api_backend（grok 目录 apiBackend，闭集只收 chat_completions/responses/
                              #   messages；仅权威层有值，model_api_backend_for 供预览说实话）；
                              # fetch 沉淀解析兼容 grok 目录别名（contextWindow/context_window/_meta.totalContextTokens）；
@@ -361,6 +372,32 @@ src-tauri/src/
                              #   不进 UI 但往返保留；细则 conventions/profiles.md §6.1）；
                              # 下载公共库顺带提取定价（models.dev cost / OpenRouter pricing → 条目 cost 字段），
                              #   db_price_table 供 usage.rs 定价链消费
+  capability_manifest.rs     # 能力写入清单（**不驱动写入**，只做记账与机器检查）：全表 WRITES 记「哪个 agent ×
+                             #   哪个目标键 × 该键的 requiredness/completeness/harm × 依据强度」，
+                             #   未知时动作**不存**、由 action() 从三个属性推——存下来会与属性漂移，
+                             #   而漂移的表比没有表更坏。三档动作：Omit（可选就整个不写）/
+                             #   ConservativeFloor（必填未知也写，但写下限并说清是下限）/
+                             #   UnionWithDefault（完备声明 + 写少更坏 ⇒ 只加不减）。
+                             # 为什么要有它：注册链前四层答「确知吗」、兜底层只答「给个数」，
+                             #   把估值当声明写进别人家配置会**压低**真实能力（codex -c model_context_window
+                             #   是硬覆盖，1M 窗口被按 128K 提前压缩）；更隐蔽的是完备声明键，
+                             #   少写一个成员 = 断言「不支持」——kimi env KIMI_MODEL_CAPABILITIES 缺省集
+                             #   ["image_in","thinking"] **不含 tool_use**，旧代码「非思考模型就不写」
+                             #   静默剥夺了工具能力（根因：把「不知道」当成「假」；memory：2026-09-26）。
+                             # 免除名单 NO_CAPABILITY_WRITES 带**理由**（NoConfigSurface / PolicyOnly），
+                             #   不用裸字符串——空理由等于没记账；coverage_* 五条测试：
+                             #   every_agent_is_accounted_for（新增第十家 CLI 时红，逼一次显式决策）/
+                             #   no_stale_excuses / no_orphan_rows /
+                             #   conservative_floor_is_never_used_for_a_complete_declaration /
+                             #   kimi_env_capabilities_must_union_with_the_cli_default
+  capability_golden.rs       # 能力写入的黄金样本测试装置（数据在 src-tauri/tests/golden/capability_writes.json）：
+                             #   断的不是「某函数返回了什么」而是**用户可见的最终形态**——启动 env 表与
+                             #   写盘的 toml/json 文本；单测各断自己那一段（agents.rs 断 env、global_config.rs
+                             #   断 toml）互相不知道对方存在，kimi 那条错的注释正是这样活下来的。
+                             # 放 crate 内而非 tests/ 目录：写入点私有/pub(crate)，集成测试够不到；
+                             #   tests/golden/ 只是**数据**的位置约定，Cargo 只认 .rs 不会多出空 target。
+                             # 期望值人工核对过二进制（不是跑一遍录下来）；golden_file_is_self_consistent
+                             #   要求 id 唯一、why 非空、至少一条期望——防「加了一例但什么都没断」。
   profiles.rs                # 网关+绑定：gateways.json / bindings.json；keys.json 键=网关 id（0600）；
                              # list 物化成 Profile 视图（binding id 复用旧 profile id）；删除绑定=解绑不清密钥；
                              # 绑定级 api_backend 字段（grok 专用，仅设为全局写 [model.*] 消费；闭集校验 +
@@ -410,7 +447,8 @@ src-tauri/src/
                              # qwen 条目级 generationConfig.samplingParams（snake_case 线格式，逐模型取值；
                              #   配了就跳过 CLI 的 max_tokens 自动钳制）；
                              # kimi 的 [models.*] 随写 display_name（配置名·模型，选择器 label 优先它）
-                             # 与 capabilities（按注册表组合 tool_use/thinking/image_in，仅新版变体）；
+                             # 与 capabilities（补集写入：恒含 tool_use，保留缺省里未被声明为假的成员；
+                             #   未确知不猜——完备声明语义见 conventions/profiles.md 硬规则）；
                              # grok（2026-09-01 起）写 ~/.grok/config.toml：顶层 api_key + [endpoints].models_base_url +
                              #   [models].default 与请求策略全局默认（通用键只设不删，防误清用户手写值）；
                              #   每个绑定模型写 [model.<id>]（name；段键自动加引号）；有「API 后端」或
@@ -437,6 +475,7 @@ src-tauri/src/
   project_memory.rs          # 项目知识 .ccode/memory.md：结构化块只记人工确认（revision 比对 + active/superseded/revoked 状态机；
                              # 作废/替代条目不注入，Agent 结论不自动采纳；原文历史保留并留备份）
   pty.rs                     # PtyManager：spawn_tracked 公共拉起，agent/shell 复用；
+                             #   开 PTY 用前端传入的 cols/rows（缺省 24×80），避免 resume 先窄后宽把旧帧留进滚动记录；
                              # pty_report_terminal_colors = Windows 底色告知（win32-input-mode 记录逐条投递，
                              #   条间 2ms；ConPTY 双向吞 OSC 的实测结论见 conventions/terminal.md，别改回 OSC）
   pty_input.rs               # 每个终端独立的有界输入队列：一个不读 stdin 的 CLI 不得占住 PTY 全局锁

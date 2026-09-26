@@ -163,9 +163,13 @@ export interface GatewayInput {
   models: GatewayModel[];
   apiKey: string | null;
   expectedRevision?: string | null;
-  /** New API 系统访问令牌；空 = 不改 */
+  /** 明确删除密钥；不发或 false = 不改 */
+  clearKey?: boolean;
+  /** 前端拉取目录后保存时回传；None = 不改（新建时可带） */
+  catalogFetchedAt?: string | null;
+  catalogFromSlot?: string | null;
+  /** New API 系统访问令牌；空 = 不改。清除走 clear_gateway_wallet_token（带二次确认） */
   walletAccessToken?: string | null;
-  clearWalletToken?: boolean;
   /** 空串清空；缺省不改 */
   walletUserId?: string | null;
 }

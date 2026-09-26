@@ -442,12 +442,15 @@
   --color-cta: #c23838;
 }
 
-/* 浅色滚动条：白拇指不可见，换黑色半透明 */
+/* 浅色滚动条：白拇指不可见，换黑色半透明。
+   0.16 实测最差 1.43:1（neutral-light/rail），远低于 WCAG 2.1 非文本 3:1；
+   0.44 在最差底（mocha-light/rail #e3dfea）上是 3.10:1，其余浅色底更高。
+   hover 仍比常态深一档。 */
 [data-theme$="-light"] ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.16);
+  background: rgba(0, 0, 0, 0.44);
 }
 [data-theme$="-light"] ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.28);
+  background: rgba(0, 0, 0, 0.58);
 }
 
 html,
@@ -457,7 +460,7 @@ body {
   margin: 0;
   overflow: hidden;
   overscroll-behavior: none;
-  background: var(--color-canvas);
+  background: transparent;
   color: var(--color-l2);
   /* Windows 的 CJK 回退要显式给雅黑：否则中文穿过 Segoe UI/Noto Sans SC（通常未装）
      落到通用 sans-serif，小字号下 DirectWrite 渲染发虚 */
@@ -493,7 +496,7 @@ body {
    hinting，小字发糊。只换静态 Segoe UI、关掉 optical sizing；字号/字重
    仍继承正文（14px / 400），不另压小或加粗。macOS/Linux 不走此块。 */
 [data-platform="windows"] .ccode-titlebar,
-[data-platform="windows"] .ccode-top-nav-capsule {
+[data-platform="windows"] .ccode-nav-island {
   font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   font-optical-sizing: none;
   font-kerning: none;
@@ -506,7 +509,7 @@ body {
   height: 100vh;
   height: 100dvh;
   margin: 0;
-  background: var(--color-canvas);
+  background: transparent;
 }
 
 /* 连续工作台层：统一模块边界、曲率与动效节奏，避免页面像一组互不相干的卡片。 */
@@ -517,6 +520,14 @@ body {
      上接近直角，用户反馈「方正」后提到 12px（Linear 卡片口径）；控件 7px / 紧凑 5px 不动。 */
   --ccode-radius-panel: 12px;
   --ccode-motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* 完全隐藏侧栏时的顶部导航岛，嵌在标题栏里，不下沉到内容上。
+     岛是 content-box：总高 = 行高 + 上下各 2px padding + 各 1px 边框 = 行高 + 6px。
+     行 22px → 总高 28px；macOS 标题栏 2.25rem×14 = 31.5px、Windows 2.25rem×16 = 36px，
+     两边都装得下，岛不再越出栏外，内容也就不必让位。 */
+  --ccode-island-row: 22px;
+  /* 标题栏 h-9 = 2.25rem；macOS 根字号 14px → 31.5px，Windows 16px → 36px。
+     岛靠栏内 50% 居中定位，不读这个值；首启提示挂在栏下沿才需要它。 */
+  --ccode-titlebar-h: 2.25rem;
   /* 原生表单控件配色模式：保留全局深色默认值；Windows 浅色主题单独覆盖，
      避免 WebView2 把浅色下拉/复选框画成黑色，同时不改变 macOS/Linux 的原有路径。 */
   color-scheme: dark;
@@ -527,9 +538,59 @@ body {
 }
 
 .ccode-app-shell {
-  background: var(--color-canvas);
+  /* 桌面磨砂（macOS underWindowBackground / Windows Mica）从窗口底透上来。
+     shell 本身不铺实心底，罩色只落在标题栏和侧栏；主画布仍是不透明面板。
+     Linux 与「减少透明度」由下面的回退块盖回实心 rail。 */
+  background: transparent;
   color: var(--color-l2);
   isolation: isolate;
+
+  /* 侧栏 / 顶栏罩色的**基数**：各主题、各形态本来的透明度，也就是「没调过」的样子。
+     用户设置只写一个系数 --ccode-chrome-scale（App.tsx 内联进来），乘在基数上——
+     一个值同时管侧栏与顶栏、深浅两套。存绝对值就得按主题各存一个滑块，而基数本来
+     就不一样（侧栏深色 42% / 浅色 78% / 图标态 28%），存哪个都会在别的主题里对不上。
+     scale = 1 逐字节还原改版前——这条不变式是有意的：装上新版、不动设置，
+     界面不该有任何变化。档位表见 Rust KNOWN_CHROME_OPACITIES。
+
+     基数的分工：
+       rail   侧栏那层罩。
+       shell  壳自己那层。浅色下它同时是「顶栏 + 四周缝」的可见来源——顶栏自己不铺色，
+              是壳这层罩从背后透出来的，所以调低时顶栏跟着一起变；深色壳是 0%，
+              纯窗口材质，顶栏直接透出桌面（见 .ccode-titlebar 上那段）。
+       lsel   选中行胶囊。与 rail 同乘一个系数：胶囊填色和罩色是同一类东西（rail 色系
+              的表面处理），罩色淡下去而胶囊不淡，它就不再读作「这行被高亮」，而读作
+              「壁纸上贴了一块不透明的东西」——用户把侧栏调透，最显眼的那块却没动，
+              观感上就是设置没生效。数值上两者色差是 0.88×(S−侧栏色)，同乘 k 一起收窄，
+              正是「选中的那行相应淡一点」。
+              为什么不做「选中行只淡一半」这类保底：0 档的标签写的是「全透 / 完全不铺
+              罩色」，胶囊留实心等于标签在说假话；而且对文字早就接受了同样的风险
+              （0 档文字直接压壁纸，不做硬拦），单拦胶囊是自相矛盾的。
+              选中态不只有填色：文字 text-l1、图标 text-nav-accent 都不随系数变，
+              0 档下这两个信号仍在，只是没有底衬（与 hover 的强弱关系见该规则处）。 */
+  --ccode-chrome-scale: 1;
+  --ccode-rail-base: 42%;
+  --ccode-shell-base: 0%;
+  --ccode-lsel-base: 88%;
+
+  /* 每条 color-mix 前都留一条不含 calc 的同基数声明：万一 WebKit 不接受 color-mix()
+     里的 calc()，作废的只是后一条，罩色退回基数——侧栏一旦整条失效就是直接透出壁纸，
+     l1/l2 压在照片上不再有对比度保证。
+
+     浅色下 shell 那层 78% 会连同「四周缝」一起被缩放：缝与顶栏共用同一层罩，
+     这是既有结构，不是新引入的耦合。 */
+  background: color-mix(in srgb, var(--color-rail) var(--ccode-shell-base), transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-rail) calc(var(--ccode-shell-base) * var(--ccode-chrome-scale)),
+    transparent
+  );
+}
+
+/* 图标态侧栏更透：只改写基数，规则本体不再写死数字。
+   与浅色块同权重（各一条属性选择器），浅色块排在后面，所以浅色 + 图标态落到 78%
+   ——与改版前一致：那时这条规则写在浅色块之前，也是被盖掉。 */
+.ccode-app-shell[data-nav="icons"] {
+  --ccode-rail-base: 28%;
 }
 
 /* 全局内容卡：普通页面取 canvas，项目工作面取 rail2；嵌套卡不再叠加透明度。
@@ -548,9 +609,104 @@ body {
   }
 }
 
+/* 顶栏自己不铺罩色——两种 chrome 都不铺，但理由不同，别当成一处口子：
+   · 深色：窗口材质（underWindowBackground / Mica）直接透出来，这已经是顶栏最透的状态，
+     没有可再调低的余量。系数调到最低，这一条也不动。
+   · 浅色：壳那层罩（--ccode-shell-base，78%）从背后透上来就是顶栏看到的颜色，
+     它跟着系数走，所以浅色顶栏会跟着调。这里再铺一层会与壳合成到约 95%，
+     顶栏和侧栏分成两块深浅——改版前就是因为这个才只让壳铺。
+   一句话：**顶栏在浅色下由壳的罩色代表，深色下由窗口材质代表**；两者都不在本规则里。
+   position + z-index 是导航岛的定位上下文与层级：岛嵌在栏内，靠这里的 39 给整条栏
+   （含岛、含收件箱下拉）定基准——和岛当年独立待在根层级时的 z-39 同一读数，仍在
+   各挡浮层 z-40~70 之下。没有这个 z-index 时栏不构成层叠上下文，岛的 z-1 会掉进
+   页面内容的 z-10/20/30 里去。 */
+.ccode-titlebar {
+  position: relative;
+  z-index: 39;
+  background: transparent;
+}
+
+/* 侧栏罩色：基数（.ccode-app-shell 里声明）× 用户系数。
+   展开 42% 是改版前的值；62% 以上在深色壁纸上会看成实心 rail。图标态 28% 由下面
+   那条改写基数，规则本体不再出现数字。选中行也走这一套（基数 lsel，见下面那条规则）。
+   每条 color-mix 前留一条不含 calc 的同基数声明：万一 WebKit 不接受 color-mix() 里的
+   calc()，作废的只是后一条、罩色退回基数，而不是整条失效——侧栏一旦没有罩色就是
+   直接透出壁纸，l1/l2 压在上面不再有对比度保证。 */
+.ccode-app-rail {
+  background: color-mix(in srgb, var(--color-rail) var(--ccode-rail-base), transparent);
+  background: color-mix(
+    in srgb,
+    var(--color-rail) calc(var(--ccode-rail-base) * var(--ccode-chrome-scale)),
+    transparent
+  );
+}
+
+/* 浅色（含自定义浅色）侧栏与四周缝同一层罩。
+   顶栏贴上沿，侧栏贴左沿、不另做圆角。data-chrome 由当前主题深浅写入，切换即换这一套。
+
+   浅色不另铺色，只改基数——壳与侧栏取同一个 78%，正是这里的原意（原来是一串选择器
+   各自铺 78%，现在是壳一层罩 + 侧栏罩色基数跟上）。
+   基数是自定义属性、沿 DOM 继承，所以一条声明同时喂给壳与缩进多层的侧栏。
+   图标态那条同权重规则排在前面，这里自然盖过它，浅色 + 图标态因此是 78%——
+   与改版前一致（那时它也在浅色块之前，本就被盖掉）。 */
+.ccode-app-shell[data-chrome="light"] {
+  --ccode-rail-base: 78%;
+  --ccode-shell-base: 78%;
+}
+
+/* 选中行胶囊：基数（--ccode-lsel-base，声明在 .ccode-app-shell 里）× 同一个用户系数。
+   88% 是改版前的值，k=1 时逐字节还原。展开 88% 而不是实心：胶囊要透出一点侧栏罩色，
+   深浅两套才都成立（浅色侧栏 78% 已经很亮，实心 rail-sel 会糊成一块砖）。
+
+   hover 与选中的强弱关系随系数变，这是有意的：k=1 时胶囊 88% 明显重于 hover（5% 白/黑）；
+   调到 0 后胶囊消失，两者只剩文字差——选中是 text-l1 + text-nav-accent 图标，hover 是
+   文字转 text-l2。0 档本来就是「完全不铺罩色、还看得到字」的档位，不该再靠一块实心
+   胶囊把选中钉回来（那会让 0 档名不副实）。副作用是臂展/滑动浏览时选中项更依赖文字对比，
+   照片壁纸上尤其明显——hint 里已经讲明 0 档文字会压在壁纸上。 */
+.ccode-app-rail .bg-rail-sel {
+  background-color: color-mix(in srgb, var(--color-rail-sel) var(--ccode-lsel-base), transparent);
+  background-color: color-mix(
+    in srgb,
+    var(--color-rail-sel) calc(var(--ccode-lsel-base) * var(--ccode-chrome-scale)),
+    transparent
+  );
+}
+
 .ccode-app-rail {
   border-color: var(--color-hairline);
+}
+
+/* 没有系统材质可透（Linux、系统「减少透明度」）：回到实心 rail，避免罩色直接透出窗口后的桌面。 */
+[data-platform="linux"] .ccode-titlebar,
+[data-platform="linux"] .ccode-app-rail {
   background: var(--color-rail);
+}
+
+[data-platform="linux"] .ccode-app-shell[data-nav="icons"] .ccode-app-rail {
+  background: var(--color-rail);
+}
+
+[data-platform="linux"] .ccode-app-rail .bg-rail-sel {
+  background-color: var(--color-rail-sel);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  html,
+  body,
+  #root {
+    background: var(--color-canvas);
+  }
+
+  .ccode-app-shell,
+  .ccode-titlebar,
+  .ccode-app-rail,
+  .ccode-app-shell[data-nav="icons"] .ccode-app-rail {
+    background: var(--color-rail);
+  }
+
+  .ccode-app-rail .bg-rail-sel {
+    background-color: var(--color-rail-sel);
+  }
 }
 
 /* 品牌区与侧栏同底不画线（Codex 式：侧栏只有全高竖分界 + 底部栏一根横线，分区间靠留白）。
@@ -673,31 +829,66 @@ body {
   animation: ccode-pop 150ms var(--ccode-motion-ease);
 }
 
-/* 完全隐藏侧栏时的顶部导航胶囊：浮在上下文栏下方，不参与页面布局。
-   玻璃拟态三要素：低不透明度底（content 透上来）+ 强 backdrop blur/saturate + 边缘高光；
-   静止时背后若是纯色画布玻璃感天然偏弱（没有可模糊的内容），滚动时内容从底下穿过才完全显现 */
-.ccode-top-nav-capsule {
-  position: relative;
+/* 完全隐藏侧栏时的顶部灵动岛（替代旧的"幽灵胶囊"）。
+   旧结构是一条隐形热区 + 悬停唤出后自己跑掉的胶囊，全收起后窗口顶部是空的，
+   用户不主动去摸就以为导航没了。现在岛常驻，只在休眠/展开两态之间收缩展开：
+
+     dormant   恢复侧栏（恒带文字）+ 播报（若有），始终可见，宽度按内容自适应
+     expanded  完整导航（分组 / 快速开聊 / 恢复侧栏），悬停或聚焦时展开
+
+   玻璃拟态三要素保留：低不透明度底 + 强 backdrop blur/saturate + 边缘高光。 */
+.ccode-nav-island {
+  /* 嵌在标题栏里：绝对定位到栏中央（含 padding 与边框一起居中），
+     不再 fixed 到视口顶部、悬在标题栏下沿沉到内容上去。
+     这里用 translate 而非 inset+margin:auto —— 岛宽由 JS 写入，居中方式不必依赖宽度数学。 */
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1;
+  /* z-1 只在标题栏内抬到左右两组按钮之上。岛的水平居中位置正是右侧「命令面板 / 待处理」
+     的地盘，展开时会短暂压住它们；收件箱下拉在 header 之外且 z-40，仍稳稳盖过岛。 */
+  border: 1px solid;
+  border-radius: 999px;
+  /* 内容盒：JS 量到多宽就写多宽，padding 与边框长在外侧，不必在 JS 里复刻盒模型。
+     这条是必需的，不是风格选择——用 border-box 时 width 要自己加上 2+2+1+1，
+     一旦改 padding 或边框而 JS 没同步，摆进去的内容就会从右边被 overflow 切掉。 */
+  box-sizing: content-box;
+  /* 宽高由 JS 按两副面孔的自然尺寸写入：宽度决定形变，高度就取行高 */
+  padding: 2px;
+  overflow: hidden;
   isolation: isolate;
   background: color-mix(in srgb, var(--color-raised) 58%, transparent);
   -webkit-backdrop-filter: blur(26px) saturate(150%);
   backdrop-filter: blur(26px) saturate(150%);
   border-color: color-mix(in srgb, var(--color-l1) 12%, transparent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.26);
+  transition:
+    width 180ms var(--ccode-motion-ease),
+    height 180ms var(--ccode-motion-ease),
+    /* box-shadow 必须在名单里：展开态的投影若不参与过渡，切态那一刻重影会先跳没，
+       而宽高还要 180ms 才缩完——先"塌影"后"收盒"，看着就是散架。
+       稍长一点（220ms）让影子的淡出比盒子慢半拍，收起才像沉下去而不是被关掉。 */
+    box-shadow 220ms var(--ccode-motion-ease),
+    background-color 150ms var(--ccode-motion-ease);
+}
+
+/* 展开态深一点、投影重一点：形变之外再给一层"抬起来了"的读数
+   （扁平语言零阴影原则不变，投影只用于表达层级） */
+.ccode-nav-island[data-state="expanded"] {
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.26),
     inset 0 -1px 0 rgb(0 0 0 / 0.06),
-    0 12px 32px rgb(0 0 0 / 0.20);
-  animation: ccode-nav-capsule-in 150ms var(--ccode-motion-ease);
-  scrollbar-width: none;
+    0 12px 32px rgb(0 0 0 / 0.2);
 }
 
 /* Windows：backdrop-filter 画在同一层会把文字一起栅格化发糊。
    模糊挪到伪元素，文字在上层按 hinted 字体画。macOS 玻璃效果保持原样。 */
-[data-platform="windows"] .ccode-top-nav-capsule {
+[data-platform="windows"] .ccode-nav-island {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
-[data-platform="windows"] .ccode-top-nav-capsule::before {
+[data-platform="windows"] .ccode-nav-island::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -709,32 +900,226 @@ body {
   pointer-events: none;
 }
 
-[data-theme$="-light"] .ccode-top-nav-capsule {
+[data-theme$="-light"] .ccode-nav-island {
   background: color-mix(in srgb, var(--color-canvas) 55%, transparent);
   -webkit-backdrop-filter: blur(30px) saturate(170%);
   backdrop-filter: blur(30px) saturate(170%);
   border-color: color-mix(in srgb, var(--color-l1) 9%, transparent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.85);
+}
+[data-theme$="-light"] .ccode-nav-island[data-state="expanded"] {
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.85),
     inset 0 -1px 0 rgb(44 48 64 / 0.05),
     0 10px 28px rgb(63 70 92 / 0.12);
 }
 
-.ccode-top-nav-capsule::-webkit-scrollbar {
+/* 两副面孔绝对叠放：容器做尺寸形变，面孔只做透明度过渡。
+   这样不必给每个导航项做位移动画，切换时也不会互相挤压重排。 */
+.ccode-nav-island-face {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.ccode-nav-island-row {
+  display: flex;
+  height: var(--ccode-island-row);
+  align-items: center;
+  gap: 1px;
+}
+
+/* 休眠面在文档流里量自然宽（容器此刻是同一宽度，两者不构成自反馈环：
+   宽度只在切态时由 JS 写入，量值本身不反过来改内容）。
+   水平居中，理由和展开面同一条：收回时容器是「两头一起往中间收」，
+   若休眠面仍按 left:0 排，它的内容会在盒子变窄的过程中被推着向右平移
+   半个宽度差——一次横移叠在一次淡入上，收尾那下就是顿挫。 */
+.ccode-nav-island-row-dormant {
+  width: max-content;
+  margin-inline: auto;
+  opacity: 1;
+  transition: opacity 120ms var(--ccode-motion-ease);
+}
+/* 展开面脱离文档流，按 max-content 量自身的完整宽度，宽度不受容器夹持。
+   未展开时保持挂载并接受测量，否则拿不到目标宽度、形变就无从谈起。
+   同样水平居中（left:50% + translateX(-50%)）：展开面比休眠面宽，
+   左对齐时收缩过程是整条导航向左滑出去被 overflow 切掉，像被推走；
+   居中则两头同时往中间收，读起来才是缩回去。 */
+.ccode-nav-island-row-expanded {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms var(--ccode-motion-ease);
+}
+
+.ccode-nav-island[data-state="expanded"] .ccode-nav-island-row-dormant {
+  opacity: 0;
+  pointer-events: none;
+}
+.ccode-nav-island[data-state="expanded"] .ccode-nav-island-row-expanded {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 休眠面就是这个按钮本身：全收起时"恢复侧栏"是唯一退路，给一点常驻强调色。
+   休眠态只有它一个元素——先前还并排放一个当前页高亮块，两个圆图标挤在小胶囊里
+   读起来像开关，而且那个块没有点击语义（点回当前页是把页面设成它自己）。
+
+   它带文字、而且不跟 displayMode 走（见 TopNavCapsule 里那段）：一个没有文字的光
+   图标，看不出是入口，也看不出悬停会展开整排导航。文字用 l1 与图标同属"这是主
+   操作"的一档，不再另调——休眠面上就这一项，不必再分层级。
+   左右各多留 2px：它现在是一枚带字的胶囊，不是一枚方图标，7px 的横内距贴在字上会显挤。 */
+.ccode-nav-island-restore {
+  color: var(--color-l1);
+  padding: 0 9px;
+}
+.ccode-nav-island-restore svg {
+  color: var(--color-nav-accent);
+}
+
+/* 角标以计数为 key 重挂载：数字变化时重播一次呼吸，作为计数变化的轻提示 */
+.ccode-nav-island-badge {
+  animation: ccode-island-badge 420ms var(--ccode-motion-ease);
+}
+@keyframes ccode-island-badge {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.28);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* 跑完/跑挂播报：贴着「恢复侧栏」排在休眠面行尾的一段字，不是岛的新形态。
+   颜色比导航项弱一档（l3 而非 l2）——它是刚过去的事，不该和入口抢注意力；
+   只有失败用红点。不做入场动画：播报是「突然出现的一句话」，
+   淡入反而让它显得像界面的一部分而不是刚发生的事。 */
+.ccode-nav-island-announce {
+  display: inline-flex;
+  min-height: 22px;
+  /* 长项目名会把休眠面撑出去。这里封顶 + 省略号，而不是收窄整个岛：
+     省略号是可见的「还有」，导航项被裁没有信号——所以上限只加在这句话上。 */
+  max-width: 180px;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 0 8px 0 7px;
+  overflow: hidden;
+  color: var(--color-l3);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: background-color 120ms var(--ccode-motion-ease);
+}
+.ccode-nav-island-announce:hover {
+  background: var(--color-hover, var(--color-strip));
+  color: var(--color-l1);
+}
+.ccode-nav-island-announce-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: #3fb950;
+}
+.ccode-nav-island-announce-failed .ccode-nav-island-announce-dot {
+  background: #f85149;
+}
+
+/* ── 岛展开时，标题栏两侧的上下文让位 ───────────────────────────────────────
+   岛居中在 z-1，左组（项目上下文、"N 运行中"）在它下面会被盖住，右组 z-3 在它
+   上面会盖住岛的右端。同一件事在两侧出的是相反的毛病，靠比 z-index 大小决不出
+   胜负——所以不决胜负：岛一展开，两侧一起淡出并交出指针。
+
+   为什么是淡出而不是收窄岛：兜住左边要压到导航内容自己滚，而滚动是没有可见提示
+   的（你只会发现某个入口没了）。岛压着的时候那些按钮本来也点不到（指针事件被岛
+   截走），既然不可点就不要再以可点的样子亮着——淡出是承认这件事，不是遮掩。
+
+   visibility 参与过渡而不是直接切：opacity 到 0 的按钮仍在 Tab 序里，键盘会走进
+   一片看不见的东西里。visibility 在淡出结束后才翻，延迟取 140ms（比 120ms 略长
+   一点），保证淡完才不可达。
+
+   延迟只写在展开态那条上——那条管的是「变不可见」这个方向。基态是「可见」，
+   它的 visibility 过渡必须零延迟：否则从展开收回时，透明度和可见性一起被推迟
+   140ms，淡入变成原地藏 140ms 再整块蹦出来，正是要修的那个闪。 */
+.ccode-titlebar-side {
+  transition:
+    opacity 120ms var(--ccode-motion-ease),
+    visibility 0s linear;
+}
+.ccode-titlebar[data-island="expanded"] .ccode-titlebar-side {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 120ms var(--ccode-motion-ease),
+    visibility 0s linear 140ms;
+}
+
+/* 首启提示：挂在标题栏下沿一句说明，首次真正展开过或 3.2 秒后消失。
+   岛已收进栏内，提示不能再按岛底边定位（那会盖住栏里的岛），改按栏高往下让 6px。
+   pointer-events: none：它只是句话，别挡住下面内容的点击。 */
+.ccode-nav-island-hint {
+  position: fixed;
+  top: calc(var(--ccode-titlebar-h) + 6px);
+  left: 50%;
+  z-index: 39;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--ccode-radius-control);
+  padding: 6px 10px;
+  background: var(--color-raised);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05);
+  color: var(--color-l3);
+  font-size: 11px;
+  pointer-events: none;
+  animation: ccode-fade 120ms var(--ccode-motion-ease);
+}
+
+/* Linux 没有系统材质可透，岛上的玻璃感会退化成"深色板贴浅色条"，
+   这里改成与标题栏同底、去掉玻璃，只留一颗安静的胶囊。 */
+[data-platform="linux"] .ccode-nav-island {
+  background: var(--color-rail);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-color: var(--color-hairline);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .ccode-nav-island {
+    background: var(--color-raised);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+.ccode-nav-island::-webkit-scrollbar {
   display: none;
 }
 
 .ccode-top-nav-item {
   display: inline-flex;
-  min-height: 28px;
+  /* 与 --ccode-island-row 同高：嵌进标题栏后行只有 22px，
+     按钮再是 28px 会把岛撑出栏外（原先 28px 是岛悬在内容的时代留下的）。 */
+  min-height: 22px;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   border-radius: 999px;
-  padding: 0 9px;
+  padding: 0 7px;
   color: var(--color-l2);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
-  line-height: 18px;
+  line-height: 16px;
   white-space: nowrap;
   text-rendering: optimizeLegibility;
   transition:
@@ -767,42 +1152,29 @@ body {
 
 .ccode-top-nav-separator {
   width: 1px;
-  height: 16px;
+  /* 行 22px，分隔线留 12px 才不像顶到边的竖杠 */
+  height: 12px;
   flex: 0 0 auto;
   background: var(--color-hairline);
 }
 
 .ccode-top-nav-badge {
-  min-width: 15px;
-  height: 15px;
+  min-width: 14px;
+  height: 14px;
   padding: 0 4px;
   border-radius: 999px;
   background: var(--color-cta-pill);
   color: var(--color-cta-pill-text);
   font-size: 10px;
-  line-height: 15px;
+  line-height: 14px;
   text-align: center;
 }
 
-.ccode-nav-capsule-hint {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  white-space: nowrap;
-  border: 1px solid var(--color-hairline);
-  border-radius: var(--ccode-radius-control);
-  padding: 6px 10px;
-  background: var(--color-raised);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05);
-  color: var(--color-l3);
-  font-size: 11px;
-  animation: ccode-fade 120ms var(--ccode-motion-ease);
-}
-
+/* Tab 从岛尾绕回岛头的落点：贴着标题栏下沿，看不见但可聚焦。
+   top 跟栏高走，不再写死 40px——换了根字号或栏高，它不会掉到别处。 */
 .ccode-nav-capsule-sentinel {
   position: fixed;
-  top: 40px;
+  top: var(--ccode-titlebar-h);
   left: 50%;
   z-index: 44;
   width: 120px;
@@ -815,17 +1187,6 @@ body {
 .ccode-nav-capsule-sentinel:focus-visible {
   opacity: 0.08;
   outline: 1px solid var(--color-nav-accent);
-}
-
-@keyframes ccode-nav-capsule-in {
-  from {
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 /* 遮罩入场：只做透明度淡入，避免明暗瞬间切换的生硬感 */
@@ -856,8 +1217,9 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .ccode-float-surface,
   .ccode-fade,
-  .ccode-top-nav-capsule,
-  .ccode-nav-capsule-hint,
+  .ccode-nav-island,
+  .ccode-nav-island-badge,
+  .ccode-nav-island-hint,
   .ccode-app-main > div,
   .ccode-app-shell :where(.animate-spin),
   .ccode-working-spinner circle {
@@ -981,20 +1343,16 @@ body {
     width: min(460px, 88vw);
     box-shadow: -12px 0 30px rgb(0 0 0 / 0.24);
   }
-  .ccode-review-rail {
+  .ccode-review-rail.ccode-review-rail-open {
     position: absolute;
     inset: 0 0 0 auto;
     z-index: 31;
+    display: flex;
     width: min(292px, 88vw);
     min-width: min(292px, 88vw);
     overflow: auto;
     border-left-width: 1px;
     box-shadow: -12px 0 30px rgb(0 0 0 / 0.24);
-    transform: translateX(100%);
-    transition: transform 150ms var(--ccode-motion-ease);
-  }
-  .ccode-review-rail.ccode-review-rail-open {
-    transform: translateX(0);
   }
   .ccode-review-rail-trigger {
     display: inline-flex;
@@ -1022,13 +1380,14 @@ body {
 @media (max-width: 900px) {
   .ccode-sessions-rail,
   .ccode-workspaces-rail,
-  .ccode-review-rail {
+  .ccode-review-rail:not(.ccode-review-rail-open) {
     width: 0;
     min-width: 0;
     overflow: hidden;
     border-width: 0;
   }
   .ccode-review-rail.ccode-review-rail-open {
+    display: flex;
     width: min(292px, 88vw);
     min-width: min(292px, 88vw);
     overflow: auto;
@@ -1180,17 +1539,19 @@ select:focus-visible {
   border-right-width: 0.5px;
 }
 
-/* Ghostty 风格细滚动条：透明轨道 + 低对比拇指，hover 略提亮 */
+/* Ghostty 风格细滚动条：透明轨道 + 低对比拇指，hover 略提亮。
+   0.12 实测最差 1.35:1（neutral/rail），低于 WCAG 2.1 非文本 3:1；
+   0.40 在最差底（dracula/raised #3f404f）上是 3.06:1，其余深色底更高。 */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.4);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.58);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
