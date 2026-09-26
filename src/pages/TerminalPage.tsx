@@ -42,7 +42,9 @@ import {
   joinDroppedPaths,
   KIMI_CSI_U_CTRL_V,
   KIMI_CSI_U_ENTER,
+  markdownToPlain,
   pasteImageFeedback,
+  printableKeyFallback,
   ptyShiftEnterRewrite,
   shouldReportTerminalColors,
   xtermOscColorReport,
@@ -59,6 +61,7 @@ import { samePath } from "../path-utils";
 import { cwdIsCodingWorktree } from "../coding-git";
 import { loadCodingOverview } from "../components/CodingProjectView";
 import { normalizeWorkMode } from "../work-mode";
+import { exitCodeClause, exitCodeSummary, exitToneClass } from "../exit-code";
 import ChatSurface from "../components/ChatSurface";
 import { confirmDialog, alertDialog } from "../components/ConfirmDialog";
 import ContextMenu from "../components/ContextMenu";
@@ -80,9 +83,15 @@ import { defaultCommitMessage } from "../git-commit-message";
 import { skipDisconnectedOfficial } from "../resume-profile";
 import {
   findResumeHolderTab,
+  fittedPtySize,
   resolveResumeLaunch,
   shouldRelaunchResumeTab,
 } from "../terminal-resume";
+import {
+  allowSpawn,
+  launchChromeBeforeMeasure,
+  type ResizeLatch,
+} from "../terminal-geometry";
 import { toast } from "../toast";
 import { ORGANIZE_NOTES_PROMPT } from "../pipeline-presets";
 import {
@@ -109,6 +118,7 @@ import {
   Columns2,
   Eye,
   EyeOff,
+  FolderOpen,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
@@ -119,6 +129,7 @@ import {
   PanelTopOpen,
   RefreshCw,
   Search,
+  Sparkles,
   SquareTerminal,
 } from "lucide-react";
 import {
@@ -284,6 +295,8 @@ export interface FocusTabActions {
   openConversationPage: () => void;
   search: () => void;
   modify: () => void;
+  /** 运行中的「插入」在标签栏，菜单本身仍由这个终端画 */
+  toggleInsert: () => void;
   /** 往 xterm 画面写一行浅灰日志（状态栏 Commit & Push 的回显；走终端缓冲区不经 PTY，
       运行中的 TUI 会在下一帧覆盖它——只是即时反馈，不是持久日志） */
   logLine: (text: string) => void;
@@ -371,7 +384,10 @@ async function fireAttentionNotification(
   sendNotification({ title, body, actionTypeId: "ccode.attention", extra });
 }
 
-/** 七套深色 + 七套浅色主题对应的 xterm 底色/前景（取自 App.css 各主题调色板）。
+/** 七套深色 + 七套浅色主题对应的 xterm 底色/前景。
+ *  深色行与 App.css 的 --color-editor-bg/--color-editor-fg 逐字一致（tests/theme-tokens.test.ts 锁定）。
+ *  浅色行**刻意不等同 editor-bg**：editor-bg 是纯白 #ffffff，整屏纯白当终端发刺眼，
+ *  故各主题取自己色相的近白（暖纸 / 冷灰 / 淡紫，见 16c456b 的调校），不一概用 #fff。
  *  ANSI 16 色 + 光标 + 选区由调色板预设提供，并按主题亮暗自动取深/浅套
  *  （见 terminal-palettes.ts 的 resolvePaletteId）。 */
 const XTERM_BG_FG: Record<string, { background: string; foreground: string }> =
@@ -430,6 +446,7 @@ const TerminalView = memo(function TerminalView({
   layoutKey,
   gitTotals,
   termBg,
+  statusBarOn = true,
   tabId,
   initialCwd,
   skipSeed,
@@ -479,6 +496,8 @@ const TerminalView = memo(function TerminalView({
   gitTotals?: { add: number; del: number } | null;
   /** 终端画面底色（与 xterm 主题同源）：画布区涂它，和状态栏拼成一张同色圆角卡 */
   termBg?: string;
+  /** 底部状态栏开着：画面只圆上沿，下沿圆角由状态栏补。关掉时画面自己四角都圆。 */
+  statusBarOn?: boolean;
   /** 本标签 id（liveSessions 登记用） */
   tabId: string;
   /** 不继承「上次启动」记录（兜底空标签） */
@@ -785,6 +804,8 @@ const TerminalView = memo(function TerminalView({
   const [running, setRunning] = useState(false); // agent 正在运行
   const [shellActive, setShellActive] = useState(false); // 当前接的是 shell
   const [exited, setExited] = useState(false);
+  /** 最后一次子进程退出的码；后端 pty-exit 事件的 payload。null＝从未退出过。 */
+  const [exitCode, setExitCode] = useState<number | null>(null);
   /** agent 启动成功时刻（状态栏运行时长；shell/未启动为 null） */
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -799,6 +820,12 @@ const TerminalView = memo(function TerminalView({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // openpty 之后的尺寸锁。unset 不是「可以改行列」。
+  // measured / frozen 时，attach 和防抖 onResize 都不通知进程。
+  const resizeLatchRef = useRef<ResizeLatch>({ kind: "unset" });
+  const barExpandedRef = useRef(!restored);
+  const advancedLaunchOpenRef = useRef(!!presetPrompt);
+  barExpandedRef.current = barExpanded;
   // 组件卸载标记：attach/onPtyExit 的 await 途中关标签时，回落 shell 不得再碰已 dispose 的 xterm
   const mountedRef = useRef(true);
   const searchRef = useRef<SearchAddon | null>(null);
@@ -809,6 +836,10 @@ const TerminalView = memo(function TerminalView({
   // —— 输出搜索（SearchAddon）：搜索条只作用于本标签的 xterm 实例 ——
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  // 备用屏（全屏 TUI）没有回滚区：查找范围塌缩成当前一屏，↑↓ 只在屏幕内打转。
+  // 搜索条据此出提示，免得看起来像查找坏了。由 buffer.onBufferChange 驱动，
+  // 进出全屏程序时提示跟着出现/消失。
+  const [altBufferActive, setAltBufferActive] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [terminalActionMenu, setTerminalActionMenu] = useState<{
     x: number;
@@ -818,6 +849,12 @@ const TerminalView = memo(function TerminalView({
   const [termCtxMenu, setTermCtxMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
+  const [termPick, setTermPick] = useState<{
+    text: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [termPickView, setTermPickView] = useState<string | null>(null);
   // 粘贴图片/拖入文件后的瞬态轻反馈（3s 自动消，重贴重置计时）
   const [inputNote, setInputNote] = useState<string | null>(null);
   const inputNoteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -862,28 +899,28 @@ const TerminalView = memo(function TerminalView({
     }
   }
 
-  /** 右键「粘贴」：先试 navigator.clipboard.read() 找图片条目（Chromium 支持）；
-      不支持/无图回落 readText 纯文本写 PTY（多行由 Rust 端自动 bracketed paste 包裹） */
+  /** 右键「粘贴」。菜单点击拿不到网页剪贴板权限，文字走终端输入框的 paste。 */
   async function pasteFromClipboard() {
-    try {
-      const items = await navigator.clipboard.read();
-      for (const item of items) {
-        const imgType = item.types.find((t) => t.startsWith("image/"));
-        if (imgType) {
-          const blob = await item.getType(imgType);
-          await pasteImageFile(new File([blob], "clipboard", { type: imgType }));
-          return;
-        }
+    const area = termRef.current?.textarea;
+    if (area) {
+      area.focus();
+      try {
+        if (document.execCommand("paste")) return;
+      } catch {
+        /* 下面再试异步读取 */
       }
-    } catch {
-      /* 当前 webview 不支持 read() 或权限被拒：回落文本 */
     }
     try {
       const text = await navigator.clipboard.readText();
       if (!text) return;
       const id = ptyIdRef.current;
       if (id) {
-        writeInteractivePty(id, text);
+        if (text.includes("\n")) {
+          await invoke("pty_write", { ptyId: id, data: text });
+          flashInputNote("已粘贴");
+        } else {
+          writeInteractivePty(id, text);
+        }
       }
     } catch {
       flashInputNote("无法读取剪贴板");
@@ -930,9 +967,13 @@ const TerminalView = memo(function TerminalView({
     }
   }, [visible]);
 
-  // 搜索条打开时聚焦输入框并选中已有文本
+  // 搜索条打开时聚焦输入框并选中已有文本，同时按当前缓冲区类型定一次提示。
+  // 订阅只在「切换」时触发：若打开搜索条时已经身处全屏程序里（备屏早已激活），
+  // 光靠订阅会一直保持 false，提示就不出现。
   useEffect(() => {
-    if (searchOpen) searchInputRef.current?.select();
+    if (!searchOpen) return;
+    searchInputRef.current?.select();
+    setAltBufferActive(termRef.current?.buffer.active.type === "alternate");
   }, [searchOpen]);
 
   // Cmd/Ctrl+F 呼出搜索条：只挂当前可见且活跃的 pane，保证只作用于活跃终端。
@@ -1066,6 +1107,8 @@ const TerminalView = memo(function TerminalView({
   // 高级启动项默认收起：主栏回答「用谁、用哪个模型、在哪运行」；
   // 首条指令收进高级选项，技能/MCP 保留为运行时常驻入口。
   const [advancedLaunchOpen, setAdvancedLaunchOpen] = useState(!!presetPrompt);
+  advancedLaunchOpenRef.current = advancedLaunchOpen;
+  const [launchInfoOpen, setLaunchInfoOpen] = useState(false);
   // 向上弹出菜单的锚点与动态限高：固定 224px 在锚点上方空间不足时会顶出屏幕
   const insertAnchor = useRef<HTMLSpanElement>(null);
   const [insertMenuMaxH, setInsertMenuMaxH] = useState(224);
@@ -1278,6 +1321,8 @@ const TerminalView = memo(function TerminalView({
 
   // 空态引导卡可见性（画布中央卡片 + 启动栏主按钮降级 + ⌘↵ 快捷键共用同一条件）
   const welcomeVisible = !shellOnly && !running && !shellActive;
+  // 退出码白话（后端 pty-exit 的 payload 已接住）：状态行与紧凑行共用同一份解释。
+  const exitSummary = exitCode === null ? null : exitCodeSummary(exitCode);
   // 启动栏第二行（状态提示行）有内容才渲染——只有 ⋯ 时整行像悬空碎片（v3.92 修）
   const showBarMeta = !!(
     error ||
@@ -1493,6 +1538,12 @@ const TerminalView = memo(function TerminalView({
       minimumContrastRatio: 4.5,
       // Ink 类 TUI（Gemini CLI）整片高频重绘时，平滑滚动动画会叠加成闪烁——关闭
       smoothScrollDuration: 0,
+      // 鼠标上报逃生口：claude code / grok 这类全屏 TUI 会开鼠标上报（mode 1000/1002/1006）
+      // 接管拖拽，xterm 便不再产生本地选择，getSelection() 恒为空 → ⌘C 无内容可复制。
+      // xterm 的 shouldForceSelection 在 macOS 上要求 altKey && 本开关（默认 false，
+      // 即 Option+拖拽也失效），Windows/Linux 走 shiftKey 本就能强选。
+      // 打开后 Option+拖拽可在任何开鼠标上报的 TUI 里正常选文本。
+      macOptionClickForcesSelection: true,
       lineHeight: 1.2,
       letterSpacing: 0,
       cursorStyle: "bar",
@@ -1518,6 +1569,21 @@ const TerminalView = memo(function TerminalView({
       // 容器隐藏时 fit 会算不出尺寸，可见时再 fit
     }
     termRef.current = term;
+    const onPickPointerUp = (event: MouseEvent) => {
+      const text = term.getSelection().trim();
+      const host = containerRef.current;
+      if (!text || !host) return;
+      const box = host.getBoundingClientRect();
+      setTermPick({
+        text,
+        x: Math.max(8, Math.min(event.clientX - box.left, box.width - 120)),
+        y: Math.max(8, Math.min(event.clientY - box.top + 8, box.height - 36)),
+      });
+    };
+    const onPickCleared = term.onSelectionChange(() => {
+      if (!term.getSelection().trim()) setTermPick(null);
+    });
+    containerRef.current?.addEventListener("mouseup", onPickPointerUp);
     mountedRef.current = true;
     fitRef.current = fit;
     searchRef.current = search;
@@ -1525,6 +1591,10 @@ const TerminalView = memo(function TerminalView({
     // Codex Shift+Enter 改写后，xterm 仍可能再发 `\r`（keydown 返回 false 未 cancel）。
     // 空输入时 Codex 不提交，看起来像换行；有内容时这记 `\r` 会直接发送。
     let swallowShiftEnterCrUntil = 0;
+    // Shift+标点已由宿主补发过一次的字符：随后 xterm 的 keypress/input 若再发同一个字，
+    // 这里吞掉，避免「?」变「??」。窗口取得短，只兜同一记按键的重复来源。
+    let swallowPrintableChar: string | null = null;
+    let swallowPrintableUntil = 0;
     // Cmd/Ctrl+F 在终端聚焦时也呼出搜索条（拦在 xterm 之前，避免 Ctrl+F 字符进 PTY）
     term.attachCustomKeyEventHandler((e) => {
       // kimi 的 TUI 开了 kitty 键盘协议（\x1b[>7u）后只认 CSI-u 形式的 Enter，
@@ -1584,14 +1654,32 @@ const TerminalView = memo(function TerminalView({
       // 只拦 macOS：Windows 各家贴图用 Alt+V（本就透传为 ESC+v），
       // Windows/Linux 的 Ctrl+V 保留文本粘贴语义（走下方 paste 事件路径）。
       if (
+        e.type === "keydown" &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === "c"
+      ) {
+        const selected = term.getSelection();
+        if (selected) {
+          e.preventDefault();
+          void navigator.clipboard.writeText(selected).catch(() => {});
+          return false;
+        }
+      }
+      if (
         IS_MAC &&
         e.type === "keydown" &&
-        e.ctrlKey &&
-        !e.metaKey &&
+        (e.ctrlKey || e.metaKey) &&
         !e.altKey &&
         !e.shiftKey &&
         e.key.toLowerCase() === "v"
       ) {
+        // ⌘V 先看剪贴板里有没有图片。有图就落成路径；没有再当普通文本粘贴。
+        if (e.metaKey) {
+          void pasteFromClipboard();
+          return false;
+        }
         const id = ptyIdRef.current;
         if (id) {
           // kimi 开了 kitty 键盘协议后只认 CSI-u（v=118 + ctrl 修饰位 5），
@@ -1611,6 +1699,38 @@ const TerminalView = memo(function TerminalView({
       ) {
         launchNowRef.current();
         return false;
+      }
+      // Shift+标点丢字：xterm 只在 keyCode>=48 时把单字符送进 PTY，WKWebView 上 Shift+`/`
+      // 可能报 keyCode 0（这一下整个丢掉），中文输入法组词期常报 229。keyCode 0 当场补；
+      // 229 等一拍，隐藏输入框没多出字才补（多出字说明组词已上屏，xterm 自己发过，再补就重了）。
+      if (e.type === "keydown") {
+        const fallback = printableKeyFallback(e);
+        if (fallback) {
+          const id = ptyIdRef.current;
+          if (fallback.action === "send") {
+            if (id) {
+              invoke("pty_write", { ptyId: id, data: fallback.data }).catch((err) =>
+                setError(String(err)),
+              );
+            }
+            swallowPrintableChar = fallback.data;
+            swallowPrintableUntil = performance.now() + 120;
+            return false;
+          }
+          const { data } = fallback;
+          const before = term.textarea?.value.length ?? 0;
+          setTimeout(() => {
+            // 字符数变多说明组词已上屏，xterm 自己会发这一下，不再补
+            if ((term.textarea?.value.length ?? 0) > before) return;
+            const pid = ptyIdRef.current;
+            if (pid) {
+              invoke("pty_write", { ptyId: pid, data }).catch((err) =>
+                setError(String(err)),
+              );
+            }
+          }, 0);
+          return true; // 不 return false：组词流程要继续走
+        }
       }
       return true;
     });
@@ -1712,9 +1832,8 @@ const TerminalView = memo(function TerminalView({
     });
     if (containerRef.current) resizeObs.observe(containerRef.current);
 
-    // codex 的 resize reflow 已无开关（上游恒开）：每次 SIGWINCH 都把整个 transcript
-    // 按新宽度重放一遍，旧帧留在 scrollback——拖分屏/拖窗口的连续 resize 会留下一串
-    // 重复帧。trailing 防抖把一串尺寸合并成最后一次，重放次数随之降到每次拖拽一次
+    // 画面稳定后再告诉进程一次。继续会话时高度会从启动栏展开变成收起，
+    // 不通知的话 Claude 按矮的画完，又在变高后的底边自己补一行。
     let resizeCoalesceTimer: ReturnType<typeof setTimeout> | null = null;
     let pendingResize: { cols: number; rows: number } | null = null;
     const subs = [
@@ -1726,6 +1845,18 @@ const TerminalView = memo(function TerminalView({
         ) {
           swallowShiftEnterCrUntil = 0;
           return;
+        }
+        // Shift+标点已由宿主补发过一次：xterm 随后若仍把同一个字发出来，吞掉这一记，
+        // 否则「?」会变「??」。只比对补发过的那个字符，且限在同一记按键的时间窗内。
+        if (
+          swallowPrintableChar !== null &&
+          performance.now() < swallowPrintableUntil
+        ) {
+          if (data === swallowPrintableChar) {
+            swallowPrintableChar = null;
+            return;
+          }
+          swallowPrintableChar = null;
         }
         markInteraction();
         if (ptyInputLooksLikeSubmit(data, KIMI_CSI_U_ENTER)) armPtyWorking();
@@ -1740,14 +1871,20 @@ const TerminalView = memo(function TerminalView({
           const size = pendingResize;
           pendingResize = null;
           const id = ptyIdRef.current;
-          if (id && size) {
-            invoke("pty_resize", {
-              ptyId: id,
-              cols: size.cols,
-              rows: size.rows,
-            }).catch(() => {});
-          }
-        }, 150);
+          if (!id || !size) return;
+          invoke("pty_resize", {
+            ptyId: id,
+            cols: size.cols,
+            rows: size.rows,
+          }).catch(() => {});
+        }, 400);
+      }),
+      // 备屏进出（进/出 claude code、vim 这类全屏程序）时同步搜索条提示。
+      // 只在类型真的翻转时 setState：xterm 开备屏时会连发数次事件，直接设值会让
+      // 这个体量很大的组件白白重渲染好几轮。
+      term.buffer.onBufferChange((buf) => {
+        const alt = buf.type === "alternate";
+        setAltBufferActive((prev) => (prev === alt ? prev : alt));
       }),
     ];
 
@@ -1769,6 +1906,8 @@ const TerminalView = memo(function TerminalView({
       termTextarea?.removeEventListener("blur", onTermFocusChange);
       void unlistenDrop.then((f) => f());
       subs.forEach((s) => s.dispose());
+      onPickCleared.dispose();
+      container.removeEventListener("mouseup", onPickPointerUp);
       stopLinkTimer();
       stopSessionWatcher();
       stopPendingReplyPolling();
@@ -1800,8 +1939,8 @@ const TerminalView = memo(function TerminalView({
     termRef.current?.write(welcomeVisible ? "\x1b[?25l" : "\x1b[?25h");
   }, [welcomeVisible, everVisible]);
 
-  // 标签从隐藏切回可见 / 右侧工作台开关改变可用宽度时重新 fit（display:none 下尺寸为 0）；
-  // barExpanded 切换（启动时启动栏塌缩为收缩态）同样改变终端区高度，不补 fit 会下方留空
+  // 布局变化只重排画面。进程起来之后不再通知它改行列：
+  // 从综述流程继续时，多出来的高度会让 Claude 把状态行再画一份。
   useEffect(() => {
     requestAnimationFrame(() => {
       try {
@@ -1870,20 +2009,35 @@ const TerminalView = memo(function TerminalView({
         if (!(await checkWorkingDirectory(launchCwd))) return;
         autoStartedRef.current = true;
         if (launchCwd !== cwd) setCwd(launchCwd);
+        const size = fittedPtySize(fitRef.current, termRef.current);
+        if (!allowSpawn(size)) {
+          setError("这次没能按画面大小启动");
+          return;
+        }
+        resizeLatchRef.current = {
+          kind: "measured",
+          cols: size.cols,
+          rows: size.rows,
+        };
         const ptyId = customRuntimeId
           ? (await invoke<{ ptyId: string }>("pty_spawn_custom", {
               runtimeId: customRuntimeId,
               cwd: launchCwd,
               runId: runId ?? initialRunId,
+              cols: size.cols,
+              rows: size.rows,
             })).ptyId
           : await invoke<string>("shell_spawn", {
               cwd,
               extraEnv: initialExtraEnv ?? null,
               purpose: "script",
               runId: runId ?? initialRunId ?? null,
+              cols: size.cols,
+              rows: size.rows,
             });
         await attach(ptyId, customRuntimeId ? "agent" : "shell", { reset: true });
         setExited(false);
+        setExitCode(null);
         setShellActive(!customRuntimeId);
         // 与「启动后自动收缩」一致：脚本已接管终端，启动栏收成一行
         setBarExpanded(false);
@@ -1944,7 +2098,8 @@ const TerminalView = memo(function TerminalView({
   useEffect(() => {
     if (!resumeKick || resumeKick === lastResumeKickRef.current) return;
     // Agent 还在跑：先不消费这次 kick，等它停了再拉起。
-    if (!visible || running) return;
+    // 标签还藏着时不预热：fit 会落到 0×0，再拉宽就把窄画面写进滚动记录。
+    if (!visible || !everVisible || running) return;
     lastResumeKickRef.current = resumeKick;
     void launch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1992,8 +2147,8 @@ const TerminalView = memo(function TerminalView({
           });
         }
       }),
-      await listen<number>(`pty-exit-${ptyId}`, () => {
-        void onPtyExit(ptyId);
+      await listen<number>(`pty-exit-${ptyId}`, (e) => {
+        void onPtyExit(ptyId, e.payload);
       }),
     ];
     // 两个 await listen 期间卸载：退掉刚注册的监听并杀掉 PTY，避免向已 dispose 的 term 写入
@@ -2036,16 +2191,19 @@ const TerminalView = memo(function TerminalView({
     try {
       fitRef.current?.fit();
     } catch {}
-    await invoke("pty_resize", {
-      ptyId,
-      cols: term.cols,
-      rows: term.rows,
-    }).catch(() => {});
+    const fitted = fittedPtySize(fitRef.current, term);
+    if (fitted) {
+      await invoke("pty_resize", {
+        ptyId,
+        cols: fitted.cols,
+        rows: fitted.rows,
+      }).catch(() => {});
+    }
     // 退出回落等被动 attach 不抢焦点（分屏下用户在另一个 pane 打字）
     if (opts?.focus !== false) term.focus();
   }
 
-  async function onPtyExit(exitedId: string) {
+  async function onPtyExit(exitedId: string, code: number) {
     // 已被 launch/cleanup 切换到新 PTY，忽略这个过期的退出事件
     if (ptyIdRef.current !== exitedId) return;
     const kind = ptyKindRef.current;
@@ -2053,6 +2211,7 @@ const TerminalView = memo(function TerminalView({
     ptyKindRef.current = null;
     setActivePtyId(null);
     setRunning(false);
+    setExitCode(code);
     ptyWorkingArmedRef.current = false;
     hadPtyWorkingOutputRef.current = false;
     setAttention(null); // agent 退出：清除注意力标记
@@ -2060,14 +2219,30 @@ const TerminalView = memo(function TerminalView({
       // 记录可恢复的会话 id（一键恢复按钮用）
       lastResumeRef.current = linkCtxRef.current?.sessionId ?? null;
       // agent 退出（含手动停止）→ 同一终端自动回落到登录 shell
+      const clause = exitCodeClause(code);
       termRef.current?.write(
-        "\r\n\x1b[90m── agent 已结束（会话已保存，可一键恢复）── 当前为 shell ──\x1b[0m\r\n",
+        `\r\n\x1b[90m── agent 已结束（会话已保存，可一键恢复）── 当前为 shell ──${
+          clause ? ` ${clause} ──` : ""
+        }\x1b[0m\r\n`,
       );
       try {
         // 用 cwdRef 取最新目录：运行期间 pty_get_cwd 轮询更新的 cwd 不进本闭包
+        const size = fittedPtySize(fitRef.current, termRef.current);
+        if (!allowSpawn(size)) {
+          setError("这次没能按画面大小启动");
+          setExited(true);
+          return;
+        }
+        resizeLatchRef.current = {
+          kind: "measured",
+          cols: size.cols,
+          rows: size.rows,
+        };
         const id = await invoke<string>("shell_spawn", {
           cwd: cwdRef.current,
           extraEnv: initialExtraEnv ?? null,
+          cols: size.cols,
+          rows: size.rows,
         });
         // 等待 shell_spawn 期间用户可能已重新启动：已有新 PTY 时杀掉这个回落 shell，不抢监听
         if (ptyIdRef.current !== null) {
@@ -2540,6 +2715,29 @@ const TerminalView = memo(function TerminalView({
     setConfirmDetail(null);
   }
 
+  /** 布局提交之后再读格子。高度没变时当前帧就能量到；变了就等下一次尺寸。 */
+  function waitForTerminalGrid(): Promise<{ cols: number; rows: number } | null> {
+    const now = fittedPtySize(fitRef.current, termRef.current);
+    const host = containerRef.current;
+    if (!host) return Promise.resolve(now);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (size: { cols: number; rows: number } | null) => {
+        if (settled) return;
+        settled = true;
+        observer.disconnect();
+        window.clearTimeout(timer);
+        resolve(size);
+      };
+      const observer = new ResizeObserver(() => {
+        finish(fittedPtySize(fitRef.current, termRef.current));
+      });
+      observer.observe(host);
+      const timer = window.setTimeout(() => finish(now), 200);
+      if (now) finish(now);
+    });
+  }
+
   async function launch(
     resumeId?: string,
     options?: { prompt?: string; readonly?: boolean },
@@ -2555,6 +2753,14 @@ const TerminalView = memo(function TerminalView({
           setBarExpanded(true);
           return null;
         }
+        const probeRun = (runId ?? initialRunId ?? "").trim();
+        if (
+          probeRun &&
+          (await invoke<string | null>("pty_id_for_run", { runId: probeRun }))
+        ) {
+          setError("已接回正在跑的进程，画面大小先不动");
+          return null;
+        }
         await cleanupPty();
         if (launchCwd !== cwd) setCwd(launchCwd);
         const fresh = await invoke<{ id: string }>("run_open_custom", {
@@ -2563,13 +2769,30 @@ const TerminalView = memo(function TerminalView({
           runId: null,
           customRuntimeId,
         });
+        const size = fittedPtySize(fitRef.current, termRef.current);
+        if (!allowSpawn(size)) {
+          setError("这次没能按画面大小启动");
+          return null;
+        }
+        resizeLatchRef.current = {
+          kind: "measured",
+          cols: size.cols,
+          rows: size.rows,
+        };
         const res = await invoke<{ ptyId: string; runId: string | null }>(
           "pty_spawn_custom",
-          { runtimeId: customRuntimeId, cwd: launchCwd, runId: fresh.id },
+          {
+            runtimeId: customRuntimeId,
+            cwd: launchCwd,
+            runId: fresh.id,
+            cols: size.cols,
+            rows: size.rows,
+          },
         );
         setRunId(res.runId ?? fresh.id);
         await attach(res.ptyId, "agent", { reset: true });
         setExited(false);
+        setExitCode(null);
         setShellActive(false);
         setBarExpanded(false);
         return { ptyId: res.ptyId, promptDropped: false };
@@ -2596,6 +2819,54 @@ const TerminalView = memo(function TerminalView({
       setBarExpanded(true);
       return null;
     }
+    if (!visible || !everVisible) {
+      setError("这次没能按画面大小启动");
+      return null;
+    }
+    const launchPrompt = (options?.prompt ?? promptText).trim();
+    const isResume = Boolean(resumeId ?? resumeSessionId);
+    const chrome = launchChromeBeforeMeasure({
+      resume: isResume,
+      prompt: launchPrompt,
+      promptInject: agentId === "kimi" ? "unsupported" : "positional",
+    });
+    const chromeSnapshot = {
+      bar: barExpandedRef.current,
+      advanced: advancedLaunchOpenRef.current,
+    };
+    const probeRun = (runId ?? initialRunId ?? "").trim();
+    let existingPty: string | null = null;
+    if (probeRun) {
+      existingPty = await invoke<string | null>("pty_id_for_run", {
+        runId: probeRun,
+      });
+    }
+    if (existingPty) {
+      resizeLatchRef.current = { kind: "frozen" };
+      setLinkState("detecting");
+      setSyncState("detecting");
+      linkStartedAtRef.current = Date.now();
+      startLinkPolling(500);
+      await attach(existingPty, "agent", { reset: false });
+      setExited(false);
+      setExitCode(null);
+      setShellActive(false);
+      setRunning(true);
+      setStartedAt((prev) => prev ?? Date.now());
+      setError("已接回正在跑的进程，画面大小先不动");
+      return { ptyId: existingPty, promptDropped: false };
+    }
+    if (chrome.kind === "collapse") {
+      setAdvancedLaunchOpen(false);
+      setBarExpanded(false);
+    }
+    const size = await waitForTerminalGrid();
+    if (!allowSpawn(size)) {
+      setBarExpanded(chromeSnapshot.bar);
+      setAdvancedLaunchOpen(chromeSnapshot.advanced);
+      setError("这次没能按画面大小启动");
+      return null;
+    }
     await cleanupPty();
     setLinkState("detecting");
     setSyncState("detecting");
@@ -2618,12 +2889,18 @@ const TerminalView = memo(function TerminalView({
     }
     interactiveLaunchLocks.add(lockKey);
     try {
+      resizeLatchRef.current = {
+        kind: "measured",
+        cols: size.cols,
+        rows: size.rows,
+      };
       const res = await invoke<{
         ptyId: string;
         sessionHint: string | null;
         promptDropped: boolean;
         model: string | null;
         runId: string | null;
+        adopted?: boolean;
       }>("pty_spawn", {
         agentId,
         profileId,
@@ -2657,7 +2934,10 @@ const TerminalView = memo(function TerminalView({
         reuseKey: reuseKey ?? null,
         runId: runId ?? initialRunId ?? null,
         taskId: taskId ?? null,
+        cols: size.cols,
+        rows: size.rows,
       });
+      if (res.adopted) resizeLatchRef.current = { kind: "frozen" };
       if (res.runId) setRunId(res.runId);
       // 后端兜底模型回传（前端留空 = profile 首个模型）：同步进标签状态，
       // 否则状态栏/对话头部在兜底路径下没有模型可显示；lastLaunch/模型历史也记生效值
@@ -2709,7 +2989,7 @@ const TerminalView = memo(function TerminalView({
       // 首次关联阶段使用短间隔，避免聊天层长时间停留在“识别中”；关联成功后
       // lockLink 会切回较宽松的兜底轮询，正常刷新由 session watcher 驱动。
       startLinkPolling(500);
-      await attach(res.ptyId, "agent", { reset: true });
+      await attach(res.ptyId, "agent", { reset: !res.adopted });
       const launchedPrompt = (options?.prompt ?? promptText).trim();
       const armWorking = shouldArmWorkingOnLaunch({
         prompt: launchedPrompt,
@@ -2719,17 +2999,18 @@ const TerminalView = memo(function TerminalView({
         armPtyWorking();
       }
       setExited(false);
+      setExitCode(null);
       setShellActive(false);
       setRunning(true);
       setStartedAt(Date.now());
-      if (res.promptDropped) {
+      if (res.adopted) {
+        setError("已接回正在跑的进程，画面大小先不动");
+      } else if (res.promptDropped && !isResume) {
         disarmPtyWorking();
         setPendingReply(false);
-        // 该 CLI 无交互注入参数（目前仅 kimi）：保留启动栏展开与指令文本，
-        // 并自动复制到剪贴板（运行中输入框 disabled 不可选中），用户在终端里粘贴发送
-        setAdvancedLaunchOpen(true);
+        // 栏高保持测量时的样子。指令留在错误行，收缩行因 error 会显示出来。
         void navigator.clipboard
-          .writeText((options?.prompt ?? promptText).trim())
+          .writeText(launchPrompt)
           .catch(() => {});
         setError("该 CLI 不支持启动注入：指令已复制，请在终端里粘贴发送");
       } else {
@@ -2747,6 +3028,10 @@ const TerminalView = memo(function TerminalView({
       if (resumeSessionId) onConsumeResume?.(tabId);
       return { ptyId: res.ptyId, promptDropped: res.promptDropped };
     } catch (e) {
+      if (resizeLatchRef.current.kind !== "measured" && resizeLatchRef.current.kind !== "frozen") {
+        setBarExpanded(chromeSnapshot.bar);
+        setAdvancedLaunchOpen(chromeSnapshot.advanced);
+      }
       invoke("release_session_claim", { claimId: tabId }).catch(() => {});
       stopLinkTimer();
       setLinkState("idle");
@@ -2769,12 +3054,25 @@ const TerminalView = memo(function TerminalView({
     }
     await cleanupPty();
     try {
+      const size = fittedPtySize(fitRef.current, termRef.current);
+      if (!allowSpawn(size)) {
+        setError("这次没能按画面大小启动");
+        return;
+      }
+      resizeLatchRef.current = {
+        kind: "measured",
+        cols: size.cols,
+        rows: size.rows,
+      };
       const ptyId = await invoke<string>("shell_spawn", {
         cwd,
         extraEnv: initialExtraEnv ?? null,
+        cols: size.cols,
+        rows: size.rows,
       });
       await attach(ptyId, "shell", { reset: true });
       setExited(false);
+      setExitCode(null);
       setShellActive(true);
       setBarExpanded(false);
     } catch (e) {
@@ -2927,6 +3225,7 @@ const TerminalView = memo(function TerminalView({
     openConversationPage: () => {},
     search: () => {},
     modify: () => {},
+    toggleInsert: () => {},
     logLine: () => {},
     setCwd: () => {},
     chooseCwd: () => {},
@@ -2945,7 +3244,12 @@ const TerminalView = memo(function TerminalView({
     },
     openConversationPage,
     search: () => setSearchOpen(true),
+    toggleInsert: () => setInsertMenuOpen((open) => !open),
     modify: () => {
+      if (ptyIdRef.current) {
+        setLaunchInfoOpen(true);
+        return;
+      }
       setBarExpanded(true);
       setAdvancedLaunchOpen(true);
     },
@@ -2982,6 +3286,7 @@ const TerminalView = memo(function TerminalView({
         actionsRef.current.openConversationPage(),
       search: () => actionsRef.current.search(),
       modify: () => actionsRef.current.modify(),
+      toggleInsert: () => actionsRef.current.toggleInsert(),
       logLine: (t) => actionsRef.current.logLine(t),
       setCwd: (c) => actionsRef.current.setCwd(c),
       chooseCwd: () => actionsRef.current.chooseCwd(),
@@ -3075,8 +3380,6 @@ const TerminalView = memo(function TerminalView({
         void navigator.clipboard.writeText(ctxSelection).catch(() => {}),
     },
     { label: "粘贴", onSelect: () => void pasteFromClipboard() },
-    { label: "全选", onSelect: () => termRef.current?.selectAll() },
-    { label: "清屏", onSelect: () => termRef.current?.clear() },
     { label: "查找输出", onSelect: () => setSearchOpen(true) },
   ];
 
@@ -3087,8 +3390,66 @@ const TerminalView = memo(function TerminalView({
   const compactBarUrgent = !!error || !!cwdIssue;
 
   return (
-    <div className={`flex h-full flex-col ${embedInPeek ? "" : "px-2 pt-2"}`}>
-      {embedInPeek ? null : barExpanded ? (
+    <div className={`relative flex h-full flex-col ${embedInPeek ? "" : "px-2 pt-2"}`}>
+      {launchInfoOpen && ptyIdRef.current && (
+        <>
+          <button
+            type="button"
+            aria-label="关闭本次启动"
+            className="fixed inset-0 z-40"
+            onClick={() => setLaunchInfoOpen(false)}
+          />
+          <div className="absolute left-3 top-10 z-50 w-72 rounded-md border border-field bg-raised p-3 text-xs text-l2 shadow-none">
+            <p className="text-l1">这次进程不会改。要换，先停止。</p>
+            <p className="mt-2">
+              {agentLabel(agentId)}
+              {selectedProfile ? ` · ${selectedProfile.name}` : ""}
+              {model ? ` · ${model}` : ""}
+            </p>
+            <p className="mt-1 truncate text-l3" title={cwd}>
+              {cwd}
+            </p>
+          </div>
+        </>
+      )}
+      {activePtyId && insertMenuOpen && (
+        <div className="fixed right-3 top-12 z-50">
+          <button
+            type="button"
+            aria-label="关闭插入菜单"
+            className="fixed inset-0 z-40"
+            onClick={() => setInsertMenuOpen(false)}
+          />
+          <ul className="relative z-50 max-h-56 w-72 overflow-auto rounded-md border border-field ccode-float-surface p-1">
+            {agentSkills.map((s) => (
+              <li key={s.id}>
+                <button
+                  type="button"
+                  onClick={() => useSkill(s.name)}
+                  className="flex w-full rounded-sm px-2 py-1.5 text-left text-xs text-l1 hover:bg-hover"
+                >
+                  {s.name}
+                </button>
+              </li>
+            ))}
+            {agentMcps.map((m) => (
+              <li key={m.id}>
+                <button
+                  type="button"
+                  onClick={() => useMcp(m.name)}
+                  className="flex w-full rounded-sm px-2 py-1.5 text-left text-xs text-l1 hover:bg-hover"
+                >
+                  {m.name}
+                </button>
+              </li>
+            ))}
+            {agentSkills.length === 0 && agentMcps.length === 0 && (
+              <li className="px-2 py-1.5 text-xs text-l4">还没有可插入的技能或 MCP</li>
+            )}
+          </ul>
+        </div>
+      )}
+      {embedInPeek || activePtyId ? null : barExpanded ? (
         <>
           <div className="mb-1 flex min-w-0 flex-wrap items-start gap-x-1.5 gap-y-2">
             {/* Agent/配置/模型收进同一条分段工具条：段间留空隙各自成胶囊。
@@ -3113,7 +3474,6 @@ const TerminalView = memo(function TerminalView({
               }}
               className={`${seg} w-[clamp(7.5rem,12vw,10rem)] min-w-[7.5rem] max-w-[10rem] shrink`}
             />
-            <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
             <LaunchMenu
               label="配置"
               value={profileId}
@@ -3148,7 +3508,6 @@ const TerminalView = memo(function TerminalView({
               // 模型 combo-box：可输可选（profile 预设 + 本 agent 历史），输入即筛选，
               // 自由输入的模型启动成功后记入历史（ccode.modelHistory.<agent>），下次直接可选
               <>
-              <span aria-hidden="true" className="h-4 w-px shrink-0 bg-field" />
               <span
                 ref={modelAnchorRef}
                 className="flex w-[clamp(10rem,22vw,18rem)] min-w-[9rem] max-w-[18rem] shrink items-center"
@@ -3156,6 +3515,10 @@ const TerminalView = memo(function TerminalView({
                 <input
                   className={`${seg} min-w-0 flex-1`}
                   value={model}
+                  /* 长模型 id（deepseek-v4-flash-0731 这类）会被这格宽度截断，
+                     而输入框是横向滚动的、没有省略号，截掉的部分看不出"还有"。
+                     title 给出完整值：悬停即可读全，不用点进去按 Home/End 挪光标。 */
+                  title={model || "选择或输入本次启动使用的模型"}
                   onChange={(e) => {
                     setModel(e.target.value);
                     setModelKept(false);
@@ -3173,7 +3536,6 @@ const TerminalView = memo(function TerminalView({
                   }}
                   placeholder="模型，可输入"
                   disabled={running}
-                  title="选择或输入本次启动使用的模型"
                 />
                 <button
                   type="button"
@@ -3348,8 +3710,17 @@ const TerminalView = memo(function TerminalView({
             {shellActive && !running && (
               <span className="text-l3">shell 模式</span>
             )}
-            {exited && !running && !shellActive && (
-              <span className="text-l3">进程已退出</span>
+            {exited && !running && !shellActive && exitSummary && (
+              <span
+                className={exitToneClass(exitSummary.tone)}
+                title={
+                  exitSummary.code === null
+                    ? "结束原因未知：手动停止、进程回收或回收超时"
+                    : `退出码 ${exitSummary.code}`
+                }
+              >
+                进程{exitSummary.label}
+              </span>
             )}
             {cwdIssue && (
               <span className="truncate text-warn-text" title={cwdIssue}>
@@ -3385,7 +3756,9 @@ const TerminalView = memo(function TerminalView({
               </span>
             )}
             {shellActive && !running ? " · shell 模式" : ""}
-            {exited && !running && !shellActive ? " · 已退出" : ""}
+            {exited && !running && !shellActive
+              ? ` · ${exitSummary ? `进程${exitSummary.label}` : "已退出"}`
+              : ""}
             {restored && !customRuntimeId && !running && !shellActive ? " · 上次任务，可恢复" : ""}
             {restored && customRuntimeId && !running && !shellActive ? " · 自定义 Runtime 不支持恢复" : ""}
           </span>
@@ -3425,56 +3798,79 @@ const TerminalView = memo(function TerminalView({
           </span>
         </div>
       )}
-      {/* 输出搜索条：Cmd/Ctrl+F 或「查找」按钮呼出；只作用于本标签的 xterm */}
+      {/* 查找盖在画面上，不占终端行。打开和关闭都不改行列。 */}
       {searchOpen && (
-        <div className="mb-1 flex items-center gap-1 rounded-md bg-strip px-2 py-1">
-          <input
-            ref={searchInputRef}
-            value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value);
-              findNext(e.target.value);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                if (e.shiftKey) findPrev();
-                else findNext();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                closeSearch();
-              }
-            }}
-            placeholder="查找终端输出"
-            className="w-56 rounded-sm border border-field bg-inset px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
-          />
-          <button
-            onClick={findPrev}
-            title="上一个（Shift+Enter）"
-            className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
-          >
-            ↑
-          </button>
-          <button
-            onClick={() => findNext()}
-            title="下一个（Enter）"
-            className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
-          >
-            ↓
-          </button>
-          <button
-            onClick={closeSearch}
-            title="关闭（Esc）"
-            className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
-          >
-            ×
-          </button>
+        <div className="absolute left-3 top-2 z-30 flex flex-col items-start gap-1 rounded-md border border-field bg-strip px-2 py-1">
+          <div className="flex items-center gap-1">
+            <input
+              ref={searchInputRef}
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                findNext(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  if (e.shiftKey) findPrev();
+                  else findNext();
+                } else if (e.key === "ArrowUp") {
+                  // 单行输入框里 ↑ 本就只做「光标归位」，没有编辑语义——拿来做上一条匹配
+                  e.preventDefault();
+                  findPrev();
+                } else if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  findNext();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  closeSearch();
+                }
+              }}
+              placeholder="查找终端输出"
+              className="w-56 rounded-sm border border-field bg-inset px-2 py-1 text-sm text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            />
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={findPrev}
+              title="上一个（Shift+Enter 或 ↑）"
+              className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => findNext()}
+              title="下一个（Enter 或 ↓）"
+              className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
+            >
+              ↓
+            </button>
+            <button
+              onClick={closeSearch}
+              title="关闭（Esc）"
+              className="flex h-7 w-7 items-center justify-center rounded-sm text-sm text-l3 hover:bg-hover hover:text-l1"
+            >
+              ×
+            </button>
+          </div>
+          {/* 全屏 TUI 跑在备用屏上，没有回滚缓冲可查：不说明的话 ↑↓ 只在屏幕内
+              打转会被当成查找坏了。nowrap + 字数控制在输入行宽度内——浮条宽度由
+              最宽的子项决定，提示比输入行还宽会把整个浮条撑开 */}
+          {altBufferActive && (
+            <div className="whitespace-nowrap text-xs text-l4">
+              全屏程序内没有可回看的输出，查找只在本屏生效
+            </div>
+          )}
         </div>
       )}
-      {/* 终端卡上半：涂 xterm 同源底色 + 上圆角，与下方状态栏（rounded-b-xl 同底色）
-          拼成一张无缝圆角卡；宿主 px-3 py-2.5 内衬从此隐入同色，不再露灰边 */}
+      {/* 有状态栏：只圆上沿，和状态栏的下圆角拼成一张卡。
+          没有状态栏：画面自己四角都圆。 */}
       <div
-        className="relative flex min-h-0 flex-1 overflow-hidden rounded-t-xl"
+        className={`relative flex min-h-0 flex-1 overflow-hidden ${
+          statusBarOn ? "rounded-t-xl" : "rounded-xl"
+        }`}
         style={{ background: termBg }}
       >
         <div
@@ -3491,6 +3887,55 @@ const TerminalView = memo(function TerminalView({
         {inputNote && (
           <div className="pointer-events-none absolute bottom-3 right-4 z-20 max-w-[80%] truncate rounded-sm border border-field ccode-float-surface px-2 py-1 text-xs text-l2">
             {inputNote}
+          </div>
+        )}
+        {termPick && (
+          <div
+            className="absolute z-30 flex gap-1 rounded-md border border-field bg-raised p-1"
+            style={{ left: termPick.x, top: termPick.y }}
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              className="rounded-sm px-2 py-1 text-xs text-l1 hover:bg-hover"
+              onClick={() => {
+                void navigator.clipboard.writeText(termPick.text).then(
+                  () => {
+                    flashInputNote("已复制");
+                    termRef.current?.clearSelection();
+                  },
+                  () => flashInputNote("复制失败"),
+                );
+              }}
+            >
+              复制
+            </button>
+            <button
+              type="button"
+              className="rounded-sm px-2 py-1 text-xs text-l1 hover:bg-hover"
+              title="去掉标题、加粗、链接这些标记，只留字"
+              onClick={() => {
+                void navigator.clipboard.writeText(markdownToPlain(termPick.text)).then(
+                  () => {
+                    flashInputNote("已复制文本");
+                    termRef.current?.clearSelection();
+                  },
+                  () => flashInputNote("复制失败"),
+                );
+              }}
+            >
+              复制文本
+            </button>
+            <button
+              type="button"
+              className="rounded-sm px-2 py-1 text-xs text-l1 hover:bg-hover"
+              onClick={() => {
+                setTermPickView(termPick.text);
+                termRef.current?.clearSelection();
+              }}
+            >
+              查看
+            </button>
           </div>
         )}
         {/* 未启动空态引导（v3.91 / v3.213）：画布中央一张卡，只回答「在这个目录运行」。
@@ -3547,9 +3992,19 @@ const TerminalView = memo(function TerminalView({
                 onClick={() => void chooseWorkingDirectory()}
                 disabled={cwdChecking}
                 title={`${cwd === "~" && homeDir ? homeDir : cwd}\n点击选择工作目录`}
-                className="max-w-full cursor-pointer truncate font-mono text-xs text-l3 hover:text-l1 hover:underline disabled:cursor-default disabled:opacity-50"
+                className="flex max-w-full cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 font-mono text-xs text-l3 hover:bg-hover hover:text-l1 disabled:cursor-default disabled:opacity-50"
               >
-                {welcomeCwdActionLabel(cwd, homeDir, !!restored, IS_WINDOWS)}
+                <FolderOpen
+                  size={13}
+                  strokeWidth={1.8}
+                  className="shrink-0 text-l4"
+                  aria-hidden="true"
+                />
+                {/* 图标 + 文字改成 inline-flex 后，省略号要落在文字这一格上：
+                    按钮自身不带 truncate（它现在还要容纳图标），给文字套一层 min-w-0。 */}
+                <span className="min-w-0 truncate">
+                  {welcomeCwdActionLabel(cwd, homeDir, !!restored, IS_WINDOWS)}
+                </span>
               </button>
               {agentProfiles.length === 0 ? (
                 /* 无配置时主按钮换成有效引导（禁用的「启动」是死按钮，v3.92 修） */
@@ -3595,6 +4050,23 @@ const TerminalView = memo(function TerminalView({
           onClose={() => setTerminalActionMenu(null)}
           items={terminalMenuItems}
         />
+      )}
+      {termPickView !== null && (
+        <div className="absolute inset-4 z-40 flex flex-col rounded-md border border-field bg-canvas">
+          <div className="flex h-8 shrink-0 items-center justify-between border-b border-hairline px-2">
+            <span className="text-xs text-l3">选中的文字</span>
+            <button
+              type="button"
+              className="rounded-sm px-2 py-1 text-xs text-l2 hover:bg-hover"
+              onClick={() => setTermPickView(null)}
+            >
+              关闭
+            </button>
+          </div>
+          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-3 text-xs text-l1">
+            {termPickView}
+          </pre>
+        </div>
       )}
       {termCtxMenu && (
         <ContextMenu
@@ -5788,8 +6260,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         </div>
       )}
 
-      {/* 中带：终端标签区 */}
-      <div className="relative flex min-w-0 flex-1 flex-col">
+      {/* 中带：终端标签区。向上盖 1px，挡住顶栏透出的那条窗口黑缝。 */}
+      <div className="relative -mt-px flex min-w-0 flex-1 flex-col bg-canvas">
         {/* 顶部标签条：常驻中带顶部 */}
         <div className="flex h-9 items-center gap-1 overflow-hidden px-2">
           <div className="min-w-0 flex-1 overflow-x-auto">
@@ -5818,8 +6290,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             }
             return (
               <Fragment key={t.id}>
-                {/* 标签间分隔：启动栏分段同款的居中短刻度线（h-4 w-px），全高边框太重。
-                    刻度只出现在两颗未激活标签之间——紧贴激活胶囊的刻度会撞上胶囊边 */}
+                {/* 标签间分隔：居中短刻度线（h-4 w-px），全高边框太重。
+                    刻度只出现在两颗未激活标签之间——紧贴激活胶囊的刻度会撞上胶囊边。
+                    注意这与启动栏分段工具条无关：那边是 gap 分段的胶囊组、不用分隔线
+                    （divide 方案被否为「粘在一起」，见 design-system.md）；标签是平铺的
+                    并列项，刻度承担的是分组边界，两处不共用口径。 */}
                 {tabIndex > 0 &&
                   tabs[tabIndex - 1].id !== activeId &&
                   !active && (
@@ -5855,11 +6330,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   position: isDragSource ? "relative" : undefined,
                   zIndex: isDragSource ? 10 : undefined,
                 }}
-                className={`group/tab flex h-8 min-w-[72px] flex-1 basis-0 cursor-pointer items-center gap-1.5 border text-xs ${
+                className={`group/tab flex h-8 min-w-[72px] flex-1 basis-0 cursor-pointer items-center gap-1.5 rounded-full border text-xs ${
                   tabIndex === 0 && !rightExpanded && !treeOpen ? "pl-1 pr-2.5" : "px-2.5"
                 } ${
                   active
-                    ? "rounded-full border-field bg-raised text-l1"
+                    ? "border-field bg-raised text-l1"
                     : "border-transparent text-l3 hover:bg-hover hover:text-l1"
                 } ${isDragSource ? "bg-raised" : ""}`}
               >
@@ -5929,6 +6404,21 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 <span className="min-w-0 flex-1 truncate">
                   {s?.title && s.title !== "终端" ? s.title : "终端"}
                 </span>
+                {active && s?.ptyId && (
+                  <button
+                    type="button"
+                    title="插入技能或 MCP"
+                    aria-label="插入技能或 MCP"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      tabActionsRef.current.get(t.id)?.toggleInsert();
+                    }}
+                    className="flex size-5 shrink-0 items-center justify-center rounded-full text-l4 hover:bg-hover hover:text-l2"
+                  >
+                    <Sparkles size={13} strokeWidth={1.8} aria-hidden="true" />
+                  </button>
+                )}
                 {t.restored && (
                   <span
                     className="shrink-0 text-micro text-l4"
@@ -5964,7 +6454,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           <button
             onClick={() => addTab()}
             title="新建终端标签"
-            className="flex size-8 shrink-0 items-center justify-center rounded-full text-sm text-l4 hover:bg-hover hover:text-l1"
+            className="flex size-8 shrink-0 items-center justify-center rounded-full border border-hairline bg-inset text-sm text-l4 hover:border-field hover:bg-raised hover:text-l2"
           >
             ＋
           </button>
@@ -6099,13 +6589,14 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 rightOpen={rightOpen}
                 compactBarHidden={compactBarHidden}
                 onToggleCompactBar={toggleCompactBar}
-                layoutKey={`${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}-${splitActive ? `split${Math.round(splitPct)}` : "single"}-${(surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) === "chat" && peekByTab[t.id] ? "peek" : "full"}`}
+                layoutKey={`${rightOpen}-${Math.round(rightWidth)}-${rightExpanded}-${splitActive ? `split${Math.round(splitPct)}` : "single"}-${(surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) === "chat" && peekByTab[t.id] ? "peek" : "full"}-${reader && readerTabId === t.id ? "reader" : "pane"}-${appSettings?.statusBar === false ? "nostatus" : "status"}`}
                 embedInPeek={
                   (surfaceModeByTab[t.id] ?? DEFAULT_SURFACE_MODE) === "chat" &&
                   Boolean(peekByTab[t.id])
                 }
                 gitTotals={t.id === focusedId ? gitTotals : null}
                 termBg={statusBarColors.background}
+                statusBarOn={appSettings?.statusBar ?? true}
                 tabId={t.id}
                 skipSeed={t.skipSeed}
                 initialCwd={t.initialCwd}
@@ -6159,7 +6650,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
               <div
                 key={t.id}
                 className={paneClass}
-                style={paneStyle}
+                style={
+                  tabVisible
+                    ? { ...paneStyle, background: statusBarColors.background }
+                    : paneStyle
+                }
                 onPointerDownCapture={
                   splitActive && tabVisible
                     ? () => setActivePane(isRightPane ? "right" : "left")
@@ -6241,7 +6736,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                   >
                     {/* 窥视 = 底栏真实分栏（终端按此高度 fit）。不能只裁全高 xterm 的
                         底部：Codex 主对话是 inline，内容靠上、底下空行，裁底就是白板。
-                        切聊天/终端仍用绝对铺满，行列数不变。窥视开合会 SIGWINCH 一次。 */}
+                        切聊天/终端仍用绝对铺满。进程起来之后不再通知改行列。 */}
                     <div
                       className={
                         chatOn && peek

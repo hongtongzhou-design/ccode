@@ -55,6 +55,40 @@ export function shouldRelaunchResumeTab(st?: {
   return !st?.running;
 }
 
+/** 拉起 PTY 时用的行列。xterm 还没量到格子（隐藏标签、首帧未 fit）时不传，
+ *  后端保持 24×80。量到了就按当前画面启动：resume 会在进程活着的第一帧按这个宽度
+ *  重放整段对话；先 80 列再拉宽，窄的那份会留在滚动记录里。 */
+/** 启动前先 fit 一次再读格子。fit 抛错（容器宽高为 0）时返回 null。 */
+export function fittedPtySize(
+  fit: { fit: () => void } | null | undefined,
+  term: { cols?: number; rows?: number } | null | undefined,
+): { cols: number; rows: number } | null {
+  try {
+    fit?.fit();
+  } catch {
+    return null;
+  }
+  return launchPtySize(term);
+}
+
+export function launchPtySize(
+  term: { cols?: number; rows?: number } | null | undefined,
+): { cols: number; rows: number } | null {
+  const cols = term?.cols;
+  const rows = term?.rows;
+  if (
+    typeof cols !== "number" ||
+    typeof rows !== "number" ||
+    !Number.isInteger(cols) ||
+    !Number.isInteger(rows) ||
+    cols < 2 ||
+    rows < 1
+  ) {
+    return null;
+  }
+  return { cols, rows };
+}
+
 export interface ResumeLaunchRequest {
   agentId: string;
   provider?: string | null;

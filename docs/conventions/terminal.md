@@ -66,8 +66,7 @@
   重做 merge commit。「解决冲突」后干净工作区必须自动以**当前基准 tip** 准备两侧（完成前禁以 merge-base diff 冒充）；
   处理中基准前进立即停止展示和选边，经用户确认 `merge --abort` 后重新同步。评审入口以 intent 区分
   （`WorkspaceReviewRequest.action`：pr/archive/resolve-conflict）：仅 `resolve-conflict` 允许自动同步基准、准备冲突两侧。
-- **评审覆盖层以代码为中心**：顶部固定任务/分支/增删统计与唯一主动作，提交信息和批量冲突操作在第二工具行；右侧只做
-  文件搜索/树形定位/简短进度；diff 连续浏览、标题吸顶、长段未修改折叠，右侧选中随主区滚动同步；冲突选边用文件标题下
+- **评审覆盖层以代码为中心**：顶部固定任务/分支/增删统计与唯一主动作，提交信息和批量冲突操作在第二工具行；右侧文件目录默认收起，顶栏「文件列表 / 收起文件」开关，窄窗口仍是抽屉。对照长行换行，不再按 720px 硬撑；左右分栏只在 xl 及以上，更窄时上下叠。diff 连续浏览、标题吸顶、长段未修改折叠，目录打开时选中随主区滚动同步；冲突选边用文件标题下
   紧凑双侧控件，AI 理由单行展示、用户显式执行。**提交信息可留空（v3.97，面向不懂编程的用户）**：留空走
   `defaultCommitMessage` 本地规则默认信息（chore: 更新 N 个文件），不调 AI、不拦提交——评审与归档弹层同口径，
   与改动面板「留空 = 快速提交」、主仓快速提交面板的先例一致；想写更好的点 ◈。
@@ -287,6 +286,10 @@
   **Codex Shift+Enter 换行**：xterm.js 对 Shift+Enter 仍发 `\r`，Codex composer 当成发送。宿主拦 shift+Enter
   （keydown/keypress）改写为 kitty CSI-u `\x1b[13;2u`，并吞掉随后 80ms 内 onData 的 `\r`（空输入时 Codex 不提交，
   看起来像换行；有内容时这记 `\r` 会直接发送）。不点亮「生成中」。只改 Codex。
+  **Shift+标点丢字**：xterm 的 keydown 只发送 `keyCode ≥ 48` 的单个字符。WKWebView 上 Shift+`/`
+  可能报 keyCode 0，这一下进不了 PTY，再按才出来。`printableKeyFallback`：keyCode 0 当场补发 `e.key`；
+  keyCode 229（输入法占位）等这一拍结束，隐藏输入框没多出字再补，避免和组词各写一遍。带 Ctrl/Alt/⌘ 不补。
+  **⌘V**：Mac 上先读剪贴板。有图片就走落盘路径，没有再当文本粘贴。Ctrl+V 仍是 `\x16`，让 CLI 自己读系统剪贴板。
 - **文件拖入转路径**：`getCurrentWebviewWindow().onDragDropEvent`（HumanTasksList 同款），只处理 `drop` 且
   坐标命中本终端容器 rect（devicePixelRatio 两口径都试）；隐藏标签 rect 全 0 天然不响应；**只在自己 rect 内响应，
   不 return 掉人工事项导入等其它监听**（按坐标域区分共存）。多路径 shell 转义后空格拼接，不换行防误执行。
@@ -294,6 +297,12 @@
   `navigator.clipboard.read()` 找图片、回落 readText / 全选 / 清屏 / 查找输出）。**链接点击** =
   `@xterm/addon-web-links`（0.12.0 配 xterm 6），点击 handler 走 `@tauri-apps/plugin-opener` 的 `openUrl`
   （capabilities 已有 `opener:default`，与技能页同源，不另引入机制）。
+- **查找输出（⌘F / 标签栏 `Search`）**：`@xterm/addon-search` 盖在画面上，↑↓ 或 Enter/Shift+Enter 走
+  `findNext`/`findPrevious`（单行输入框里 ↑ 没有编辑语义，拿来做上一条匹配）。**备用屏没有回滚缓冲**
+  （`buffer.hasScrollback === false` → `viewportY`/`baseY` 恒 0）：查找范围只剩当前一屏，↑↓ 只在屏内打转。
+  此时搜索条出一行提示说明缘由（由 `buffer.onBufferChange` 驱动，开关搜索条时按 `buffer.active.type`
+  补一次初始值——订阅只在翻转时触发，已经身处全屏程序里时看不到事件）。这是终端语义不是缺陷：真要在
+  TUI 里搜历史得在宿主机侧另存 PTY 原始输出，未做。
 - **临时图片生命周期**：`save_clipboard_image(bytes, ext)` 落 `<config>/ccode/tmp/paste-<时间戳>-<随机>.<ext>`
   （ext 白名单 png/jpg/jpeg/gif/webp，非法归 png；上限 50MB），每次调用顺带清理 7 天前 `paste-*`；**不加
   arboard 依赖**（读剪贴板在前端 paste 事件完成，Rust 只收字节）。
@@ -494,7 +503,15 @@
   会把整个 transcript 按新宽度重放，旧帧留在 scrollback，表现为每条消息成对出现（截断版 + 完整版）。
   上游 issue 簇 openai/codex#38839/#38479/#25622 全部 open，原 reflow 开关已移除（恒开），
   唯一官方旋钮 `tui.terminal_resize_reflow_max_rows` 有 resume 丢历史的副作用（#21635/#26570），不预设。
-  本端缓解：`term.onResize → pty_resize` trailing 防抖 150ms（TerminalPage），连续拖拽只触发一次重放；
+  本端缓解：拖拽的多次 fit 仍用 150ms 收成一次，但 `onResize` 与 `attach` 在进程活着之后
+  不再自己 `pty_resize`（`allowPtyResize`：`measured` 与 `frozen` 一律 false）。
+  拉起时按当前 xterm 格子开 PTY。带首条指令、且这家能注入的新会话，先收起高级选项再量格子
+  （`launchChromeBeforeMeasure`）。「退回修改」不收栏：意见是起来之后再写进去的。
+  量不到格子就不起进程，不把 null 交给 `pty_size_from` 的 24×80。
+  有 `runId` 时先问只读的 `pty_id_for_run`：已经在跑就不收栏、不改行列。
+  起来之后只有这些操作通知进程一次：拖窗口、拖分隔、改字号或字体、开关文件树 / 右栏 /
+  拉起 / 分屏、阅读区搬进和搬回、设置里开关底部状态栏。查找和运行中点「修改」可以改画面高度，
+  不通知进程。已经写进历史的旧副本清不掉。
   底部状态栏跨聊天/终端模式常驻渲染（聊天页默认也显示模型/目录/git/token）——设置页「底部状态栏」
   统一开关两层同进退（2026-09-19，settings 字段 status_bar 默认 true，旧 status_bar_in_chat=false
   读时迁移），无论开关，切层时栏的存在与否不变化 → 终端行列数稳定、不触发 SIGWINCH，

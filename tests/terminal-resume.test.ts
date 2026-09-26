@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   findResumeHolderTab,
+  fittedPtySize,
+  launchPtySize,
   resolveResumeLaunch,
   shouldRelaunchResumeTab,
 } from "../src/terminal-resume.ts";
@@ -104,6 +106,27 @@ test("已有 resume 标签但没在跑：再点继续应重试启动", () => {
     "回落 shell 也要再拉起，不能只盯着空壳",
   );
   assert.equal(shouldRelaunchResumeTab({ alive: false, running: true }), false);
+});
+
+test("启动格子：量到的行列原样带上，没量到或非法则不传", () => {
+  assert.deepEqual(launchPtySize({ cols: 140, rows: 42 }), { cols: 140, rows: 42 });
+  assert.equal(launchPtySize(null), null);
+  assert.equal(launchPtySize({ cols: 1, rows: 24 }), null);
+  assert.equal(launchPtySize({ cols: 80, rows: 0 }), null);
+  assert.equal(launchPtySize({ cols: 80.5, rows: 24 }), null);
+  let fitted = 0;
+  assert.deepEqual(
+    fittedPtySize(
+      { fit: () => { fitted += 1; } },
+      { cols: 120, rows: 36 },
+    ),
+    { cols: 120, rows: 36 },
+  );
+  assert.equal(fitted, 1);
+  assert.equal(
+    fittedPtySize({ fit: () => { throw new Error("zero"); } }, { cols: 120, rows: 36 }),
+    null,
+  );
 });
 
 const apiProfile = (id: string, agent = "codex") => ({

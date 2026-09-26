@@ -333,6 +333,9 @@ pub struct SpawnResult {
     pub model: Option<String>,
     /// 交互 Run id；登录标签为空
     pub run_id: Option<String>,
+    /// 交回这条 Run 上已经在跑的 PTY，没有新开进程。
+    /// 前端据此不收启动栏、不改行列。
+    pub adopted: bool,
 }
 
 /// 支持 --session-id <uuid> 的 agent（AgentSpec.fixed_session_id；matrix：claude-code、qwen、codebuddy），
@@ -343,6 +346,20 @@ fn session_id_for(agent_id: &str) -> Option<String> {
         .map(|_| uuid::Uuid::new_v4().to_string())
 }
 
+/// 前端量到的终端格子。缺省或非法时用 24×80（xterm 默认）。
+/// 恢复会话会在进程活着的第一帧按这个宽度重放整段对话；先 80 列再拉宽，
+/// 窄的那份会留在滚动记录里（审阅退回修改实测）。
+fn pty_size_from(cols: Option<u16>, rows: Option<u16>) -> PtySize {
+    let cols = cols.filter(|n| *n >= 2).unwrap_or(80);
+    let rows = rows.filter(|n| *n >= 1).unwrap_or(24);
+    PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
 /// 在 PTY 中拉起进程并登记到管理器，输出/退出通过 `pty-output-<id>` / `pty-exit-<id>` 事件推送。
 fn spawn_tracked(
     app: &AppHandle,
@@ -351,6 +368,7 @@ fn spawn_tracked(
     cwd: &str,
     purpose: PtyPurpose,
     run_id: Option<String>,
+    size: PtySize,
 ) -> Result<String, String> {
     if crate::process::shutting_down() {
         return Err("应用正在退出，拒绝启动终端".into());
@@ -360,17 +378,14 @@ fn spawn_tracked(
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "Mesa");
     cmd.env_remove("TERM_PROGRAM_VERSION"); // 避免继承到宿主终端的版本号
-                                            // NO_COLOR 只要存在就会强制 CLI 关闭彩色，优先级高于 TERM/COLORTERM，必须剔除
+                                            // 这两个只要存在就会强制 CLI 关闭彩色，优先级高于 TERM/COLORTERM。
+                                            // Mesa Dev 若从带 FORCE_COLOR=0 的终端拉起，不剔除则所有会话都是灰白。
     cmd.env_remove("NO_COLOR");
+    cmd.env_remove("FORCE_COLOR");
     cmd.cwd(cwd);
 
     let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
+        .openpty(size)
         .map_err(|e| format!("创建 PTY 失败: {e}"))?;
 
     let child = pair
@@ -526,6 +541,9 @@ pub fn pty_spawn(
     effort_override: Option<String>,
     // 已由任务入口创建的 Run 所属 Task。
     task_id: Option<String>,
+    // 当前 xterm 格子。恢复会话按这个宽度重放；缺省保持 24×80。
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<SpawnResult, String> {
     let selected = model.filter(|m| !m.trim().is_empty());
     let mut profile = store.get_with_model(&profile_id, selected.as_deref())?;
@@ -674,6 +692,7 @@ pub fn pty_spawn(
                 prompt_dropped: false,
                 model,
                 run_id: opened_id,
+                adopted: true,
             });
         }
         crate::runs::claim_interactive_start(id, false)?;
@@ -688,6 +707,7 @@ pub fn pty_spawn(
         &expand_tilde(&cwd),
         PtyPurpose::Agent,
         opened_id.clone(),
+        pty_size_from(cols, rows),
     ) {
         Ok(pty_id) => pty_id,
         Err(error) => {
@@ -737,6 +757,7 @@ pub fn pty_spawn(
         prompt_dropped: plan.prompt_dropped,
         model,
         run_id: opened_id,
+        adopted: false,
     })
 }
 
@@ -752,6 +773,8 @@ pub fn shell_spawn(
     purpose: Option<String>,
     // 自定义 Runtime 等：进程退出时 close 该 Run
     run_id: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<String, String> {
     let (shell, shell_args) = if purpose.as_deref() == Some("script") {
         script_shell_argv()?
@@ -783,6 +806,7 @@ pub fn shell_spawn(
         &expand_tilde(&cwd),
         purpose,
         run_id.clone(),
+        pty_size_from(cols, rows),
     ) {
         Ok(id) => {
             if let Some(run_id) = run_id.as_deref() {
@@ -824,6 +848,8 @@ pub fn pty_spawn_custom(
     runtime_id: String,
     cwd: String,
     run_id: String,
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<SpawnResult, String> {
     let runtime = crate::custom_runtime::get_custom_runtime(&runtime_id)?;
     let cwd = crate::custom_runtime::resolve_custom_cwd(&cwd, runtime.cwd.as_deref())?;
@@ -854,6 +880,7 @@ pub fn pty_spawn_custom(
         &cwd_path.to_string_lossy(),
         PtyPurpose::Agent,
         Some(run_id.clone()),
+        pty_size_from(cols, rows),
     ) {
         Ok(id) => id,
         Err(error) => {
@@ -884,7 +911,15 @@ pub fn pty_spawn_custom(
         prompt_dropped: false,
         model: None,
         run_id: Some(run_id),
+        adopted: false,
     })
+}
+
+/// 这条 Run 上已经在跑的 PTY。只读，不启动、不改行列。
+/// 空 id 返回 None。前端在收起启动栏之前先问这一次，避免按矮格子新开进程。
+#[tauri::command]
+pub fn pty_id_for_run(manager: tauri::State<'_, PtyManager>, run_id: String) -> Option<String> {
+    manager.inner().pty_id_for_run(&run_id)
 }
 
 /// 登录 shell 的程序与参数（纯函数，便于单测）。
@@ -1247,6 +1282,19 @@ mod tests {
         let expanded = expand_tilde("~/work");
         assert!(!expanded.starts_with('~'));
         assert!(expanded.ends_with("/work"));
+    }
+
+    #[test]
+    fn pty_size_uses_measured_grid_and_rejects_tiny_values() {
+        let sized = pty_size_from(Some(140), Some(42));
+        assert_eq!(sized.cols, 140);
+        assert_eq!(sized.rows, 42);
+        let fallback = pty_size_from(Some(1), Some(0));
+        assert_eq!(fallback.cols, 80);
+        assert_eq!(fallback.rows, 24);
+        let missing = pty_size_from(None, None);
+        assert_eq!(missing.cols, 80);
+        assert_eq!(missing.rows, 24);
     }
 
     #[test]

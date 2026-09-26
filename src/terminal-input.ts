@@ -71,6 +71,38 @@ export function ptyShiftEnterRewrite(agentId: string): string | null {
   return agentId === "codex" ? CODEX_CSI_U_SHIFT_ENTER : null;
 }
 
+/** Shift+标点丢字的补发决议。xterm 的 keydown 只在 `keyCode >= 48` 时把单个字符送进 PTY。
+ *  WKWebView 上 Shift+`/` 可能报 keyCode 0（这一下整个丢掉，再按才出来）；中文输入法在组词
+ *  期则常报 229。两者等待方式不同：
+ *    - `0`：当场补发，不必等——系统根本没打算让 xterm 处理这一下
+ *    - `229`：不能当场发。组词上屏时 xterm 自己会把字发一遍，早发就重了；须等一拍再看
+ *      隐藏输入框有没有多出字，没多出才补
+ *  带 Ctrl/Alt/Cmd 一律不补：那些是终端控制序列，不是可打印字符。 */
+export type PrintableKeyFallback =
+  | { action: "send"; data: string }
+  | { action: "defer"; data: string };
+
+export function printableKeyFallback(e: {
+  type: string;
+  key: string;
+  keyCode: number;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+}): PrintableKeyFallback | null {
+  // keyup 也走同一 handler，只认 keydown
+  if (e.type !== "keydown") return null;
+  if (e.ctrlKey || e.altKey || e.metaKey) return null;
+  // 单字符且可打印：排掉 Shift/Enter/ArrowUp 这类具名键（key 是长名）与控制字符
+  if (e.key.length !== 1) return null;
+  const code = e.key.charCodeAt(0);
+  if (code < 32 || code === 127) return null;
+  if (e.keyCode === 0) return { action: "send", data: e.key };
+  if (e.keyCode === 229) return { action: "defer", data: e.key };
+  // keyCode >= 48：xterm 自己会发，不干预
+  return null;
+}
+
 /** 剪贴板条目里挑出第一张图片（image/*），无图片返回 null（不干预默认文本粘贴） */
 export function firstImageItem(
   items: readonly { type: string }[],
@@ -95,6 +127,25 @@ export function imageExtFromMime(mime: string): string {
 }
 
 /** 粘贴图片成功后的轻反馈文案（名字太长截断，避免状态栏被路径撑爆） */
+/** 去掉常见 Markdown 标记，留下可读的字。代码块围栏去掉，里面的字留下。
+ *  不处理单下划线斜体，避免把文件名里的下划线拆掉。 */
+export function markdownToPlain(text: string): string {
+  let plain = text.replace(/\r\n/g, "\n");
+  plain = plain.replace(/^```[^\n]*\n([\s\S]*?)^```[ \t]*$/gm, "$1");
+  plain = plain.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+  plain = plain.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+  plain = plain.replace(/`([^`]+)`/g, "$1");
+  plain = plain.replace(/\*\*([^*]+)\*\*/g, "$1");
+  plain = plain.replace(/__([^_]+)__/g, "$1");
+  plain = plain.replace(/~~([^~]+)~~/g, "$1");
+  plain = plain.replace(/(^|[\s])\*([^*\n]+)\*(?=[\s]|$)/g, "$1$2");
+  plain = plain.replace(/^#{1,6}\s+/gm, "");
+  plain = plain.replace(/^>\s?/gm, "");
+  plain = plain.replace(/^(\s*)[-*+]\s+/gm, "$1");
+  plain = plain.replace(/^(\s*)\d+[.)]\s+/gm, "$1");
+  return plain;
+}
+
 export function pasteImageFeedback(path: string): string {
   const name = path.split(/[\\/]/).pop() ?? path;
   return `已粘贴图片路径：${name.length > 40 ? `${name.slice(0, 37)}…` : name}`;

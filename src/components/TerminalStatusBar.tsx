@@ -426,11 +426,11 @@ export default function TerminalStatusBar({
 
   return (
     <div
-      className={`relative mb-2 h-8 shrink-0 overflow-visible rounded-b-xl text-[11px] whitespace-nowrap select-none ${
+      className={`relative h-8 shrink-0 overflow-visible rounded-b-xl text-micro whitespace-nowrap select-none ${
         // chat 变体通栏涂画布色（上方 ChatSurface 同为 bg-canvas，接缝消失），
-        // px-4 + 内层 max-w-4xl 与 ChatComposer 同构，内容与输入卡同一左缘；
-        // 终端变体保持 mx-2 成无缝圆角卡的下沿。内容包进内层后终端盒模型不变
-        chat ? "w-full bg-canvas px-4" : "mx-2 px-3"
+        // px-4 + 内层 max-w-4xl 与 ChatComposer 同构，内容与输入卡同一左缘。
+        // 终端变体用 xterm 同源底色，下圆角和画面的上圆角拼成一张卡。
+        chat ? "w-full bg-canvas px-4" : "w-full px-3"
       }`}
       style={{
         background: chat ? "var(--color-canvas)" : colors.background,
@@ -526,7 +526,7 @@ export default function TerminalStatusBar({
                           <button
                             type="button"
                             onClick={() => pickModel(m)}
-                            className="flex w-full items-center gap-1 rounded-sm px-2 py-1 text-left font-mono text-[11px]"
+                            className="flex w-full items-center gap-1 rounded-sm px-2 py-1 text-left font-mono text-micro"
                             style={{ color: m === shownModel ? fg : dim }}
                             onMouseEnter={(e) => {
                               e.currentTarget.style.background = `${fg}1a`;
@@ -680,7 +680,7 @@ export default function TerminalStatusBar({
                   }
                 }}
                 placeholder="如 ~/work/myproject"
-                className="w-full rounded-sm border bg-transparent px-1.5 py-1 font-mono text-[11px] outline-none"
+                className="w-full rounded-sm border bg-transparent px-1.5 py-1 font-mono text-micro outline-none"
                 style={{ borderColor: `${fg}33`, color: fg }}
               />
             </div>
@@ -862,7 +862,7 @@ export default function TerminalStatusBar({
             onClick={() => setSplitOpen(false)}
           />
           <div
-            className="absolute right-0 bottom-full z-50 mb-2 w-72 rounded-md border p-2 font-mono text-[11px] whitespace-normal"
+            className="absolute right-0 bottom-full z-50 mb-2 w-72 rounded-md border p-2 font-mono text-micro whitespace-normal"
             style={{
               background: floatBg,
               borderColor: `${fg}33`,
@@ -918,7 +918,7 @@ export default function TerminalStatusBar({
                   }
                 }}
                 placeholder="如：全英文，带 emoji"
-                className="w-full rounded-sm border bg-transparent px-1.5 py-1 font-mono text-[11px] outline-none"
+                className="w-full rounded-sm border bg-transparent px-1.5 py-1 font-mono text-micro outline-none"
                 style={{ borderColor: `${fg}33`, color: fg }}
               />
             </div>
@@ -928,7 +928,7 @@ export default function TerminalStatusBar({
       {/* review 气泡：预览确认（倒计时 + Esc 取消 + Enter 立即执行 + ✎ 改信息） */}
       {phase === "review" && (
         <div
-          className="absolute bottom-full z-50 mb-2 w-84 overflow-hidden rounded-md border p-3 pb-4 font-mono text-[11px]"
+          className="absolute bottom-full z-50 mb-2 w-84 overflow-hidden rounded-md border p-3 pb-4 font-mono text-micro"
           style={{
             background: floatBg,
             borderColor: `${fg}33`,
@@ -1048,7 +1048,7 @@ export default function TerminalStatusBar({
         <button
           type="button"
           onClick={() => setErrToast(null)}
-          className="absolute right-2 bottom-full z-50 mb-1 block max-w-md cursor-pointer rounded-md border px-3 py-2 text-left font-mono text-[11px]"
+          className="absolute right-2 bottom-full z-50 mb-1 block max-w-md cursor-pointer rounded-md border px-3 py-2 text-left font-mono text-micro"
           style={{
             background: floatBg,
             borderColor: `${colors.red}66`,

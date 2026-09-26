@@ -13,6 +13,8 @@ import {
   KIMI_CSI_U_ENTER,
   KIMI_CSI_U_CTRL_V,
   ptyShiftEnterRewrite,
+  printableKeyFallback,
+  markdownToPlain,
 } from "../src/terminal-input.ts";
 
 test("escapeShellPath 安全字符路径原样返回", () => {
@@ -70,10 +72,69 @@ test("kimi CSI-u 序列是 kitty 键盘协议的 Enter 与 Ctrl+V", () => {
   assert.equal(KIMI_CSI_U_CTRL_V, "\x1b[118;5u");
 });
 
+test("复制文本去掉 Markdown 标记，代码和文件名还在", () => {
+  const src = [
+    "## 结论",
+    "",
+    "这是 **重点**，见 [论文](https://example.com) 和 `notes/a_b.md`。",
+    "",
+    "- 第一项",
+    "1. 第二项",
+    "",
+    "```python",
+    "print(1)",
+    "```",
+  ].join("\n");
+  const plain = markdownToPlain(src);
+  assert.equal(plain.includes("##"), false);
+  assert.equal(plain.includes("**"), false);
+  assert.equal(plain.includes("https://"), false);
+  assert.match(plain, /这是 重点，见 论文 和 notes\/a_b.md。/);
+  assert.match(plain, /^第一项$/m);
+  assert.match(plain, /^第二项$/m);
+  assert.match(plain, /^print\(1\)$/m);
+  assert.equal(plain.includes("```"), false);
+});
+
 test("Codex Shift+Enter 改写成 CSI-u 换行，其它 agent 不改", () => {
   assert.equal(ptyShiftEnterRewrite("codex"), "\x1b[13;2u");
   assert.equal(ptyShiftEnterRewrite("kimi"), null);
   assert.equal(ptyShiftEnterRewrite("claude-code"), null);
+});
+
+test("printableKeyFallback：keyCode 0 当场补发，keyCode 229 等一拍", () => {
+  const base = { type: "keydown", ctrlKey: false, altKey: false, metaKey: false };
+  // WKWebView 上 Shift+/ 报 0：这一下 xterm 不发，宿主当场补
+  assert.deepEqual(printableKeyFallback({ ...base, key: "?", keyCode: 0 }), {
+    action: "send",
+    data: "?",
+  });
+  // 输入法组词占位 229：不能当场发，等一拍看隐藏输入框有没有多出字
+  assert.deepEqual(printableKeyFallback({ ...base, key: "?", keyCode: 229 }), {
+    action: "defer",
+    data: "?",
+  });
+  // keyCode >= 48：xterm 自己会发，不干预（补发会变两个字符）
+  assert.equal(printableKeyFallback({ ...base, key: "?", keyCode: 191 }), null);
+  assert.equal(printableKeyFallback({ ...base, key: "a", keyCode: 65 }), null);
+});
+
+test("printableKeyFallback：修饰键、具名键、控制字符、keyup 一律不补", () => {
+  const base = { type: "keydown", key: "?", keyCode: 0, ctrlKey: false, altKey: false, metaKey: false };
+  // 带修饰键的不是可打印字符，是终端控制序列
+  assert.equal(printableKeyFallback({ ...base, ctrlKey: true }), null);
+  assert.equal(printableKeyFallback({ ...base, altKey: true }), null);
+  assert.equal(printableKeyFallback({ ...base, metaKey: true }), null);
+  // 具名键（key 是长名）不该被当成单字符补发
+  assert.equal(printableKeyFallback({ ...base, key: "Enter" }), null);
+  assert.equal(printableKeyFallback({ ...base, key: "ArrowUp" }), null);
+  assert.equal(printableKeyFallback({ ...base, key: "Shift" }), null);
+  // 控制字符走各自通道
+  assert.equal(printableKeyFallback({ ...base, key: "\r", keyCode: 0 }), null);
+  assert.equal(printableKeyFallback({ ...base, key: "\x7f", keyCode: 0 }), null);
+  // keyup 与同一次按键共用 handler，只认 keydown
+  assert.equal(printableKeyFallback({ ...base, type: "keyup" }), null);
+  assert.equal(printableKeyFallback({ ...base, type: "keypress" }), null);
 });
 
 test("firstImageItem 挑出第一个 image/* 条目", () => {
