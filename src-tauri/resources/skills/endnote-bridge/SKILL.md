@@ -50,7 +50,7 @@ outputs: [papers/endnote-report.json, output/endnote.docx, papers/endnote-cite-r
     <urls><pdf-urls><url>file:///C:/project/papers/example.pdf</url></pdf-urls></urls>
   </record></records></xml>
   ```
-- RIS 与 XML 一起生成（`TY`/`ID`/`AU`/`TI`/`T2`/`J2`/`PY`/`DA`/`ET`/`VL`/`IS`/`SP`/`M2`/`EP`/`M3`/`SN`/`DO`/`KW`/`AB`/`UR`，CRLF，无 BOM）。`ID` 载 citation key。对照 EndNote 2025 的 RefMan RIS 过滤器：期刊全称只写 `T2`，其他形式的期刊名写 `J2`，页 `SP`，起始页码 `M2`，文章类型 `M3`，网络出版日期 `ET`（XML 写在 `edition`）。不要写 `JO`/`JF`/`JA`/`M1`：`M1` 不进任何格子。写文件时一次查全：有 DOI 就向 Crossref 取正式字段，摘要和关键词缺了再问 OpenAlex，期刊缩写按 ISSN 查 NLM Catalog 的 Medline 缩写，没有再用 Semantic Scholar 的期刊别名。两处都没有就留空，不让 Agent 现编缩写。点「同步到 EndNote」只把这份已经写好的 RIS 交给 EndNote，不再重新检索。
+- RIS 与 XML 一起生成（`TY`/`ID`/`AU`/`TI`/`T2`/`J2`/`PY`/`DA`/`ET`/`VL`/`IS`/`SP`/`M2`/`EP`/`M3`/`SN`/`DO`/`KW`/`AB`/`UR`，CRLF，无 BOM）。`ID` 载 citation key。对照 EndNote 2025 的 RefMan RIS 过滤器：期刊全称只写 `T2`，其他形式的期刊名写 `J2`，页 `SP`，起始页码 `M2`，文章类型 `M3`，网络出版日期 `ET`（XML 写在 `edition`）。不要写 `JO`/`JF`/`JA`/`M1`：`M1` 不进任何格子。写文件时一次查全：有 DOI 就向 Crossref 取正式字段，摘要和关键词缺了再问 OpenAlex。期刊缩写用 ISO 4、每个缩写词后加句点，按期刊全称查；对不上就留空，不让 Agent 现编，也不用 NLM 的 ISSN 结果。点「同步到 EndNote」只把这份已经写好的 RIS 交给 EndNote，不再重新检索。
 - 导入动作本身是人工：报告里写清指引——双击文件或 EndNote「File → Import」，XML 选「EndNote generated XML / EndNote XML」、RIS 选「Reference Manager (RIS)」；具体名称与附件解析须在实际版本验证
 
 ### 2. Word 侧人工步骤（供人工事项引用）

@@ -46,7 +46,7 @@ outputs: [papers/]
 - 检索日志用固定六字段表头，逐库一行记入 `papers/screening.md`：**日期 / 库 / 完整检索式 / 命中数 / 去重后数 / 筛后保留数**，保证检索过程可复现；
 - 各库结果合并去重后，同一篇（DOI 或标题归一判定）被 ≥2 个库命中的，在记录上标「**多源命中**」——这是优先阅读的提示，不是纳入标准；
 - 每篇记录：标题、作者（全名，一位一行）、年份、期刊全称、卷、期、页码、出版日期、文章类型、ISSN、DOI、链接。有摘要、关键词、期刊缩写一并记下。字段未知一律标「待补」，不得留空或猜测。
-- **有 DOI 就用 Crossref 把上面这些字段补全再写入筛选记录和 RIS**（`https://api.crossref.org/works/<DOI>`，礼貌 User-Agent）。Crossref 没有摘要时再用 OpenAlex。期刊缩写不拿 Crossref 的 short-container-title 当缩写（它经常等于全称）：按 ISSN 查 NLM Catalog 的 `MedlineTA`（`esearch` `db=nlmcatalog` + `efetch`），目录没有再用 Semantic Scholar 的 `publicationVenue.alternate_names` 里短于全称的那条。两处都没有就标「待补」，不自己编缩写。没有期、没有独立网络出版日也标「待补」，不把卷、页或创建日期挪去填。作者以 Crossref 的 `family`/`given` 为准，写成 `姓, 名`，一人一行；来源名单被截成「前三人, et al.」或同一人重复出现时，用 Crossref 的完整名单替换，不沿用截断名单。
+- **有 DOI 就用 Crossref 把上面这些字段补全再写入筛选记录和 RIS**（`https://api.crossref.org/works/<DOI>`，礼貌 User-Agent）。Crossref 没有摘要时再用 OpenAlex。期刊缩写用 **ISO 4，每个缩写词后面加句点**（`Adv. Mater.`，不是 `Adv Mater`）。按期刊全称查 JabRef 的 ACS / mechanical / geology_physics / general / lifescience 表（`https://abbrv.jabref.org/journals/`），或期刊官网、CASSI。不要用 NLM Catalog 的 ISSN 结果：它不带句点，还会把 *Advanced Materials* 对成 `Adv Eng Mater`。Crossref 的 short-container-title 经常就是全称，不能当缩写。表里没有、现有值等于全称、缺句点、或对不上这本期刊全称的，先写「待补」，再按官网或 ISO 4 补上。一词刊名（*Nature*、*Science*、*Small*）不缩，写全称。不要自己编。没有期、没有独立网络出版日也标「待补」，不把卷、页或创建日期挪去填。作者以 Crossref 的 `family`/`given` 为准，写成 `姓, 名`，一人一行；来源名单被截成「前三人, et al.」或同一人重复出现时，用 Crossref 的完整名单替换，不沿用截断名单。
 
 #### 外部 AI 检索站导出导入（人肉中转）
 

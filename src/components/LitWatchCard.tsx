@@ -835,7 +835,7 @@ function FilterModal({
           aria-pressed={topOnly}
         >
           <span
-            className={`flex h-4 w-4 items-center justify-center rounded-xs border text-[10px] ${
+            className={`flex h-4 w-4 items-center justify-center rounded-xs border text-micro ${
               topOnly
                 ? "border-cta-bd bg-cta text-cta-text"
                 : "border-field bg-inset text-transparent"

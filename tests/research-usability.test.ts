@@ -15,7 +15,15 @@ const md = (id: string) => find(id).steps.map((s) => renderTaskMd(s, {
 test("任务书减重不靠删阶段/门禁：共用摘要一次，格式适配不重复终审", () => {
   // 上限含按步骤派生的停工清单（拍板/先报再问/样张）。
   // 上限含论文大纲、结论条目、章节状态和先报告后改稿。再涨要说明加了什么合同。
-  const before: Record<string, number> = { review: 21200, "research-paper": 31900, "data-processing": 12100, thesis: 29400, "submission-rebuttal": 8600, "latex-paper": 13200 };
+  // 这三个上限原先就已过时（HEAD 上 review 21798/21200、论文 32338/31900、学位 29899/29400 全超），
+  // 本轮涨的是 review +853、论文两模板各 +131，全是新加的合同：
+  //   · 图件：figures/README.md 升为必须产物，正文新增 machine:not-contains:manuscript/draft.md::待绘制，
+  //     挡住「先写待绘制、回头再补图」——占位符一旦进正文就没人回头补。
+  //   · 交棒：notes/handoff.md 升为必须产物并挂写作约束门禁，outline 接它作输入；
+  //     同时挪掉「核心篇名单」那个人工确认门（净减一道停工）。
+  //   · 缩写：lit-search 的刊名缩写从 NLM ISSN 查询改成 ISO 4 规则自算，不必联网。
+  // 上限取整到百位，比当前文本高一点的余量，留给下一轮微量改字——真加合同仍须回来写明。
+  const before: Record<string, number> = { review: 22700, "research-paper": 32500, "data-processing": 12100, thesis: 30100, "submission-rebuttal": 8600, "latex-paper": 13200 };
   for (const t of PIPELINE_TEMPLATES) {
     const tasks = md(t.id);
     assert.ok(tasks.reduce((n, s) => n+s.length, 0) < before[t.id], t.id);

@@ -113,6 +113,12 @@ fn export_xml_with(project_root: &Path, enrich: bool) -> Result<PathBuf, String>
     let stamp = uuid::Uuid::new_v4();
     let script = std::env::temp_dir().join(format!("ccode-endnote-bridge-{stamp}.py"));
     crate::storage::atomic_write(&script, BRIDGE_PY.as_bytes(), true)?;
+    let abbr = script.with_file_name("journal-abbreviations.csv");
+    crate::storage::atomic_write(
+        &abbr,
+        include_bytes!("../resources/journal-abbreviations.csv"),
+        true,
+    )?;
     let py = python_bin()?;
     let enw = papers.join("endnote-import.enw");
     // 有 DOI 的条目先按 Crossref 补作者全名、期刊、卷期页、ISSN、摘要。
@@ -141,6 +147,7 @@ fn export_xml_with(project_root: &Path, enrich: bool) -> Result<PathBuf, String>
         &py, &script, &source, &papers, &stamp, "enw", &enw, &report, &root,
     )?;
     let _ = std::fs::remove_file(&script);
+    let _ = std::fs::remove_file(script.with_file_name("journal-abbreviations.csv"));
     if source != bib {
         let _ = std::fs::remove_file(&source);
     }
@@ -385,22 +392,23 @@ fn find_import_ris(project_root: &Path) -> Option<PathBuf> {
 
 #[tauri::command]
 pub async fn endnote_export_xml(project_root: String) -> Result<String, String> {
+    // 转换和打开 EndNote 都在后台线程，不占界面。
     tauri::async_runtime::spawn_blocking(move || {
         let root = crate::sessions::expand_tilde(&project_root);
-        let Some(ris) = find_import_ris(Path::new(&root)) else {
+        let root_path = Path::new(&root);
+        // 精读之后同步：有引文库就按它重写，不再打开检索时的旧文件。
+        if root_path.join("references.bib").is_file() {
+            let _ = export_xml(root_path);
+        }
+        let Some(ris) = find_import_ris(root_path) else {
             return Err(
                 "还没有 papers/endnote-import.ris。检索保存进项目后才会有这一份，同步只打开它，不再重新检索。"
                     .into(),
             );
         };
         copy_path_to_clipboard(&ris);
-        if let Some(parent) = ris.parent() {
-            if parent.is_dir() {
-                let _ = tauri_plugin_opener::open_path(parent, None::<&str>);
-            }
-        }
         match launch_endnote_with_file(&ris) {
-            Ok(()) => Ok("已导入 EndNote。把打开的 PDF 拖进库，合并时留下 RIS 那条。".into()),
+            Ok(()) => Ok("已交给 EndNote。点「打开 papers」，把 PDF 拖到对应条目上。".into()),
             Err(e) => Ok(format!(
                 "文件在 papers/endnote-import.ris。把它拖到 EndNote 图标上（不要拖进窗口）。{e}"
             )),

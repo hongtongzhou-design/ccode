@@ -55,7 +55,7 @@ outputs: [notes/, references.bib, papers/to-fetch.md]
 
 ### 3. 同步引文库
 
-每篇在 `references.bib` 检查 DOI/版本与键，复用匹配条目，缺失才追加一条 BibTeX。有 DOI 时先向 Crossref 取正式发表版（不用 preprint 顶替）。OpenAlex 只补 Crossref 没有的摘要。期刊缩写按 ISSN 查 NLM Catalog 的 Medline 缩写，没有再用 Semantic Scholar 的期刊别名；两处都没有就写「待补」，不自己编。条目要带上登记库里实际有的这些字段：
+每篇在 `references.bib` 检查 DOI/版本与键，复用匹配条目，缺失才追加一条 BibTeX。有 DOI 时先向 Crossref 取正式发表版（不用 preprint 顶替）。OpenAlex 只补 Crossref 没有的摘要。期刊缩写用 ISO 4、每个缩写词后加句点，按期刊全称查；现有值是全称、缺句点或对不上刊名的改成「待补」再补。一词刊名不缩。不要用 NLM 的 ISSN 缩写，不要自己编。条目要带上登记库里实际有的这些字段：
 
 - `author`：全名，`and` 分隔；「名 姓」翻成 `姓, 名`；被截成前三人或同一人重复的名单，改用 Crossref 完整名单
 - `year`、`title`、`journal`、`doi`

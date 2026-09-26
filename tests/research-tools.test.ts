@@ -46,7 +46,8 @@ test("Blender 只挂研究设计/结构示意，不替代统计图；EndNote 交
   assert.equal(steps[0].expectedArtifacts.includes("output/endnote.docx"), false);
   const notes = steps.find((s) => s.skills.includes("lit-notes"))!;
   assert.ok(notes.skills.includes("endnote-bridge"));
-  assert.ok(notes.expectedArtifacts.includes("papers/endnote-import.ris"));
+  assert.equal(notes.expectedArtifacts.includes("papers/endnote-import.ris"), false);
+  assert.ok(steps[0].expectedArtifacts.includes("papers/endnote-import.ris"));
   assert.equal(notes.expectedArtifacts.includes("output/endnote.docx"), false);
   const paperPolish = steps.find((s) => s.workspaceName === "research-paper-polish")!;
   assert.ok(paperPolish.skills.includes("endnote-bridge"));
@@ -80,7 +81,8 @@ test("Zotero 与 EndNote 是同一种文献库选择，定稿只交一份", () =
   assert.ok(fromZotero.expectedArtifacts.includes("output/endnote.docx"));
   const notesEndnote = withResearchTools(notes, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "endnote" });
   assert.ok(notesEndnote.skills.includes("endnote-bridge"));
-  assert.match(notesEndnote.brief, /同步到 EndNote/);
+  assert.match(notesEndnote.brief, /按 references\.bib 重写/);
+  assert.equal(notesEndnote.expectedArtifacts.includes("papers/endnote-import.ris"), false);
 });
 
 test("Zotero 同步技能跟 lit_source，不跟已废除的 literature 设置", () => {
@@ -217,4 +219,10 @@ test("旧草稿不能悄悄绕过当前工具选择，恢复默认后可开工",
   assert.equal(researchToolContractMatches(chosen,chosen.brief),true);
   assert.equal(researchToolContractMatches(source,chosen.brief),false);
   assert.equal(researchToolContractMatches(source,source.brief),true);
+  const extra = chosen.brief.replace(
+    '"artifacts":["',
+    '"artifacts":["papers/to-fetch.ris","',
+  );
+  assert.notEqual(extra, chosen.brief);
+  assert.equal(researchToolContractMatches(chosen, extra), true);
 });

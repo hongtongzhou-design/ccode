@@ -12,6 +12,32 @@ CITE_RE = re.compile(
 )
 ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,\s]+)\s*,", re.S)
 
+def load_mesa_iso4() -> dict[str, str]:
+    """与脚本同目录的 journal-abbreviations.csv。"""
+    import csv
+    path = Path(__file__).with_name("journal-abbreviations.csv")
+    table: dict[str, str] = {}
+    if not path.is_file():
+        return table
+    for row in csv.reader(path.read_text(encoding="utf-8").splitlines()):
+        if not row or row[0].strip().startswith("#") or len(row) < 2:
+            continue
+        key = " ".join(row[0].replace("&", " and ").casefold().split())
+        short = row[1].strip()
+        if key and short:
+            table[key] = short
+    return table
+
+
+_MESA_ISO4 = load_mesa_iso4()
+
+
+def journal_short(journal: str, stored: str) -> str:
+    if stored.strip():
+        return stored.strip()
+    key = " ".join(journal.replace("&", " and ").casefold().split())
+    return _MESA_ISO4.get(key, journal.strip())
+
 
 def parse_keys(span: str) -> list[str]:
     keys = []
@@ -60,6 +86,7 @@ def bib_records(text: str) -> dict[str, dict]:
             "abstract": fields.get("abstract", ""),
             "keywords": fields.get("keywords", ""),
             "date": fields.get("date", ""),
+            "url": fields.get("url", ""),
         }
     return records
 
@@ -68,14 +95,68 @@ def rtf_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
+def write_library_ris(bib_text: str, dest: Path) -> None:
+    """整份 bib 写成 Zotero RIS。同步用，不依赖正文引用。"""
+    records = bib_records(bib_text)
+    lines = []
+    for key, rec in records.items():
+        lines.append("TY  - JOUR")
+        lines.append(f"ID  - {key}")
+        if rec["title"]:
+            lines.append(f"TI  - {rec['title']}")
+        for author in [part.strip() for part in rec["author"].split(" and ") if part.strip()]:
+            lines.append(f"AU  - {author}")
+        if rec["year"] and rec["year"] != "n.d.":
+            lines.append(f"PY  - {rec['year']}")
+        if rec["journal"]:
+            lines.append(f"T2  - {rec['journal']}")
+        short = journal_short(rec["journal"], rec["journalabbreviation"])
+        if short:
+            lines.append(f"J2  - {short}")
+        if rec["volume"]:
+            lines.append(f"VL  - {rec['volume']}")
+        if rec["number"]:
+            lines.append(f"IS  - {rec['number']}")
+        pages = rec["pages"].replace("–", "-").replace("—", "-")
+        parts = [part.strip() for part in pages.split("--" if "--" in pages else "-", 1)] if pages else []
+        if parts and parts[0]:
+            lines.append(f"SP  - {parts[0]}")
+        if len(parts) == 2 and parts[1] and parts[1] != parts[0]:
+            lines.append(f"EP  - {parts[1]}")
+        if rec["date"]:
+            lines.append(f"DA  - {rec['date']}")
+        if rec["issn"]:
+            lines.append(f"SN  - {rec['issn']}")
+        if rec["doi"]:
+            lines.append(f"DO  - {rec['doi']}")
+        url = rec["url"] or (f"https://doi.org/{rec['doi']}" if rec["doi"] else "")
+        if url:
+            lines.append(f"UR  - {url}")
+        for word in [part.strip() for part in rec["keywords"].replace("；", ";").split(";") if part.strip()]:
+            lines.append(f"KW  - {word}")
+        if rec["abstract"]:
+            lines.append(f"AB  - {rec['abstract']}")
+        lines.append("ER  - ")
+        lines.append("")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(("\r\n".join(lines)).encode("utf-8"))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Write a Zotero RTF Scan manuscript")
-    parser.add_argument("--input", required=True)
+    parser.add_argument("--library-ris", action="store_true")
+    parser.add_argument("--input")
     parser.add_argument("--bib", required=True)
-    parser.add_argument("--rtf", required=True)
+    parser.add_argument("--rtf")
     parser.add_argument("--ris", required=True)
-    parser.add_argument("--report", required=True)
+    parser.add_argument("--report")
     args = parser.parse_args(argv)
+    if args.library_ris:
+        write_library_ris(Path(args.bib).read_text(encoding="utf-8"), Path(args.ris))
+        return 0
+    if not args.input:
+        print("缺 --input", file=sys.stderr)
+        return 2
     markdown = Path(args.input).read_text(encoding="utf-8")
     records = bib_records(Path(args.bib).read_text(encoding="utf-8"))
     missing = []
@@ -121,8 +202,8 @@ def main(argv: list[str] | None = None) -> int:
             ris_lines.append(f"PY  - {rec['year']}")
         if rec["journal"]:
             ris_lines.append(f"T2  - {rec['journal']}")
-        short = rec["journalabbreviation"]
-        if short and short.casefold() != rec["journal"].casefold():
+        short = journal_short(rec["journal"], rec["journalabbreviation"])
+        if short:
             ris_lines.append(f"J2  - {short}")
         if rec["volume"]:
             ris_lines.append(f"VL  - {rec['volume']}")
@@ -140,6 +221,9 @@ def main(argv: list[str] | None = None) -> int:
             ris_lines.append(f"SN  - {rec['issn']}")
         if rec["doi"]:
             ris_lines.append(f"DO  - {rec['doi']}")
+        url = rec["url"] or (f"https://doi.org/{rec['doi']}" if rec["doi"] else "")
+        if url:
+            ris_lines.append(f"UR  - {url}")
         for word in [part.strip() for part in rec["keywords"].split(";") if part.strip()]:
             ris_lines.append(f"KW  - {word}")
         if rec["abstract"]:

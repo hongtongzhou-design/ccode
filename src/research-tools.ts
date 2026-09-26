@@ -169,7 +169,14 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
     mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：导入用「从 Zotero 导入」（只读，不 POST）。用户若把 PDF 拖进 Zotero，它会检索元数据并生成条目，拖完再导入。未使用 Zotero 的项目不要走这条，题录直接写入 references.bib。同步用待获取清单「同步到 Zotero」或拖 to-fetch.ris。已有主 bib 键不改。交付在定稿，交 output/zotero.rtf。");
   }
   if (reading && (lit === "endnote" || tools.libraryExport === "endnote")) {
-    mount("endnote-bridge", ["papers/endnote-import.ris"], "EndNote：导入是把导出的 XML/RIS 放进 papers/imports/，不读 .enl。同步用待获取清单「同步到 EndNote」，从 references.bib 生成导入文件。交付在定稿，交 output/endnote.docx。");
+    const ownsImport = step.skills.includes("lit-search");
+    mount(
+      "endnote-bridge",
+      ownsImport ? ["papers/endnote-import.ris"] : [],
+      ownsImport
+        ? "EndNote：papers/endnote-import.ris 只在检索步生成。同步打开这一份。已有记录不覆盖。"
+        : "EndNote：精读不把 papers/endnote-import.ris 列为产物。人点「同步到文献库」时，按 references.bib 重写 to-fetch.ris 与 endnote-import.ris 再打开。PDF 从「打开 papers」拖进库，挂到对应条目上。",
+    );
   }
   const outputRoot = artifactDir.replace(/\\/g, "/").replace(/\/+$/, "") || "artifacts";
   if ((tools.plotting === "origin" || tools.illustration === "blender") && (outputRoot.startsWith("/") || outputRoot.includes(":") || outputRoot.split("/").some((part) => !part || part === "." || part === ".."))) {
@@ -248,14 +255,33 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
   return step;
 }
 
-/** 旧 TASK 草稿优先于模板，但不能悄悄带着旧工具执行。只告警/阻止，不覆盖人写内容。 */
+function toolBlock(text: string): string | null {
+  const begin = text.indexOf(START);
+  if (begin < 0) return "";
+  const end = text.indexOf(END, begin);
+  return end < 0 ? null : text.slice(begin, end + END.length);
+}
+
+function toolChoice(block: string): string {
+  const json = block.match(/\{[\s\S]*?\}/)?.[0];
+  if (!json) return block;
+  try {
+    const data = JSON.parse(json) as { skills?: unknown; required?: unknown };
+    const names = [
+      ...(Array.isArray(data.skills) ? data.skills : []),
+      ...(Array.isArray(data.required) ? data.required : []),
+    ].filter((name): name is string => typeof name === "string");
+    return [...new Set(names)].sort().join("\n");
+  } catch {
+    return block;
+  }
+}
+
+/** 旧 TASK 草稿优先于模板。工具选择变了才挡住；产物名单增减不挡，不覆盖人写内容。 */
 export function researchToolContractMatches(step: Pick<ProjectStepDto, "brief">, task: string): boolean {
-  const block = (text: string) => {
-    const begin = text.indexOf(START);
-    if (begin < 0) return "";
-    const end = text.indexOf(END, begin);
-    return end < 0 ? null : text.slice(begin, end + END.length);
-  };
-  const expected = block(step.brief);
-  return expected !== null && expected === block(task);
+  const expected = toolBlock(step.brief);
+  const actual = toolBlock(task);
+  if (expected === null || actual === null) return false;
+  if (!expected && !actual) return true;
+  return toolChoice(expected) === toolChoice(actual);
 }

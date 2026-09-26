@@ -293,8 +293,8 @@ def render(records, suffix):
             for author in r.get('authors', []): put('contributors/authors/author', family_comma(author))
             if r.get('title'): put('titles/title', r['title'])
             if r.get('journal'): put('titles/secondary-title', r['journal'])
-            short = r.get('journalAbbreviation') or ''
-            if short and short.casefold() != (r.get('journal') or '').casefold():
+            short = r.get('journalAbbreviation') or iso4_abbreviation(r.get('journal')) or r.get('journal') or ''
+            if short:
                 # EndNote.dtd 里期刊缩写在 periodical/abbr-1。EndNote 2025 期刊类型的
                 # 「其他形式的期刊名」是 Field 29（Generic 的 Alternate Title = titles/alt-title）。
                 # 两处都写：XML 导入认 abbr-1，界面字段认 alt-title。
@@ -354,8 +354,8 @@ def render(records, suffix):
             # 不再写 JO/JF/JA。Zotero 会把 JO 放进期刊缩写；这份只给 EndNote。
             if r.get('journal'):
                 result.append(line('T2', r['journal']))
-            short = r.get('journalAbbreviation') or ''
-            if short and short.casefold() != (r.get('journal') or '').casefold():
+            short = r.get('journalAbbreviation') or iso4_abbreviation(r.get('journal')) or r.get('journal') or ''
+            if short:
                 result.append(line('J2', short))
             if r.get('year'):
                 result.append(line('PY', r['year']))
@@ -416,8 +416,8 @@ def render(records, suffix):
                 result.append('%T ' + clean(r['title']))
             if r.get('journal'):
                 result.append('%J ' + clean(r['journal']))
-            short = r.get('journalAbbreviation') or ''
-            if short and short.casefold() != (r.get('journal') or '').casefold():
+            short = r.get('journalAbbreviation') or iso4_abbreviation(r.get('journal')) or r.get('journal') or ''
+            if short:
                 result.append('%B ' + clean(short))
             if r.get('volume'):
                 result.append('%V ' + clean(r['volume']))
@@ -650,8 +650,81 @@ def http_text(url, timeout=40, attempts=4):
     raise last
 
 
+# ISO 4 带句点。按期刊全称查，不用 ISSN：NLM 的 ISSN 会把 Advanced Materials 对成 Adv Eng Mater。
+# 顺序靠后的表只补前面没有的刊名，不覆盖已有缩写。
+_ISO4_LISTS = (
+    'journal_abbreviations_acs.csv',
+    'journal_abbreviations_mechanical.csv',
+    'journal_abbreviations_geology_physics.csv',
+    'journal_abbreviations_general.csv',
+    'journal_abbreviations_lifescience.csv',
+)
+_iso4_index = None
+
+
+def _journal_key(name):
+    text = clean(name).casefold().replace('&', ' and ')
+    return ' '.join(text.split())
+
+
+def load_mesa_iso4():
+    """resources/journal-abbreviations.csv。同步时由调用方放到脚本旁边。"""
+    import csv
+    path = Path(__file__).with_name('journal-abbreviations.csv')
+    table = {}
+    if not path.is_file():
+        return table
+    for row in csv.reader(path.read_text(encoding='utf-8').splitlines()):
+        if not row or row[0].strip().startswith('#') or len(row) < 2:
+            continue
+        key = _journal_key(row[0])
+        short = clean(row[1])
+        if key and short:
+            table[key] = short
+    return table
+
+
+_MESA_ISO4 = load_mesa_iso4()
+
+
+def iso4_index():
+    """JabRef 公开缩写表，再叠 Mesa 兜底。一次拉下，同一进程复用。失败的表跳过。"""
+    global _iso4_index
+    if _iso4_index is not None:
+        for key, short in _MESA_ISO4.items():
+            _iso4_index.setdefault(key, short)
+        return _iso4_index
+    import csv
+    import io
+    index = dict(_MESA_ISO4)
+    for name in _ISO4_LISTS:
+        try:
+            text = http_text(f'https://abbrv.jabref.org/journals/{name}', timeout=40, attempts=2)
+        except Exception:
+            continue
+        for row in csv.reader(io.StringIO(text)):
+            if len(row) < 2:
+                continue
+            key = _journal_key(row[0])
+            short = clean(row[1])
+            if key and short and key not in index:
+                index[key] = short
+    index.update(_MESA_ISO4)
+    _iso4_index = index
+    return index
+
+
+def iso4_abbreviation(journal):
+    """按全称取 ISO 4 缩写。一词刊名（Nature、Small）表里就是全称，原样返回。对不上返回空。"""
+    key = _journal_key(journal)
+    if not key:
+        return ''
+    return iso4_index().get(key, '')
+
+
 def nlm_abbreviation(issn):
-    """NLM Catalog 的 MedlineTA。按 ISSN 查，同一期刊只查一次。没有记录就返回空。"""
+    """NLM Catalog 的 MedlineTA。按 ISSN 查，同一期刊只查一次。没有记录就返回空。
+    不带句点，且 ISSN 可能对到另一本刊。期刊缩写改走 iso4_abbreviation。"""
     key = clean(issn)
     if not key:
         return ''
@@ -777,22 +850,14 @@ def enrich_records(records):
 
             if len(filled.get('authors') or []) < 2 and len(extra.get('authors') or []) > len(filled.get('authors') or []):
                 filled['authors'] = extra['authors']
-        journal_name = clean(filled.get('journal'))
-        short_name = clean(filled.get('journalAbbreviation'))
-        if not short_name or short_name.casefold() == journal_name.casefold():
-            try:
-                short_name = nlm_abbreviation(filled.get('issn'))
-            except Exception:
-                short_name = ''
-            if short_name and short_name.casefold() != journal_name.casefold():
-                filled['journalAbbreviation'] = short_name
-        if not filled.get('journalAbbreviation') or clean(filled.get('journalAbbreviation')).casefold() == journal_name.casefold():
-            try:
-                short = s2_abbreviation(doi)
-            except Exception:
-                short = ''
-            if short:
-                filled['journalAbbreviation'] = short
+        journal_name = clean(filled.get('journal') or record.get('journal'))
+        try:
+            iso4 = iso4_abbreviation(journal_name)
+        except Exception:
+            iso4 = ''
+        # 查到 ISO 4 就用。查不到保留引文库里已有的缩写，不把空值写回去。
+        if iso4:
+            filled['journalAbbreviation'] = iso4
         if not filled:
             continue
         # 作者以出版商登记为准：原名单经常被截成前三人或同一人写两次。

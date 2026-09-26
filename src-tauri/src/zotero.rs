@@ -1334,16 +1334,72 @@ pub async fn zotero_open_papers(project_root: String) -> Result<(), String> {
     .map_err(|e| format!("{e}"))?
 }
 
+/// 按 references.bib 重写 papers/to-fetch.ris。精读保存后同步用。
+pub fn refresh_library_ris(project_root: &Path) -> Result<PathBuf, String> {
+    let root =
+        crate::paths::canonicalize_plain(project_root).map_err(|e| format!("项目目录无效: {e}"))?;
+    let bib = root.join("references.bib");
+    if !bib.is_file() {
+        return Err("还没有 references.bib。精读保存进项目后才能同步。".into());
+    }
+    let papers = root.join("papers");
+    std::fs::create_dir_all(&papers).map_err(|e| format!("无法创建 papers/: {e}"))?;
+    let ris = papers.join("to-fetch.ris");
+    let stamp = uuid::Uuid::new_v4();
+    let script = std::env::temp_dir().join(format!("ccode-zotero-ris-{stamp}.py"));
+    crate::storage::atomic_write(
+        &script,
+        include_str!("../resources/skills/zotero-sync/scripts/zotero_rtf.py").as_bytes(),
+        true,
+    )?;
+    let abbr = script.with_file_name("journal-abbreviations.csv");
+    crate::storage::atomic_write(
+        &abbr,
+        include_bytes!("../resources/journal-abbreviations.csv"),
+        true,
+    )?;
+    let py = crate::agents::resolve_binary("python3")
+        .or_else(|| crate::agents::resolve_binary("python"))
+        .ok_or_else(|| "本机找不到 python3，无法生成 Zotero 导入文件".to_string())?;
+    let out = crate::process::background_command(&py)
+        .arg(&script)
+        .arg("--library-ris")
+        .arg("--bib")
+        .arg(&bib)
+        .arg("--ris")
+        .arg(&ris)
+        .current_dir(&root)
+        .output()
+        .map_err(|e| format!("无法生成 Zotero RIS: {e}"))?;
+    let _ = std::fs::remove_file(&script);
+    let _ = std::fs::remove_file(&abbr);
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(if err.trim().is_empty() {
+            "生成 Zotero RIS 失败".into()
+        } else {
+            err.trim().to_string()
+        });
+    }
+    if !ris.is_file() {
+        return Err("转换结束但没有 papers/to-fetch.ris".into());
+    }
+    Ok(ris)
+}
+
 /// 用 Zotero 打开 RIS/BibTeX/CSL JSON（原生导入，不需要 Better BibTeX）。
 #[tauri::command]
 pub async fn zotero_open_import(path: String, root: String) -> Result<String, String> {
+    // 重写 RIS 和打开 Zotero 都在后台线程。按钮立刻显示「正在按引文库生成」。
     tauri::async_runtime::spawn_blocking(move || {
         let root_exp = crate::sessions::expand_tilde(&root);
         let path_exp = crate::sessions::expand_tilde(&path);
         let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&root_exp))
             .map_err(|e| format!("目录无效: {e}"))?;
-        let path_c = crate::paths::canonicalize_plain(std::path::Path::new(&path_exp))
-            .map_err(|_| "找不到 to-fetch.ris（筛完检索后会生成）".to_string())?;
+        let refreshed = refresh_library_ris(&root_c).ok();
+        let open_path = refreshed.unwrap_or_else(|| std::path::PathBuf::from(&path_exp));
+        let path_c = crate::paths::canonicalize_plain(&open_path)
+            .map_err(|_| "找不到 to-fetch.ris（精读保存后会按引文库生成）".to_string())?;
         if !crate::paths::path_within_path(&path_c, &root_c) {
             return Err("导入文件不在项目目录内".into());
         }
@@ -1358,13 +1414,7 @@ pub async fn zotero_open_import(path: String, root: String) -> Result<String, St
         tauri_plugin_opener::open_path(&path_c, Some("Zotero"))
             .or_else(|_| tauri_plugin_opener::open_path(&path_c, None::<&str>))
             .map_err(|e| format!("没法交给 Zotero 打开: {e}"))?;
-        // 题录交给 Zotero 后打开 papers/，人把 PDF 拖进库再合并。
-        // 不代点合并：Zotero 本机接口只读，主记录必须人选 RIS 那条。
-        let papers = root_c.join("papers");
-        if papers.is_dir() {
-            let _ = tauri_plugin_opener::open_path(&papers, None::<&str>);
-        }
-        Ok("已导入 Zotero。把打开的 PDF 拖进库，重复项合并时留下 RIS 那条。".into())
+        Ok("已交给 Zotero。确认导入后，点「打开 papers」，把 PDF 拖到对应条目上。".into())
     })
     .await
     .map_err(|e| format!("{e}"))?

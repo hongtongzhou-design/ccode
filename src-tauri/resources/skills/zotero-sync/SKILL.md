@@ -34,7 +34,7 @@ outputs: [papers/zotero-sync.md]
 - 交付 `papers/to-fetch.ris`（RIS 2004，CRLF，与 to-fetch.md 同序）。这一份只给 Zotero：一位作者一条 `AU`（`姓, 名`），期刊全称只写 `T2`，缩写只写 `J2`。再写 `PY`、`VL`、`IS`、`SP`、`EP`、`SN`、`DO`、`KW`、`AB`、`UR`。不要写 `JO`（Zotero 会把它放进期刊缩写）、不要写 `N1`（会进笔记）。EndNote 用另一份 `papers/endnote-import.ris`，起始页码是 `M2`、文章类型是 `M3`。检索时一次查全；人纳入后按 Zotero 标签追加，不再另查。Zotero 原生导入 RIS/BibTeX/CSL JSON，不需要插件
 - 告诉用户用清单「同步到 Zotero」或把 RIS 拖进 Zotero。不要另开一条 API/BBT 写库
 - 不要代点按钮、不要循环导入。库里已有条目再导会重复——界面会按 DOI 提示
-- **PDF：** 同步会打开 `papers/`。先导入 RIS，再把 PDF 拖进库，重复项合并时主记录选 RIS 那一条。选 PDF 那条会盖掉卷期页和摘要。关掉「自动重命名附件文件」。用户不用 Zotero 时不要要求拖 PDF。禁止声称 Mesa 已自动挂上附件或代为合并。
+- **PDF：** 同步只交 RIS，不打开目录。人点「打开 papers」打开课题根里的 PDF，再拖进库。重复项合并时主记录选 RIS 那一条。关掉「自动重命名附件文件」。禁止声称 Mesa 已自动挂上附件或代为合并。
 - 未明确要求进库：只留 RIS，报告写明「未进库，文件已交」
 
 ### 2. 出库（Zotero → 项目，仅精读/用户明确要求时）

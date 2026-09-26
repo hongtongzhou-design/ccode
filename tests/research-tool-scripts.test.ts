@@ -182,6 +182,35 @@ test("Zotero 交稿写出可扫描的引用和对应 RIS，缺键不交稿", () 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("ISO 4 缩写按期刊全称，带句点；一词刊名不缩", () => {
+  const script = resolve("src-tauri/resources/skills/endnote-bridge/scripts/bridge.py");
+  const probe = [
+    "import importlib.util",
+    `spec = importlib.util.spec_from_file_location("bridge", ${JSON.stringify(script)})`,
+    "mod = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "from pathlib import Path",
+    "Path(mod.__file__).with_name('journal-abbreviations.csv').write_text(",
+    "  'Energy Storage Materials,Energy Storage Mater.\\nThe Chemical Record,Chem. Rec.\\nNature,Nature\\n',",
+    "  encoding='utf-8')",
+    "mod._MESA_ISO4 = mod.load_mesa_iso4()",
+    "mod._iso4_index = {",
+    "  'advanced materials': 'Adv. Mater.',",
+    "  'advanced engineering materials': 'Adv. Eng. Mater.',",
+    "  'small': 'Small',",
+    "}",
+    "assert mod.iso4_abbreviation('Advanced Materials') == 'Adv. Mater.'",
+    "assert mod.iso4_abbreviation('Advanced Engineering Materials') == 'Adv. Eng. Mater.'",
+    "assert mod.iso4_abbreviation('Small') == 'Small'",
+    "assert mod.iso4_abbreviation('Unknown Journal') == ''",
+    "assert mod.iso4_abbreviation('Energy Storage Materials') == 'Energy Storage Mater.'",
+    "assert mod.iso4_abbreviation('The Chemical Record') == 'Chem. Rec.'",
+    "assert mod.iso4_abbreviation('Nature') == 'Nature'",
+  ].join("\n");
+  const result = spawnSync(python, ["-c", probe], { encoding: "utf8", timeout: 20_000 });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("Blender validates provenance and dimensions without executing Blender; Origin probe starts no GUI", () => {
   const root = mkdtempSync(join(tmpdir(),"mesa-tool-probe-"));
   try {
