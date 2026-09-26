@@ -31,6 +31,10 @@ src-tauri/gen
 __pycache__/
 *.pyc
 
+# 运行期投放到脚本旁的期刊缩写副本（endnote.rs/zotero.rs 从 temp_dir 写入，
+# 跑完即删；正本在 src-tauri/resources/journal-abbreviations.csv，必须提交）
+src-tauri/resources/skills/*/scripts/journal-abbreviations.csv
+
 # 打包前置落位的 sidecar（scripts/stage-sidecar.mjs 生成，勿提交）
 src-tauri/binaries/
 
