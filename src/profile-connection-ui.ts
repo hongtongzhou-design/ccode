@@ -21,6 +21,7 @@ export const CONNECTION_STATUS_CAPTION: Record<
   ],
   ready: ["已连接", "最近一次连接测试通过", "text-ok-text"],
   official: ["官方账号", "由 CLI 官方登录态提供", "text-ok-text"],
+  unknown: ["状态未知", "连接状态尚未计算", "text-l4"],
 };
 
 export function profileConnectionCaptions(profile: {

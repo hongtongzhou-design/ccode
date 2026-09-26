@@ -63,6 +63,8 @@ pub fn helper_pending_for_doi(doi: &str) -> Option<(String, String, String)> {
 }
 
 mod browser_bridge;
+mod capability_golden;
+mod capability_manifest;
 mod download_inbox;
 mod endnote;
 mod gateway_balance;
@@ -156,6 +158,68 @@ pub fn run() {
             if let Err(e) = tray::setup(app.handle()) {
                 logbuf::record("warn", "tray", &format!("托盘初始化失败: {e}"));
             }
+            // 配置里的 windowEffects 在建窗时就会套。这里再挂一次，兜住没带上的情况。
+            if let Some(window) = app.get_webview_window("main") {
+                let effects = tauri::utils::config::WindowEffectsConfig {
+                    effects: vec![
+                        tauri::utils::WindowEffect::UnderWindowBackground,
+                        tauri::utils::WindowEffect::Mica,
+                    ],
+                    state: Some(tauri::utils::WindowEffectState::FollowsWindowActiveState),
+                    radius: None,
+                    color: None,
+                };
+                if let Err(e) = window.set_effects(effects) {
+                    logbuf::record("warn", "window", &format!("桌面磨砂未挂上: {e}"));
+                }
+                // WKWebView 即使窗口 transparent，网页层仍会铺实心底。
+                // 关掉 drawsBackground，侧栏罩色才能透出桌面磨砂。
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = window.with_webview(|webview| unsafe {
+                        use objc2::runtime::AnyObject;
+                        let wk = &*(webview.inner() as *mut AnyObject);
+                        let no: *mut AnyObject = objc2::msg_send![
+                            objc2::class!(NSNumber),
+                            numberWithBool: false
+                        ];
+                        let key: *mut AnyObject = objc2::msg_send![
+                            objc2::class!(NSString),
+                            stringWithUTF8String: b"drawsBackground\0".as_ptr()
+                        ];
+                        let _: () = objc2::msg_send![wk, setValue: no, forKey: key];
+                        let clear: *mut AnyObject = objc2::msg_send![
+                            objc2::class!(NSColor),
+                            clearColor
+                        ];
+                        let color_key: *mut AnyObject = objc2::msg_send![
+                            objc2::class!(NSString),
+                            stringWithUTF8String: b"underPageBackgroundColor\0".as_ptr()
+                        ];
+                        let _: () = objc2::msg_send![wk, setValue: clear, forKey: color_key];
+                        eprintln!("[window] webview background cleared");
+                    });
+                    // 清底发生在首屏绘制前。WKWebView 随后还会自己铺一层不透明底，
+                    // 晚一拍再清一次，侧栏罩色才能稳住透出的桌面。
+                    let again = window.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        let _ = again.with_webview(|webview| unsafe {
+                            use objc2::runtime::AnyObject;
+                            let wk = &*(webview.inner() as *mut AnyObject);
+                            let no: *mut AnyObject = objc2::msg_send![
+                                objc2::class!(NSNumber),
+                                numberWithBool: false
+                            ];
+                            let key: *mut AnyObject = objc2::msg_send![
+                                objc2::class!(NSString),
+                                stringWithUTF8String: b"drawsBackground\0".as_ptr()
+                            ];
+                            let _: () = objc2::msg_send![wk, setValue: no, forKey: key];
+                        });
+                    });
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -239,6 +303,7 @@ pub fn run() {
             global_config::restore_original_backup,
             pty::pty_spawn,
             pty::pty_spawn_custom,
+            pty::pty_id_for_run,
             runs::run_open,
             runs::run_open_custom,
             runs::run_close,

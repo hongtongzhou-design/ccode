@@ -287,11 +287,23 @@ pub fn apply_to_profile(profile: &mut Profile, model: Option<&str>) {
     let surface = surface_for_profile(profile, model);
     // 剥的是「任何入口都到不了」（无 inject/persist 通道）或「体检明确失败」的存储值；
     // persist 字段保留——启动不注，但「设为全局」要写（qwen generationConfig 路径）。
-    // effort 另要求模型会思考（不思考=注入无意义）
+    //
+    // effort 另要求模型会思考，但这里**不能用** surface.thinking：那是 bool，把「确知
+    // 不思考」与「不知道」压成同一个 false。本函数做的是删除——未知模型会被当成不思考，
+    // 用户存好的 reasoning_effort 被无声抹掉且不可恢复。所以只有**声明层确知 false**
+    // 才配当删除依据；未知一律保留（启动注入侧会再判一次，留着不会误注）。
+    let model_name = model
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| profile.models.first().map(String::as_str))
+        .unwrap_or("");
+    let thinking_declared = crate::model_registry::model_thinking_declared_for(
+        model_name,
+        profile.gateway_id.as_deref(),
+    );
     let probe_failed = |s: &str| s == "failed";
-    if !(channel_carries(surface.channel_effort)
-        && surface.thinking
-        && !probe_failed(surface.probe_effort))
+    if !channel_carries(surface.channel_effort)
+        || thinking_declared == Some(false)
+        || probe_failed(surface.probe_effort)
     {
         profile.request_policy.reasoning_effort = None;
     }
@@ -490,6 +502,71 @@ mod tests {
                 vec![]
             },
         }
+    }
+
+    /// apply_to_profile 的最小 profile：agent 定通道、models 定模型名、effort 是待剥的存量值。
+    fn profile_with(agent: &str, models: &[&str], effort: Option<&str>) -> Profile {
+        Profile {
+            id: "p".into(),
+            agent: agent.into(),
+            name: "测试".into(),
+            account_type: Default::default(),
+            no_auth: false,
+            protocol: None,
+            api_backend: None,
+            base_url: Some("https://relay.example.com".into()),
+            models: models.iter().map(|s| s.to_string()).collect(),
+            extra_env: Default::default(),
+            request_policy: crate::profiles::RequestPolicy {
+                reasoning_effort: effort.map(str::to_string),
+                ..Default::default()
+            },
+            key_hint: None,
+            model: None,
+            last_used_at: None,
+            has_key: false,
+            gateway_id: None,
+            slot_missing: false,
+            connection_status: String::new(),
+            model_sync_status: String::new(),
+            model_sync_note: None,
+            provider_override: None,
+        }
+    }
+
+    #[test]
+    fn apply_to_profile_keeps_stored_effort_when_thinking_unknown() {
+        // 注册链未确知该模型是否思考（不在内置表、无网关实测、无用户覆盖）：
+        // 「不知道」不等于「不思考」，不能当删除依据——用户存好的 effort 留着，
+        // 启动注入侧会再判一次，留着不会误注。
+        let mut p = profile_with("claude-code", &["my-relay-model"], Some("high"));
+        apply_to_profile(&mut p, None);
+        assert_eq!(p.request_policy.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn apply_to_profile_keeps_stored_effort_when_thinking_declared_true() {
+        // 内置表确知 claude-opus-4 会思考 → 保留（声明为真同样不是删除依据）
+        let mut p = profile_with("claude-code", &["claude-opus-4"], Some("high"));
+        apply_to_profile(&mut p, None);
+        assert_eq!(p.request_policy.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn apply_to_profile_drops_stored_effort_when_thinking_declared_false() {
+        // 内置表确知 claude-3-5 不思考（Some(false) 是唯一配当删除依据的声明值）
+        let mut p = profile_with("claude-code", &["claude-3-5-sonnet"], Some("high"));
+        apply_to_profile(&mut p, None);
+        assert_eq!(p.request_policy.reasoning_effort, None);
+    }
+
+    #[test]
+    fn apply_to_profile_drops_stored_effort_when_channel_missing() {
+        // gemini 的 effort 通道为 unknown（当前无入口）：不管模型是否思考都剥——
+        // 通道判据与模型声明判据是两条独立的 or 分支
+        let mut p = profile_with("gemini", &["claude-opus-4"], Some("high"));
+        apply_to_profile(&mut p, None);
+        assert_eq!(p.request_policy.reasoning_effort, None);
     }
 
     #[test]

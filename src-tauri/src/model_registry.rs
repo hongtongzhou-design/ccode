@@ -48,12 +48,26 @@ const fn caps(thinking: bool, context: Option<i64>) -> ModelCaps {
     }
 }
 
+/// 同 `caps`，但显式声明视觉能力（确知多模态家族）。
+/// 视觉知识以前散在 `model_supports_vision_for` 末尾的硬编码清单里兜底——那份清单
+/// 本身就是「确知多模态」名单，收进这里后「未声明」才真正等于「不知道」，
+/// catalog 才能据此省略 input_modalities，而不是替用户把未知模型声明成纯文本。
+const fn capsv(thinking: bool, context: Option<i64>, vision: bool) -> ModelCaps {
+    ModelCaps {
+        thinking: Some(thinking),
+        context,
+        output: None,
+        vision: Some(vision),
+        api_backend: None,
+    }
+}
+
 /// 内置前缀表（最长前缀匹配：kimi-k2-thinking 优先于 kimi-k2）。
 /// 数据口径：2026-08 各官方文档；context 只填确知值（kimi 系按官方上下文映射），
 /// 其余 None 落 fallback_context_size 的保守默认。
 const BUILTIN_CAPS: &[(&str, ModelCaps)] = &[
     // Kimi（官方：k3 = 1M 多模态思考，k2.5+ = 256K 思考，k2-thinking = 128K 思考，k2 = 128K 无思考）
-    ("kimi-k3", caps(true, Some(1_048_576))),
+    ("kimi-k3", capsv(true, Some(1_048_576), true)),
     ("kimi-k2.7", caps(true, Some(262_144))),
     ("kimi-k2.6", caps(true, Some(262_144))),
     ("kimi-k2.5", caps(true, Some(262_144))),
@@ -70,17 +84,17 @@ const BUILTIN_CAPS: &[(&str, ModelCaps)] = &[
     ("o1", caps(true, None)),
     ("o3", caps(true, None)),
     ("o4-mini", caps(true, None)),
-    ("gpt-4o", caps(false, None)),
+    ("gpt-4o", capsv(false, None, true)),
     ("gpt-4.1", caps(false, None)),
     // Anthropic（3.7 起全系 extended thinking；3.5 及更早不支持）
-    ("claude-opus-4", caps(true, None)),
+    ("claude-opus-4", capsv(true, None, true)),
     ("claude-sonnet-4", caps(true, None)),
     ("claude-haiku-4", caps(true, None)),
     ("claude-3-7-sonnet", caps(true, None)),
     ("claude-3-5", caps(false, None)),
     // Google（2.5 起全系 thinking）
-    ("gemini-3", caps(true, None)),
-    ("gemini-2.5", caps(true, None)),
+    ("gemini-3", capsv(true, None, true)),
+    ("gemini-2.5", capsv(true, None, true)),
     // 智谱（4.5 起 hybrid thinking 可开关；z1 = 推理专版）
     ("glm-z1", caps(true, None)),
     ("glm-5", caps(true, None)),
@@ -933,6 +947,16 @@ pub fn model_thinking_for(model: &str, gateway_id: Option<&str>) -> bool {
     lookup_field_for(model, gateway_id, |c| c.thinking).unwrap_or_else(|| keyword_thinking(model))
 }
 
+/// 思考能力的**声明层**视图：只有查询链里有显式声明（用户覆盖/网关实测/公共库/内置表）
+/// 才返回 Some，关键词推断与「未命中即 false」都不算。
+///
+/// 用途：区分「确知不思考」与「不知道」。`model_thinking_for` 把两者都压成 false，
+/// 拿它做**破坏性**决策（清掉用户已存的 reasoning_effort）时，未知模型会被当成
+/// 不思考，用户配置被无声抹掉。只有 `Some(false)` 配当删除依据。
+pub(crate) fn model_thinking_declared_for(model: &str, gateway_id: Option<&str>) -> Option<bool> {
+    lookup_field_for(model, gateway_id, |c| c.thinking)
+}
+
 /// 模型上下文窗口：逐字段查询链 → 保守默认映射
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn model_context_size(model: &str) -> i64 {
@@ -942,6 +966,29 @@ pub fn model_context_size(model: &str) -> i64 {
 pub fn model_context_size_for(model: &str, gateway_id: Option<&str>) -> i64 {
     lookup_field_for(model, gateway_id, |c| c.context)
         .unwrap_or_else(|| fallback_context_size(model))
+}
+
+/// 上下文窗口的**声明层**视图：查询链里有显式值才 Some。
+///
+/// 与 `model_context_size_for` 的分工：那个永远给一个数（控制面板显示、UI 估算要有个数），
+/// 这个只回答「我们确知吗」。写进**别人家配置文件**的值必须走这条——把 128K 保守默认
+/// 当声明写进 codex catalog，会让 1M 上下文的模型在真实窗口里被 codex 按 128K 提前压缩，
+/// 比不写更坏（codex 自己认得时以目录为准，我们不写它反而算得对）。
+pub(crate) fn model_context_size_declared_for(
+    model: &str,
+    gateway_id: Option<&str>,
+) -> Option<i64> {
+    lookup_field_for(model, gateway_id, |c| c.context)
+}
+
+/// 输出上限的**声明层**视图：查询链里有显式值才 Some（内置表 output 全为 None，
+/// 所以现状等于「只有用户覆盖/网关实测/公共库声明才算」）。opencode 的 limit.output
+/// 是 schema 必填，调用方拿 None 时只能写保守值，但至少知道那是保守值而非声明。
+pub(crate) fn model_output_limit_declared_for(
+    model: &str,
+    gateway_id: Option<&str>,
+) -> Option<i64> {
+    lookup_field_for(model, gateway_id, |c| c.output)
 }
 
 /// 输出上限兜底：models.dev 上多数 chat 模型的常见值，保守不越界
@@ -968,15 +1015,19 @@ pub fn model_supports_vision(model: &str) -> bool {
 }
 
 pub fn model_supports_vision_for(model: &str, gateway_id: Option<&str>) -> bool {
-    if let Some(v) = lookup_field_for(model, gateway_id, |c| c.vision) {
-        return v;
-    }
-    let normalized = normalize(model);
-    normalized.contains("kimi-k3")
-        || normalized.starts_with("gemini-2.5")
-        || normalized.starts_with("gemini-3")
-        || normalized.starts_with("gpt-4o")
-        || normalized.starts_with("claude-opus-4")
+    // 确知多模态清单已收进 BUILTIN_CAPS（capsv），链上就能查到；未命中即「不知道」，
+    // 保守当不支持（宁缺毋滥——宁可少声明，不可替用户把未知模型声明成多模态）
+    model_supports_vision_declared_for(model, gateway_id).unwrap_or(false)
+}
+
+/// 视觉能力的**声明层**视图：只有链上有显式声明（含内置表里的确知多模态）才 Some。
+/// 写进别人家配置的字段用它——None 时要么省略该键、要么按「不知道」保守处理，
+/// 而不是替用户断言「这个模型是纯文本」（那会让中继上的视觉模型在 CLI 里丢掉图像输入）。
+pub(crate) fn model_supports_vision_declared_for(
+    model: &str,
+    gateway_id: Option<&str>,
+) -> Option<bool> {
+    lookup_field_for(model, gateway_id, |c| c.vision)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

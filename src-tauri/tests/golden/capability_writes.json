@@ -1,0 +1,99 @@
+{
+  "_comment": [
+    "能力写入的黄金样本。每例锁住「三层注册链在某个模型上的结论 → 渲染给某个 CLI 的文本」。",
+    "为什么需要它：单测都是逐写入点各断各的（agents.rs 断 env、global_config.rs 断 toml），",
+    "没有任何一条测试比较过跨层的一致性。于是 kimi 那条错的注释活了很久——env 通道的缺省集",
+    "被当成 CUSTOM_REGISTRY_DEFAULT_CAPABILITIES（[\"tool_use\"]），实际是 [\"image_in\",\"thinking\"]，",
+    "而该数组是完备声明（CLI 用 capabilities.some(===) 判成员），写窄就是静默剥夺能力。",
+    "这些样本按「用户可见的最终文本」断言，期望值都是**人读过、对过二进制**的，不是跑一遍录下来的。",
+    "改写期望值前请先确认依据，否则这个文件就退化成「记录现状」而不是「锁住正确」。"
+  ],
+  "registry": {
+    "_comment": "测试期四层查表被 cfg!(test) 清空，所以下表就是全部输入。",
+    "note": "内置表 BUILTIN_CAPS 仍生效（kimi-k3 / gpt-4o / deepseek-chat 等在表内有条目）"
+  },
+  "cases": [
+    {
+      "id": "kimi_env_capabilities_thinking_vision_model",
+      "why": "完备声明 + 缺省集含 image_in/thinking 但不含 tool_use：必须写成 缺省 ∪ 确知为真",
+      "agent": "kimi",
+      "protocol": "openai",
+      "base_url": "https://relay.example.com/v1",
+      "model": "kimi-k3",
+      "expect_env": {
+        "KIMI_MODEL_CAPABILITIES": "tool_use,thinking,image_in"
+      }
+    },
+    {
+      "id": "kimi_env_capabilities_plain_model",
+      "why": "非思考模型：thinking 确知为假才摘；image_in 未确知 → 保留；tool_use 缺省本就欠 → 加回",
+      "agent": "kimi",
+      "protocol": "openai",
+      "base_url": "https://relay.example.com/v1",
+      "model": "deepseek-chat",
+      "expect_env": {
+        "KIMI_MODEL_CAPABILITIES": "tool_use,image_in"
+      },
+      "expect_env_absent": ["KIMI_MODEL_MAX_CONTEXT_SIZE"]
+    },
+    {
+      "id": "kimi_env_capabilities_vision_non_thinking_model",
+      "why": "gpt-4o 在内置表里 vision=true、thinking 未声明：thinking 不该被写进去",
+      "agent": "kimi",
+      "protocol": "openai",
+      "base_url": "https://relay.example.com/v1",
+      "model": "gpt-4o",
+      "expect_env": {
+        "KIMI_MODEL_CAPABILITIES": "tool_use,image_in"
+      }
+    },
+    {
+      "id": "kimi_official_protocol_omits_capabilities",
+      "why": "官方协议通道 CLI 缺省已合理，不注入——此时「不写」是对的，因为它不走 env 缺省那条路",
+      "agent": "kimi",
+      "protocol": null,
+      "base_url": null,
+      "model": "kimi-k3",
+      "expect_env_absent": ["KIMI_MODEL_CAPABILITIES"]
+    },
+    {
+      "id": "codex_context_window_omitted_when_undeclared",
+      "why": "codex 的 -c model_context_window 是硬覆盖：写 128K 猜测会压低真实窗口，宁可不写",
+      "agent": "codex",
+      "protocol": null,
+      "base_url": "https://relay.example.com/v1",
+      "model": "deepseek-chat",
+      "expect_args_absent_substring": ["model_context_window"]
+    },
+    {
+      "id": "claude_code_context_window_omitted_when_undeclared",
+      "why": "同上：deferred 到 declared 视图，未知即不写",
+      "agent": "claude-code",
+      "protocol": null,
+      "base_url": "https://relay.example.com/v1",
+      "model": "deepseek-chat",
+      "expect_env_absent": ["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]
+    }
+  ],
+  "global_config_cases": [
+    {
+      "id": "kimi_config_toml_required_context_size_gets_conservative_floor",
+      "why": "config.toml 的 max_context_size 是必填（二进制硬抛 must define a positive max_context_size）：未知也得给值，但要给保守下限且注释说明",
+      "agent": "kimi",
+      "expect_contains": ["max_context_size"],
+      "expect_not_contains": []
+    },
+    {
+      "id": "kimi_config_toml_capabilities_omitted_when_unknown",
+      "why": "此处 capabilities 是 schema 可选、缺省由 CLI 按模型推导：未知时整个不写反而对（写窄才是降级）——与 env 通道策略相反",
+      "agent": "kimi",
+      "expect_not_contains": ["capabilities"]
+    },
+    {
+      "id": "gemini_features_omitted_when_unknown",
+      "why": "能力标记宁缺毋滥：注册链确知才写",
+      "agent": "gemini",
+      "expect_not_contains": ["multimodalToolUse", "thinking"]
+    }
+  ]
+}

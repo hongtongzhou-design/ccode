@@ -295,17 +295,68 @@ fn validate_anthropic_base_url(profile: &Profile, url: &reqwest::Url) -> Result<
     Ok(())
 }
 
-pub(crate) fn validate_anthropic_slot_url(url: Option<&str>) -> Result<(), String> {
-    let Some(url) = url.filter(|s| !s.trim().is_empty()) else {
-        return Ok(());
-    };
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("API 地址格式错误: {e}"))?;
-    let path = parsed.path().trim_end_matches('/');
-    if path.ends_with("/messages") {
-        return Err(
-            "Anthropic 槽不能填写完整 /messages 地址；请填写基础 URL（CLI 会自动追加 /v1/messages）"
-                .into(),
-        );
+/// 槽位名 → 该槽的完整端点后缀（可多个）。用户把「完整端点」当基础 URL 填进槽时，
+/// CLI 会在后面再追加一遍自己的后缀，静默变成 404。原先只校验 anthropic 槽，
+/// 另外四槽可以存进任意字符串（含空格、非 URL 全文）——这里统一成一张表。
+///
+/// gemini 两条：`/v1beta/models/gemini-3-pro:generateContent` 用的是冒号形式，
+/// 只写 `/generateContent` 会漏掉它——而这恰恰是官方文档里最常被照抄的形状。
+pub(crate) const SLOT_ENDPOINT_SUFFIXES: &[(&str, &[&str], &str)] = &[
+    ("anthropic", &["/messages"], "CLI 会自动追加 /v1/messages"),
+    (
+        "openai",
+        &["/chat/completions"],
+        "CLI 会自动追加 /chat/completions",
+    ),
+    ("responses", &["/responses"], "CLI 会自动追加 /responses"),
+    (
+        "gemini",
+        &["/generateContent", ":generateContent"],
+        "CLI 会自动追加 /v1beta/models/<模型>:generateContent",
+    ),
+    (
+        "cursor",
+        &["/chat/completions"],
+        "CLI 会自动追加 /chat/completions",
+    ),
+];
+
+/// 逐槽校验地址：格式必须可解析，且不得已经包含该槽的完整端点后缀。
+/// 空槽是合法状态（缺槽由绑定侧的 `slot_missing` 报，不在这里拦）。
+pub(crate) fn validate_slot_urls(slots: &crate::profiles::ProtocolSlots) -> Result<(), String> {
+    let entries: [(&str, Option<&str>); 5] = [
+        ("anthropic", slots.anthropic.as_deref()),
+        ("openai", slots.openai.as_deref()),
+        ("responses", slots.responses.as_deref()),
+        ("gemini", slots.gemini.as_deref()),
+        ("cursor", slots.cursor.as_deref()),
+    ];
+    for (slot, url) in entries {
+        let Some(url) = url.filter(|s| !s.trim().is_empty()) else {
+            continue;
+        };
+        let parsed = reqwest::Url::parse(url).map_err(|e| format!("{slot} 槽地址格式错误: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(format!(
+                "{slot} 槽地址必须以 http:// 或 https:// 开头（当前：{}）",
+                parsed.scheme()
+            ));
+        }
+        if parsed.host_str().is_none() {
+            return Err(format!("{slot} 槽地址缺少主机名"));
+        }
+        let Some((_, suffixes, hint)) = SLOT_ENDPOINT_SUFFIXES
+            .iter()
+            .find(|(name, _, _)| *name == slot)
+        else {
+            continue;
+        };
+        let path = parsed.path().trim_end_matches('/');
+        if let Some(suffix) = suffixes.iter().find(|suffix| path.ends_with(**suffix)) {
+            return Err(format!(
+                "{slot} 槽不能填写完整 {suffix} 地址；请填写基础 URL（{hint}）"
+            ));
+        }
     }
     Ok(())
 }
@@ -1053,7 +1104,10 @@ pub(crate) fn should_persist_slot_probe(
         saved_url.map(str::trim).filter(|s| !s.is_empty()),
     ) {
         (None, Some(_)) => true,
-        (Some(draft), Some(saved)) => draft == saved,
+        (Some(draft), Some(saved)) => {
+            crate::gateway_store::url_fingerprint(draft)
+                == crate::gateway_store::url_fingerprint(saved)
+        }
         _ => false,
     }
 }
@@ -1673,6 +1727,7 @@ pub async fn validate_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profiles::ProtocolSlots;
 
     fn profile(agent: &str) -> Profile {
         Profile {
@@ -1943,7 +1998,59 @@ mod tests {
         assert!(validate_profile_fields(&p)
             .unwrap_err()
             .contains("不能填写完整 /messages"));
-        assert!(validate_anthropic_slot_url(Some("https://relay.example.com/messages")).is_err());
+    }
+
+    #[test]
+    fn every_slot_rejects_its_own_full_endpoint() {
+        for (slot, suffix) in [
+            ("anthropic", "/v1/messages"),
+            ("openai", "/v1/chat/completions"),
+            ("responses", "/v1/responses"),
+            ("gemini", "/v1beta/models/gemini-pro:generateContent"),
+            ("cursor", "/v1/chat/completions"),
+        ] {
+            let mut slots = ProtocolSlots::default();
+            let url = format!("https://relay.example.com{suffix}");
+            match slot {
+                "anthropic" => slots.anthropic = Some(url),
+                "openai" => slots.openai = Some(url),
+                "responses" => slots.responses = Some(url),
+                "gemini" => slots.gemini = Some(url),
+                _ => slots.cursor = Some(url),
+            }
+            let err = validate_slot_urls(&slots).unwrap_err();
+            assert!(err.contains(slot), "{slot} 的报错要指出是哪个槽: {err}");
+        }
+    }
+
+    #[test]
+    fn slot_urls_accept_base_urls_and_empty() {
+        // 空槽合法（缺槽由绑定的 slot_missing 报）
+        assert!(validate_slot_urls(&ProtocolSlots::default()).is_ok());
+        let slots = ProtocolSlots {
+            anthropic: Some("https://api.example.com".into()),
+            openai: Some("https://api.example.com/v1".into()),
+            responses: Some("https://open.bigmodel.cn/api/v1".into()),
+            gemini: None,
+            cursor: None,
+        };
+        assert!(validate_slot_urls(&slots).is_ok());
+    }
+
+    #[test]
+    fn slot_urls_reject_unparseable_and_non_http() {
+        let mut slots = ProtocolSlots {
+            anthropic: Some("不是地址".into()),
+            ..Default::default()
+        };
+        assert!(validate_slot_urls(&slots)
+            .unwrap_err()
+            .contains("anthropic 槽地址格式错误"));
+
+        slots.anthropic = Some("ftp://api.example.com".into());
+        assert!(validate_slot_urls(&slots)
+            .unwrap_err()
+            .contains("http:// 或 https://"));
     }
 
     #[test]

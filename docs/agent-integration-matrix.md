@@ -85,7 +85,7 @@
 | 项 | 新版 kimi-code（TS，0.x，现役） | 旧版 kimi-cli（Python，1.x，收缩中） |
 |---|---|---|
 | 检测 | `~/.kimi-code/` 存在；`kimi doctor` 可用 | `~/.kimi/` 存在；`kimi --version` 为 1.x |
-| 注入 env | **故意忽略 shell env 的 API key**。唯一注入通道：合成模型 `KIMI_MODEL_NAME` + `KIMI_MODEL_API_KEY` + `KIMI_MODEL_BASE_URL` + `KIMI_MODEL_PROVIDER_TYPE`（kimi/anthropic/openai）。合成通道另有元数据字段（2026-08-17 二进制 strings 实证）：`KIMI_MODEL_CAPABILITIES`（逗号分隔小写，如 `tool_use,thinking`；缺省时 kimi 协议默认 `["image_in","thinking"]`、openai/anthropic 兼容通道默认 `["tool_use"]`——不含 thinking 时 TUI 显示「不支持思考」）、`KIMI_MODEL_DISPLAY_NAME`（选择器 label 优先它）、`KIMI_MODEL_MAX_CONTEXT_SIZE`、`KIMI_MODEL_THINKING_EFFORT`/`ADAPTIVE_THINKING`/`REASONING_KEY` 等；Ccode 注入 display_name=配置名·模型、max_context_size 与 capabilities 判定统一走 model_registry（内置表 + model-capabilities.json 覆盖 + 关键词推断兜底，思考模型才声明） | `KIMI_API_KEY`/`KIMI_BASE_URL`/`KIMI_MODEL_NAME`（最高优先级）；或 `--config-file` / `--config '<json>'` |
+| 注入 env | **故意忽略 shell env 的 API key**。唯一注入通道：合成模型 `KIMI_MODEL_NAME` + `KIMI_MODEL_API_KEY` + `KIMI_MODEL_BASE_URL` + `KIMI_MODEL_PROVIDER_TYPE`（kimi/anthropic/openai）。合成通道另有元数据字段（2026-08-17 二进制 strings 实证）：`KIMI_MODEL_CAPABILITIES`（逗号分隔小写）、`KIMI_MODEL_DISPLAY_NAME`（选择器 label 优先它）、`KIMI_MODEL_MAX_CONTEXT_SIZE`、`KIMI_MODEL_THINKING_EFFORT`/`ADAPTIVE_THINKING`/`REASONING_KEY` 等；Ccode 注入 display_name=配置名·模型、max_context_size 与 capabilities 判定统一走 model_registry（内置表 + model-capabilities.json 覆盖 + 关键词推断兜底） | `KIMI_API_KEY`/`KIMI_BASE_URL`/`KIMI_MODEL_NAME`（最高优先级）；或 `--config-file` / `--config '<json>'` |
 | 全局配置 | `~/.kimi-code/config.toml`：`[providers.x]`（type/base_url/api_key/custom_headers）+ `[models.x]` + `default_model`；也可脚本化 `kimi provider add/remove`；`KIMI_CODE_HOME` 整体搬迁 | `~/.kimi/config.toml`，同构字段；`KIMI_SHARE_DIR` 整体搬迁 |
 | 会话存储 | `~/.kimi-code/session_index.jsonl`（枚举入口：sessionId/sessionDir/**workDir**）+ `sessions/<wd_*>/<id>/agents/main/wire.jsonl` | `~/.kimi/sessions/<md5(workDir)>/<uuid>/context.jsonl`（无时间戳；时间戳在 `wire.jsonl`，标题在 `state.json`）；项目映射读 `~/.kimi/kimi.json` 的 `work_dirs[]` |
 | 会话格式 | wire.jsonl：版本化 record（`metadata` / `turn.prompt`（用户输入）/ `context.append_message`（assistant/tool）/ `usage.record`（token）），协议 v1.0→v1.4 有迁移 | context.jsonl：`{role, content, tool_calls, tool_call_id}`；`_` 开头的 role 是内部记录（跳过）；content 可能是字符串或 parts 数组；tool_calls.arguments 是 JSON 字符串 |
@@ -161,11 +161,21 @@
    **全 Option——「这层不知道」继续向下找，显式 false 只在数据源如实给出时生效**（网关只报上下文不挡公共库的推理声明）。
    kimi 的 capabilities/max_context_size、codex catalog、opencode 的 reasoning/limit/modalities 全从这条链出；
    内置表宁缺毋滥（收错比漏报有害）。
+   **声明层 vs 估值层（2026-09-26）**：兜底层（`fallback_context_size` 的 128K/256K/1M、关键词推断 thinking、
+   硬编码视觉清单）是**已知会错**的一层，只能喂 UI 显示；写进别人家配置的值必须走 `model_*_declared_for`
+   （只认链上显式值的三个访问器，未命中 = 不知道）。分流口径按**目标格式的必填性**：
+   可省略的未知就不写（codex catalog 的 context_window/max_context_window/input_modalities、codex `-c` 两键、
+   kimi `KIMI_MODEL_MAX_CONTEXT_SIZE`）；必填的写保守下限并注明不是声明（kimi config.toml `max_context_size`——
+   二进制无值硬抛；opencode `limit.*`——`limit` 键存在则 context/output 强制）。
+   理由：把 128K 猜测当声明写进 codex `-c model_context_window` 是硬覆盖，会把 codex 自带 registry 认得的
+   272K/1M 窗口**压低**，比不写更坏；`input_modalities: ["text"]` 则是替用户断言「这是纯文本模型」，
+   中继上的视觉模型会在 CLI 里丢掉图像输入。
    有能力声明通道的只有 kimi/codex/opencode/claude；gemini/qwen/codebuddy/cursor/grok 无此机制（2026-08-25 逐家核实）。
-   各通道声明面（2026-08-25 补齐）：codex catalog = context_window + effective_context_window_percent(95) +
-   input_modalities（`model_supports_vision`）+ supports_search_tool(false) + reasoning levels；kimi = max_context_size +
-   capabilities（tool_use + thinking/image_in 按需，兼容协议通道才注入/写盘；官方协议通道 CLI 缺省已合理）；
-   opencode = limit.context/output + reasoning + modalities（视觉模型 input 加 image；tool_call 缺省即开，实测请求带全量
+   各通道声明面（2026-08-25 补齐，字段可用性见上条）：codex catalog = context_window + effective_context_window_percent(95) +
+   input_modalities（`model_supports_vision`）+ supports_search_tool(false) + reasoning levels（前两者可选，未知即缺省）；
+   kimi = max_context_size（config.toml 必填 / env 可省）+
+   capabilities（补集写入：env 通道恒写 `tool_use` + 保留 CLI 缺省里未被声明为假的成员；config.toml 通道仅写声明为真的成员、未确知则整键省略；详见 profiles.md 硬规则）；
+   opencode = limit.context/output（条件必填）+ reasoning + modalities（视觉模型 input 加 image；tool_call 缺省即开，实测请求带全量
    工具）；claude = 显示名槽 + CLAUDE_CODE_MAX_CONTEXT_TOKENS（注册表 >200K 才写，不需要时清旧值）。
    注意边界：streaming/function calling/结构化输出是协议层能力（声明补不了）；web search/file search/code interpreter
    等 hosted tools 是第一方服务端能力，第三方中继没有对应物，声明了等于摆死工具——如实不写。

@@ -190,11 +190,21 @@ pub fn preview_launch_plan(
     if profile.agent == "codex" && profile.account_type != crate::profiles::AccountType::Official {
         notes.push("协议：Responses（wire_api=responses，中转必须实现 /v1/responses）".into());
         if let Some(m) = selected.as_deref() {
-            let ctx =
-                crate::model_registry::model_context_size_for(m, profile.gateway_id.as_deref());
-            notes.push(format!(
-                "上下文窗口：{ctx}（catalog 声明，有效窗口按 95% 计）"
-            ));
+            // 说实话：注册链确知才叫「catalog 声明」；不知道时 catalog 不写这两个字段，
+            // 由 codex 按自带默认算——预告里的措辞必须跟实际写入一致，否则用户拿它
+            // 排查提前 compact 时会被引到错误方向。
+            match crate::model_registry::model_context_size_declared_for(
+                m,
+                profile.gateway_id.as_deref(),
+            ) {
+                Some(ctx) => notes.push(format!(
+                    "上下文窗口：{ctx}（catalog 声明，有效窗口按 95% 计）"
+                )),
+                None => notes.push(
+                    "上下文窗口：注册链未确知，catalog 不声明（codex 按自带默认算；可在连接页「能力声明」里补）"
+                        .into(),
+                ),
+            }
         }
     }
     if profile.agent == "codex" && profile.account_type == crate::profiles::AccountType::Official {
@@ -661,18 +671,27 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                     // 长上下文声明（与设为全局同条件同键）：claude 对不认识的第三方模型按
                     // 200K 上下文假设，注册链确知更大时必须显式声明，否则长会话提前 compact
                     if let Some(m) = model {
-                        let ctx = crate::model_registry::model_context_size_for(
+                        // 用 declared 视图：门限是 >200K，而 fallback 的 256K/1M 两档
+                        // 与 BUILTIN_CAPS 里 kimi-k2.6/2.7/k3 的声明值重复，对真实模型
+                        // 两视图同值；差别只在中转改名模型——那时 fallback 的 128K 本就
+                        // 过不了门限，所以切换不改变任何现有行为，只是不再把估值当声明。
+                        if let Some(ctx) = crate::model_registry::model_context_size_declared_for(
                             m,
                             profile.gateway_id.as_deref(),
-                        );
-                        if ctx > 200_000 {
-                            plan.env
-                                .push(("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), ctx.to_string()));
-                            // 自动压缩窗口与上限成对注入、同值（cc-switch 校准口径）：
-                            // Claude Code 用它算 auto-compact 触发点，只抬上限不抬它，
-                            // 长会话的压缩触发点仍留在旧窗口档
-                            plan.env
-                                .push(("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), ctx.to_string()));
+                        ) {
+                            if ctx > 200_000 {
+                                plan.env.push((
+                                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(),
+                                    ctx.to_string(),
+                                ));
+                                // 自动压缩窗口与上限成对注入、同值（cc-switch 校准口径）：
+                                // Claude Code 用它算 auto-compact 触发点，只抬上限不抬它，
+                                // 长会话的压缩触发点仍留在旧窗口档
+                                plan.env.push((
+                                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
+                                    ctx.to_string(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -698,17 +717,23 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                         // Override stale user-level Codex context limits for this session.
                         // The catalog and auto-compact threshold must follow the selected
                         // model, not whichever model was last used globally.
-                        let context = crate::model_registry::model_context_size_for(
+                        //
+                        // 只在我们**确知**窗口时覆盖：注册链未知时宁可不写——codex 自己认得
+                        // 的模型（原生 -c 内联 provider 下仍会查自家 registry）会得到正确窗口，
+                        // 而写一个 128K 猜测等于把 272K/1M 的真实窗口压低，比不覆盖更坏；
+                        // 「覆盖过期值」的诉求只在确知时才有意义，猜测覆盖不解决过期问题。
+                        if let Some(context) = crate::model_registry::model_context_size_declared_for(
                             model,
                             profile.gateway_id.as_deref(),
-                        );
-                        plan.args.push("-c".into());
-                        plan.args.push(format!("model_context_window={context}"));
-                        plan.args.push("-c".into());
-                        plan.args.push(format!(
-                            "model_auto_compact_token_limit={}",
-                            context.saturating_mul(95) / 100
-                        ));
+                        ) {
+                            plan.args.push("-c".into());
+                            plan.args.push(format!("model_context_window={context}"));
+                            plan.args.push("-c".into());
+                            plan.args.push(format!(
+                                "model_auto_compact_token_limit={}",
+                                context.saturating_mul(95) / 100
+                            ));
+                        }
                         // 会话内自省入口：codex 没有模型/base URL 环境变量（matrix §2），配置又走
                         // 内联 -c 不落盘，agent 被问「你是什么模型」时 config.json/$CODEX_MODEL 全空。
                         // 注入 Mesa 命名空间的显示名（配置名 · 模型，与选择器口径一致），
@@ -821,44 +846,58 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
                             plan.env.push(("KIMI_MODEL_BASE_URL".into(), url.clone()));
                         }
                         // 合成模型的元数据（2026-08-17 二进制实证）：
-                        // 选择器 label 优先 displayName——用 profile 名避免显示成内部名；
-                        // 兼容协议通道（openai/anthropic）capabilities 缺省只有 ["tool_use"]，
-                        // 注册表判定为思考模型时显式声明（kimi 官方协议默认 ["image_in","thinking"]
-                        // 已合理，不注入以免覆盖丢 image_in）
+                        // 选择器 label 优先 displayName——用 profile 名避免显示成内部名。
+                        // capabilities 的判定见下方 provider_type != "kimi" 分支的实证注释。kimi 官方
+                        // 协议通道缺省 [`image_in`,`thinking`] 已合理，不注入以免覆盖丢 image_in。
                         plan.env.push((
                             "KIMI_MODEL_DISPLAY_NAME".into(),
                             format!("{} · {model}", profile.name),
                         ));
-                        plan.env.push((
-                            "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
-                            crate::model_registry::model_context_size_for(
-                                model,
-                                profile.gateway_id.as_deref(),
-                            )
-                            .to_string(),
-                        ));
+                        // env 通道与 config.toml 不同：未设时 kimi 用
+                        // `parsePositiveInt(raw) ?? DEFAULT_MAX_CONTEXT_SIZE` 兜底，
+                        // **不报错**（config.toml 缺了才硬抛 "must define a positive
+                        // max_context_size"）。所以这里未知就不写——写 128K 猜测会让
+                        // 1M 窗口的模型被 CLI 按 128K 算，比不写更坏。
+                        if let Some(ctx) = crate::model_registry::model_context_size_declared_for(
+                            model,
+                            profile.gateway_id.as_deref(),
+                        ) {
+                            plan.env.push((
+                                "KIMI_MODEL_MAX_CONTEXT_SIZE".into(),
+                                ctx.to_string(),
+                            ));
+                        }
                         if provider_type != "kimi" {
-                            // 兼容协议通道 capabilities 缺省只有 ["tool_use"]：
-                            // 思考/视觉模型都要显式声明，否则能力丧失（kimi 官方协议通道
-                            // 缺省 ["image_in","thinking"] 已合理，不动）
-                            let thinking = crate::model_registry::model_thinking_for(
+                            // 二进制实证（kimi 2.1.0）：env 通道未设 KIMI_MODEL_CAPABILITIES 时
+                            // 兜底是 `DEFAULT_CAPABILITIES = ["image_in","thinking"]`——它**不含
+                            // tool_use**，所以这里不能一省了之（省了就是没工具）；而缺省值本身已含
+                            // image_in/thinking，所以写窄了（少写 image_in）反而是降级。
+                            //
+                            // 该数组是**完备声明**：CLI 用 `capabilities.some(===)` 判成员，
+                            // 不在表里就等于「不支持」。所以只写「确知为真」的 plus CLI 自己的
+                            // 缺省集——让这次写入只可能加、不可能减。估值层的猜测（关键词推断、
+                            // 128K/256K 保守默认）不配当声明。
+                            //
+                            // 旧注释称「兼容协议通道 capabilities 缺省只有 ["tool_use"]」张冠李戴：
+                            // 那是 CUSTOM_REGISTRY_DEFAULT_CAPABILITIES（自定义注册项），非本通道。
+                            let thinking = crate::model_registry::model_thinking_declared_for(
                                 model,
                                 profile.gateway_id.as_deref(),
                             );
-                            let vision = crate::model_registry::model_supports_vision_for(
+                            let vision = crate::model_registry::model_supports_vision_declared_for(
                                 model,
                                 profile.gateway_id.as_deref(),
                             );
-                            if thinking || vision {
-                                let mut caps = String::from("tool_use");
-                                if thinking {
-                                    caps.push_str(",thinking");
-                                }
-                                if vision {
-                                    caps.push_str(",image_in");
-                                }
-                                plan.env.push(("KIMI_MODEL_CAPABILITIES".into(), caps));
+                            // None = 未确知：保留 CLI 缺省里的成员（不替它摘），确知为假才摘
+                            let mut caps = vec!["tool_use"];
+                            if thinking != Some(false) {
+                                caps.push("thinking");
                             }
+                            if vision != Some(false) {
+                                caps.push("image_in");
+                            }
+                            plan.env
+                                .push(("KIMI_MODEL_CAPABILITIES".into(), caps.join(",")));
                         } else if let Some(effort) = &profile.request_policy.reasoning_effort {
                             // KIMI_MODEL_THINKING_EFFORT（2026-08-28 二进制实证：原样透传 +
                             // 小写归一，env 路径无闭集校验；仅 kimi 协议通道读取，
@@ -1278,10 +1317,13 @@ pub(crate) fn opencode_provider_json(
         }
     }
     for m in all {
+        // limit 是 opencode 用户配置 schema 里**条件必填**：`limit` 键本身可省，
+        // 但一旦出现，`context` 与 `output` 都是必填（只有 input 可选）。
+        // 1.18 实测缺 output 直接 "Configuration is invalid" 退出 1。
+        // 所以这里不能像 codex catalog 那样「未知就省略」——未知只能写保守下限，
+        // 且要清楚那是下限不是声明（注册链确知时就是真值）。
         let mut entry = serde_json::json!({
             "name": format!("{} · {m}", profile.name),
-            // 上下文与输出上限写入 limit（官方文档字段；1.18 起 schema 强制要求 output，
-            // 缺了直接 Configuration is invalid），供 opencode 算剩余上下文与 max output tokens
             "limit": {
                 "context": crate::model_registry::model_context_size_for(m, profile.gateway_id.as_deref()),
                 "output": crate::model_registry::model_output_limit_for(m, profile.gateway_id.as_deref()),
@@ -1329,23 +1371,13 @@ fn codex_catalog_entry_for(
     model: &str,
     gateway_id: Option<&str>,
 ) -> serde_json::Value {
-    let ctx = crate::model_registry::model_context_size_for(model, gateway_id);
-    serde_json::json!({
+    let mut entry = serde_json::json!({
         "slug": model,
         "display_name": format!("{profile_name} · {model}"),
         "description": null,
-        // 上下文窗口按能力注册表（cc-switch 的 catalog 条目同样带这两个字段）
-        "context_window": ctx,
-        "max_context_window": ctx,
         // 有效上下文百分比：codex 按它算自动压缩阈值，缺了会用满窗口才压缩、
         // 容易先撞上下文上限报错（cc-switch 模板同值 95）
         "effective_context_window_percent": 95,
-        // 图像输入按能力注册表如实声明（只认确知多模态系列，纯文本模型不给 ["text","image"]）
-        "input_modalities": if crate::model_registry::model_supports_vision_for(model, gateway_id) {
-            vec!["text", "image"]
-        } else {
-            vec!["text"]
-        },
         // codex 的 web_search 是官方 hosted tool，第三方中继不支持——如实声明 false，
         // 不摆一个调了必挂的死工具（cc-switch 对拒收网关同样禁用）
         "supports_search_tool": false,
@@ -1377,7 +1409,25 @@ fn codex_catalog_entry_for(
         "experimental_supported_tools": [],
         // ≥0.144.5 缺此字段会拒收整份 catalog，ChatGPT 自带 Codex 同样（cc-switch 同补）
         "supports_reasoning_summaries": true,
-    })
+    });
+    // 上下文窗口/图像输入都是**可选**字段：codex 的 catalog 解析器只强制
+    // supports_reasoning_summaries 与 base_instructions（cc-switch 的
+    // CODEX_CATALOG_PARSER_REQUIRED_FIELDS 明列；其 CHANGELOG 亦言可选能力字段
+    // 「缺省即解析器默认」的语义要保住）。所以不知道就不写——把 128K 保守默认当真值
+    // 写进去，反而会让 1M 窗口的模型被 codex 按 128K 提前压缩，比不写更坏。
+    if let Some(ctx) = crate::model_registry::model_context_size_declared_for(model, gateway_id) {
+        entry["context_window"] = serde_json::json!(ctx);
+        entry["max_context_window"] = serde_json::json!(ctx);
+    }
+    if let Some(vision) = crate::model_registry::model_supports_vision_declared_for(model, gateway_id)
+    {
+        entry["input_modalities"] = if vision {
+            serde_json::json!(["text", "image"])
+        } else {
+            serde_json::json!(["text"])
+        };
+    }
+    entry
 }
 
 /// ModelsResponse { models: [ModelInfo] }：每个 profile 模型一条目
@@ -3833,8 +3883,11 @@ api_backend = "responses"
         assert!(joined.contains(r#"service_tier="auto""#));
         assert!(!joined.contains("features.apps=false"));
         assert!(joined.contains("plugins.codex-app-tools@openai-bundled.enabled=false"));
-        assert!(joined.contains("model_context_window=131072"));
-        assert!(joined.contains("model_auto_compact_token_limit=124518"));
+        // 窗口未确知 → 不写 -c 覆盖：gpt-5-codex 在内置表里 context=None（只标了会思考），
+        // 单测里用户覆盖/网关实测/公共库均为空，declared 视图返回 None。此时写 128K 猜测
+        // 会把 codex 自带 registry 里的真实窗口压低，比不覆盖更坏。
+        assert!(!joined.contains("model_context_window"));
+        assert!(!joined.contains("model_auto_compact_token_limit"));
         // 会话内自省：模型显示名随启动注入（配置名 · 模型），agent 可查
         assert!(plan.env.contains(&(
             "CCODE_MODEL_DISPLAY_NAME".into(),
@@ -4539,10 +4592,12 @@ api_backend = "responses"
         let mut p = profile("kimi", Some("https://relay.example.com/v1"));
         p.protocol = Some("openai".into());
         let plan = launch_plan(&p, None, Some("kimi-k2-thinking"));
-        // 兼容协议通道 capabilities 缺省只有 ["tool_use"]：思考模型要显式声明
+        // 兼容协议通道：确知思考 → 加 thinking；视觉未确知 → 保留 env 缺省里的 image_in
+        // （缺省 ["image_in","thinking"]，见 agents.rs 正文注释的二进制实证）。
+        // 该数组是完备声明，未确知就保留缺省成员，不替 CLI 摘掉它。
         assert!(plan
             .env
-            .contains(&("KIMI_MODEL_CAPABILITIES".into(), "tool_use,thinking".into())));
+            .contains(&("KIMI_MODEL_CAPABILITIES".into(), "tool_use,thinking,image_in".into())));
         assert!(plan.env.contains(&(
             "KIMI_MODEL_DISPLAY_NAME".into(),
             "测试 · kimi-k2-thinking".into()
@@ -4550,20 +4605,30 @@ api_backend = "responses"
     }
 
     #[test]
-    fn kimi_plan_plain_model_omits_capabilities() {
-        // 非思考模型不声明 capabilities：留空走 CLI registry 默认，避免降级
+    fn kimi_plan_plain_model_declares_capabilities_union_with_default() {
+        // 非思考模型：thinking 确知为假 → 摘掉；视觉未确知 → 保留。
+        // env 通道缺省是已知有限集 ["image_in","thinking"]，含 image_in 但**不含 tool_use**，
+        // 而该数组是完备声明（CLI 用 some(===) 判成员），故这里写的是
+        // 「缺省集去掉确知为假的成员，再加回缺省本就欠的 tool_use」——
+        // 只做加法与「确知为假才摘」，估值层猜测不参与。
         let mut p = profile("kimi", Some("https://relay.example.com/v1"));
         p.protocol = Some("openai".into());
         let plan = launch_plan(&p, None, Some("deepseek-chat"));
-        assert!(!plan.env.iter().any(|(k, _)| k == "KIMI_MODEL_CAPABILITIES"));
-        // 显示名与上下文照常注入
+        assert!(plan
+            .env
+            .contains(&("KIMI_MODEL_CAPABILITIES".into(), "tool_use,image_in".into())));
+        // 显示名照常注入；上下文窗口**不写**——deepseek-chat 在内置表里 context=None
+        // （只标了不思考），单测其余三层为空。env 通道未设时 kimi 走
+        // `parsePositiveInt(raw) ?? DEFAULT_MAX_CONTEXT_SIZE` 兜底，不报错，
+        // 所以不写是安全的；写 128K 猜测反而会让真实窗口被按 128K 算。
         assert!(plan.env.contains(&(
             "KIMI_MODEL_DISPLAY_NAME".into(),
             "测试 · deepseek-chat".into()
         )));
-        assert!(plan
+        assert!(!plan
             .env
-            .contains(&("KIMI_MODEL_MAX_CONTEXT_SIZE".into(), "131072".into())));
+            .iter()
+            .any(|(k, _)| k == "KIMI_MODEL_MAX_CONTEXT_SIZE"));
     }
 
     #[test]
@@ -4706,14 +4771,20 @@ api_backend = "responses"
         assert_eq!(e["supports_search_tool"], false);
         assert_eq!(e["supports_reasoning_summaries"], true);
         assert_eq!(e["service_tiers"], serde_json::json!([]));
-        // 图像输入按能力注册表：gpt-5 系不在确知多模态清单 → 仅 text
-        assert_eq!(e["input_modalities"], serde_json::json!(["text"]));
-        // 确知多模态（kimi-k3）→ text + image
+        // 窗口与图像输入都是 catalog 的**可选**字段（codex 解析器只强制
+        // supports_reasoning_summaries/base_instructions）→ 未确知就不写，
+        // 让 codex 用自己的默认值，而不是替它断言一个猜测值。
+        // gpt-5 系在内置表里 context=None、vision=None，单测里其余三层为空 → 两个键都缺
+        assert!(e.get("context_window").is_none());
+        assert!(e.get("max_context_window").is_none());
+        assert!(e.get("input_modalities").is_none());
+        // 确知多模态且确知窗口（kimi-k3）→ 两个键都写
         let v2 = codex_catalog_json("测试", &["kimi-k3".into()]);
         assert_eq!(
             v2["models"][0]["input_modalities"],
             serde_json::json!(["text", "image"])
         );
+        assert_eq!(v2["models"][0]["context_window"], serde_json::json!(1_048_576));
     }
 
     #[test]

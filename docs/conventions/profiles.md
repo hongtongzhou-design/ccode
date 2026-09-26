@@ -41,6 +41,9 @@ Gateway
 GatewayModel
   id            网关认识的模型 id
   source        fetched | user
+  status        available = 最近一次获取目录仍存在；stale = 目录已不再返回。
+                旧配置缺省 available——迁移不该把用户的模型藏起来
+  lastSeenAt    最近一次在目录里见到它的时间（ISO）；手填的为 null
   catalogSlot   最近一次把该 id 标为 available 的协议槽；按槽刷新时只 stale 本槽
   temperature / topP / maxOutputTokens / reasoningEffort   用户设了才存
 
@@ -255,7 +258,7 @@ catalog 条目不写 `apply_patch_tool_type`（freeform＝type=custom 工具会�
 
 | 操作 | 含义 |
 |---|---|
-| 保存网关 | 保存地址、凭证、目录和逐模型策略 |
+| 保存网关 | 保存地址（折进 slots）、凭证、目录和逐模型策略 |
 | 添加 Agent 配置 | 选择这个 Agent 使用哪些模型、哪个默认；不写 CLI 文件 |
 | 设为 Mesa 启动默认 | 只影响 Mesa 新启动时的预选 |
 | 设为项目默认 | 只影响当前项目的默认连接；项目里另选的模型也只记在这个项目上，不改连接的模型名单 |
@@ -268,6 +271,7 @@ catalog 条目不写 `apply_patch_tool_type`（freeform＝type=custom 工具会�
 
 - **推荐模型 ≤3、与实际目录求交后才选中**（`intersectCatalog`：保推荐顺序；交集空不预填；目录有而推荐没有的不自动加——整目录预填红线不变）。用户手改过名单（与推荐清单逐项相同判定）后不再覆盖；名单仍空时默认选目录第一个，**不留空名单**（空名单 = pty 完全不注入的静默陷阱）。推荐模型 ID 允许过时：交集为空只是不自动选，不会配出无效模型。
 - **「验证并获取」合并原「测试」/「获取模型」**：force 真实请求一次完成验证 + 拉目录 + 自动选模，不再走缓存与 ↻。选用已有网关的「获取模型」（现拉并写入网关目录）路径不变。
+- **表单 Base URL 是便利层，slots 是唯一真相（2026-09-26）**：网关编辑器只暴露一个 Base URL 输入框，`masterUrl` 仅存在于草稿态；**保存时 `effectiveSlotUrl(slots, key, masterUrl)` 把主输入折进五个槽再序列化**（`GatewayLibrary.tsx` save）。读取路径一直用这个函数（探测、拉目录、槽体检、告警都走它），所以只序列化原始 `slots` 会让「只填 Base URL、不展开槽区」的网关存成**五槽全空**：当次探测正常（读路径有 masterUrl 兜底），保存后地址凭空消失，再次打开全是空槽。禁止写回任何 `masterUrl` 字段——后端只有 `slots`。
 - **「同时绑到」**：新建网关时勾选额外 Agent，保存走 saveGateway → bindGateway×N（**不走 create_profile**——它一次只建一条绑定且只填一个槽）。槽位由 `gatewayDraftSlots` 拼装：主槽永远 = 表单 Base URL（预设不覆盖用户正在填的地址）；预设定义的其他槽以预设值为准（智谱 responses 专用端点不被同址回落盖掉）；无预设时额外 Agent 的槽回落同一地址（中转同址惯例）。额外绑定的协议由 `extraBindTargets` 推导（复用 `apiKindOf` 同族过滤；多协议 Agent 优先 openai——第三方端点最稳；kimi 官方 kimi 协议只认预设 `protocolByAgent` 显式给）。绑定失败**不回滚网关**，错误文案指路网关库补绑（避免重试再建重复网关）。
 - **网关库新建即绑**：新建表单同样可选预设（同址只填主输入、分槽直填并展开槽区；推荐模型仅在目录为空时播种，不动手填内容）；新建保存后自动展开 Agent 配置区，打开零绑定网关同样自动展开——消除「保存 → 再编辑 → 找折叠项」往返。`save_gateway` / `bind_gateway` command 返回保存后的 DTO（store 透传），前端禁止再用「列表末位」猜新建网关。
 
@@ -400,6 +404,7 @@ Codex            → …
 9. 官方设为全局 = 恢复初始快照。
 10. 预设表仍只收官方 / 公开端点。
 11. 一键接入（2026-09-15）：预设 provider 级一份多槽；推荐模型 ≤3 且与实际目录求交（整目录预填红线不变）；「同时绑到」走 saveGateway + bindGateway×N，主槽永远跟随表单地址；「验证并获取」合并测试与获取（force 真实请求）。
+12. 网关保存折槽（2026-09-26）：表单 Base URL 保存时折进五槽（slots 唯一真相，不落 masterUrl）；逐模型 id 合并保留后端目录元数据（source/status/catalogSlot/lastSeenAt）；清除密钥走显式 `clearKey`，不再由「空 apiKey + noAuth」隐式推断；`bindGateway` 保存后重算连接状态。
 
 ## 18. 导出 / 导入 v2
 
@@ -439,3 +444,5 @@ Codex            → …
 - 配置页查询模型能力必须带 `gatewayId`，网关级能力声明优先于公共/内置能力库；写 Grok 逐模型上下文时只使用显式声明值，不使用通用估值。
 - 思考档注入优先级（2026-09-15）：开工弹层的本次覆盖（`KickoffLaunch.effort` → PendingTerminal → Tab → `pty_spawn` 的 `effortOverride`）> 绑定逐模型策略（网关库 `reasoningEffort`）> 端点默认。弹层选择器按 `combo_surface.injectEffortAllowed` 判定显示（不给调不了的东西）；值只影响本次进程不写回绑定；运行中调整仍在状态栏（起点/运行两层同源 combo）。执行权限不做成弹层选项——步骤执行固定 write_tree + 沙箱，只读讨论走聊想法/商量（弹层只有一行权限边界可见性文案）。
 - **能力声明与能力通道（2026-09-19，对照 cc-switch 补口）**：Claude 长上下文 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 与 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` **同值成对**注入/清除（启动 + 设为全局；只抬上限不抬压缩窗口会把压缩触发点留在旧档，勿拆对）。Codex catalog **不写** `apply_patch_tool_type`（freeform=custom 工具会被原生 /responses 与 Anthropic 网关拒/丢，编辑走 `shell_type: "shell_command"`）。模型能力注册链四层全 miss 时用户可经网关库「能力声明」写覆盖（`model-capabilities.json` 最高层；表单只收 context/思考/视觉——output 的旋钮是策略字段 max output，能力层 output 只喂 opencode limit.output，与策略并排摆两个输出框属重复），`input_modalities` 等按注册链如实声明（宁缺毋滥）+ 覆盖层补口的口径不变。
+- **声明层与估值层分家（2026-09-26，硬规则）**：写进**别人家 CLI 配置文件**的能力值只能来自 `model_*_declared_for` 声明层访问器，兜底层（`fallback_context_size` 的 128K/256K/1M、关键词推断 thinking、内置表确知多模态清单）**一律不得**当声明写出——它只配喂 UI 显示与自己家状态的估算。分流按目标格式的必填性决定：**可省略的未知就不写**（codex catalog 的 `context_window`/`max_context_window`/`input_modalities`，实证可选；codex `-c model_context_window`/`model_auto_compact_token_limit`；kimi `KIMI_MODEL_MAX_CONTEXT_SIZE`，env 通道有 CLI 兜底不报错），**必填的写保守下限**（kimi `config.toml` 的 `max_context_size`；opencode 的 `limit.context`/`limit.output`）。理由：`-c model_context_window` 是硬覆盖，写 128K 猜测会把 codex 自带 registry 认得的 272K/1M 窗口压低（比不写更坏）；`input_modalities: ["text"]` 是替用户断言「纯文本」；未知≠假，凡**破坏性/删除性**决策（如 `combo::apply_to_profile` 剥 `reasoning_effort`）只认显式 `Some(false)`，未知一律保留。反面对照：凡是注释里出现「必填/强制/schema 要求」的说法，改前先去二进制或上游源码找非注释证据（本仓此类说法源头都是注释，文档/测试只是复述）。
+  第三个分流维度是**目标键是不是「完备声明」**：`capabilities` 这类数组由 CLI 用 `some(===)` 判成员（不在表里 == 不支持），所以写进去就是替用户断言「不在此表即没有」，未确知不得写入；但**若该键有已知缺省集，就可以写「缺省集 ∪ 确知为真」，只可能加不可能减**。kimi env 通道正属此列：缺省 `["image_in","thinking"]` 是已知有限集（且**不含 `tool_use`**——省了就是丢工具），故恒写 `tool_use` 并保留未被声明为假的缺省成员；config.toml 通道的 `capabilities` 缺省由 CLI 按模型自身线索推导、边界不可知，故只在 `== Some(true)` 时写、未确知整键省略。**未确知的缺省集不许猜**：`["tool_use"]` 是 `CUSTOM_REGISTRY_DEFAULT_CAPABILITIES`（注册项路径）的缺省，曾被误当 env 通道缺省引用，勿再复述。

@@ -276,10 +276,13 @@ fn patch_claude_settings(
     // 必须显式写 CLAUDE_CODE_MAX_CONTEXT_TOKENS，否则长会话提前 compact（cc-switch 同口径）。
     // AUTO_COMPACT_WINDOW（auto-compact 触发点的窗口基数）与上限同值成对管理——
     // 只抬上限不抬它，压缩触发点仍留在旧窗口档。不需要时两键都清：随「设为全局」
-    // 归 Mesa 管，留着过期大值比没有更有害
-    let max_ctx = models
-        .first()
-        .map(|m| crate::model_registry::model_context_size_for(m, gateway_id));
+    // 归 Mesa 管，留着过期大值比没有更有害。
+    //
+    // 用 declared 视图：门限 >200K 意味着未声明（含 128K 保守默认）本来就走清理分支，
+    // 两视图对现有模型行为完全一致；区别只在语义——不再拿估值冒充「注册表确知」。
+    let max_ctx = models.first().and_then(|m| {
+        crate::model_registry::model_context_size_declared_for(m, gateway_id)
+    });
     match max_ctx {
         Some(ctx) if ctx > 200_000 => {
             env.insert(
@@ -428,7 +431,10 @@ fn set_codex_provider_static_auth(blk: &mut toml_edit::Item, key: &str) {
 /// （auto 挤主视图、pro 被无权限账号过滤）；与内置表浅合并不丢官方模型；
 /// 消费侧全门控该开关且 requiresRestart——已在跑的 gemini 会话要重启才生效。
 /// 只写/更新当前名单的条目，不删旧条目（键是模型 id，用户可能手维护）。
-fn patch_gemini_settings(
+// pub(crate) 而非私有：capability_golden 的黄金样本要在 crate 内直接渲染这两个写入点，
+// 按「最终文本」断言跨层结论。不加 test-only 包装层——包装层会与真函数漂移，
+// 而漂移的样本比没有样本更坏（它锁的是包装层的行为，不是写盘的行为）。
+pub(crate) fn patch_gemini_settings(
     existing: Option<&str>,
     profile_name: &str,
     models: &[String],
@@ -454,12 +460,15 @@ fn patch_gemini_settings(
                 "isPreview": false,
                 "isVisible": true,
             });
-            // 能力标记宁缺毋滥：注册链确知才写，否则留空走 CLI 缺省
+            // 能力标记宁缺毋滥：注册链确知才写，否则留空走 CLI 缺省。
+            // 用 declared 视图而非 model_thinking_for——后者把关键词推断也算命，
+            // 给「名字里带 thinking」的中转改名模型写死 thinking:true 是无据的正向声明；
+            // 确知（用户覆盖/网关实测/公共库/内置表）才配写。
             let mut feats = serde_json::Map::new();
-            if crate::model_registry::model_thinking_for(m, gateway_id) {
+            if crate::model_registry::model_thinking_declared_for(m, gateway_id) == Some(true) {
                 feats.insert("thinking".into(), json!(true));
             }
-            if crate::model_registry::model_supports_vision_for(m, gateway_id) {
+            if crate::model_registry::model_supports_vision_declared_for(m, gateway_id) == Some(true) {
                 feats.insert("multimodalToolUse".into(), json!(true));
             }
             if !feats.is_empty() {
@@ -670,7 +679,8 @@ fn kimi_model_alias(model: &str) -> String {
         .collect()
 }
 
-fn patch_kimi_config(
+// pub(crate)：理由同 patch_gemini_settings（黄金样本按最终文本断言）。
+pub(crate) fn patch_kimi_config(
     existing: Option<&str>,
     provider_type: &str,
     profile_name: &str,
@@ -713,24 +723,36 @@ fn patch_kimi_config(
             let t = sub_table(models_tbl, &kimi_model_alias(m))?;
             t["provider"] = value(provider_id);
             t["model"] = value(m.as_str());
-            // 新版 0.31+ 必填 max_context_size；旧版 kimi-cli 不写（未知字段可能报错），
-            // display_name/capabilities 同理只写新版（alias.display_name 与 capabilities
-            // 数组均为新版字段，2026-08-17 二进制实证）
+            // 此键为必填（实证：kimi 2.1.0 二进制在模型无 maxContextSize 时硬抛
+            // 「must define a positive max_context_size in config.toml」，非校验告警）。
+            // 因此**不能省略**——注册链未知时只能写保守下限，与 opencode 的 limit 同理。
+            // （旧注释称「0.31+ 必填」，该版本边界无实证，勿作依赖。）
             if require_context_size {
                 t["max_context_size"] =
                     value(crate::model_registry::model_context_size_for(m, gateway_id));
                 // 选择器 label 优先 display_name：用 profile 名避免显示成 provider id "ccode"
                 t["display_name"] = value(format!("{profile_name} · {m}"));
-                // 思考/视觉模型显式声明 capabilities；否则留空走 CLI registry 默认兜底，
-                // 避免把 CLI 自己认得的模型能力降级（兼容通道缺省只有 tool_use）
-                let thinking = crate::model_registry::model_thinking_for(m, gateway_id);
-                let vision = crate::model_registry::model_supports_vision_for(m, gateway_id);
-                if thinking || vision {
+                // 思考/视觉能力只写**确知为真**的（声明层 `== Some(true)`），估值层的
+                // 关键词推断不参与：`capabilities` 是完备声明（CLI 用 some(===) 判成员），
+                // 写进去等于断言「不在此表即不支持」。对未知模型我们没资格做这个断言。
+                //
+                // 此处与 env 通道（agents.rs）策略不同，因为缺省集不同：
+                //   env 通道缺省是确定的 `["image_in","thinking"]`，并集不会超出它；
+                //   本通道是普通 model alias，`capabilities` 为 schema 可选，缺省值
+                //   取决于 CLI 自己是否认得该模型（`capabilitiesForModel` 无信息时返回
+                //   undefined），我们猜不出边界，所以未知就整个不写。
+                //
+                // （旧注释称本通道缺省只有 ["tool_use"]——那是
+                // CUSTOM_REGISTRY_DEFAULT_CAPABILITIES，属自定义注册项路径，与 model
+                // alias 不是一条路，勿再引用。）
+                let thinking = crate::model_registry::model_thinking_declared_for(m, gateway_id);
+                let vision = crate::model_registry::model_supports_vision_declared_for(m, gateway_id);
+                if thinking == Some(true) || vision == Some(true) {
                     let mut caps = vec!["tool_use"];
-                    if thinking {
+                    if thinking == Some(true) {
                         caps.push("thinking");
                     }
-                    if vision {
+                    if vision == Some(true) {
                         caps.push("image_in");
                     }
                     t["capabilities"] =
@@ -2777,6 +2799,188 @@ mod tests {
         assert_eq!(sp["top_p"], 0.95);
         assert_eq!(sp["max_tokens"], 8192);
         assert!(sp.get("topP").is_none(), "键名必须是 snake_case 线格式");
+    }
+
+    /// 跨层一致性：agent_specs::request_policy_support 的通道表和本文件的补丁函数是两处
+    /// 手写知识。加一个 agent、改一档通道，两边都不会编译失败——只有这个测试会响。
+    ///
+    /// 只断言表里说「写盘可达」（persist）的部分：
+    /// - persist ⇒ 该字段必须真的落到写出的配置里；
+    /// - unsupported ⇒ 即使设了值，写出的文本里也不该出现（防补丁函数偷偷多写一条表不知道的路径）。
+    /// **不断言 inject。** 表的取值按入口记账，inject 指的是启动注入（agents::apply_request_policy_env），
+    /// 本来就**不该**进配置文件；把「inject ⇒ 写盘」写成断言，等于把当初 persist 拆分要修的那个
+    /// 混淆（见 agent_specs.rs 里 qwen 那条注释）重新钉进测试。启动注入那半边归 agents.rs 的测试管。
+    #[test]
+    fn policy_channel_table_agrees_with_patch_functions() {
+        use crate::agent_specs::request_policy_support;
+
+        // 探针值取得足够怪：在输出里按子串找它们，撞上别的字段的概率可以忽略。
+        // 三个字段各用不同数量级，便于区分是谁漏出来的。
+        const PROBE_TEMP: f64 = 0.123456;
+        const PROBE_TOP_P: f64 = 0.654321;
+        const PROBE_MAX: u64 = 987654;
+
+        // 表里五个字段名，与 RequestPolicySupportDto 的字段一一对应。
+        const FIELDS: [&str; 5] = [
+            "temperature",
+            "top_p",
+            "max_output_tokens",
+            "reasoning_effort",
+            "custom_headers",
+        ];
+
+        let field_value = |field: &str| -> Value {
+            match field {
+                "temperature" => json!(PROBE_TEMP),
+                "top_p" => json!(PROBE_TOP_P),
+                "max_output_tokens" => json!(PROBE_MAX),
+                "reasoning_effort" => json!("probeEffort7"),
+                "custom_headers" => json!("PROBE_HEADER_ENV_7"),
+                other => panic!("表里出现了测试不认识的字段 {other}，请同步本测试"),
+            }
+        };
+        let field_status = |agent: &str, field: &str| match field {
+            "temperature" => request_policy_support(agent).temperature,
+            "top_p" => request_policy_support(agent).top_p,
+            "max_output_tokens" => request_policy_support(agent).max_output_tokens,
+            "reasoning_effort" => request_policy_support(agent).reasoning_effort,
+            "custom_headers" => request_policy_support(agent).custom_headers,
+            other => panic!("表里出现了测试不认识的字段 {other}"),
+        };
+
+        // 只把该字段设上，其余留空——这样输出里出现的探针值一定来自这个字段。
+        let only = |agent: &str, field: &str| -> (Profile, String) {
+            let mut p = profile(agent);
+            p.models = vec!["probe-model-7".into()];
+            let value = field_value(field);
+            match field {
+                "temperature" => p.request_policy.temperature = Some(value.as_f64().unwrap()),
+                "top_p" => p.request_policy.top_p = Some(value.as_f64().unwrap()),
+                "max_output_tokens" => {
+                    p.request_policy.max_output_tokens = Some(value.as_u64().unwrap())
+                }
+                "reasoning_effort" => {
+                    p.request_policy.reasoning_effort = Some(value.as_str().unwrap().into())
+                }
+                "custom_headers" => {
+                    p.request_policy
+                        .header_env
+                        .insert("X-Probe".into(), "PROBE_HEADER_ENV_7".into());
+                }
+                other => panic!("字段 {other} 没有探针"),
+            }
+            // 在写出的文本里找这个子串。字符串字段用裸文本（配置里会带引号，
+            // 裸串仍是其子串）；数值字段直接用 JSON 记法。
+            let text = match value.as_str() {
+                Some(s) => s.to_string(),
+                None => value.to_string(),
+            };
+            (p, text)
+        };
+
+        // 跑「设为全局」的写盘路径，返回要落盘的文本。每个 agent 一条，缺了就 panic——
+        // 将来加了 agent，这里必须显式补一条，不能悄悄漏测。
+        let written = |p: &Profile| -> String {
+            let key = Some("sk-probe");
+            match p.agent.as_str() {
+                "claude-code" => {
+                    patch_claude_settings(None, p.base_url.as_deref(), key, &p.models, None, None)
+                }
+                "qwen" => patch_qwen_settings(None, key, p),
+                "gemini" => patch_gemini_settings(None, &p.name, &p.models, None),
+                "codex" => patch_codex_config(
+                    None,
+                    p.base_url.as_deref(),
+                    p.models.first().map(String::as_str),
+                    None,
+                    "ccode-probe",
+                    None,
+                    "sk-probe",
+                ),
+                "opencode" => {
+                    let mut provider = crate::agents::opencode_provider_json(p, key, None);
+                    overlay_opencode_per_model(&mut provider, p);
+                    patch_opencode_config(None, provider, None, "ccode-probe")
+                }
+                "kimi" => patch_kimi_config(
+                    None,
+                    "kimi",
+                    &p.name,
+                    p.base_url.as_deref(),
+                    key,
+                    &p.models,
+                    true,
+                    "ccode-probe",
+                    None,
+                ),
+                "grok" => patch_grok_config(None, key, p),
+                "codebuddy" => patch_codebuddy_settings(
+                    None,
+                    p.base_url.as_deref(),
+                    key,
+                    p.models.first().map(String::as_str),
+                ),
+                other => panic!("新增了 agent {other}，请在跨层一致性测试里补一条写盘路径"),
+            }
+            .unwrap_or_else(|e| panic!("{} 写盘失败: {e}", p.agent))
+        };
+
+        // 表里声明「设为全局写盘可达」的格子。改动这张表时这个测试会要求你同时改补丁函数
+        // （或反过来），这正是它的用处——它不该被顺手放宽。
+        let agents = [
+            "claude-code",
+            "codebuddy",
+            "gemini",
+            "codex",
+            "opencode",
+            "kimi",
+            "qwen",
+            "grok",
+        ];
+        let mut persist_cells = Vec::new();
+        let mut failures = Vec::new();
+        for agent in agents {
+            for field in FIELDS {
+                let status = field_status(agent, field);
+                let (p, probe) = only(agent, field);
+                let text = written(&p);
+                let present = text.contains(&probe);
+                match status {
+                    "persist" => {
+                        persist_cells.push(format!("{agent}.{field}"));
+                        if !present {
+                            failures.push(format!(
+                                "{agent} 的 {field} 声明为 persist（设为全局可达），\
+                                 但写出的配置里没有这个值——补丁函数漏写了，或表该降级"
+                            ));
+                        }
+                    }
+                    "unsupported" => {
+                        if present {
+                            failures.push(format!(
+                                "{agent} 的 {field} 声明为 unsupported（CLI 无入口），\
+                                 却出现在了写出的配置里——补丁函数多了一条表不知道的写盘路径"
+                            ));
+                        }
+                    }
+                    // inject 属于启动注入那半边，tui/unknown 本就不该落盘；这里不表态。
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "通道表与写盘函数不一致：\n{}",
+            failures.join("\n")
+        );
+
+        // 表里 persist 的格子目前只有 qwen 的 temperature/top_p。这条防的是「表被悄悄扩了
+        // persist 而没人实现」——真出现了，上面 failures 会先响，这里再说明该去看哪。
+        assert_eq!(
+            persist_cells,
+            vec!["qwen.temperature".to_string(), "qwen.top_p".to_string()],
+            "persist 格子变了：确认补丁函数跟上后，同步更新这里"
+        );
     }
 
     #[test]

@@ -239,7 +239,7 @@ function ReasoningEffortPicker({
           </select>
         </label>
       )}
-      <p className="text-[11px] text-l4">勾选的档位可在会话里切换。开场只用其中一档。</p>
+      <p className="text-micro text-l4">勾选的档位可在会话里切换。开场只用其中一档。</p>
     </div>
   );
 }
@@ -580,15 +580,16 @@ export default function GatewayLibrary({
       name: name.trim() || "未命名网关",
       noAuth,
       slots: {
-        anthropic: slots.anthropic?.trim() || null,
-        openai: slots.openai?.trim() || null,
-        responses: slots.responses?.trim() || null,
-        gemini: slots.gemini?.trim() || null,
-        cursor: slots.cursor?.trim() || null,
+        anthropic: effectiveSlotUrl(slots, "anthropic", masterUrl) || null,
+        openai: effectiveSlotUrl(slots, "openai", masterUrl) || null,
+        responses: effectiveSlotUrl(slots, "responses", masterUrl) || null,
+        gemini: effectiveSlotUrl(slots, "gemini", masterUrl) || null,
+        cursor: effectiveSlotUrl(slots, "cursor", masterUrl) || null,
       },
       headerEnv,
       models,
       apiKey: apiKey.trim() || null,
+      clearKey: editing !== "new" && editing !== null && noAuth && !apiKey.trim(),
       expectedRevision: editing === "new" || editing === null ? null : editing.revision ?? null,
       walletAccessToken: walletToken.trim() || null,
       walletUserId,
@@ -806,7 +807,10 @@ export default function GatewayLibrary({
       const dto = await invoke<GatewayProbeDto>("probe_gateway_slot", {
         gatewayId: editing !== null && editing !== "new" ? editing.id : null,
         slot,
-        model: models.find((m) => m.status !== "stale")?.id ?? null,
+        model:
+          models.find((m) => m.status !== "stale" && m.catalogSlot === slot)?.id ??
+          models.find((m) => m.status !== "stale")?.id ??
+          null,
         basicOnly,
         baseUrl,
         apiKey: noAuth ? null : apiKey.trim() || null,
@@ -854,7 +858,10 @@ export default function GatewayLibrary({
           const dto = await invoke<GatewayProbeDto>("probe_gateway_slot", {
             gatewayId: editing !== null && editing !== "new" ? editing.id : null,
             slot,
-            model: models.find((m) => m.status !== "stale")?.id ?? null,
+            model:
+              models.find((m) => m.status !== "stale" && m.catalogSlot === slot)?.id ??
+              models.find((m) => m.status !== "stale")?.id ??
+              null,
             basicOnly: true,
             baseUrl: effectiveSlotUrl(slots, slot, masterUrl),
             apiKey: noAuth ? null : apiKey.trim() || null,
@@ -1022,7 +1029,7 @@ export default function GatewayLibrary({
               />
             </label>
             {responsesUrlWarn && (
-              <p className="text-[11px] text-warn-text">{responsesUrlWarn}</p>
+              <p className="text-micro text-warn-text">{responsesUrlWarn}</p>
             )}
             <div className="flex flex-wrap items-center gap-2">
               <button
@@ -1375,10 +1382,10 @@ export default function GatewayLibrary({
                         {open && (
                           <div className="mt-1 space-y-1 pl-5">
                             {combo?.probeNote && (
-                              <p className="text-[11px] text-warn-text">{combo.probeNote}</p>
+                              <p className="text-micro text-warn-text">{combo.probeNote}</p>
                             )}
                             {combo?.policyChannelNote && (
-                              <p className="text-[11px] text-l4">{combo.policyChannelNote}</p>
+                              <p className="text-micro text-l4">{combo.policyChannelNote}</p>
                             )}
                             {effortMode !== "hidden" && (
                               <label className="block text-micro text-l3">
@@ -1482,7 +1489,7 @@ export default function GatewayLibrary({
                                   中转新模型查不到/报错时手填；对本机所有 Agent 生效（能力来源最高层）
                                 </span>
                               </p>
-                              <p className="mt-0.5 text-[11px] text-l4">
+                              <p className="mt-0.5 text-micro text-l4">
                                 当前解析：
                                 {cap
                                   ? `${Math.round(cap.context / 1024)}K 上下文${cap.thinking ? " · 思考" : ""}${cap.vision ? " · 视觉" : ""}`

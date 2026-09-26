@@ -113,8 +113,30 @@ pub fn set_slot_url(slots: &mut ProtocolSlots, slot: Slot, url: Option<String>) 
     }
 }
 
+/// URL 归一化：大小写、默认端口、尾斜杠这些「写法差异」不该影响指纹。
+/// `https://API.example.com:443/v1/` 与 `https://api.example.com/v1` 是同一个端点，
+/// 归一前会算出两个指纹，于是改一个尾斜杠就把体检结论判成失效（用户反复点测试、
+/// 列表里永远「未测试」）。scheme 与 host 按 RFC 3986 本就不区分大小写，默认端口
+/// 与空 path 等价，故这些归一是纯无损的；path 保留原大小写（可能真的区分）。
 fn normalize_url(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_string()
+    let trimmed = url.trim();
+    let Ok(mut parsed) = reqwest::Url::parse(trimmed) else {
+        // 解析不了（用户半截输入）就只做保守处理，别把原文改坏。
+        return trimmed.trim_end_matches('/').to_string();
+    };
+    let _ = parsed.set_fragment(None);
+    if parsed.path() == "/" {
+        // `https://example.com` 与 `https://example.com/` 是同一个端点，
+        // 统一成无尾斜杠，与旧口径一致（旧记录因此不会误失效）。
+        let _ = parsed.set_path("");
+    }
+    let normalized = parsed.as_str().trim_end_matches('/').to_string();
+    // 解析成功但产生了别的形态（如 punycode 化）时，仍以能还原出原文为准。
+    if normalized.is_empty() {
+        trimmed.trim_end_matches('/').to_string()
+    } else {
+        normalized
+    }
 }
 
 pub fn url_fingerprint(url: &str) -> String {
@@ -202,12 +224,17 @@ pub fn probe_field_status_with_key(
 }
 
 /// 体检结果只对写下时的地址/密钥指纹有效。网关已改则丢弃迟到的回包。
-pub fn probe_record_still_valid(gateway: &Gateway, rec: &crate::profiles::ProbeRecord) -> bool {
+/// `has_key` 由调用方从密钥库权威获取，不得依赖 `key_hint`（key_hint 只是显示提示，可与实际状态不同步）。
+pub fn probe_record_still_valid(
+    gateway: &Gateway,
+    rec: &crate::profiles::ProbeRecord,
+    has_key: bool,
+) -> bool {
     let Some(slot) = Slot::from_str(&rec.slot) else {
         return false;
     };
     let url = slot_url(&gateway.slots, slot).unwrap_or("");
-    rec.url_fp == url_fingerprint(url) && rec.key_fp == key_presence_fp(gateway.key_hint.is_some())
+    rec.url_fp == url_fingerprint(url) && rec.key_fp == key_presence_fp(has_key)
 }
 
 pub fn invalidate_slot_probes(gateway: &mut Gateway, slot: Slot) {
@@ -271,10 +298,11 @@ pub struct MergeEntry {
     pub name: Option<String>,
 }
 
+/// 配置目录。走 `storage::config_root()` 而不是直接问 `dirs`，因为测试要能把
+/// 整个配置根重定向到临时目录——这里读写的 gateways.json/bindings.json 是真实用户数据，
+/// 以前测试留下的假网关会真的出现在网关库里（见 `config_root` 的注释）。
 fn config_dir() -> Result<PathBuf, String> {
-    Ok(dirs::config_dir()
-        .ok_or("无法确定平台配置目录")?
-        .join("ccode"))
+    crate::storage::config_root().ok_or_else(|| "无法确定平台配置目录".to_string())
 }
 
 pub fn gateways_path() -> Result<PathBuf, String> {
@@ -1557,11 +1585,11 @@ mod tests {
             latency_ms: None,
         };
         assert!(
-            !probe_record_still_valid(&gw, &rec),
+            !probe_record_still_valid(&gw, &rec, true),
             "地址已改，迟到回包不得当作新配置结论"
         );
         gw.slots.anthropic = Some("https://example.com/".into());
-        assert!(probe_record_still_valid(&gw, &rec));
+        assert!(probe_record_still_valid(&gw, &rec, true));
     }
 
     /// 连接状态徽标同样受 §8 约束：A 模型的体检结论不得株连选了 B 模型的绑定

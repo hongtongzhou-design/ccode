@@ -273,15 +273,21 @@ pub struct GatewayInput {
     pub api_key: Option<String>,
     #[serde(default)]
     pub expected_revision: Option<String>,
-    /// New API 系统访问令牌（查钱包）；空 / None = 不改
+    /// New API 系统访问令牌（查钱包）；空 / None = 不改。清除不走这里——
+    /// 见 `clear_gateway_wallet_token`（带二次确认的专用命令）
     #[serde(default)]
     pub wallet_access_token: Option<String>,
-    /// 清空系统访问令牌
-    #[serde(default)]
-    pub clear_wallet_token: bool,
     /// Some("") 清空；None 不改
     #[serde(default)]
     pub wallet_user_id: Option<String>,
+    /// 明确删除密钥；不发或 false = 不改（save_gateway 不通过推断隐式删密钥）
+    #[serde(default)]
+    pub clear_key: bool,
+    /// 前端拉取目录后保存时回传；None = 不改
+    #[serde(default)]
+    pub catalog_fetched_at: Option<String>,
+    #[serde(default)]
+    pub catalog_from_slot: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -464,26 +470,47 @@ pub(crate) fn sensitive_env_name(name: &str) -> bool {
 
 pub struct ProfileStore {
     path: PathBuf,
+    /// 测试专用：持有配置根重定向的守卫，store 活多久隔离就维持多久。
+    /// 生产构建下是零大小占位（见 `storage::ConfigRootGuard`）。
+    ///
+    /// 放在 store 上而不是让测试自己记着「进进出出」，是因为隔离一旦靠人守就容易漏：
+    /// `save_gateway` 等入口调的是 `gateway_store` 的自由函数，它们不看 store 参数，
+    /// 只看当前线程上有没有覆盖。
+    _root_guard: crate::storage::ConfigRootGuard,
 }
 
 impl ProfileStore {
     pub fn new() -> Result<Self, String> {
-        let dir = dirs::config_dir()
-            .ok_or("无法确定平台配置目录")?
-            .join("ccode");
+        let dir = crate::storage::config_root().ok_or("无法确定平台配置目录")?;
         fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
         Ok(Self {
             path: dir.join("profiles.json"),
+            _root_guard: crate::storage::inert_config_root(),
         })
     }
 
     /// 只读场景的构造（config_dump 自省快照）：配置目录不存在返回 None，
     /// 不像 new() 那样建目录——只读路径不得有写副作用
     pub(crate) fn existing() -> Option<Self> {
-        let dir = dirs::config_dir()?.join("ccode");
+        let dir = crate::storage::config_root()?;
         dir.is_dir().then(|| Self {
             path: dir.join("profiles.json"),
+            _root_guard: crate::storage::inert_config_root(),
         })
+    }
+
+    /// 测试专用：在任意目录建一个 store，不碰真实配置目录。
+    ///
+    /// 重定向的不只是 `profiles.json`——整个配置根都跟着走（gateways.json、
+    /// bindings.json、keys.json、锁）。以前只挪了 `profiles.json`，于是
+    /// `save_gateway` 这类经 `gateway_store` 自由函数的入口仍写真实目录，
+    /// 网关库里攒下 68 条 `api.example.com` 假网关（2026-09-26 修）。
+    #[cfg(test)]
+    pub(crate) fn new_for_test(dir: &std::path::Path) -> Self {
+        Self {
+            path: dir.join("profiles.json"),
+            _root_guard: crate::storage::redirect_config_root(dir),
+        }
     }
 
     fn read_legacy_profiles(&self) -> Result<Vec<Profile>, String> {
@@ -1002,7 +1029,7 @@ impl ProfileStore {
     pub fn save_gateway(&self, id: Option<String>, input: GatewayInput) -> Result<Gateway, String> {
         let _g = store_lock()?;
         self.ensure_split_locked()?;
-        crate::profile_validation::validate_anthropic_slot_url(input.slots.anthropic.as_deref())?;
+        crate::profile_validation::validate_slot_urls(&input.slots)?;
         let mut gateways = crate::gateway_store::load_gateways()?;
         if let Some(id) = id {
             let idx = gateways
@@ -1012,7 +1039,7 @@ impl ProfileStore {
             if let Some(expected) = input.expected_revision.as_deref().filter(|s| !s.is_empty()) {
                 let current = crate::gateway_store::gateway_content_revision(&gateways[idx]);
                 if current != expected {
-                    return Err("网关已被其他窗口修改，未覆盖。请重新打开后再保存。".into());
+                    return Err("网关数据已变更（可能是后台目录刷新），未覆盖。请重新打开后再保存。".into());
                 }
             }
             let old = gateways[idx].clone();
@@ -1020,7 +1047,41 @@ impl ProfileStore {
             gateways[idx].no_auth = input.no_auth;
             gateways[idx].slots = input.slots;
             gateways[idx].header_env = input.header_env;
-            gateways[idx].models = input.models;
+            // 按 id 合并：保留目录同步字段（status/last_seen_at/catalog_slot），
+            // 用 input 的策略字段（temperature/top_p 等）覆盖；input 没有的条目保留原有记录。
+            {
+                let mut next: Vec<GatewayModel> = input.models.iter().map(|incoming| {
+                    if let Some(existing) = gateways[idx].models.iter().find(|m| m.id == incoming.id) {
+                        GatewayModel {
+                            id: incoming.id.clone(),
+                            source: incoming.source.clone(),
+                            status: existing.status.clone(),
+                            last_seen_at: existing.last_seen_at.clone(),
+                            catalog_slot: existing.catalog_slot.clone(),
+                            temperature: incoming.temperature,
+                            top_p: incoming.top_p,
+                            max_output_tokens: incoming.max_output_tokens,
+                            reasoning_effort: incoming.reasoning_effort.clone(),
+                        }
+                    } else {
+                        incoming.clone()
+                    }
+                }).collect();
+                // 保留 input 里没有但原来存在的条目（例如目录已拉取、用户未选的模型）
+                for existing in &gateways[idx].models {
+                    if !next.iter().any(|m| m.id == existing.id) {
+                        next.push(existing.clone());
+                    }
+                }
+                gateways[idx].models = next;
+            }
+            // Bug #6: 前端在保存前已拉取目录时回传 catalog 字段；None 表示不改（保留后端已有值）
+            if let Some(fetched_at) = input.catalog_fetched_at {
+                gateways[idx].catalog_fetched_at = Some(fetched_at);
+            }
+            if let Some(from_slot) = input.catalog_from_slot {
+                gateways[idx].catalog_from_slot = Some(from_slot);
+            }
             if old.slots.anthropic != gateways[idx].slots.anthropic {
                 crate::gateway_store::invalidate_slot_probes(
                     &mut gateways[idx],
@@ -1056,18 +1117,15 @@ impl ProfileStore {
                 crate::gateway_store::invalidate_all_probes(&mut gateways[idx]);
             }
             let pending_key = input.api_key.filter(|k| !k.is_empty());
-            let clear_key = pending_key.is_none() && input.no_auth;
+            let clear_key = input.clear_key && pending_key.is_none();
             if let Some(key) = &pending_key {
                 gateways[idx].key_hint = Some(key_hint_of(key));
             } else if clear_key {
                 gateways[idx].key_hint = None;
             }
             let pending_wallet = input.wallet_access_token.filter(|k| !k.trim().is_empty());
-            let clear_wallet = input.clear_wallet_token;
             if let Some(tok) = &pending_wallet {
                 gateways[idx].wallet_key_hint = Some(key_hint_of(tok));
-            } else if clear_wallet {
-                gateways[idx].wallet_key_hint = None;
             }
             if let Some(uid) = input.wallet_user_id {
                 let t = uid.trim();
@@ -1098,12 +1156,6 @@ impl ProfileStore {
                     let _ = crate::gateway_store::save_gateways(&gateways);
                     return Err(error);
                 }
-            } else if clear_wallet {
-                if let Err(error) = delete_key(&wallet_key_id(&id)) {
-                    gateways[idx] = old;
-                    let _ = crate::gateway_store::save_gateways(&gateways);
-                    return Err(error);
-                }
             }
             Ok(saved)
         } else {
@@ -1117,8 +1169,8 @@ impl ProfileStore {
                 slots: input.slots,
                 header_env: input.header_env,
                 models: input.models,
-                catalog_fetched_at: None,
-                catalog_from_slot: None,
+                catalog_fetched_at: input.catalog_fetched_at,
+                catalog_from_slot: input.catalog_from_slot,
                 last_probe: Vec::new(),
                 slot_probes: Vec::new(),
                 revision: String::new(),
@@ -1226,6 +1278,7 @@ impl ProfileStore {
         }
         let mut profile = crate::gateway_store::materialize(&binding, Some(gw), None);
         profile.has_key = has_key_locked(&gid)?;
+        crate::gateway_store::refresh_profile_connection_state(&mut profile, &binding, Some(gw));
         crate::profile_validation::validate_profile_fields(&profile)?;
         bindings.push(binding);
         crate::gateway_store::save_bindings(&bindings)?;
@@ -1240,7 +1293,7 @@ impl ProfileStore {
             .iter_mut()
             .find(|g| g.id == gateway_id)
             .ok_or("网关不存在")?;
-        if !crate::gateway_store::probe_record_still_valid(gw, &rec) {
+        if !crate::gateway_store::probe_record_still_valid(gw, &rec, has_key_locked(&gateway_id)?) {
             // 探测期间用户改了地址或密钥：旧回包不得写成新配置的结论。
             return Ok(());
         }
@@ -1315,6 +1368,16 @@ impl ProfileStore {
     }
 }
 
+/// 旧版拆分中断后的无猜测修复：把还挂在 binding id 下的密钥搬回网关 id。
+///
+/// 只在「确实同一把密钥」时搬。早先只比对「网关有没有 key_hint」，于是任何一把
+/// 残留密钥都会被认领——包括当初指向别的端点的那把。用户在旧版换过网关地址后，
+/// 这把错密钥会转正成当前网关的凭证，请求带着它打到新端点（每次都是 401，
+/// 而 UI 显示「已配置密钥」）。
+///
+/// 认领判据是密钥**尾 4 位**。尾号不是身份，只是当时能拿到的上界——拆分迁移没有把
+/// 旧 `base_url` 留在 binding 上（只留了 id），所以端点身份无从比对，这里不假装能比。
+/// 能做的是消除歧义：尾号在多个网关间撞车时不认领（见函数内注释）。
 fn repair_legacy_key_links(
     bindings: &[Binding],
     gateways: &[Gateway],
@@ -1325,17 +1388,36 @@ fn repair_legacy_key_links(
         let Some(gid) = binding.gateway_id.as_ref() else {
             continue;
         };
-        if keys.contains_key(gid)
-            || !gateways
-                .iter()
-                .any(|gateway| gateway.id == *gid && gateway.key_hint.is_some())
+        if keys.contains_key(gid) {
+            continue;
+        }
+        let Some(gateway) = gateways
+            .iter()
+            .find(|gateway| gateway.id == *gid && gateway.key_hint.is_some())
+        else {
+            continue;
+        };
+        let Some(key) = keys.get(&binding.id).cloned() else {
+            continue;
+        };
+        let hint = key_hint_of(&key);
+        // hint 是尾 4 位。对不上就是换过密钥，宁可不修也不能认错。
+        if gateway.key_hint.as_deref() != Some(hint.as_str()) {
+            continue;
+        }
+        // 尾号不是身份，只是上界：两把不同的密钥撞尾号时，认领会把 A 的密钥装到 B。
+        // 端点本来能区分它们，但拆分迁移没有把 base_url 留在 binding 上（只留了 id），
+        // 所以这里不再装作能认出端点——只在尾号**无歧义**时才认领：如果还有别的网关
+        // 也挂着同一个尾号，那把密钥归谁就是赌，此时不搬（留作孤立密钥）比搬错强，
+        // 搬错的表现是请求带着别人的密钥打到新端点（持续 401，而 UI 显示已配置）。
+        if gateways
+            .iter()
+            .any(|other| other.id != *gid && other.key_hint.as_deref() == Some(hint.as_str()))
         {
             continue;
         }
-        if let Some(key) = keys.get(&binding.id).cloned() {
-            keys.insert(gid.clone(), key);
-            changed = true;
-        }
+        keys.insert(gid.clone(), key);
+        changed = true;
     }
     changed
 }
@@ -1462,9 +1544,8 @@ fn pick_copy_protocol(src: &Profile, target_agent: &str) -> Result<Option<String
 // 读取时仍会从钥匙串做一次性迁移，兼容旧版本写入的条目。
 
 fn keys_path() -> Result<PathBuf, String> {
-    Ok(dirs::config_dir()
+    Ok(crate::storage::config_root()
         .ok_or("无法确定平台配置目录")?
-        .join("ccode")
         .join("keys.json"))
 }
 
@@ -2328,9 +2409,11 @@ mod tests {
     #[test]
     fn legacy_key_repair_preserves_binding_and_gateway_identity() {
         let binding: Binding = serde_json::from_value(serde_json::json!({"id":"old-binding", "agent":"codex", "kind":"api", "gatewayId":"new-gateway", "models":[], "extraEnv":{}})).unwrap();
-        let mut gateway: Gateway = serde_json::from_value(
-            serde_json::json!({"id":"new-gateway", "name":"gateway", "keyHint":"tail"}),
-        )
+        let mut gateway: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "new-gateway",
+            "name": "gateway",
+            "keyHint": key_hint_of("synthetic-key"),
+        }))
         .unwrap();
         let mut keys = [("old-binding".into(), "synthetic-key".into())]
             .into_iter()
@@ -2360,6 +2443,82 @@ mod tests {
             !repair_legacy_key_links(&[binding], &[gateway], &mut keys),
             "明确清除的密钥不能被恢复"
         );
+    }
+
+    #[test]
+    fn legacy_key_repair_refuses_a_key_the_gateway_does_not_claim() {
+        // 网关现在挂着别的密钥（用户在旧版换过端点/换过密钥）。残留的这把不该被认领，
+        // 否则它会转正成当前网关的凭证，请求带着错密钥打到新端点。
+        let binding: Binding = serde_json::from_value(serde_json::json!({"id":"old-binding", "agent":"codex", "kind":"api", "gatewayId":"new-gateway", "models":[], "extraEnv":{}})).unwrap();
+        let gateway: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "new-gateway",
+            "name": "gateway",
+            "keyHint": key_hint_of("sk-currentAAA7"),
+        }))
+        .unwrap();
+        let mut keys = [("old-binding".into(), "sk-supersededB2C9".into())]
+            .into_iter()
+            .collect();
+        assert!(
+            !repair_legacy_key_links(&[binding], &[gateway], &mut keys),
+            "尾号对不上就不是同一把密钥"
+        );
+        assert!(keys.get("new-gateway").is_none());
+    }
+
+    #[test]
+    fn legacy_key_repair_trusts_a_unique_hint_tail() {
+        // 只有一个网关挂着这个尾号时，尾号就是可用的判据：一致即认领。
+        // 这不是「认出了身份」，是「没有别的候选」。
+        let binding: Binding = serde_json::from_value(serde_json::json!({"id":"old-binding", "agent":"codex", "kind":"api", "gatewayId":"new-gateway", "models":[], "extraEnv":{}})).unwrap();
+        let gateway: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "new-gateway",
+            "name": "gateway",
+            "keyHint": key_hint_of("sk-aaaaaaaaBBBB"),
+        }))
+        .unwrap();
+        let mut keys = [("old-binding".into(), "sk-zzzzzzzzBBBB".into())]
+            .into_iter()
+            .collect();
+        assert!(
+            repair_legacy_key_links(&[binding], &[gateway], &mut keys),
+            "尾号一致且无其他候选网关时认领"
+        );
+        assert_eq!(
+            keys.get("new-gateway").map(String::as_str),
+            Some("sk-zzzzzzzzBBBB")
+        );
+    }
+
+    #[test]
+    fn legacy_key_repair_declines_when_the_hint_tail_is_ambiguous() {
+        // 两个网关撞同一个尾号：这把密钥归谁无从判断，此时**不搬**。
+        // 搬错的表现是请求带着 A 的密钥打到 B 的端点（持续 401，UI 却显示已配置）；
+        // 不搬只是留一把孤立密钥——两害相权取其轻。端点身份本可区分二者，
+        // 但拆分迁移没把旧 base_url 留在 binding 上，所以这里只能拒绝猜测。
+        let binding: Binding = serde_json::from_value(serde_json::json!({"id":"old-binding", "agent":"codex", "kind":"api", "gatewayId":"new-gateway", "models":[], "extraEnv":{}})).unwrap();
+        let hint = key_hint_of("sk-aaaaaaaaBBBB");
+        let gateway: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "new-gateway",
+            "name": "gateway",
+            "keyHint": hint,
+        }))
+        .unwrap();
+        let other: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "another-gateway",
+            "name": "another",
+            "keyHint": hint,
+        }))
+        .unwrap();
+        let mut keys = [("old-binding".into(), "sk-zzzzzzzzBBBB".into())]
+            .into_iter()
+            .collect();
+        assert!(
+            !repair_legacy_key_links(&[binding], &[gateway, other], &mut keys),
+            "尾号在多个网关间撞车时不认领"
+        );
+        assert!(keys.get("new-gateway").is_none());
+        assert!(keys.get("another-gateway").is_none());
     }
 
     #[test]
@@ -3108,6 +3267,210 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== save_gateway / bind_gateway / delete_gateway 编排测试 =====
+
+    fn make_store_in(dir: &std::path::Path) -> ProfileStore {
+        ProfileStore::new_for_test(dir)
+    }
+
+    fn minimal_gateway_input(name: &str, url: &str) -> GatewayInput {
+        GatewayInput {
+            name: name.into(),
+            no_auth: true,
+            slots: crate::profiles::ProtocolSlots {
+                anthropic: Some(url.into()),
+                openai: Some(url.into()),
+                responses: None,
+                gemini: None,
+                cursor: None,
+            },
+            header_env: Default::default(),
+            models: vec![],
+            api_key: None,
+            expected_revision: None,
+            wallet_access_token: None,
+            wallet_user_id: None,
+            clear_key: false,
+            catalog_fetched_at: None,
+            catalog_from_slot: None,
+        }
+    }
+
+    #[test]
+    fn save_gateway_create_then_update_preserves_catalog_fields() {
+        let dir = std::env::temp_dir().join(format!("ccode-gw-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = make_store_in(&dir);
+
+        // 新建
+        let input = minimal_gateway_input("test", "https://api.example.com");
+        let gw = store.save_gateway(None, input).unwrap();
+        assert_eq!(gw.name, "test");
+        assert_eq!(gw.catalog_fetched_at, None);
+
+        // 更新 — 带 catalog_fetched_at 回传
+        let mut update = minimal_gateway_input("test-updated", "https://api.example.com");
+        update.expected_revision = Some(gw.revision.clone());
+        update.catalog_fetched_at = Some("2026-01-01T00:00:00Z".into());
+        update.catalog_from_slot = Some("openai".into());
+        let gw2 = store.save_gateway(Some(gw.id.clone()), update).unwrap();
+        assert_eq!(gw2.name, "test-updated");
+        assert_eq!(gw2.catalog_fetched_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(gw2.catalog_from_slot.as_deref(), Some("openai"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_gateway_model_merge_preserves_catalog_metadata() {
+        let dir = std::env::temp_dir().join(format!("ccode-gw-merge-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = make_store_in(&dir);
+
+        // 新建带一个 fetched 模型
+        let mut input = minimal_gateway_input("merge-test", "https://api.example.com");
+        input.models = vec![GatewayModel {
+            id: "model-a".into(),
+            source: "fetched".into(),
+            status: "available".into(),
+            last_seen_at: Some("2026-01-01T00:00:00Z".into()),
+            catalog_slot: Some("openai".into()),
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+        }];
+        let gw = store.save_gateway(None, input).unwrap();
+
+        // 更新 — 前端回传相同 id 但不带目录元数据，应保留后端 catalog_slot
+        let mut update = minimal_gateway_input("merge-test", "https://api.example.com");
+        update.expected_revision = Some(gw.revision.clone());
+        update.models = vec![GatewayModel {
+            id: "model-a".into(),
+            source: "fetched".into(),
+            status: "available".into(),
+            last_seen_at: None,
+            catalog_slot: None,
+            temperature: Some(0.7),
+            top_p: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+        }];
+        let gw2 = store.save_gateway(Some(gw.id.clone()), update).unwrap();
+        let model = gw2.models.iter().find(|m| m.id == "model-a").unwrap();
+        // catalog_slot 来自后端，不应被前端的 None 覆盖
+        assert_eq!(model.catalog_slot.as_deref(), Some("openai"));
+        // temperature 来自前端更新
+        assert_eq!(model.temperature, Some(0.7));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_gateway_explicit_clear_key_flag() {
+        let dir = std::env::temp_dir().join(format!("ccode-gw-ck-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = make_store_in(&dir);
+
+        let gw = store.save_gateway(None, minimal_gateway_input("key-test", "https://api.example.com")).unwrap();
+
+        // no_auth=true と clear_key=false → 不应清除密钥
+        let mut update = minimal_gateway_input("key-test", "https://api.example.com");
+        update.expected_revision = Some(gw.revision.clone());
+        update.no_auth = true;
+        update.clear_key = false;
+        let gw2 = store.save_gateway(Some(gw.id.clone()), update).unwrap();
+        // key_hint 初始为 None（没有密钥），保持 None — clear 没副作用
+        assert_eq!(gw2.key_hint, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bind_gateway_returns_correct_connection_state() {
+        let dir = std::env::temp_dir().join(format!("ccode-bind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = make_store_in(&dir);
+
+        let gw = store.save_gateway(None, minimal_gateway_input("bind-gw", "https://api.example.com")).unwrap();
+        let binding_input = BindingInput {
+            agent: "claude-code".into(),
+            name: String::new(),
+            gateway_id: Some(gw.id.clone()),
+            kind: BindingKind::Api,
+            protocol: None,
+            api_backend: None,
+            models: vec![],
+            extra_env: Default::default(),
+        };
+        let profile = store.bind_gateway(binding_input).unwrap();
+        // slot_missing=false (anthropic slot is set), no key needed (no_auth=true)
+        // → connection_state should not be slot_missing or credential_missing
+        assert_ne!(profile.connection_status, "slot_missing");
+        assert_ne!(profile.connection_status, "credential_missing");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_gateway_removes_gateway_and_leaves_bindings_orphaned() {
+        let dir = std::env::temp_dir().join(format!("ccode-del-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = make_store_in(&dir);
+
+        let gw = store.save_gateway(None, minimal_gateway_input("del-gw", "https://api.example.com")).unwrap();
+        store.delete_gateway(&gw.id).unwrap();
+
+        let gateways = store.list_gateways().unwrap();
+        assert!(gateways.iter().all(|g| g.id != gw.id));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `new_for_test` 必须把**整个配置根**挪走，不只是 `profiles.json`。
+    ///
+    /// 这是 2026-09-26 那次修复的回归闸：以前只重定向了 `profiles.json`，
+    /// `save_gateway` 走 `gateway_store` 的自由函数照旧写真实配置目录，
+    /// 于是每跑一轮 `cargo test` 就往用户的网关库里塞假网关（实测攒到 68 条）。
+    /// 断言打在「写入落在临时目录内」上，而不是「真实目录没变」——
+    /// 后者在别人的机器上会假绿。
+    #[test]
+    fn store_isolation_redirects_the_whole_config_root() {
+        let dir = std::env::temp_dir().join(format!("ccode-isolation-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = make_store_in(&dir);
+
+        // 网关落点：gateway_store 的自由函数必须也认这个临时根
+        let gw = store
+            .save_gateway(None, minimal_gateway_input("iso-gw", "https://api.example.com"))
+            .unwrap();
+        for name in ["gateways.json", "bindings.json"] {
+            assert!(
+                dir.join(name).exists(),
+                "{name} 没有落在临时目录里——配置根没被重定向（gateway_store 会写真实配置目录）"
+            );
+        }
+        let on_disk: Vec<crate::profiles::Gateway> =
+            serde_json::from_str(&fs::read_to_string(dir.join("gateways.json")).unwrap()).unwrap();
+        assert!(on_disk.iter().any(|g| g.id == gw.id), "网关没写进临时目录的 gateways.json");
+
+        // 锁也要跟走：否则测试会和真实运行中的实例抢同一把锁
+        let roots = crate::storage::config_root().unwrap();
+        assert_eq!(roots, dir, "config_root 没指向临时目录");
+
+        // 守卫 drop 后必须还原，否则隔离会漏给同线程的后续用例。
+        // 还原目标 = 该线程此前的根（通常是真实配置目录），总之不再是临时目录。
+        drop(store);
+        let restored = crate::storage::config_root().unwrap();
+        assert_ne!(
+            restored, dir,
+            "store 已 drop，配置根却没还原到「{}」",
+            restored.display()
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

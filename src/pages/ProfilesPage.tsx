@@ -728,7 +728,7 @@ function ProfileModal({
               if (appliedPreset) setAppliedPreset(null);
             }}
           />
-          <span className="mt-1 block text-[10px] text-l4">
+          <span className="mt-1 block text-micro text-l4">
             填好后到下方「验证并获取」一次完成连通验证和模型目录拉取
           </span>
         </label>
@@ -1095,7 +1095,7 @@ function ProfileModal({
                 />
               ))}
             </div>
-            <p className="mt-1 text-[10px] text-l4">
+            <p className="mt-1 text-micro text-l4">
               保存时用同一份网关和模型名单给勾选的 Agent 各建一条绑定，协议自动按各家适配。
             </p>
           </div>
@@ -1115,7 +1115,7 @@ function ProfileModal({
                 />
                 <span
                   aria-hidden="true"
-                  className="flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-field bg-canvas text-[10px] text-cta-text transition-colors peer-checked:border-cta-bd peer-checked:bg-cta peer-checked:after:content-['✓']"
+                  className="flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-field bg-canvas text-micro text-cta-text transition-colors peer-checked:border-cta-bd peer-checked:bg-cta peer-checked:after:content-['✓']"
                 />
                 本地端点无密钥
               </label>
@@ -1162,7 +1162,7 @@ function ProfileModal({
                   <option value="responses">responses</option>
                   <option value="messages">messages</option>
                 </select>
-                <span className="mt-1 block text-[10px] text-l4">
+                <span className="mt-1 block text-micro text-l4">
                   启动注入改不了后端（grok overlay 白名单不放行），此项随「设为全局默认」写入 ~/.grok/config.toml 的 [model.*] 段；中转目录条目带 apiBackend 字段时以目录为准之外的另一渠道
                 </span>
               </label>
@@ -1171,16 +1171,16 @@ function ProfileModal({
             <div className="mb-3 rounded border border-hairline ccode-well p-2">
               <p className="mb-2 text-xs font-medium text-l2">请求策略</p>
               {combo?.policyChannelNote && (
-                <p className="mb-1 text-[11px] text-l3">{combo.policyChannelNote}</p>
+                <p className="mb-1 text-micro text-l3">{combo.policyChannelNote}</p>
               )}
               {combo?.effortReadonly && (
-                <p className="mb-1 text-[11px] text-l3">思考档已保存在网关，当前 CLI 没有注入通道，启动时不会写进去。</p>
+                <p className="mb-1 text-micro text-l3">思考档已保存在网关，当前 CLI 没有注入通道，启动时不会写进去。</p>
               )}
               {combo && combo.channelTemperature !== "inject" && form.requestPolicy.temperature != null && (
-                <p className="mb-1 text-[11px] text-l3">{combo.channelTemperature === "persist" ? "温度已保存在网关，仅「设为全局默认」写入后生效，启动注入不携带。" : "温度已保存在网关，当前 CLI 没有通道，启动时不会注入。"}</p>
+                <p className="mb-1 text-micro text-l3">{combo.channelTemperature === "persist" ? "温度已保存在网关，仅「设为全局默认」写入后生效，启动注入不携带。" : "温度已保存在网关，当前 CLI 没有通道，启动时不会注入。"}</p>
               )}
               {combo?.mixedModelsNote && (
-                <p className="mb-1 text-[11px] text-warn-text">{combo.mixedModelsNote}</p>
+                <p className="mb-1 text-micro text-warn-text">{combo.mixedModelsNote}</p>
               )}
               {!initial && bindMode === "new" && (
                 <>
@@ -1188,10 +1188,10 @@ function ProfileModal({
                 {([[
                   "temperature", "temperature", "temperature"], ["topP", "top_p", "topP"], ["maxOutputTokens", "max output", "maxOutputTokens"]] as const).map(([key, label, capability]) => {
                   const support = agentCapabilities?.requestPolicy[capability];
-                  return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-[10px] text-l4">协议{channelLabel(support)}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => { const n = parseOptionalNumber(e.target.value); if (n !== undefined) setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: n } }); }} /></label>;
+                  return <label key={key} className="text-xs text-l3">{label}<span className="ml-1 text-micro text-l4">协议{channelLabel(support)}</span><input className={fieldClass} type="number" min={key === "temperature" ? "0" : key === "topP" ? "0" : "1"} max={key === "temperature" ? "2" : key === "topP" ? "1" : undefined} step={key === "temperature" ? "0.1" : key === "topP" ? "0.05" : "1"} placeholder="默认" value={form.requestPolicy[key] ?? ""} onChange={(e) => { const n = parseOptionalNumber(e.target.value); if (n !== undefined) setForm({ ...form, requestPolicy: { ...form.requestPolicy, [key]: n } }); }} /></label>;
                 })}
               </div>
-              <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-[10px] text-l4">协议{channelLabel(agentCapabilities?.requestPolicy.reasoningEffort)}</span>{agentCapabilities?.effortOptions?.length ? (
+              <label className="mt-2 block text-xs text-l3">reasoning effort<span className="ml-1 text-micro text-l4">协议{channelLabel(agentCapabilities?.requestPolicy.reasoningEffort)}</span>{agentCapabilities?.effortOptions?.length ? (
                 <select className={fieldClass} value={form.requestPolicy.reasoningEffort ?? ""} onChange={(e) => setForm({ ...form, requestPolicy: { ...form.requestPolicy, reasoningEffort: e.target.value || null } })}>
                   <option value="">默认</option>
                   {agentCapabilities.effortOptions.map((opt) => (
@@ -1204,12 +1204,12 @@ function ProfileModal({
                 </>
               )}
               {initial && (
-                <p className="mb-2 text-[11px] text-l4">思考档 / 温度 / 输出上限在网关库里按模型编辑，这里改了也不会覆盖已有逐模型策略。</p>
+                <p className="mb-2 text-micro text-l4">思考档 / 温度 / 输出上限在网关库里按模型编辑，这里改了也不会覆盖已有逐模型策略。</p>
               )}
               {showGatewayFields && (
-              <label className="mt-2 block text-xs text-l3">自定义 Header（Header 名=环境变量名）<span className="ml-1 text-[10px] text-l4">协议{channelLabel(agentCapabilities?.requestPolicy.customHeaders)}</span><textarea className={`${fieldClass} h-16 font-mono text-xs`} placeholder="X-Provider-Region=MODEL_REGION\nX-Trace-Id=TRACE_ID" value={headerEnvText} onChange={(e) => setHeaderEnvText(e.target.value)} /></label>
+              <label className="mt-2 block text-xs text-l3">自定义 Header（Header 名=环境变量名）<span className="ml-1 text-micro text-l4">协议{channelLabel(agentCapabilities?.requestPolicy.customHeaders)}</span><textarea className={`${fieldClass} h-16 font-mono text-xs`} placeholder="X-Provider-Region=MODEL_REGION\nX-Trace-Id=TRACE_ID" value={headerEnvText} onChange={(e) => setHeaderEnvText(e.target.value)} /></label>
               )}
-              <p className="mt-1 text-[11px] text-l4">Header 跟网关；思考档/温度跟每个模型。当前不会伪造请求体。Header 值只填环境变量名，不保存密文。</p>
+              <p className="mt-1 text-micro text-l4">Header 跟网关；思考档/温度跟每个模型。当前不会伪造请求体。Header 值只填环境变量名，不保存密文。</p>
             </div>
             )}
             <label className="block text-sm">
@@ -1229,7 +1229,7 @@ function ProfileModal({
               />
             </label>
             {form.agent === "kimi" && (
-              <p className="mt-1 text-[10px] text-l4">
+              <p className="mt-1 text-micro text-l4">
                 Kimi 窄通道（不自动注入，按需在此声明）：KIMI_MODEL_ADAPTIVE_THINKING=true/false（Anthropic 通道思考形态）、KIMI_MODEL_REASONING_KEY=reasoning_content/reasoning_details/reasoning（OpenAI 通道思考字段方言，中转异常时 pin）
               </p>
             )}
@@ -1607,7 +1607,7 @@ function PreviewDialog({
               <ul className="space-y-1">
                 {result.env.map((item, index) => (
                   <li key={index} className="flex flex-wrap items-baseline gap-2">
-                    <span className="rounded border border-hairline px-1.5 py-0.5 font-mono text-[11px] text-l2">
+                    <span className="rounded border border-hairline px-1.5 py-0.5 font-mono text-micro text-l2">
                       {item.name}
                     </span>
                     <span className="text-l4">{item.source}</span>
@@ -1635,14 +1635,14 @@ function PreviewDialog({
               <p className="mb-1 font-medium text-l2">配置 overlay</p>
               {result.overlays.map((overlay, index) => (
                 <div key={index} className="mb-2">
-                  <span className="rounded border border-hairline px-1.5 py-0.5 font-mono text-[11px] text-l2">
+                  <span className="rounded border border-hairline px-1.5 py-0.5 font-mono text-micro text-l2">
                     {overlay.name}
                   </span>
-                  <pre className="mt-1 overflow-x-auto rounded border border-hairline p-2 font-mono text-[11px] text-l3">
+                  <pre className="mt-1 overflow-x-auto rounded border border-hairline p-2 font-mono text-micro text-l3">
                     {overlay.content}
                   </pre>
                   {overlay.note && (
-                    <p className="mt-1 text-[11px] text-l4">{overlay.note}</p>
+                    <p className="mt-1 text-micro text-l4">{overlay.note}</p>
                   )}
                 </div>
               ))}
@@ -1655,7 +1655,7 @@ function PreviewDialog({
                 {result.envRemove.map((name) => (
                   <span
                     key={name}
-                    className="rounded border border-hairline px-1.5 py-0.5 font-mono text-[11px] text-l2"
+                    className="rounded border border-hairline px-1.5 py-0.5 font-mono text-micro text-l2"
                   >
                     {name}
                   </span>

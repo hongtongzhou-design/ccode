@@ -11,6 +11,9 @@ export function mergeGatewayCatalog(
     if (!keep) return { ...row };
     return {
       ...row,
+      // 手工添加的模型来源标记以本地为准，不被目录覆盖
+      source: keep.source === "user" ? "user" : row.source,
+      status: keep.source === "user" ? keep.status : row.status,
       temperature: keep.temperature,
       topP: keep.topP,
       maxOutputTokens: keep.maxOutputTokens,
