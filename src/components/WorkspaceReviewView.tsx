@@ -54,6 +54,18 @@ import {
   deliveryFollowupText,
 } from "../acceptance-log";
 import { defaultCommitMessage } from "../git-commit-message";
+import {
+  absUnderRoot,
+  blockerList,
+  blockerText,
+  buildChangeTree,
+  fileDiffCacheKey,
+  foldContextRows,
+  parseDiff,
+  reviewFileChip,
+  type ChangeTreeNode,
+  type DiffLine,
+} from "../diff-view";
 import { useAppStore } from "../store";
 import type {
   CitationHealthDto,
@@ -108,32 +120,6 @@ type ConflictChoice = "ours" | "theirs";
 
 type FinishMode = "commit" | "merge" | "merge-archive" | "archive";
 
-interface DiffLine {
-  kind: "line" | "hunk";
-  header?: string;
-  oldNo: number | null;
-  newNo: number | null;
-  oldText: string;
-  newText: string;
-  oldKind: "context" | "delete" | "blank";
-  newKind: "context" | "add" | "blank";
-}
-
-interface FoldedDiffBlock {
-  kind: "fold";
-  id: string;
-  rows: DiffLine[];
-}
-
-type DisplayDiffRow = DiffLine | FoldedDiffBlock;
-
-interface ChangeTreeNode {
-  name: string;
-  path: string;
-  children: ChangeTreeNode[];
-  file: GitFileDto | null;
-}
-
 const STATUS_STYLE: Record<string, string> = {
   M: "text-warn-text",
   A: "text-add",
@@ -142,169 +128,9 @@ const STATUS_STYLE: Record<string, string> = {
   R: "text-l2",
 };
 
-function parseHunkStart(
-  line: string,
-): { oldStart: number; newStart: number } | null {
-  const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-  if (!match) return null;
-  return { oldStart: Number(match[1]), newStart: Number(match[2]) };
-}
-
 const fileDiffCache = new Map<string, { text: string; rows: DiffLine[] }>();
 
-function fileDiffCacheKey(worktreePath: string, path: string, revision: number) {
-  return `${worktreePath}\t${path}\t${revision}`;
-}
-
-function absUnderRoot(root: string, rel: string): string {
-  return `${root.replace(/[\\/]+$/, "")}/${rel.replace(/^[\\/]+/, "")}`;
-}
-
-function reviewFileChip(path: string): string {
-  const base = path.split(/[\\/]/).pop() ?? path;
-  if (/\.pdf$/i.test(base)) return `${base} · 先看是否乱码`;
-  return base;
-}
-
-function parseDiff(text: string): DiffLine[] {
-  const rows: DiffLine[] = [];
-  let oldNo = 1;
-  let newNo = 1;
-  let removed: string[] = [];
-  let added: string[] = [];
-
-  const flushChanged = () => {
-    const count = Math.max(removed.length, added.length);
-    for (let i = 0; i < count; i++) {
-      const oldText = removed[i];
-      const newText = added[i];
-      rows.push({
-        kind: "line",
-        oldNo: oldText === undefined ? null : oldNo++,
-        newNo: newText === undefined ? null : newNo++,
-        oldText: oldText ?? "",
-        newText: newText ?? "",
-        oldKind: oldText === undefined ? "blank" : "delete",
-        newKind: newText === undefined ? "blank" : "add",
-      });
-    }
-    removed = [];
-    added = [];
-  };
-
-  for (const line of text.split("\n")) {
-    const hunk = parseHunkStart(line);
-    if (hunk) {
-      flushChanged();
-      oldNo = hunk.oldStart;
-      newNo = hunk.newStart;
-      rows.push({
-        kind: "hunk",
-        header: line,
-        oldNo: null,
-        newNo: null,
-        oldText: "",
-        newText: "",
-        oldKind: "blank",
-        newKind: "blank",
-      });
-      continue;
-    }
-    if (
-      line.startsWith("diff --git") ||
-      line.startsWith("index ") ||
-      line.startsWith("--- ") ||
-      line.startsWith("+++ ") ||
-      line.startsWith("\\ No newline")
-    ) {
-      continue;
-    }
-    if (line.startsWith("-")) {
-      removed.push(line.slice(1));
-      continue;
-    }
-    if (line.startsWith("+")) {
-      added.push(line.slice(1));
-      continue;
-    }
-    if (line.startsWith(" ")) {
-      flushChanged();
-      const value = line.slice(1);
-      rows.push({
-        kind: "line",
-        oldNo: oldNo++,
-        newNo: newNo++,
-        oldText: value,
-        newText: value,
-        oldKind: "context",
-        newKind: "context",
-      });
-    }
-  }
-  flushChanged();
-  return rows;
-}
-
-function buildChangeTree(files: GitFileDto[]): ChangeTreeNode[] {
-  const root: ChangeTreeNode = { name: "", path: "", children: [], file: null };
-  for (const file of files) {
-    const parts = file.path.split("/").filter(Boolean);
-    let node = root;
-    parts.forEach((part, index) => {
-      let child = node.children.find((entry) => entry.name === part);
-      if (!child) {
-        const path = parts.slice(0, index + 1).join("/");
-        child = { name: part, path, children: [], file: null };
-        node.children.push(child);
-      }
-      node = child;
-    });
-    node.file = file;
-  }
-  const sort = (nodes: ChangeTreeNode[]) => {
-    nodes.sort((a, b) => {
-      const aDir = a.children.length > 0;
-      const bDir = b.children.length > 0;
-      return aDir === bDir ? a.name.localeCompare(b.name) : aDir ? -1 : 1;
-    });
-    nodes.forEach((node) => sort(node.children));
-  };
-  sort(root.children);
-  return root.children;
-}
-
 /** 健康检查拦截项：key 用于给「主仓脏」挂快速提交入口，text 为面向用户的白话文案 */
-interface HealthBlocker {
-  key: "conflict" | "conflict-unknown" | "main-dirty" | "main-off-base" | "gitdir";
-  text: string;
-}
-
-function blockerList(health: WorkspaceHealthDto | null): HealthBlocker[] {
-  if (!health) return [];
-  const blockers: HealthBlocker[] = [];
-  if (health.conflict === true)
-    blockers.push({
-      key: "conflict",
-      text: "与主分支存在冲突（两边改了同一个地方，需要选一边）",
-    });
-  if (health.conflict === null)
-    blockers.push({ key: "conflict-unknown", text: "当前 Git 版本无法预检冲突" });
-  if (health.mainDirty)
-    blockers.push({ key: "main-dirty", text: "主文件夹里还有没保存的改动" });
-  if (health.gitdirDetached)
-    blockers.push({
-      key: "gitdir",
-      text: "工作树与主仓脱节，请重新挂载",
-    });
-  if (health.mainOffBase)
-    blockers.push({ key: "main-off-base", text: "主文件夹当前不在主分支上" });
-  return blockers;
-}
-
-function blockerText(health: WorkspaceHealthDto | null): string[] {
-  return blockerList(health).map((blocker) => blocker.text);
-}
-
 function DiffSide({
   lineNo,
   text,
@@ -339,57 +165,16 @@ function DiffSide({
       >
         {lineNo ?? ""}
       </span>
-      <span className="min-w-0 overflow-x-auto whitespace-pre px-2 text-l2">{text || " "}</span>
+      <span className="min-w-0 whitespace-pre-wrap break-words px-2 text-l2 [overflow-wrap:anywhere]">{text || " "}</span>
     </div>
   );
 }
 
-function foldContextRows(
-  rows: DiffLine[],
-  expanded: ReadonlySet<string>,
-): DisplayDiffRow[] {
-  const output: DisplayDiffRow[] = [];
-  let context: DiffLine[] = [];
-  let foldIndex = 0;
-  const flush = () => {
-    if (context.length <= 12) {
-      output.push(...context);
-    } else {
-      const id = `fold-${foldIndex++}`;
-      if (expanded.has(id)) {
-        output.push(...context);
-      } else {
-        output.push(...context.slice(0, 3));
-        output.push({ kind: "fold", id, rows: context.slice(3, -3) });
-        output.push(...context.slice(-3));
-      }
-    }
-    context = [];
-  };
-
-  for (const row of rows) {
-    if (
-      row.kind === "line" &&
-      row.oldKind === "context" &&
-      row.newKind === "context"
-    ) {
-      context.push(row);
-    } else {
-      flush();
-      output.push(row);
-    }
-  }
-  flush();
-  return output;
-}
-
 function DiffTable({
   rows,
-  minWidth = 720,
   unified = false,
 }: {
   rows: DiffLine[];
-  minWidth?: number;
   unified?: boolean;
 }) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -403,7 +188,7 @@ function DiffTable({
   }, [rows]);
 
   return (
-    <div className="overflow-x-auto bg-canvas font-mono text-micro leading-5">
+    <div className="bg-canvas font-mono text-xs leading-6">
       {displayRows.map((row, index) => {
         if (row.kind === "fold") {
           return (
@@ -447,8 +232,7 @@ function DiffTable({
         return (
           <div
             key={index}
-            className="grid min-w-0 grid-cols-2 divide-x divide-hairline"
-            style={{ minWidth }}
+            className="grid min-w-0 grid-cols-1 divide-y divide-hairline xl:grid-cols-2 xl:divide-x xl:divide-y-0"
           >
             <div className="min-w-0 overflow-hidden">
               <DiffSide
@@ -548,7 +332,7 @@ function DiffFileSection({
       }}
       className="border-b-4 border-strip bg-canvas"
     >
-      <div className="sticky top-0 z-[1] flex h-10 items-center gap-2 border-b border-hairline bg-strip px-3 text-xs">
+      <div className="sticky top-0 z-1 flex h-10 items-center gap-2 border-b border-hairline bg-strip px-3 text-xs">
         <span className={`font-mono ${STATUS_STYLE[file.status] ?? "text-l3"}`}>
           {file.status === "??" ? "U" : file.status}
         </span>
@@ -581,7 +365,7 @@ function DiffFileSection({
       ) : rows.length === 0 ? (
         <p className="px-4 py-5 text-xs text-l4">无可显示的文本差异</p>
       ) : (
-        <DiffTable rows={rows} minWidth={unified ? undefined : 680} unified={unified} />
+        <DiffTable rows={rows} unified={unified} />
       )}
     </section>
   );
@@ -702,8 +486,14 @@ function DeliveryReviewPane({
   onSelect: (path: string) => void;
   empty: string;
 }) {
+  const [query, setQuery] = useState("");
+  const [listOpen, setListOpen] = useState(true);
   const current =
     (activePath && paths.includes(activePath) ? activePath : paths[0]) ?? null;
+  const needle = query.trim().toLowerCase();
+  const shown = needle
+    ? paths.filter((path) => reviewFileChip(path).toLowerCase().includes(needle))
+    : paths;
   if (!current) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center px-8 text-sm text-l4">
@@ -712,29 +502,63 @@ function DeliveryReviewPane({
     );
   }
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      {paths.length > 1 && (
-        <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-hairline px-3 py-1.5">
-          {paths.map((path) => (
+    <div className="flex min-h-0 flex-1 overflow-hidden">
+      {paths.length > 1 && listOpen && (
+        <aside className="flex w-56 shrink-0 flex-col border-r border-hairline">
+          <div className="flex h-8 shrink-0 items-center gap-1 border-b border-hairline px-2">
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="找笔记"
+              className="min-w-0 flex-1 rounded-sm border border-field bg-inset px-2 py-0.5 text-xs text-l1"
+            />
             <button
-              key={path}
               type="button"
-              onClick={() => onSelect(path)}
-              title={path}
-              className={`shrink-0 rounded-sm px-2 py-0.5 text-xs ${
-                current === path ? "bg-rail-sel text-l1" : "text-l3 hover:text-l1"
-              }`}
+              onClick={() => setListOpen(false)}
+              className="shrink-0 text-micro text-l3 hover:text-l1"
             >
-              {reviewFileChip(path)}
+              收起
             </button>
-          ))}
-        </div>
+          </div>
+          <ul className="min-h-0 flex-1 overflow-auto px-1 pb-2">
+            {shown.map((path) => (
+              <li key={path}>
+                <button
+                  type="button"
+                  onClick={() => onSelect(path)}
+                  title={path}
+                  className={`w-full truncate rounded-sm px-2 py-1 text-left text-xs ${
+                    current === path ? "bg-rail-sel text-l1" : "text-l3 hover:text-l1"
+                  }`}
+                >
+                  {reviewFileChip(path)}
+                </button>
+              </li>
+            ))}
+            {shown.length === 0 && (
+              <li className="px-2 py-1 text-xs text-l4">没有匹配的笔记。</li>
+            )}
+          </ul>
+        </aside>
       )}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden overscroll-none">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden overscroll-none">
         <ProjectFilePreview
           key={current}
           path={absUnderRoot(root, current)}
           root={root}
+          leading={
+            paths.length > 1 && !listOpen ? (
+              <button
+                type="button"
+                onClick={() => setListOpen(true)}
+                title="展开笔记列表"
+                aria-label="展开笔记列表"
+                className="-ml-1 shrink-0 px-1 text-micro text-l3 hover:text-l1"
+              >
+                ›
+              </button>
+            ) : null
+          }
         />
       </div>
     </div>
@@ -845,7 +669,7 @@ function ConflictFileSection({
       ref={(element) => register(path, element)}
       className="border-b-4 border-strip bg-canvas"
     >
-      <div className="sticky top-0 z-[2] border-b border-hairline bg-strip">
+      <div className="sticky top-0 z-2 border-b border-hairline bg-strip">
         <div className="flex h-10 items-center gap-2 px-3 text-xs">
           <span
             className={`font-mono ${unresolved ? "text-err-text" : "text-ok-text"}`}
@@ -1246,6 +1070,7 @@ function LiveWorkspaceReviewView({
   const setSelectProjectReq = useAppStore((s) => s.setSelectProjectReq);
   const setFilePreviewReq = useAppStore((s) => s.setFilePreviewReq);
   const [reviewPane, setReviewPane] = useState<ReviewPane>("content");
+  const [opening, setOpening] = useState(true);
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1367,6 +1192,7 @@ function LiveWorkspaceReviewView({
     }
     sectionRefs.current.clear();
     setMergedAt(null);
+    setOpening(true);
     setResearchContext(null);
     setResearchError(null);
     setMergeDone(false);
@@ -1448,6 +1274,7 @@ function LiveWorkspaceReviewView({
         if (!stale) {
           setResearchError(null);
           setResearchContext(step ? { root: worktreePath, workspace, step, artifactDir: read.config.artifactDir || "artifacts", hasReproduction: reproductionEntrypoints(step).length > 0 || step.run.some((s) => /reproduc|复现|复算/i.test(s.name)) } : null);
+          setOpening(false);
         }
         if (step) {
           invoke<{ run: { name: string }[] }>("workspace_settings", { repoPath: workspace.repoPath }).then((settings) => {
@@ -1517,8 +1344,17 @@ function LiveWorkspaceReviewView({
     } else {
       setWritingHits([]);
     }
-    invoke<{ text: string }>("read_file_preview", {
-      path: absUnderRoot(worktreePath, ".ccode/review-notes.md"),
+    return () => {
+      stale = true;
+    };
+  }, [diff, worktreePath]);
+
+  // 上次退回意见只在打开这一步时读一次。文件列表刷新不得把正在删的字填回去。
+  useEffect(() => {
+    let stale = false;
+    setReviewNotes("");
+    void invoke<{ text: string }>("read_file_preview", {
+      path: `${worktreePath.replace(/[\\/]+$/, "")}/.ccode/review-notes.md`,
       root: worktreePath,
     })
       .then((preview) => {
@@ -1528,7 +1364,7 @@ function LiveWorkspaceReviewView({
     return () => {
       stale = true;
     };
-  }, [diff, worktreePath]);
+  }, [worktreePath]);
 
   // 合并成功后定位流水线下一步：当前步 = 与本工作区同名的步骤；
   // 下一步 = 其后第一个尚未开步的步骤（同仓库存在同名工作区 = 已开过，含已归档）。
@@ -1919,19 +1755,28 @@ function LiveWorkspaceReviewView({
       cancelled = true;
     };
   }, [conflictMode, diff, revision, worktreePath]);
-  const filesInDrawer = reviewProfile.filesInDrawer && !conflictMode && !health?.conflict;
-  const showFilePane = !filesInDrawer;
   const screeningReview = reviewProfile.kind === "screening";
   const paneTabs = reviewPaneTabs(
     reviewProfile.kind,
     (diff?.files ?? []).map((file) => file.path),
   );
   const contentReview = Boolean(paneTabs) && !conflictMode && !health?.conflict;
-  const showGitFiles = !contentReview || reviewPane === "files";
+  const contentReady = !opening && contentReview && diff != null;
+  const showGitFiles = contentReady && reviewPane === "files";
   const deliveryPaths =
     reviewPane === "process"
       ? deliveryProcessPaths(displayedPaths)
       : deliveryContentPaths(displayedPaths);
+  /** 固定副本里剔掉稿件脚手架：它们随「保存进项目」一起带回，但不是给人看的产物。
+   *  「非 Git 产物」那条清单按这份算，不能按 deliveryReview.files 原样算——
+   *  否则会标出一个「0 项」的条，看着像坏了。 */
+  const deliveryFiles = useMemo(
+    () =>
+      (deliveryReview?.files ?? []).filter(
+        (file) => !isManuscriptScaffold(file.path),
+      ),
+    [deliveryReview],
+  );
 
   useEffect(() => {
     if (displayedPaths.length === 0) return;
@@ -1947,17 +1792,6 @@ function LiveWorkspaceReviewView({
     setActivePath(preferred ?? displayedPaths[0]);
   }, [activePath, displayedPaths, reviewProfile.hideListDiffs, reviewProfile.kind]);
 
-  useEffect(() => {
-    if (!reviewRailOpen || !filesInDrawer) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setReviewRailOpen(false);
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [filesInDrawer, reviewRailOpen]);
-
   const registerSection = useCallback(
     (path: string, element: HTMLElement | null) => {
       if (element) sectionRefs.current.set(path, element);
@@ -1968,7 +1802,6 @@ function LiveWorkspaceReviewView({
 
   function selectFile(path: string) {
     setActivePath(path);
-    if (reviewProfile.filesInDrawer) setReviewRailOpen(true);
     suppressTrackRef.current = true;
     if (suppressTrackTimerRef.current !== null)
       window.clearTimeout(suppressTrackTimerRef.current);
@@ -2477,15 +2310,13 @@ function LiveWorkspaceReviewView({
           <div className="ml-auto flex shrink-0 items-center gap-2">
             <button
               type="button"
-              onClick={() => {
-                if (filesInDrawer) setActivePath(null);
-                setReviewRailOpen(true);
-              }}
-              aria-label={filesInDrawer ? "打开对照文件" : "打开文件列表"}
-              className={`${filesInDrawer ? "" : "ccode-review-rail-trigger "}flex h-8 items-center gap-1.5 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1`}
+              onClick={() => setReviewRailOpen((open) => !open)}
+              aria-expanded={reviewRailOpen}
+              aria-label={reviewRailOpen ? "收起文件列表" : "打开文件列表"}
+              className="flex h-8 items-center gap-1.5 rounded-sm px-2 text-xs text-l3 hover:bg-hover hover:text-l1"
             >
               <File aria-hidden="true" className="h-3.5 w-3.5" />
-              {filesInDrawer ? "对照文件" : "文件列表"}
+              {reviewRailOpen ? "收起文件" : "文件列表"}
             </button>
             <button
               type="button"
@@ -2815,7 +2646,7 @@ function LiveWorkspaceReviewView({
                   缺失引用键：{citations.missing.join("、")}
                 </p>
               )}
-              {contentReview && (
+              {contentReview && !mergeDone && (
                 <div className="mt-2 border-t border-hairline pt-2">
                   <p className="mb-1 text-micro text-l4">
                     写下意见后退回给 Agent。不会保存进项目。
@@ -2908,17 +2739,24 @@ function LiveWorkspaceReviewView({
       </header>
 
       {!diff?.reviewOnly && deliveryError && <p role="alert" className="px-3 py-2 text-xs text-err-text">非 Git 产物未能冻结：{deliveryError}。请刷新评审后再保存进项目。</p>}
-      {!diff?.reviewOnly && showGitFiles && deliveryReview && deliveryReview.files.length > 0 && <section aria-label="非 Git 产物评审" className="max-h-48 shrink-0 overflow-auto border-b border-hairline px-3 py-2 text-xs">
-        <h3 className="font-medium">非 Git 产物 · {deliveryReview.files.filter((file) => !isManuscriptScaffold(file.path)).length} 项</h3>
+      {/* 固定副本清单：点条目看的就是「保存进项目」会带回的那一版。
+          它有唯一的触发按钮（下面这条 button 的 onClick），删了这段预览弹窗就成死代码。
+          可见口径按「哪些步骤整页显示、哪些只在『文件』页签里显示」定：
+          检索/精读/写作一直是页签化的，贴在文件树上方看；没有页签的步骤整页显示。
+          验收（acceptance）本来没有页签、整页显示，这次重构才给它加了「结果/过程/文件」——
+          若按 showGitFiles 走，它会在打开时的「结果」页签上凭空消失，
+          而「保存进项目」按钮在顶栏、每个页签都在，清单不该跟着页签隐掉。 */}
+      {!diff?.reviewOnly && (showGitFiles || !paneTabs || reviewProfile.kind === "acceptance") && deliveryFiles.length > 0 && <section aria-label="非 Git 产物评审" className="max-h-48 shrink-0 overflow-auto border-b border-hairline px-3 py-2 text-xs">
+        <h3 className="font-medium">非 Git 产物 · {deliveryFiles.length} 项</h3>
         <p className="text-micro text-l3">保存进项目只带回这版固定副本。看过后内容变化会要求重看；同名冲突不覆盖，未接收文件保留在工作区。</p>
-        <ul>{deliveryReview.files.filter((file) => !isManuscriptScaffold(file.path)).map((file) => <li key={file.path} className="flex gap-2 py-0.5">
+        <ul>{deliveryFiles.map((file) => <li key={file.path} className="flex gap-2 py-0.5">
           <button type="button" className="min-w-0 flex-1 truncate text-left text-l2 hover:underline disabled:text-l4" disabled={file.disposition !== "copy"} onClick={() => setDeliveryPreview(file.path)}>{file.path}</button>
           <span className="shrink-0 text-micro text-l3">{file.disposition === "copy" ? `${(file.size / 1024).toFixed(1)} KB · ${file.sha256?.slice(0, 8)}` : file.disposition === "conflict" ? "同名存在，不覆盖" : file.disposition === "protected" ? "保护路径跳过" : file.disposition === "too_large" ? "超出冻结预算" : "随 Git 提交"}</span>
         </li>)}</ul>
       </section>}
       {deliveryPreview && deliveryReview && <Suspense fallback={<p className="px-3 py-2 text-xs text-l3">加载固定副本预览…</p>}><OfficePreviewModal path={`${deliveryReview.payloadDir}/${deliveryPreview}`} root={deliveryReview.payloadDir} onClose={() => setDeliveryPreview(null)} /></Suspense>}
       {!diff?.reviewOnly && researchError && <p role="alert" className="px-3 py-2 text-xs text-err-text">{researchError}</p>}
-      {!diff?.reviewOnly && researchContext?.root === worktreePath && reviewProfile.kind === "acceptance" && <div className="max-h-[42vh] shrink-0 overflow-y-auto border-b border-hairline px-3">
+      {!diff?.reviewOnly && researchContext?.root === worktreePath && reviewProfile.kind === "acceptance" && reviewPane === "content" && <div className="max-h-[42vh] shrink-0 overflow-y-auto border-b border-hairline px-3">
         {reviewProfile.evidence === "report" && (
           <ResearchEvidencePanel root={worktreePath} patterns={researchReportPatterns(researchContext.step, "acceptance")} kind="acceptance" />
         )}
@@ -3101,9 +2939,23 @@ function LiveWorkspaceReviewView({
         <div className="p-6 text-sm text-err-text">
           {error ?? "无法加载工作区审阅数据"}
         </div>
-      ) : showFilePane ? (
-        <>
-        {contentReview && !showGitFiles && screeningReview && researchContext?.root === worktreePath && (
+      ) : (
+        <div className="relative flex min-h-0 flex-1 flex-col">
+        {opening && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-canvas text-sm text-l4">
+            正在打开…
+          </div>
+        )}
+        {contentReady && !showGitFiles && screeningReview && reviewPane === "process" && (
+          <DeliveryReviewPane
+            root={worktreePath}
+            paths={["papers/screening.md"]}
+            activePath="papers/screening.md"
+            onSelect={() => {}}
+            empty="还没有筛选记录。"
+          />
+        )}
+        {contentReady && !showGitFiles && screeningReview && reviewPane !== "process" && researchContext?.root === worktreePath && (
           <div className="min-h-0 flex-1 overflow-auto">
             <ScreeningReviewPanel
               root={worktreePath}
@@ -3134,7 +2986,7 @@ function LiveWorkspaceReviewView({
                   }
                 })();
               }}
-              pane={reviewPane === "process" ? "process" : "list"}
+              pane="list"
               onOpenPdf={(path) => {
                 const projectRoot = researchContext.workspace.repoPath;
                 setSelectProjectReq(projectRoot);
@@ -3148,7 +3000,7 @@ function LiveWorkspaceReviewView({
             />
           </div>
         )}
-        {contentReview && !showGitFiles && reviewProfile.kind === "files" && (
+        {contentReady && !showGitFiles && reviewProfile.kind === "files" && (
           <DeliveryReviewPane
             root={worktreePath}
             paths={deliveryPaths}
@@ -3156,7 +3008,7 @@ function LiveWorkspaceReviewView({
             onSelect={setActivePath}
             empty={
               reviewPane === "process"
-                ? "没有过程记录。"
+                ? "这一步没有需要看的过程记录。脚本和配置在「文件」。"
                 : "没有稿件或笔记。"
             }
           />
@@ -3272,7 +3124,7 @@ function LiveWorkspaceReviewView({
           <aside
             className={[
               "ccode-review-rail flex w-[292px] shrink-0 flex-col border-l border-hairline bg-rail2",
-              reviewRailOpen ? "ccode-review-rail-open" : "",
+              reviewRailOpen ? "ccode-review-rail-open" : "hidden",
             ].join(" ")}
           >
             <div className="shrink-0 border-b border-hairline p-3">
@@ -3414,82 +3266,7 @@ function LiveWorkspaceReviewView({
             </button>
           </aside>
         </div>
-        </>
-      ) : null}
-
-      {diff && filesInDrawer && reviewRailOpen && (
-        <>
-          <button
-            type="button"
-            aria-label="关闭对照文件"
-            onClick={() => setReviewRailOpen(false)}
-            className="absolute inset-0 z-40 border-0 bg-black/32"
-          />
-          <div
-            role="dialog"
-            aria-label="对照文件"
-            className="absolute inset-y-0 right-0 z-40 flex w-[min(56rem,96vw)] border-l border-hairline bg-canvas"
-          >
-            <aside className="flex w-[220px] shrink-0 flex-col border-r border-hairline bg-rail2">
-              <div className="flex h-12 shrink-0 items-center justify-between border-b border-hairline px-3">
-                <span className="text-sm text-l1">对照文件</span>
-                <button
-                  type="button"
-                  onClick={() => setReviewRailOpen(false)}
-                  className="text-xs text-l3 hover:text-l1"
-                >
-                  关闭
-                </button>
-              </div>
-              <div className="shrink-0 border-b border-hairline p-3">
-                <div className="flex h-8 items-center gap-2 rounded-sm border border-field bg-canvas px-2">
-                  <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
-                  <input
-                    value={fileQuery}
-                    onChange={(event) => setFileQuery(event.target.value)}
-                    placeholder="筛选文件…"
-                    className="min-w-0 flex-1 bg-transparent text-xs text-l2 outline-none placeholder:text-l4"
-                  />
-                </div>
-              </div>
-              <div className="min-h-0 flex-1 overflow-auto py-1">
-                {orderedFiles.length === 0 ? (
-                  <p className="px-3 py-2 text-xs text-l4">没有匹配文件</p>
-                ) : (
-                  <GroupedReviewFiles
-                    groups={reviewFileGroups}
-                    onSelect={selectFile}
-                    activePath={activePath}
-                    expandAll={Boolean(normalizedQuery)}
-                  />
-                )}
-              </div>
-            </aside>
-            <main className="min-w-0 flex-1 overflow-auto">
-              {stackedFiles.length === 0 ? (
-                <div className="flex h-full items-center justify-center px-8 text-center text-sm text-l4">
-                  点左侧文件看改动
-                </div>
-              ) : (
-                stackedFiles.map((file) => (
-                  <DiffFileSection
-                    key={file.path}
-                    file={file}
-                    worktreePath={diff.worktreePath}
-                    revision={revision}
-                    register={registerSection}
-                    unified
-                    cached={
-                      diffCacheTick >= 0
-                        ? fileDiffCache.get(fileDiffCacheKey(worktreePath, file.path, revision)) ?? null
-                        : null
-                    }
-                  />
-                ))
-              )}
-            </main>
-          </div>
-        </>
+        </div>
       )}
 
       {finishMenu && !staleBase && (
@@ -3544,7 +3321,7 @@ function LiveWorkspaceReviewView({
 
       {prOpen && diff && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 ccode-fade"
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/40 p-4 ccode-fade"
           onClick={() => {
             // 请求在途时不响应遮罩关闭，避免关框重开导致重复建 PR
             if (!prBusy) closePrDialog();
@@ -3650,7 +3427,7 @@ function LiveWorkspaceReviewView({
 
       {archiveOpen && diff && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 ccode-fade"
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/40 p-4 ccode-fade"
           onClick={() => {
             // 请求在途时不响应遮罩关闭，避免关框重开导致重复提交/归档
             if (!busy) setArchiveOpen(false);

@@ -73,11 +73,28 @@ export function neighborFile<T extends { path: string }>(
   return files[next] ?? null;
 }
 
-export function projectFilePreviewKind(path: string): ProjectFilePreviewKind {
+/** 文件扩展名（小写、不含点）。无扩展名、点开头（.gitignore）或点结尾时返回 ""。 */
+export function fileExt(path: string): string {
   const name = path.split(/[\\/]/).pop() ?? path;
   const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "text";
-  const ext = name.slice(dot + 1).toLowerCase();
+  if (dot <= 0 || dot === name.length - 1) return "";
+  return name.slice(dot + 1).toLowerCase();
+}
+
+/**
+ * 沉浸阅读入口是否可用。
+ *
+ * 面板有三处要判断这件事（文件行工具条、预览浮层、「显示」浮层），原先各写各的
+ * 正则，其中一处多带了个 `markdown`——同一个 .markdown 文件在一边有入口、另一边
+ * 没有。判据收在这里，谁都不许再手写一次。
+ */
+const IMMERSIVE_EXTS = new Set(["pdf", "md", "markdown"]);
+export function supportsImmersiveReader(path: string): boolean {
+  return IMMERSIVE_EXTS.has(fileExt(path));
+}
+
+export function projectFilePreviewKind(path: string): ProjectFilePreviewKind {
+  const ext = fileExt(path);
   if (ext === "pdf") return "pdf";
   if (
     ext === "png" ||

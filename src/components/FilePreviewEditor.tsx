@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -301,6 +302,7 @@ function TextFilePreviewEditor({
   onOpenFile,
   onOpenReader,
   modeTick,
+  leading,
 }: {
   path: string;
   root: string;
@@ -323,6 +325,8 @@ function TextFilePreviewEditor({
   /** 外部触发「阅读/编辑」翻转的信号（阅读区 ⌘E；先例：TerminalPage readerAgentTick
       同款 tick/signal 模式）——值变化即翻转，初挂载不动作；传了它才在按钮 title 上带快捷键 */
   modeTick?: number;
+  /** 审阅笔记列表收起后的展开按钮。放进标题栏，不另占一列。 */
+  leading?: ReactNode;
 }) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   // 编辑器宿主节点独立于 React 渲染树：沉浸编辑切换只移动 DOM 节点，
@@ -683,6 +687,7 @@ function TextFilePreviewEditor({
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 工具条：h-8 + 底部 hairline 与阅读区三栏的顶条规格统一（栏间严丝合缝） */}
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-hairline bg-strip px-3 text-xs">
+        {leading}
         <span className="truncate text-l3">{path.split(/[\\/]/).pop()}</span>
         {ctx?.kind === "worktree" && (
           <span

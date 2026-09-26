@@ -27,6 +27,7 @@ import {
   reviewFileGroup,
   stackedReviewPaths,
   screeningCountLine,
+  screeningSearchLog,
   screeningCounts,
   screeningDecisionLines,
   screeningLaterLines,
@@ -41,6 +42,28 @@ test("待确认清完：每篇都是纳入或排除才算；空清单和空白�
   assert.equal(pendingConfirmCleared([row("included"), row("pending")]), false);
   assert.equal(pendingConfirmCleared([row("included"), row("")]), false);
   assert.equal(pendingConfirmCleared([]), false);
+});
+
+test("检索过程只取检索日志，不取验收摘要", () => {
+  const text = [
+    "## 验收摘要",
+    "质量状态：已生成待审。",
+    "### G1 问题与可行性",
+    "回答后改变什么。",
+    "## 检索日志",
+    "| 日期 | 库 | 命中 |",
+    "| --- | --- | --- |",
+    "| 2026-09-24 | OpenAlex | 30 |",
+    "## 逐条判定",
+    "不在过程页。",
+  ].join("\n");
+  const log = screeningSearchLog(text);
+  assert.match(log, /OpenAlex/);
+  assert.doesNotMatch(log, /验收摘要|G1|逐条判定/);
+  const bare = "| 库 | 命中 |\n| --- | --- |\n| PubMed | 4 |\n## 下一节\n别的";
+  assert.match(screeningSearchLog(bare), /PubMed/);
+  assert.doesNotMatch(screeningSearchLog(bare), /别的/);
+  assert.equal(screeningSearchLog("没有表"), "");
 });
 
 test("检索步按工作区名或产物识别", () => {
@@ -99,6 +122,10 @@ test("同时有 screening 与 included 时按筛选排文件", () => {
   assert.equal(reviewFileGroup("papers/included.json"), "machine");
   assert.equal(reviewFileGroup("scripts/rename_downloads.py"), "machine");
   assert.equal(reviewFileGroup(".ccode/help-wanted.md"), "machine");
+  assert.equal(reviewFileGroup("artifacts/api-cache/01.json"), "machine");
+  assert.equal(reviewFileGroup("enrich_metadata.py"), "machine");
+  assert.equal(reviewFileGroup(".gitignore"), "machine");
+  assert.equal(reviewFileGroup("papers/endnote-import.ris"), "other");
   const groups = groupReviewFiles(paths.map((path) => ({ path })));
   assert.deepEqual(
     groups.map((g) => [g.id, g.files.map((f) => f.path)]),

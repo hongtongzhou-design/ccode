@@ -57,33 +57,23 @@ export function isManuscriptScaffold(path: string): boolean {
 export function deliveryFileGroup(path: string): DeliveryFileGroupId {
   const p = normReviewPath(path);
   const base = fileName(p);
+  if (isStepProcessRecord(p) || isManuscriptScaffold(p)) return "machine";
   if (base === "to-fetch.md" || base === "to-fetch.ris") return "fetch";
-  if (isManuscriptScaffold(p)) return "machine";
-  if (base === "screening.md" || base === "included.md" || base === "included.json") {
+  if (base === "included.md" || base === "included.json") {
     return "other";
   }
-  if (
-    base === "index.json" ||
-    base.endsWith(".bib") ||
-    base === "citation-check.md"
-  ) {
-    return "index";
-  }
+  if (base.endsWith(".bib")) return "index";
   if (p === "notes" || p.startsWith("notes/") || p.includes("/notes/")) {
     return "notes";
   }
   if (
-    base === "help-wanted.md" ||
-    p === ".ccode" ||
-    p.startsWith(".ccode/") ||
-    p.includes("/.ccode/") ||
-    base === "zotero-sync.md" ||
     p === "scripts" ||
     p.startsWith("scripts/") ||
     p.includes("/scripts/") ||
-    base.endsWith(".json")
+    base.endsWith(".py") ||
+    p.includes("/api-cache/")
   ) {
-    return "machine";
+    return "other";
   }
   if (
     base === "outline.md" ||
@@ -152,6 +142,30 @@ export function manuscriptPreviewRank(path: string): number {
   return 50;
 }
 
+/** 这一步怎么做成的记录。脚本、配置、接口缓存不进这里，留在「文件」。 */
+export function isStepProcessRecord(path: string): boolean {
+  const p = normReviewPath(path);
+  const base = fileName(p);
+  if (
+    base === "screening.md" ||
+    base === "zotero-sync.md" ||
+    base === "help-wanted.md" ||
+    base === "section-status.md" ||
+    base === "changelog.md" ||
+    base === "citation-check.md" ||
+    base === "citation-style.md" ||
+    base === "compile-notes.md" ||
+    base === "run-manifest.json" ||
+    base === "implementation-check.md" ||
+    base === "cleaned-data-manifest.md"
+  ) {
+    return true;
+  }
+  if (p === "notes/index.json" || p.endsWith("/notes/index.json")) return true;
+  if (p === ".ccode" || p.startsWith(".ccode/") || p.includes("/.ccode/")) return true;
+  return false;
+}
+
 /** 打开审阅时先看笔记/稿件，不把 help-wanted 等过程文件摊在主面。 */
 export function preferredDeliveryPath(paths: readonly string[]): string | null {
   return deliveryContentPaths(paths)[0] ?? deliveryProcessPaths(paths)[0] ?? null;
@@ -183,9 +197,7 @@ function derivedPreviewRank(path: string): number {
 }
 
 export function deliveryProcessPaths(paths: readonly string[]): string[] {
-  return sortDeliveryPaths(paths).filter(
-    (path) => deliveryFileGroup(path) === "machine",
-  );
+  return sortDeliveryPaths(paths).filter((path) => isStepProcessRecord(path));
 }
 
 export function groupDeliveryFiles<T extends { path: string }>(

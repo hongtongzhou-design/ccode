@@ -2217,6 +2217,7 @@ fn acceptance_record_ids(
 
 /// 机器验收语法（仅处理显式 `machine:` 条目，普通自然语言条件仍展示给人）：
 /// `machine:file:path`、`machine:glob:path/*.md`、`machine:contains:path::文本`、
+/// `machine:not-contains:path::文本`（文件在且不含该文本）、
 /// `machine:count:path/*.pdf>=N`、`machine:same-ids:reference.json::delivered.json`。
 /// 路径始终限制在项目根内；same-ids 只核对非空唯一字符串 ID 集合，不验证研究结论。
 fn machine_acceptance_satisfied(root: &Path, criteria: &[String], since: SystemTime) -> bool {
@@ -2234,6 +2235,20 @@ fn machine_acceptance_satisfied(root: &Path, criteria: &[String], since: SystemT
             }
             if let Some(path) = rule.strip_prefix("glob:") {
                 return artifact_produced_since(root, path, since);
+            }
+            if let Some(rest) = rule.strip_prefix("not-contains:") {
+                let Some((path, needle)) = rest.split_once("::") else {
+                    return false;
+                };
+                if needle.is_empty() {
+                    return false;
+                }
+                let Some(path) = rooted_existing_path(root, path) else {
+                    return false;
+                };
+                return fs::read_to_string(path)
+                    .map(|text| !text.contains(needle))
+                    .unwrap_or(false);
             }
             if let Some(rest) = rule.strip_prefix("contains:") {
                 let Some((path, needle)) = rest.split_once("::") else {
@@ -3229,6 +3244,32 @@ fn tracked_delivery_paths(worktree: &Path) -> Result<std::collections::HashSet<S
         .collect())
 }
 
+/// 检索过程留下的缓存和脚本。不进非 Git 产物评审，也不随保存带回项目。
+fn is_delivery_process_file(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let base = path.rsplit('/').next().unwrap_or(path.as_str());
+    if matches!(
+        base,
+        "included.json"
+            | "help-wanted.md"
+            | "zotero-sync.md"
+            | ".gitignore"
+            | ".gitattributes"
+    ) {
+        return true;
+    }
+    if path.contains("/api-cache/") || path.ends_with("/api-cache") {
+        return true;
+    }
+    if path == ".ccode" || path.starts_with(".ccode/") || path.contains("/.ccode/") {
+        return true;
+    }
+    if path == "scripts" || path.starts_with("scripts/") || path.contains("/scripts/") {
+        return true;
+    }
+    base.ends_with(".py")
+}
+
 fn delivery_paths(worktree: &Path, repo: &Path) -> Result<Vec<String>, String> {
     let read = crate::projects::read_config_at(repo);
     if !read.warnings.is_empty() {
@@ -3252,6 +3293,12 @@ fn delivery_paths(worktree: &Path, repo: &Path) -> Result<Vec<String>, String> {
         worktree,
         &["papers".into(), artifact.into(), "output".into()],
     )?;
+    // 接口缓存、临时脚本和仓库配置不是要带回项目的产物。
+    // 留在工作区，不进冻结清单，也不挡 2000 项预算。
+    let paths: Vec<String> = paths
+        .into_iter()
+        .filter(|path| !is_delivery_process_file(path))
+        .collect();
     if paths.len() > DELIVERABLE_COPY_CAP {
         return Err("科研产物超过 2000 项，请缩小范围后评审".into());
     }
@@ -3697,7 +3744,8 @@ pub async fn list_help_requests() -> Vec<HelpRequestDto> {
             return out;
         };
         let mut seen_roots = std::collections::HashSet::new();
-        for w in rows.into_iter().filter(|w| w.status == "active") {
+        // 已保存的步骤不再是 active，但 help-wanted 里的补全文、授权还要人做。
+        for w in rows.into_iter().filter(|w| w.status != "archived") {
             // 工作树 + 主仓根各算一个来源（主仓可能覆盖多个工作区，去重）
             for (root, ws_id, ws_name) in [
                 (
@@ -4980,6 +5028,17 @@ mod tests {
     /// 测试也统一走 resolve_binary（与生产代码同一解析路径）
     fn git_bin() -> PathBuf {
         crate::agents::resolve_binary("git").expect("测试环境找不到 git 可执行文件")
+    }
+
+    #[test]
+    fn delivery_process_files_stay_out_of_review() {
+        assert!(is_delivery_process_file("artifacts/api-cache/01b30a.json"));
+        assert!(is_delivery_process_file("enrich_metadata.py"));
+        assert!(is_delivery_process_file(".gitignore"));
+        assert!(is_delivery_process_file("papers/included.json"));
+        assert!(!is_delivery_process_file("papers/included.md"));
+        assert!(!is_delivery_process_file("papers/to-fetch.ris"));
+        assert!(!is_delivery_process_file("papers/endnote-import.ris"));
     }
 
     fn git_available() -> bool {
@@ -6950,6 +7009,24 @@ mod tests {
             ));
         }
         fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn machine_acceptance_not_contains_rejects_placeholder() {
+        let dir = std::env::temp_dir().join(format!("ccode-accept-fig-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("draft.md"), "Figure 1（待绘制）\n").unwrap();
+        let since = SystemTime::UNIX_EPOCH;
+        let rule = vec!["machine:not-contains:draft.md::待绘制".into()];
+        assert!(!machine_acceptance_satisfied(&dir, &rule, since));
+        fs::write(dir.join("draft.md"), "见 [@kim2011] Fig. 1\n").unwrap();
+        assert!(machine_acceptance_satisfied(&dir, &rule, since));
+        assert!(!machine_acceptance_satisfied(
+            &dir,
+            &["machine:not-contains:missing.md::待绘制".into()],
+            since
+        ));
+        fs::remove_dir_all(dir).ok();
     }
 
     #[cfg(unix)]

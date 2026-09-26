@@ -449,7 +449,21 @@ fn git_commit_sync(
                 "--".into(),
             ];
             args.extend(selected.iter().cloned());
+            // 已从磁盘删除的文件不能再 add。update-index --remove 记下删除。
             let add = run_git_owned(&cwd, &args)?;
+            if !add.status.success() {
+                let mut removed = vec![
+                    "--literal-pathspecs".into(),
+                    "update-index".into(),
+                    "--remove".into(),
+                    "--".into(),
+                ];
+                removed.extend(selected.iter().cloned());
+                let retry = run_git_owned(&cwd, &removed)?;
+                if !retry.status.success() {
+                    return Err(output_tail(&add));
+                }
+            }
             if !add.status.success() {
                 return Err(output_tail(&add));
             }
@@ -465,6 +479,19 @@ fn git_commit_sync(
         }
     } else {
         let add = run_git(&cwd, &["add", "-A"])?;
+        if add.status.success() {
+            // 退回意见只留在工作区，不进这次提交。
+            let _ = run_git(
+                &cwd,
+                &[
+                    "reset",
+                    "-q",
+                    "HEAD",
+                    "--",
+                    ".ccode/review-notes.md",
+                ],
+            );
+        }
         if !add.status.success() {
             return Err(output_tail(&add));
         }

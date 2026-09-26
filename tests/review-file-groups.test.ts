@@ -11,21 +11,21 @@ import {
 
 test("精读与写作改动按笔记/稿件/引文分组", () => {
   assert.equal(deliveryFileGroup("notes/001-a.md"), "notes");
-  assert.equal(deliveryFileGroup("notes/index.json"), "index");
+  assert.equal(deliveryFileGroup("notes/index.json"), "machine");
   assert.equal(deliveryFileGroup("references.bib"), "index");
   assert.equal(deliveryFileGroup("outline.md"), "manuscript");
   assert.equal(deliveryFileGroup("manuscript/draft.md"), "manuscript");
   assert.equal(deliveryFileGroup("manuscript/_quarto.yml"), "machine");
   assert.equal(deliveryFileGroup("manuscript/ieee.csl"), "machine");
   assert.equal(deliveryFileGroup("manuscript/.gitignore"), "machine");
-  assert.equal(deliveryFileGroup("manuscript/screening.md"), "other");
+  assert.equal(deliveryFileGroup("manuscript/screening.md"), "machine");
   assert.equal(deliveryFileGroup("output/site_libs/bootstrap.css"), "machine");
   assert.equal(deliveryFileGroup("output/_tex/draft.tex"), "machine");
   assert.equal(deliveryFileGroup("survey/gap-analysis.md"), "manuscript");
   assert.equal(deliveryFileGroup("submission/formatted.md"), "manuscript");
   assert.equal(deliveryFileGroup("rebuttal/response-letter-r1.md"), "manuscript");
   assert.equal(deliveryFileGroup("papers/to-fetch.md"), "fetch");
-  assert.equal(deliveryFileGroup("scripts/build.py"), "machine");
+  assert.equal(deliveryFileGroup("scripts/build.py"), "other");
   assert.equal(deliveryFileGroup(".ccode/help-wanted.md"), "machine");
   assert.equal(deliveryFileGroup("help-wanted.md"), "machine");
   assert.equal(deliveryFileGroup("papers/a.pdf"), "other");
@@ -41,14 +41,14 @@ test("精读与写作改动按笔记/稿件/引文分组", () => {
   assert.deepEqual(sortDeliveryPaths(paths), [
     "notes/002.md",
     "manuscript/draft.md",
-    "notes/index.json",
     "references.bib",
     "papers/to-fetch.md",
     "scripts/x.py",
+    "notes/index.json",
   ]);
   assert.deepEqual(
     groupDeliveryFiles(paths.map((path) => ({ path }))).map((g) => g.id),
-    ["notes", "manuscript", "index", "fetch", "machine"],
+    ["notes", "manuscript", "index", "fetch", "other", "machine"],
   );
 });
 
@@ -60,10 +60,7 @@ test("大纲审阅默认打开稿件，不把 help-wanted 摊在主面", () => {
   ];
   assert.equal(preferredDeliveryPath(files), "outline.md");
   assert.deepEqual(deliveryContentPaths(files), ["outline.md"]);
-  assert.deepEqual(deliveryProcessPaths(files), [
-    ".ccode/help-wanted.md",
-    "artifacts/outline_key_check.json",
-  ]);
+  assert.deepEqual(deliveryProcessPaths(files), [".ccode/help-wanted.md"]);
   assert.equal(
     preferredDeliveryPath([".ccode/help-wanted.md", "notes/001.md"]),
     "notes/001.md",
@@ -119,4 +116,24 @@ test("写作审阅默认打开 draft.md，不把 _quarto.yml 当稿件", () => {
     "output/draft.pdf",
   ]);
   assert.equal(deliveryFileGroup("manuscript/_quarto.yml"), "machine");
+});
+
+test("过程只放本步记录，脚本和缓存不进", () => {
+  assert.equal(deliveryFileGroup("papers/screening.md"), "machine");
+  assert.equal(deliveryFileGroup("manuscript/section-status.md"), "machine");
+  assert.equal(deliveryFileGroup("manuscript/citation-check.md"), "machine");
+  assert.equal(deliveryFileGroup("results/run-manifest.json"), "machine");
+  assert.equal(deliveryFileGroup("cleaning/cleaned-data-manifest.md"), "machine");
+  assert.equal(deliveryFileGroup("enrich_metadata.py"), "other");
+  assert.equal(deliveryFileGroup("artifacts/api-cache/01.json"), "other");
+  assert.deepEqual(
+    deliveryProcessPaths([
+      "notes/001.md",
+      "notes/index.json",
+      "papers/to-fetch.md",
+      "manuscript/section-status.md",
+      "scripts/build.py",
+    ]),
+    ["manuscript/section-status.md", "notes/index.json"],
+  );
 });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   groupFilesByStatus,
+  userDirtyFiles,
   statusBadgeTitle,
   statusGroupKey,
 } from "../src/git-status-groups.ts";
@@ -40,6 +41,22 @@ test("状态分组：组序固定为 冲突 → 修改 → 新增 → 删除，�
     ],
   );
   assert.deepEqual(groupFilesByStatus([]), []);
+});
+
+test("未跟踪的验收账本不算用户改动", () => {
+  const files = [
+    file(".ccode/acceptance-log.jsonl", "??"),
+    file(".ccode/acceptance-log.lock", "??"),
+    file("papers/included.md", "M"),
+  ];
+  assert.deepEqual(
+    userDirtyFiles(files).map((row) => row.path),
+    ["papers/included.md"],
+  );
+  assert.deepEqual(
+    userDirtyFiles([file(".ccode/acceptance-log.jsonl", "M")]).map((row) => row.path),
+    [".ccode/acceptance-log.jsonl"],
+  );
 });
 
 test("徽标悬浮 title：字母保留 + 白话说明", () => {

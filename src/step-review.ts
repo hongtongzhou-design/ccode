@@ -17,8 +17,6 @@ export interface StepReviewProfile {
   headerHint: string | null;
   groupFiles: boolean;
   hideListDiffs: boolean;
-  /** 已废弃：对照改动抽屉。检索/精读/大纲一律用基础检查旁的 清单|笔记|稿件 / 过程 / 文件。 */
-  filesInDrawer: boolean;
   evidence: "screening" | "report" | "none";
   acceptance: "screening" | "default" | "none";
   showReproduction: boolean;
@@ -31,7 +29,6 @@ export const STEP_REVIEW_PROFILES: Record<StepReviewKind, StepReviewProfile> = {
     headerHint: null,
     groupFiles: true,
     hideListDiffs: false,
-    filesInDrawer: false,
     evidence: "screening",
     acceptance: "none",
     showReproduction: false,
@@ -42,7 +39,6 @@ export const STEP_REVIEW_PROFILES: Record<StepReviewKind, StepReviewProfile> = {
     headerHint: null,
     groupFiles: true,
     hideListDiffs: false,
-    filesInDrawer: false,
     evidence: "none",
     acceptance: "none",
     showReproduction: false,
@@ -51,9 +47,8 @@ export const STEP_REVIEW_PROFILES: Record<StepReviewKind, StepReviewProfile> = {
   acceptance: {
     kind: "acceptance",
     headerHint: null,
-    groupFiles: false,
+    groupFiles: true,
     hideListDiffs: false,
-    filesInDrawer: false,
     evidence: "report",
     acceptance: "default",
     showReproduction: true,
@@ -64,7 +59,6 @@ export const STEP_REVIEW_PROFILES: Record<StepReviewKind, StepReviewProfile> = {
     headerHint: null,
     groupFiles: false,
     hideListDiffs: false,
-    filesInDrawer: false,
     evidence: "none",
     acceptance: "none",
     showReproduction: false,
@@ -118,11 +112,12 @@ export function resolveStepReviewProfile(
 
 export type ReviewPane = "content" | "process" | "files";
 
-/** 检索、精读、大纲、写作同一套顶栏页签。Git 对照只在「文件」。 */
+/** 各步骤同一套顶栏页签。Git 对照只在「文件」。 */
 export function reviewPaneTabs(
   kind: StepReviewKind,
   filePaths: readonly string[] = [],
 ): { id: ReviewPane; label: string }[] | null {
+  if (kind === "default") return null;
   if (kind === "screening") {
     return [
       { id: "content", label: "清单" },
@@ -130,14 +125,18 @@ export function reviewPaneTabs(
       { id: "files", label: "文件" },
     ];
   }
-  if (kind === "files") {
-    const groups = new Set(filePaths.map((path) => deliveryFileGroup(path)));
-    const hasArticle = filePaths.some((path) => manuscriptPreviewRank(path) === 0);
+  if (kind === "acceptance") {
     return [
-      { id: "content", label: hasArticle || !groups.has("notes") ? "稿件" : "笔记" },
+      { id: "content", label: "结果" },
       { id: "process", label: "过程" },
       { id: "files", label: "文件" },
     ];
   }
-  return null;
+  const groups = new Set(filePaths.map((path) => deliveryFileGroup(path)));
+  const hasArticle = filePaths.some((path) => manuscriptPreviewRank(path) === 0);
+  return [
+    { id: "content", label: hasArticle || !groups.has("notes") ? "稿件" : "笔记" },
+    { id: "process", label: "过程" },
+    { id: "files", label: "文件" },
+  ];
 }

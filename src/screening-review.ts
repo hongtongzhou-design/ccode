@@ -72,10 +72,25 @@ export function reviewFileGroup(path: string): ReviewFileGroupId {
   const base = fileName(p);
   if (base === "included.md" || base === "screening.md") return "list";
   if (base === "to-fetch.md" || base === "to-fetch.ris") return "fetch";
+  if (isReviewProcessFile(p)) return "machine";
+  return "other";
+}
+
+/** 检索过程文件：缓存、脚本、配置。不进清单主面。 */
+export function isReviewProcessFile(path: string): boolean {
+  const p = normReviewPath(path);
+  const base = fileName(p);
   if (
     base === "included.json" ||
     base === "help-wanted.md" ||
     base === "zotero-sync.md" ||
+    base === ".gitignore" ||
+    base === ".gitattributes"
+  ) {
+    return true;
+  }
+  if (p.includes("/api-cache/") || p.endsWith("/api-cache")) return true;
+  if (
     p === ".ccode" ||
     p.startsWith(".ccode/") ||
     p.includes("/.ccode/") ||
@@ -83,9 +98,31 @@ export function reviewFileGroup(path: string): ReviewFileGroupId {
     p.startsWith("scripts/") ||
     p.includes("/scripts/")
   ) {
-    return "machine";
+    return true;
   }
-  return "other";
+  return base.endsWith(".py");
+}
+
+/** 检索过程只看查了哪些库、命中多少。验收摘要和 G1 整段不进这一页。 */
+export function screeningSearchLog(text: string): string {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const heading = /^(#{1,6})\s+(?:检索日志|检索过程|各库检索)/;
+  const table = /^\s*\|?\s*(?:\*\*)?(?:日期|库|来源)(?:\*\*)?\s*\|/;
+  let start = lines.findIndex((line) => heading.test(line.trim()));
+  let level = 0;
+  if (start >= 0) {
+    level = lines[start].match(/^#+/)?.[0].length ?? 0;
+  } else {
+    start = lines.findIndex((line) => table.test(line));
+  }
+  if (start < 0) return "";
+  const out: string[] = [];
+  for (let i = start; i < lines.length; i += 1) {
+    if (i > start && level > 0 && new RegExp(`^#{1,${level}}\\s`).test(lines[i])) break;
+    if (i > start && level === 0 && /^#{1,6}\s/.test(lines[i])) break;
+    out.push(lines[i]);
+  }
+  return out.join("\n").trim();
 }
 
 export function isScreeningListFile(path: string): boolean {
@@ -409,14 +446,26 @@ export function blockerPrimaryText(
   return `${blockers[0].text}（另有 ${blockers.length - 1} 项）`;
 }
 
+export type DecisionTone = "ok" | "warn" | "muted";
+
 export function decisionBadge(decision: string): {
   label: string;
-  tone: "ok" | "warn" | "muted";
+  tone: DecisionTone;
 } {
   if (decision === "included") return { label: "纳入", tone: "ok" };
   if (decision === "pending") return { label: "待确认", tone: "warn" };
   if (decision === "excluded") return { label: "排除", tone: "muted" };
   return { label: decision || "未标", tone: "muted" };
+}
+
+/**
+ * tone → 文字色类名。纳入清单里「待确认」是唯一需要用户再看一眼的行，
+ * 早先这里把三档都渲染成 `text-ok-text`，待确认和排除看起来都像已通过。
+ */
+export function decisionToneClass(tone: DecisionTone): string {
+  if (tone === "ok") return "text-ok-text";
+  if (tone === "warn") return "text-warn-text";
+  return "text-l4";
 }
 
 export type ScreeningTableFilter = "pending" | "included" | "all";

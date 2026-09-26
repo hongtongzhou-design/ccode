@@ -55,7 +55,7 @@
 - 复现运行读取脚本明确约定（`MESA_REPRODUCE` 行或 `reproduce` 子命令合同）：可执行入口、参数、工作目录=输入项目、独立输出目录、结果文件。不从报告正文抽命令，也不把输出默认写进项目内。确认后由 `research_run_reproduce` 实际执行，输出落 `~/ccode/reproductions/<工作区>/<运行id>/`，并记录命令、入口版本、退出码与本次输出清单。项目 run 配置里的脚本仍只作为声明列出，不冒充这条闭环。
 - 界面分开三层状态：运行结束、计算检查（脚本自己的 verification）、人工科研验收。零退出码、文件存在、报告自述均不等于科研通过。结果只读本次运行目录，不读项目内任意路径冒充本次结果。
 - 科研验收决定单独记在 `.ccode/research-acceptance.json`：接受／有条件接受／退回，绑定文件版本、结论范围、未关闭阻塞项、可选运行 id。Git 提交/保存进项目仍是保存工作，不因未验收而禁止。文件版本变化后标「需要重新确认」，不要求所有阶段全部重来。
-- **评审壳按步骤类型拼区块**（闭集 `screening` / `files` / `acceptance` / `default`，`step-review.ts`）：一张 `WorkspaceReviewView`，档案声明证据主面、验收表单、文件分组与默认 diff。禁止每步一张独立评审页。检索、精读、大纲、写作同一套顶栏页签（清单或笔记/稿件／过程／文件），默认内容页不是 Git 对照；`filesInDrawer` 对照抽屉已废弃。精读、大纲、写作、排版、投稿材料、返修走 files（笔记/稿件/引文分组；`survey/` `submission/` `rebuttal/` 算稿件；渲染 PDF/docx 不抢源稿；无科研决定表；`.ccode/help-wanted.md` 进过程组）。实验执行、结果分析、清洗、EDA 才走 acceptance（验收摘要/复现/接受退回，Git 对照留在下面）。有步骤但不是前两类时默认 files，不再把所有非检索步塞进实验验收壳。六套模板含返修轮次都必须能分到这四档，files 档预期产物必须进笔记/稿件主面。
+- **评审壳按步骤类型拼区块**（闭集 `screening` / `files` / `acceptance` / `default`，`step-review.ts`）：一张 `WorkspaceReviewView`，档案声明证据主面、验收表单、文件分组与默认 diff。禁止每步一张独立评审页。检索、精读、大纲、写作、实验同一套顶栏页签（清单 / 笔记或稿件 / 结果／过程／文件），默认内容页不是 Git 对照。文件页只看 Git 对照，不再在顶部再列一条非 Git 产物。「过程」只放这一步怎么做成的记录：检索页用 Markdown 预览打开 papers/screening.md；精读是 notes/index.json 和仍缺的全文；写作是章节状态、引用核对、修改记录；实验是运行清单和实现检查；清洗是清洗清单。help-wanted 和 .ccode 也在这里。脚本、.py、接口缓存、.gitignore 不进「过程」，留在「文件」。对照抽屉（旧 `filesInDrawer`）已整体移除：档案不再有这个字段，文件面一律走顶栏页签。精读、大纲、写作、排版、投稿材料、返修走 files（笔记/稿件/引文分组；`survey/` `submission/` `rebuttal/` 算稿件；渲染 PDF/docx 不抢源稿；无科研决定表；`.ccode/help-wanted.md` 进过程组）。实验执行、结果分析、清洗、EDA 走 acceptance，但页签同为「结果／过程／文件」：结果页放验收摘要、复现和接受退回。有步骤但不是前两类时默认 files。六套模板含返修轮次都必须能分到这四档，files 档预期产物必须进笔记/稿件主面。
 - **综述用图**（2026-09-20）：笔记可引用图 → 大纲每章/小节用图计划 → 初稿 `review-figures` 用随包 `extract_figure.py` / `assemble_panels.py` 裁拼（`figures/figN.png`，图注 Adapted from）。无用图计划则停。裁不到或不能拼则只写「见 [@键] Fig.n」。fail-closed：不对题注不猜最大图、不非等比拉伸、不把整页当图。人必须看 PNG。不在 Mesa 里做独立裁图 GUI。
 - **科研保存链白话**（`review-save-copy.ts`）：按钮「提交并保存进项目 / 保存进项目 / 已保存进项目」，时间线「✓ 保存进项目」，步骤卡「你核对后，保存进项目」。不是编程「合进基准」，也不是科研验收决定。
 - 新组件：`ResearchEvidencePanel` 共用摘要/原文预览，`ResearchDecisionFields` 编辑状态+说明，`ResearchReproductionPanel` 执行并回看本次结果，`ResearchAcceptancePanel` 记科研验收；不另建质量仪表盘，不自动路由/合并/改变模板。
@@ -87,7 +87,7 @@
 ## 工作区生命周期（无损口径）
 
 - **非 Git 产物评审绑定（2026-09-11）**：评审通过 `workspace_review_deliverables` 明确冻结 papers/、项目产物目录与 output/ 中
-  未被 Git 跟踪的文件；私有副本与完整 SHA-256 对应一个 token，静默健康轮询不替换 token。主仓同名文件/保护路径标为跳过，
+  未被 Git 跟踪的文件。接口缓存（`api-cache`）、工作区里的 `.py`、`scripts/`、`.gitignore`、`included.json`、`zotero-sync.md` 不进这份清单，留在工作区，不随保存带回项目。私有副本与完整 SHA-256 对应一个 token，静默健康轮询不替换 token。主仓同名文件/保护路径标为跳过，
   不冒称已接收；单文件 1 GB、合计 4 GB、2000 项预算，超限要求拆分，不把未冻结内容带回。
   合并前必须同时携带已审 Git SHA 与产物 token；新增/删除/修改过可采纳文件须重看，受 Git 跟踪但未提交的改动也拒绝合并。
   Git 成功后只从固定副本发布文件，不能再扫描工作树最新内容作写入源。目标同名文件不覆盖；发布采用同目录私有暂存与不覆盖发布，
@@ -107,7 +107,12 @@
   待补账状态由持久凭证派生，重新打开项目/评审仍有入口，不只放在组件 state 中。
   补账不受主仓新改动阻挡，但凭证版本必须仍属于基准历史；损坏/缺失凭证拒绝猜测。账本未完成不归档。
   已合并工作区仍允许之后归档，归档继续检查工作区脏状态、未合入提交和活任务。
-  未跟踪的 `.ccode/acceptance-log.jsonl` 与 `.ccode/acceptance-log.lock` 不阻塞新合并；
+  未跟踪的 `.ccode/acceptance-log.jsonl` 与 `.ccode/acceptance-log.lock` 不阻塞新合并，也不计入项目页「改动未存入历史」；已跟踪的账本改动仍算。
+  开工时，本步要读的未存文件由「记下并开始」先提交再开工，不再二次确认。与本步输入无关的改动不开工弹层里提醒。
+  任务书工具合同只在所选工具变了时挡住开始。产物名单增减不挡。技能预期读入若已是本步预期产物，不报上游缺失。
+  精读收尾写 `notes/handoff.md`：写作约束给大纲遵守，补全文和登录留在 help-wanted，不进下一步任务书。大纲输入含这份文件。`handoff.md` 是 Agent 交的产物。「沉淀到下一步」是人在审阅里另写的一段，追加进下一步任务书草稿，不代替 handoff。help-wanted 在步骤保存后仍进收件箱，直到人忽略或文件清空。
+  精读不再先问「建议核心 K 篇」：有 PDF 的全部八段精读，没有的按摘要写短记。可引用图认 PDF 文本层的图注，不要求把页面渲成图片。临时脚本和接口缓存只放工作区 artifacts/。
+  综述初稿按大纲用图计划出图：计划写「拼」则交 `figures/figN.png` 并插入正文；裁不到则正文改「见 [@键] Fig.n」，原因写入 `figures/README.md`。`machine:not-contains:manuscript/draft.md::待绘制` 不通过则这一步不算产出完成。已有课题在流程编辑器保存后才带上新标准。
   已跟踪版本及 `.ccode/project.toml`、知识、草稿等用户改动不豁免。
 
 
@@ -578,9 +583,9 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 - **to-fetch.ris 给 Zotero，endnote-import.ris 给 EndNote（2026-09-23 分标签）**：检索步同时写两份 RIS 2004、CRLF。已生成的旧文件不改写。
   Zotero 的 `papers/to-fetch.ris`：期刊全称只写 `T2`，缩写只写 `J2`，页只写 `SP`/`EP`。不写 `JO`（Zotero 会把它放进期刊缩写）、不写 `N1`（会进笔记）、不写 `M1`。
   EndNote 2025 RefMan 的 `papers/endnote-import.ris`：全称 `T2`、缩写 `J2`、页 `SP`、起始页码 `M2`、结束页 `EP`、文章类型 `M3`。不写 `JO`/`M1`（`M1` 不进格子）。
-  有 DOI 时用 Crossref 补这些字段。OpenAlex / Semantic Scholar 只补 Crossref 没有的摘要和缩写。没有的标签不写，不编造。
-  「同步到 Zotero」打开 to-fetch.ris；「同步到 EndNote」打开 endnote-import.ris。定稿从 `references.bib` 再生成时，`zotero_rtf.py` 按 Zotero 标签，`bridge.py` 按 EndNote 标签。
-  同步成功后打开 `papers/`，人把 PDF 拖进库再合并。Mesa 不代点合并：Zotero 本机接口只读，主记录必须人选 RIS 那条，空字段才从另一条补、PDF 才挂过来。EndNote 合并只留一条且不自动并附件，也必须留下 RIS 那条。成功文案只留这一句。
+  有 DOI 时用 Crossref 补这些字段。期刊缩写用 ISO 4、每个缩写词后加句点，先查 JabRef，没有查 `src-tauri/resources/journal-abbreviations.csv`。一词刊名的缩写写全称。两处都没有时，精读按官网或 ISO 4 补进 bib。不用 NLM 的 ISSN 结果。OpenAlex 只补 Crossref 没有的摘要。没有的标签不写，不编造。补这张表：一行「全称,缩写」，`&` 写成 and，改完重新编译，再点同步。
+  「同步到 Zotero」打开 to-fetch.ris；「同步到 EndNote」打开 endnote-import.ris。这份 RIS 只由检索步生成。精读不把它列为产物，不整份重写；bib 里多出来的 DOI 才追加，已有记录保持原样。定稿从 `references.bib` 再生成时，`zotero_rtf.py` 按 Zotero 标签，`bridge.py` 按 EndNote 标签。
+  同步只交题录，不打开目录。检索工作区里的 `papers/` 不是课题 PDF 落点，Finder 分栏会把 `~/ccode/workspaces/...` 整条摊开。PDF 由人点「打开 papers」打开课题根。Mesa 不代点合并。
   PDF 补进 Zotero 后回「文献与数据」重新导入即登记（只读引用不复制），再手动勾事项。
   **内核仍不直写用户 Zotero 库**——内核 `zotero_import` 只读快照并写项目；可选技能写库必须有用户明确意图和实机授权（锁库/同步冲突风险）。
 - **提交交付**：`import_human_deliverable`（卡片 checklist 行「提交产物」按钮 / 拖文件到该行）= 复制进落点
@@ -624,7 +629,8 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   事项被设计成永不抢当前节点——说明只剩悬停 tooltip（用户实测「没说清怎么导入」）。就绪（afterReady）
   且未完成时就地展开其 guidance；papers/ 落点事项的「到『文献与数据』导入」按钮按 litSource 传 focus
   高亮对应进料口（zotero→Zotero 入口 / folder→题录入口），与「确定文献来源」节点的落地口径一致。
-  **写作步评审意见（2026-09-21）**：文件交付壳顶栏「基础检查」旁扫源稿机械红线（摘要 `[待核实]`、正文 G 编号、「待绘制」、手写章节号）；人在意见框写下退回要点，落 `.ccode/review-notes.md`。「退回修改」接回该工作区最近会话并把意见当下一轮输入；「按意见重写」同一工作区新开会话。都不保存进项目。◈ AI 起草仍只用于合并后沉淀到下一步，不代替内容审查。
+  **保存后收起意见框（2026-09-24）**：文件已进入项目后，退回意见框不再显示。沉淀起草在已保存时读主仓里带本步分支名的合并提交，不再拿已经并完的工作区 `base..HEAD`（那是空的）去报「分支上还没有提交」。
+  **写作步评审意见（2026-09-21）**：文件交付壳顶栏「基础检查」旁扫源稿机械红线（摘要 `[待核实]`、正文 G 编号、「待绘制」、手写章节号）；人在意见框写下退回要点，落 `.ccode/review-notes.md`。「退回修改」接回该工作区最近会话并把意见当下一轮输入；「按意见重写」同一工作区新开会话。都不保存进项目。上次意见只在打开这一步时读进框里；文件列表刷新不得重读，避免人删掉的字被旧文件填回。◈ AI 起草仍只用于合并后沉淀到下一步，不代替内容审查。
   **产物核验就地预览（v3.97 文本；后补 pdf/docx）**：ArtifactChecklist 点 md/txt/ris/bib 开 TASK.md 同款
   居中弹层（marked 渲染 + textarea 编辑 + save_file_preview 原子写，截断只读，Esc/背景点击关闭前
   守未保存改动）；pdf/docx/表格/图同页弹层（`ProjectFilePreview`，不跳运行页）。

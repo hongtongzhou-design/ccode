@@ -37,6 +37,7 @@ import {
   flattenVisibleFiles,
   neighborFile,
   projectFilePreviewKind,
+  supportsImmersiveReader,
   type ProjectFileFilter,
 } from "../project-files";
 import { officeKindCounts } from "../project-status";
@@ -498,7 +499,7 @@ export default function ProjectFilesView({
                   <MessageSquare size={13} strokeWidth={1.8} />
                 )}
               </button>
-              {/\.(pdf|md)$/i.test(entry.name) && (
+              {supportsImmersiveReader(entry.name) && (
                 <button
                   type="button"
                   className={iconActionClass}
@@ -578,7 +579,7 @@ export default function ProjectFilesView({
                 >
                   <MessageSquare size={13} strokeWidth={1.8} />
                 </button>
-                {/\.(pdf|md)$/i.test(file.name) && (
+                {supportsImmersiveReader(file.name) && (
                   <button
                     type="button"
                     className={iconActionClass}
@@ -724,7 +725,7 @@ export default function ProjectFilesView({
                 root={projectPath}
                 onOpenFile={openPath}
                 onOpenReader={
-                  /\.(pdf|md|markdown)$/i.test(preview.name)
+                  supportsImmersiveReader(preview.name)
                     ? () => openImmersive(preview)
                     : undefined
                 }
@@ -786,7 +787,7 @@ export default function ProjectFilesView({
             root={projectPath}
             onOpenFile={openPath}
             onOpenReader={
-              /\.(pdf|md)$/i.test(preview.name)
+              supportsImmersiveReader(preview.name)
                 ? () => openImmersive(preview)
                 : undefined
             }

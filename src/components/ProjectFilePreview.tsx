@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { projectFilePreviewKind } from "../project-files";
 import { LoadingRows } from "./PageFrame";
 import PdfContinuousView from "./PdfContinuousView";
@@ -13,12 +13,15 @@ export default function ProjectFilePreview({
   root,
   onOpenFile,
   onOpenReader,
+  leading,
 }: {
   path: string;
   root: string;
   onOpenFile?: (absPath: string) => void;
   /** 「⛶ 沉浸阅读」入口：PDF 预览顶栏与 md 阅读态工具条共用；缺省不渲染该按钮 */
   onOpenReader?: () => void;
+  /** 文本预览标题栏左侧。审阅里用来放收起后的展开按钮。 */
+  leading?: ReactNode;
 }) {
   const kind = projectFilePreviewKind(path);
   const frame = "flex min-h-0 flex-1 flex-col";
@@ -77,6 +80,7 @@ export default function ProjectFilePreview({
           onOpenFile={onOpenFile}
           hideImmersive
           onOpenReader={onOpenReader}
+          leading={leading}
         />
       </Suspense>
     </div>

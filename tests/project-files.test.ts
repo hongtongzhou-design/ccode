@@ -7,6 +7,7 @@ import {
   neighborFile,
   artifactPreviewSurface,
   projectFilePreviewKind,
+  supportsImmersiveReader,
 } from "../src/project-files.ts";
 
 test("research and coding files preview in-pane, including source", () => {
@@ -30,6 +31,20 @@ test("产物核验：pdf/docx 就地预览，不跳运行页", () => {
   assert.equal(artifactPreviewSurface("manuscript/draft.md"), "text");
   assert.equal(artifactPreviewSurface("papers/to-fetch.ris"), "text");
   assert.equal(artifactPreviewSurface("main.bin"), "jump");
+});
+
+test("沉浸阅读入口的判据统一：.markdown 与 .md 同等对待", () => {
+  assert.equal(supportsImmersiveReader("papers/a.pdf"), true);
+  assert.equal(supportsImmersiveReader("notes/a.md"), true);
+  // 这条是回归点：预览浮层曾用 /\.(pdf|md|markdown)$/、工具条只认 md，
+  // 同一个 .markdown 文件在一边有入口、另一边没有。
+  assert.equal(supportsImmersiveReader("notes/a.markdown"), true);
+  assert.equal(supportsImmersiveReader("notes/a.MD"), true);
+  assert.equal(supportsImmersiveReader("notes/a.txt"), false);
+  assert.equal(supportsImmersiveReader("notes/readme"), false);
+  // 点开头的隐藏文件不是扩展名
+  assert.equal(supportsImmersiveReader("notes/.md"), false);
+  assert.equal(supportsImmersiveReader("notes/trailing."), false);
 });
 
 test("type filter keeps original office categories", () => {

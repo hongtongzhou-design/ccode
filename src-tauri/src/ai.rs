@@ -1462,26 +1462,101 @@ pub async fn ai_distill_review(
         let conn = crate::workspaces::db()?;
         let w = crate::workspaces::get_workspace(&conn, &id)?;
         let wt = PathBuf::from(&w.worktree_path);
-        let base = crate::workspaces::base_ref(&wt, &w.base_branch);
-        let log = crate::workspaces::run_git(
-            &wt,
-            &["log", "--oneline", &format!("{base}..HEAD"), "-50"],
-            Duration::from_secs(30),
-        )?;
+        // 保存进项目后，工作区 HEAD 已经等于主分支，base..HEAD 是空的。
+        // 这一步的提交在主仓里，用分支名找第二父提交是本步的那些。
+        let repo = PathBuf::from(&w.repo_path);
+        let saved = w.merged_at.is_some();
+        let git_root = if saved { repo.as_path() } else { wt.as_path() };
+        // 保存记录的标题是 Merge commit，不含分支名。用本步 HEAD 当第二父提交去找。
+        let saved_tip = if saved {
+            crate::workspaces::run_git(&wt, &["rev-parse", "HEAD"], Duration::from_secs(15))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        let log = if let Some(tip) = saved_tip.as_deref() {
+            let found = crate::workspaces::run_git(
+                git_root,
+                &["log", "--first-parent", "--format=%H %P", "-80", "HEAD"],
+                Duration::from_secs(30),
+            )?;
+            let short = &tip[..tip.len().min(12)];
+            let hit = found.lines().find(|line| line.split_whitespace().nth(2) == Some(tip) || line.contains(short));
+            match hit.and_then(|line| line.split_whitespace().next()) {
+                Some(hash) => crate::workspaces::run_git(
+                    git_root,
+                    &["log", "--oneline", "-1", hash],
+                    Duration::from_secs(15),
+                )?,
+                None => crate::workspaces::run_git(
+                    &wt,
+                    &["log", "--oneline", "-20", "HEAD"],
+                    Duration::from_secs(30),
+                )?,
+            }
+        } else if saved {
+            crate::workspaces::run_git(
+                git_root,
+                &["log", "--oneline", "-50", "--grep", w.branch.as_str()],
+                Duration::from_secs(30),
+            )?
+        } else {
+            let base = crate::workspaces::base_ref(&wt, &w.base_branch);
+            let range = format!("{base}..HEAD");
+            crate::workspaces::run_git(
+                git_root,
+                &["log", "--oneline", &range, "-50"],
+                Duration::from_secs(30),
+            )?
+        };
         if log.trim().is_empty() {
-            return Err("分支上还没有提交，无法起草沉淀".into());
+            return Err(if saved {
+                "这一步保存进项目的提交没找到，先手写沉淀".into()
+            } else {
+                "分支上还没有提交，无法起草沉淀".into()
+            });
         }
-        let mb = crate::workspaces::run_git(
-            &wt,
-            &["merge-base", &base, "HEAD"],
-            Duration::from_secs(30),
-        )?;
-        let numstat = crate::workspaces::run_git(
-            &wt,
-            &["diff", "--numstat", &format!("{mb}..HEAD")],
-            Duration::from_secs(30),
-        )
-        .unwrap_or_default();
+        let numstat = if saved {
+            let hashes = if let Some(tip) = saved_tip.as_deref() {
+                tip.to_string()
+            } else {
+                crate::workspaces::run_git(
+                    git_root,
+                    &["log", "--format=%H", "-20", "--grep", w.branch.as_str()],
+                    Duration::from_secs(30),
+                )
+                .unwrap_or_default()
+            };
+            hashes
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .take(8)
+                .filter_map(|hash| {
+                    crate::workspaces::run_git(
+                        git_root,
+                        &["show", "--numstat", "--format=", hash.trim()],
+                        Duration::from_secs(30),
+                    )
+                    .ok()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            let base = crate::workspaces::base_ref(&wt, &w.base_branch);
+            let mb = crate::workspaces::run_git(
+                &wt,
+                &["merge-base", &base, "HEAD"],
+                Duration::from_secs(30),
+            )?;
+            crate::workspaces::run_git(
+                &wt,
+                &["diff", "--numstat", &format!("{mb}..HEAD")],
+                Duration::from_secs(30),
+            )
+            .unwrap_or_default()
+        };
         // TASK.md 是开步脚手架（不进 git），读不到不阻断起草
         let task_brief = fs::read_to_string(wt.join("TASK.md")).unwrap_or_default();
         let raw = ai_prompt_impl(

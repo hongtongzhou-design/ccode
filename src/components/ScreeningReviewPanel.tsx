@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DirEntryDto } from "./FileTree";
-import { extractResearchSections } from "../research-report";
 import { readResearchFile } from "../research-report-load";
 import {
   decisionBadge,
+  decisionToneClass,
   filterIncludedRecords,
   includedRecordKey,
   includedRecordMeta,
@@ -12,6 +12,7 @@ import {
   parseIncludedRecords,
   screeningCountLine,
   screeningCounts,
+  screeningSearchLog,
   type IncludedRecord,
 } from "../screening-review";
 import { countToFetchEntries } from "../step-flow";
@@ -41,8 +42,7 @@ export default function ScreeningReviewPanel({
   const [error, setError] = useState<string | null>(null);
   const [records, setRecords] = useState<IncludedRecord[] | null>(null);
   const [toFetch, setToFetch] = useState(0);
-  const [summary, setSummary] = useState("");
-  const [quality, setQuality] = useState("");
+  const [searchLog, setSearchLog] = useState("");
   const [truncated, setTruncated] = useState(false);
   const [pdfFiles, setPdfFiles] = useState<{ name: string; path: string }[]>([]);
 
@@ -66,16 +66,8 @@ export default function ScreeningReviewPanel({
           if (json.truncated) setTruncated(true);
         }
         setToFetch(fetchMd ? countToFetchEntries(fetchMd.text) : 0);
-        if (screening) {
-          const sections = extractResearchSections(screening.text, "acceptance");
-          setSummary(
-            sections.find((s) => s.heading.includes("验收摘要"))?.text ?? "",
-          );
-          setQuality(
-            sections.find((s) => s.heading.includes("质量状态"))?.text ?? "",
-          );
-          if (screening.truncated) setTruncated(true);
-        }
+        setSearchLog(screening ? screeningSearchLog(screening.text) : "");
+        if (screening?.truncated) setTruncated(true);
         const pdfRoots = [...new Set([projectRoot, root].filter((p): p is string => Boolean(p)))];
         const listed = await Promise.all(
           pdfRoots.map((dir) =>
@@ -124,35 +116,28 @@ export default function ScreeningReviewPanel({
 
   return (
     <section aria-label="筛选结果" className="px-4 py-3 text-sm">
-      <div className="mb-2 flex items-center justify-end">
-        <button type="button" className="text-xs text-l3 hover:text-l1" onClick={() => setReload((n) => n + 1)}>
-          刷新
-        </button>
-      </div>
       {records == null ? (
         <p className="text-l3">正在读取纳入清单…</p>
       ) : pane === "process" ? (
         <>
           <h4 className="font-medium text-l1">检索过程</h4>
-          <p className="mt-1 text-xs text-l4">
-            Agent 自述。未决可以保持未决，不挡保存进项目。
-          </p>
-          {(summary || quality) ? (
-            <div className="mt-2 text-xs leading-5 text-l3">
-              {quality && <p className="text-l2">质量状态：{quality}</p>}
-              {summary && (
-                <pre className="mt-1 whitespace-pre-wrap break-words font-sans">
-                  {summary}
-                </pre>
-              )}
-            </div>
+          <p className="mt-1 text-xs text-l4">查了哪些库、命中多少、留下多少。</p>
+          {searchLog ? (
+            <pre className="mt-2 whitespace-pre-wrap break-words font-sans text-xs leading-5 text-l3">
+              {searchLog}
+            </pre>
           ) : (
-            <p className="mt-2 text-xs text-l4">没有检索过程摘要。</p>
+            <p className="mt-2 text-xs text-l4">筛选记录里没有检索日志。完整经过在「文件」里的 screening.md。</p>
           )}
         </>
       ) : (
         <>
-          <p className="text-l2">{screeningCountLine(counts)}</p>
+          <div className="flex items-center gap-3">
+            <p className="min-w-0 flex-1 text-l2">{screeningCountLine(counts)}</p>
+            <button type="button" className="shrink-0 text-xs text-l3 hover:text-l1" onClick={() => setReload((n) => n + 1)}>
+              刷新
+            </button>
+          </div>
           {truncated && <p className="mt-1 text-xs text-warn-text">清单截断，摘要可能不完整。</p>}
           {error && <p className="mt-1 text-xs text-warn-text">{error}</p>}
           <p className="mt-3 text-xs text-l4">看纳入的篇目对不对。待确认仍可纳入或排除。</p>
@@ -189,7 +174,7 @@ export default function ScreeningReviewPanel({
                   ) : (
                     <p className="text-xs leading-5 text-l1">{row.title}</p>
                   )}
-                  <p className="mt-0.5 text-micro text-ok-text">{badge.label}{meta ? ` · ${meta}` : ""}</p>
+                  <p className={`mt-0.5 text-micro ${decisionToneClass(badge.tone)}`}>{badge.label}{meta ? ` · ${meta}` : ""}</p>
                 </li>
               );
             })}

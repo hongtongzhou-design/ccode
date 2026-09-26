@@ -27,6 +27,26 @@ export const STATUS_WORD: Record<string, string> = {
 };
 
 /** 徽标悬浮 title：保留字母供程序员扫读，附白话说明 */
+/** Mesa 自己写的验收账本。未跟踪时不算「你的改动未存入历史」。 */
+export function isAcceptanceLedgerPath(path: string): boolean {
+  const name = path.replace(/\\/g, "/").split("/").pop() ?? path;
+  return name === "acceptance-log.jsonl" || name === "acceptance-log.lock";
+}
+
+function isReviewNotesPath(path: string): boolean {
+  const name = path.replace(/\\/g, "/").split("/").pop() ?? path;
+  return name === "review-notes.md";
+}
+
+export function userDirtyFiles<T extends { path: string; status: string }>(
+  files: readonly T[],
+): T[] {
+  return files.filter((file) => {
+    if (isReviewNotesPath(file.path)) return false;
+    return !(file.status === "??" && isAcceptanceLedgerPath(file.path));
+  });
+}
+
 export function statusBadgeTitle(status: string): string {
   return `${status} · ${STATUS_WORD[status] ?? status}`;
 }

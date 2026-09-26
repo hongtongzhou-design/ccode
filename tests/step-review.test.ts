@@ -7,7 +7,7 @@ import {
   type StepReviewKind,
 } from "../src/step-review.ts";
 import { PIPELINE_TEMPLATES, pipelineStepsForTemplate } from "../src/pipeline-presets.ts";
-import { deliveryContentPaths } from "../src/review-file-groups.ts";
+import { deliveryContentPaths, deliveryProcessPaths } from "../src/review-file-groups.ts";
 import { reviewSavePrimaryLabel, historyWorkspaceSaveTitle, REVIEW_SAVE } from "../src/review-save-copy.ts";
 
 test("评审档案闭集：筛选 / 文件交付 / 报告验收 / 默认，不按工作区名另开一页", () => {
@@ -47,12 +47,11 @@ test("评审档案闭集：筛选 / 文件交付 / 报告验收 / 默认，不�
     "files",
   );
   assert.equal(resolveStepReviewProfile(null, []).kind, "default");
-  assert.equal(STEP_REVIEW_PROFILES.screening.filesInDrawer, false);
   assert.equal(STEP_REVIEW_PROFILES.files.groupFiles, true);
   assert.equal(STEP_REVIEW_PROFILES.files.acceptance, "none");
   assert.equal(STEP_REVIEW_PROFILES.files.showReproduction, false);
   assert.equal(STEP_REVIEW_PROFILES.screening.acceptance, "none");
-  assert.equal(STEP_REVIEW_PROFILES.acceptance.filesInDrawer, false);
+  assert.equal(STEP_REVIEW_PROFILES.acceptance.groupFiles, true);
   assert.equal(STEP_REVIEW_PROFILES.screening.evidence, "screening");
   assert.equal(STEP_REVIEW_PROFILES.acceptance.evidence, "report");
   assert.equal(STEP_REVIEW_PROFILES.acceptance.showReproduction, true);
@@ -84,7 +83,10 @@ test("检索/精读/大纲同一套页签，Git 对照只在文件", () => {
     reviewPaneTabs("files", ["outline.md", "notes/a.md"])?.map((tab) => tab.label),
     ["稿件", "过程", "文件"],
   );
-  assert.equal(reviewPaneTabs("acceptance"), null);
+  assert.deepEqual(
+    reviewPaneTabs("acceptance")?.map((tab) => tab.label),
+    ["结果", "过程", "文件"],
+  );
   assert.equal(reviewPaneTabs("default"), null);
 });
 
@@ -177,7 +179,8 @@ test("files 档每步预期产物都能进笔记/稿件主面", () => {
     if (resolveStepReviewProfile(step, []).kind !== "files") continue;
     const samples = (step.expectedArtifacts ?? []).map(sampleArtifactPath);
     assert.ok(
-      deliveryContentPaths(samples).length > 0,
+      deliveryContentPaths(samples).length > 0 ||
+        deliveryProcessPaths(samples).length > 0,
       `${tpl.id}/${step.name} 主面空：${samples.join("、")}`,
     );
   }
