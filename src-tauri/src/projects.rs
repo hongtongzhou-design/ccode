@@ -531,15 +531,30 @@ pub(crate) fn list_projects_in(conn: &Connection) -> Result<Vec<ProjectDto>, Str
     let mut projects: Vec<ProjectDto> = rows.flatten().collect();
     // 旧行 id 回填：档案卡里已有 id 的只补注册表（纯 DB 写，不动文件）；
     // 档案卡也没有 id 的保持空串，等注册/配置写入时分配（list 不做文件副作用）
-    for project in &mut projects {
-        if project.id.is_empty() {
-            if let Some(pid) = project_id_at(Path::new(&project.path)) {
-                let _ = conn.execute(
-                    "UPDATE projects SET id=?2 WHERE path=?1",
-                    params![project.path, pid],
-                );
-                project.id = pid;
-            }
+    //
+    // 只对**缺 id 的行**读档案卡，且批量 + 有界：这是列表路径，前端按 2s 轮询，
+    // 逐个同步读会让一个卡在云同步的文件系统把项目列表整个挂死
+    //（2026-09-26 修；2026-09-13 只修了测试侧，产品侧一直没修）。
+    let needs_id: Vec<usize> = projects
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.id.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    if !needs_id.is_empty() {
+        let roots: Vec<PathBuf> = needs_id
+            .iter()
+            .map(|i| PathBuf::from(&projects[*i].path))
+            .collect();
+        for (&i, text) in needs_id.iter().zip(cards_bounded(&roots)) {
+            let Some(pid) = text.as_deref().and_then(project_id_in_text) else {
+                continue;
+            };
+            let _ = conn.execute(
+                "UPDATE projects SET id=?2 WHERE path=?1",
+                params![projects[i].path, pid],
+            );
+            projects[i].id = pid;
         }
     }
     Ok(projects.into_iter().map(attach_work_mode).collect())
@@ -630,14 +645,16 @@ pub(crate) fn project_roots_and_resources() -> (Vec<PathBuf>, Vec<PathBuf>) {
     let Ok(conn) = db() else {
         return (Vec::new(), Vec::new());
     };
-    let mut roots = Vec::new();
+    let roots: Vec<PathBuf> = list_projects_in(&conn)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| PathBuf::from(&p.path))
+        .collect();
+    // 档案卡批量有界读取：坏路径只让**该项目**的资源缺席，不再拖垮整批
+    //（2026-09-26 修：此前逐个同步读，一个卡住的云同步项目会让引用检查/PDF 预览一起挂死）
     let mut resources = Vec::new();
-    for p in list_projects_in(&conn).unwrap_or_default() {
-        let root = PathBuf::from(&p.path);
-        roots.push(root.clone());
-        let Ok(text) = fs::read_to_string(config_path(&root)) else {
-            continue;
-        };
+    for (root, text) in roots.iter().zip(cards_bounded(&roots)) {
+        let Some(text) = text else { continue };
         let (config, _) = parse_config(&text);
         for r in config.resources {
             let rp = PathBuf::from(&r.path);
@@ -931,9 +948,43 @@ fn with_project_toml_header(text: String) -> String {
     format!("{PROJECT_TOML_HEADER}\n{rest}")
 }
 
-/// 读档案卡里的稳定项目 id（无文件/无 id 行 = None）。
-pub(crate) fn project_id_at(project: &Path) -> Option<String> {
-    let text = fs::read_to_string(config_path(project)).ok()?;
+/// 档案卡读取预算（聚合路径用）。健康文件系统上是亚毫秒级，这个值只管
+/// 「无响应」那一档；共享总预算，所以项目数再多也只等这么久。
+const CARD_READ_BUDGET: Duration = Duration::from_secs(2);
+
+/// 批量读档案卡，总时长受 `CARD_READ_BUDGET` 约束，返回与入参同序。
+///
+/// 为什么不像以前那样逐个 `fs::read_to_string`：注册项目可能落在无响应的文件系统上
+/// （云同步未落地、网络盘断连），`open()` 会在内核里阻塞，一个坏路径就能把
+/// 项目列表 / 引用检查 / PDF 预览整个挂死。这里改用有界读取——超时就跳过该项目，
+/// 并把路径记进 `storage` 的卡住表，后续调用直接返回不再新建线程（细节见 storage.rs）。
+///
+/// 跳过是**显性**的：首次判定卡住时记一条 warn（`StillStuck` 是重复观察，不再记，
+/// 否则前端每 2s 轮询一次就把日志刷爆）。
+fn cards_bounded(roots: &[PathBuf]) -> Vec<Option<String>> {
+    let paths: Vec<PathBuf> = roots.iter().map(|r| config_path(r)).collect();
+    crate::storage::read_many_within(&paths, CARD_READ_BUDGET)
+        .into_iter()
+        .zip(roots)
+        .map(|(outcome, root)| {
+            if matches!(outcome, crate::storage::BoundedRead::TimedOut) {
+                crate::logbuf::record(
+                    "warn",
+                    "projects",
+                    &format!(
+                        "档案卡读取超时，本次跳过「{}」：路径所在文件系统无响应\
+                         （云同步未落地或网络盘断连）。文件系统恢复后自动重新可读，无需手动操作",
+                        root.display()
+                    ),
+                );
+            }
+            outcome.text().map(str::to_string)
+        })
+        .collect()
+}
+
+/// 从档案卡文本里取稳定项目 id（无 id 行 = None）。
+fn project_id_in_text(text: &str) -> Option<String> {
     let value = text.parse::<toml::Value>().ok()?;
     value
         .get("id")?
@@ -941,6 +992,15 @@ pub(crate) fn project_id_at(project: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(str::to_string)
+}
+
+/// 读档案卡里的稳定项目 id（无文件/无 id 行 = None）。
+///
+/// 单项目路径用这个（调用方正在操作那个项目，挂住是合理的——用户在等它）。
+/// 遍历全部注册项目的**聚合**路径请走 `cards_bounded`，否则一个坏路径拖垮整批。
+pub(crate) fn project_id_at(project: &Path) -> Option<String> {
+    let text = fs::read_to_string(config_path(project)).ok()?;
+    project_id_in_text(&text)
 }
 
 /// 读取或分配项目 id：分配即在档案卡顶部加 `id` 行（原子写，其余内容不动）。
