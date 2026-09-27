@@ -435,7 +435,7 @@ Codex            → …
 
 > 2026-09-22 自 AGENTS.md「模型配置约定」整节迁入（原文未改）。改配置/注入/设为全局/模型能力前与本文件其余章节一起读。
 
-- Claude Code 启动必须用 `--settings` 覆盖本次连接的模型选择，避免用户级 `settings.json.env` 覆盖 Mesa；不得写 `CLAUDE_CODE_SUBAGENT_MODEL`，以保留 Task 参数、frontmatter 和主模型继承链。
+- Claude Code 启动必须用 `--settings` 覆盖本次连接的 base_url、密钥与模型选择，避免用户级 `settings.json.env` 覆盖 Mesa（三者必须同层配对：只提 base_url 会让磁盘上残留的旧 token 胜出，形成「新端点 + 旧令牌」而报 401）；密钥写 0600 临时文件后以路径传入，不进 argv；不得写 `CLAUDE_CODE_SUBAGENT_MODEL`，以保留 Task 参数、frontmatter 和主模型继承链。
 - Anthropic 兼容槽只接受基础 URL；保存时拒绝以 `/messages` 结尾的完整资源地址。
 - CodeBuddy 的 `reasoning_effort` 通过当前 CLI 的 `--effort` 启动参数注入；Grok 的模型/思考档通过 `-m`/`--reasoning-effort` 注入。
 - Grok 的 `api_backend`、`context_window` 不得通过受限 `GROK_CONFIG` 猜测注入；若绑定声明非 `chat_completions`，必须先在 Grok `[model.<id>]` 配置中登记，否则启动和无头调用均 fail-closed。

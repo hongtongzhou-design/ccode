@@ -398,7 +398,7 @@ pub(crate) fn ai_prompt_impl(
     let selected = pick_listed_model(&profile.models, preferred);
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
     agents::validate_launch_compatibility(&profile, selected.as_deref())?;
-    let plan = agents::launch_plan(&profile, key, selected.as_deref());
+    let plan = agents::launch_plan(&profile, key, selected.as_deref())?;
     let mut cmd = crate::process::background_command(&binary_path);
     let (lock_id, lock_args) = lock_headless_session(&profile.agent);
     if let Some(id) = &lock_id {
@@ -561,7 +561,7 @@ pub(crate) fn run_agent_task(
     let selected = pick_listed_model(&profile.models, model);
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
     agents::validate_launch_compatibility(&profile, selected.as_deref())?;
-    let plan = agents::launch_plan(&profile, key, selected.as_deref());
+    let plan = agents::launch_plan(&profile, key, selected.as_deref())?;
     let mut cmd = crate::process::background_command(&binary_path);
     let (lock_id, lock_args) = lock_headless_session(&profile.agent);
     if let Some(id) = &lock_id {

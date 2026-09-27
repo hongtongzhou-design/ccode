@@ -576,7 +576,7 @@ pub fn pty_spawn(
         Some(_) => None,
         None => initial_prompt.as_deref(),
     };
-    let mut plan = agents::launch_plan_with_prompt(&profile, key, model.as_deref(), prompt);
+    let mut plan = agents::launch_plan_with_prompt(&profile, key, model.as_deref(), prompt)?;
     // 口径 C：原始文献（PDF/导入）允许直写主仓 papers/——从步骤工作区启动的 codex
     // 把该目录预授权进 workspace-write 沙箱（sandbox_workspace_write.writable_roots），
     // 免得每写一篇 PDF 都停下来等提权确认（2026-09-15 用户实测「总是让我授权」）。

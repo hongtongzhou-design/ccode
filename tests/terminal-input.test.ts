@@ -102,19 +102,20 @@ test("Codex Shift+Enter 改写成 CSI-u 换行，其它 agent 不改", () => {
   assert.equal(ptyShiftEnterRewrite("claude-code"), null);
 });
 
-test("printableKeyFallback：keyCode 0 当场补发，keyCode 229 等一拍", () => {
+test("printableKeyFallback：keyCode 0 与 229 都当场补发", () => {
   const base = { type: "keydown", ctrlKey: false, altKey: false, metaKey: false };
   // WKWebView 上 Shift+/ 报 0：这一下 xterm 不发，宿主当场补
   assert.deepEqual(printableKeyFallback({ ...base, key: "?", keyCode: 0 }), {
     action: "send",
     data: "?",
   });
-  // 输入法组词占位 229：不能当场发，等一拍看隐藏输入框有没有多出字
+  // Shift+/ 实测报 229（不是 191）：xterm 走 composition 的 setTimeout 分支，读到的
+  // textarea 还没被 input 写长 → 不发 → 第一下丢字。故与 0 同样当场补发
   assert.deepEqual(printableKeyFallback({ ...base, key: "?", keyCode: 229 }), {
-    action: "defer",
+    action: "send",
     data: "?",
   });
-  // keyCode >= 48：xterm 自己会发，不干预（补发会变两个字符）
+  // keyCode >= 48：xterm 自己会发（evaluateKeyboardEvent 认识 191:["/","?"]），不干预
   assert.equal(printableKeyFallback({ ...base, key: "?", keyCode: 191 }), null);
   assert.equal(printableKeyFallback({ ...base, key: "a", keyCode: 65 }), null);
 });

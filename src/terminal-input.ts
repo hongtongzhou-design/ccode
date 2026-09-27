@@ -72,15 +72,14 @@ export function ptyShiftEnterRewrite(agentId: string): string | null {
 }
 
 /** Shift+标点丢字的补发决议。xterm 的 keydown 只在 `keyCode >= 48` 时把单个字符送进 PTY。
- *  WKWebView 上 Shift+`/` 可能报 keyCode 0（这一下整个丢掉，再按才出来）；中文输入法在组词
- *  期则常报 229。两者等待方式不同：
- *    - `0`：当场补发，不必等——系统根本没打算让 xterm 处理这一下
- *    - `229`：不能当场发。组词上屏时 xterm 自己会把字发一遍，早发就重了；须等一拍再看
- *      隐藏输入框有没有多出字，没多出才补
+ *  WKWebView 上 Shift+`/` 会报 keyCode 229（而非 191），这一下 xterm 走 `_handleAnyTextareaChanges`
+ *  的 `setTimeout(…, 0)` 分支，读到的 textarea 常常还没被 `input` 事件写长 → 不发 → 第一下丢字，
+ *  再按一下才出来。故 229 与 0 同样**当场补发**，由 TerminalPage 的哨兵吞掉 xterm 可能补发的那一次。
+ *
+ *  为什么不会把「一个字母出两个」带回来：真正输入法组词时 `e.key` 是 `"Process"`（长名），
+ *  上面的 `e.key.length !== 1` 已滤掉；能走到这里的 229 一定是单字符，补发与哨兵正好一对一。
  *  带 Ctrl/Alt/Cmd 一律不补：那些是终端控制序列，不是可打印字符。 */
-export type PrintableKeyFallback =
-  | { action: "send"; data: string }
-  | { action: "defer"; data: string };
+export type PrintableKeyFallback = { action: "send"; data: string };
 
 export function printableKeyFallback(e: {
   type: string;
@@ -93,13 +92,14 @@ export function printableKeyFallback(e: {
   // keyup 也走同一 handler，只认 keydown
   if (e.type !== "keydown") return null;
   if (e.ctrlKey || e.altKey || e.metaKey) return null;
-  // 单字符且可打印：排掉 Shift/Enter/ArrowUp 这类具名键（key 是长名）与控制字符
+  // 单字符且可打印：排掉 Shift/Enter/ArrowUp 这类具名键（key 是长名）与控制字符。
+  // 也是输入法组词（key="Process"）被排除在这里，不是靠 keyCode。
   if (e.key.length !== 1) return null;
   const code = e.key.charCodeAt(0);
   if (code < 32 || code === 127) return null;
-  if (e.keyCode === 0) return { action: "send", data: e.key };
-  if (e.keyCode === 229) return { action: "defer", data: e.key };
-  // keyCode >= 48：xterm 自己会发，不干预
+  // 0：系统没打算让 xterm 处理这一下；229：xterm 的 composition 路径来不及发。
+  // 两者都当场补发，259 之外的普通 keyCode 交给 xterm（它认识 Shift+标点，见 evaluateKeyboardEvent 键位表）。
+  if (e.keyCode === 0 || e.keyCode === 229) return { action: "send", data: e.key };
   return null;
 }
 

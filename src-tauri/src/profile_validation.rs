@@ -653,7 +653,7 @@ fn cli_check(profile: &Profile, key: Option<&str>, injected: bool) -> Validation
             profile,
             key.map(ToOwned::to_owned),
             profile.models.first().map(String::as_str),
-        );
+        )?;
         let mut cmd = crate::process::background_command(binary);
         if injected {
             for (name, value) in &plan.env {

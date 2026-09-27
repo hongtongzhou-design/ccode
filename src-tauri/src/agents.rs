@@ -139,7 +139,7 @@ pub fn preview_launch_plan(
         .filter(|m| !m.trim().is_empty())
         .or_else(|| profile.models.first().cloned());
     crate::combo::apply_to_profile(&mut profile, selected.as_deref());
-    let plan = launch_plan(&profile, key, selected.as_deref());
+    let plan = launch_plan(&profile, key, selected.as_deref())?;
     // 配置 overlay 预览白名单：只有值里确定无密文的才展示原文
     //（GROK_CONFIG 的 Header 是 $VAR 引用，grok 进程内展开；CLAUDE_CODE_EXTRA_BODY
     // 只装 temperature/top_p 数值。OPENCODE_CONFIG_CONTENT 等含密钥载体永远不进这里）
@@ -205,6 +205,12 @@ pub fn preview_launch_plan(
                         .into(),
                 ),
             }
+        }
+    }
+    // API 连接：磁盘配置文件里的同名键会盖过本次注入。只提示不阻断（见 api_launch_conflict_notes）
+    if profile.account_type == crate::profiles::AccountType::Api {
+        if let Some(home) = dirs::home_dir() {
+            notes.extend(api_launch_conflict_notes(&home, &profile));
         }
     }
     if profile.agent == "codex" && profile.account_type == crate::profiles::AccountType::Official {
@@ -523,14 +529,28 @@ fn grok_overlay_note() -> String {
     "api_backend / context_window 不在 grok overlay 白名单内（[model.*] 表会被静默丢弃）；渠道有二：中转 /models 目录条目带 apiBackend / contextWindow 字段，或绑定设「API 后端」后经「设为全局默认」写入 ~/.grok/config.toml 的 [model.*] 段；目录缺 contextWindow 时 grok 按 256000 计".into()
 }
 
-/// Claude Code 的 settings.json env 会覆盖父进程 shell env。
-/// 用 --settings 传入一个不含密钥的高优先级覆盖层，避免用户全局配置把 Mesa
-/// 当前连接静默改回另一家模型；认证密钥仍只存在子进程环境中。
-fn claude_settings_override(profile: &Profile, model: Option<&str>) -> String {
+/// Claude Code 的 settings.json env 会覆盖父进程 shell env。用 --settings 传入一个高优先级
+/// 覆盖层，避免用户全局配置把 Mesa 当前连接静默改回另一家模型**或另一把密钥**。
+///
+/// 2026-09-27 修：此前只提升 base_url、不带 token（「认证密钥仍只存在子进程环境中」）。
+/// 结果磁盘 `~/.claude/settings.json` 的 `env` 块里残留的 `ANTHROPIC_AUTH_TOKEN` 依然按
+/// 配置层优先级胜出，而 base_url 已被换成本次网关 —— 请求带着别家的令牌打到新网关，
+/// 表现是 401「令牌已过期或验证不正确」（GLM 案例）。token 必须与 base_url 同层配对，
+/// 与 global_config::patch_claude_settings 的写法对齐。
+///
+/// 密钥不内联进 argv（`ps` 可见），改为写一个 0600 临时文件后以路径传入。
+fn claude_settings_override(
+    profile: &Profile,
+    key: Option<&str>,
+    model: Option<&str>,
+) -> Result<String, String> {
     let mut env = serde_json::Map::new();
     if profile.account_type == crate::profiles::AccountType::Api {
         if let Some(url) = profile.base_url.as_deref().filter(|u| !u.trim().is_empty()) {
             env.insert("ANTHROPIC_BASE_URL".into(), serde_json::json!(url));
+        }
+        if let Some(secret) = key.map(str::trim).filter(|k| !k.is_empty()) {
+            env.insert("ANTHROPIC_AUTH_TOKEN".into(), serde_json::json!(secret));
         }
     }
     const SLOTS: [&str; 4] = ["SONNET", "OPUS", "HAIKU", "FABLE"];
@@ -557,10 +577,36 @@ fn claude_settings_override(profile: &Profile, model: Option<&str>) -> String {
     if let Some(selected) = model.map(str::trim).filter(|m| !m.is_empty()) {
         env.insert("ANTHROPIC_MODEL".into(), serde_json::json!(selected));
     }
-    serde_json::json!({ "env": env }).to_string()
+    let body = serde_json::json!({ "env": env }).to_string();
+    // 覆盖层含密钥载体：必须 0600 落盘（与 write_external_wrapper 同口径）
+    let dir = external_wrapper_dir()?;
+    let path = dir.join(format!("claude-settings-{}.json", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|e| format!("创建 Claude Code 设置覆盖文件失败: {e}"))?;
+    use std::io::Write;
+    file.write_all(body.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&path);
+            format!("写入 Claude Code 设置覆盖文件失败: {e}")
+        })?;
+    schedule_wrapper_cleanup(path.clone());
+    Ok(path.to_string_lossy().into_owned())
 }
 
-pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) -> LaunchPlan {
+pub fn launch_plan(
+    profile: &Profile,
+    key: Option<String>,
+    model: Option<&str>,
+) -> Result<LaunchPlan, String> {
     let mut plan = LaunchPlan::default();
     // 空串/纯空白按「未选模型」归一：前端 buildAskAiPending 会带空串占位（防被启动栏上次的
     // 模型顶掉），Some("") 会让下面的 grok 兜底与各处 filter 全部失效，并把空模型写进
@@ -580,7 +626,7 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
         for (k, v) in &profile.extra_env {
             plan.env.push((k.clone(), v.clone()));
         }
-        return plan;
+        return Ok(plan);
     }
     // grok 未显式选模型时用绑定清单第一个兜底（2026-09-17 实测）：grok 按 id 路由，
     // 不注 GROK_DEFAULT_MODEL / -m 会回落 ~/.grok/config.toml 的 [models].default——
@@ -627,10 +673,15 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
             LaunchSpec::Special(special) => match special {
                 SpecialLaunch::ClaudeModelSlots(env) => {
                     apply_env_inject(&mut plan, env, profile, key.as_deref(), model);
-                    // settings.json 的 env 优先于 shell env；把本次连接的非敏感模型
-                    // 选择通过 --settings 提升到 CLI 配置层，防止全局 settings 覆盖。
+                    // settings.json 的 env 优先于 shell env；把本次连接的 base_url / 密钥 /
+                    // 模型选择一并通过 --settings 提升到 CLI 配置层，防止全局 settings 覆盖。
+                    // base_url 与 token 必须同层配对，只提其一会让请求带着旧令牌打到新网关（401）。
                     plan.args.push("--settings".into());
-                    plan.args.push(claude_settings_override(profile, model));
+                    plan.args.push(claude_settings_override(
+                        profile,
+                        key.as_deref(),
+                        model,
+                    )?);
                     if let Some(selected) = model.filter(|m| !m.trim().is_empty()) {
                         plan.args.push("--model".into());
                         plan.args.push(selected.into());
@@ -997,7 +1048,7 @@ pub fn launch_plan(profile: &Profile, key: Option<String>, model: Option<&str>) 
             }
         }
     }
-    plan
+    Ok(plan)
 }
 
 /// 带初始 prompt 的启动计划（一键开步首条指令）：api / 官方账号两种模式同样适用。
@@ -1008,10 +1059,10 @@ pub fn launch_plan_with_prompt(
     key: Option<String>,
     model: Option<&str>,
     initial_prompt: Option<&str>,
-) -> LaunchPlan {
-    let mut plan = launch_plan(profile, key, model);
+) -> Result<LaunchPlan, String> {
+    let mut plan = launch_plan(profile, key, model)?;
     let Some(prompt) = initial_prompt.map(str::trim).filter(|p| !p.is_empty()) else {
-        return plan;
+        return Ok(plan);
     };
     match agent_spec(&profile.agent).map(|s| s.prompt_inject) {
         Some(crate::agent_specs::PromptInject::Positional) => {
@@ -1026,7 +1077,7 @@ pub fn launch_plan_with_prompt(
             plan.prompt_dropped = true;
         }
     }
-    plan
+    Ok(plan)
 }
 
 /// Check whether the selected profile can be represented by a CLI launch plan.
@@ -1741,7 +1792,8 @@ fn sweep_stale_external_wrappers(dir: &std::path::Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with("launch-") {
+        let name = name.to_string_lossy();
+        if !name.starts_with("launch-") && !name.starts_with("claude-settings-") {
             continue;
         }
         let stale = entry
@@ -1893,8 +1945,8 @@ fn external_launch_args(
 ) -> Result<(Vec<String>, Vec<(String, String)>, Vec<String>), String> {
     validate_launch_compatibility(profile, model)?;
     let plan = match prompt {
-        Some(prompt) => launch_plan_with_prompt(profile, key, model, Some(prompt)),
-        None => launch_plan(profile, key, model),
+        Some(prompt) => launch_plan_with_prompt(profile, key, model, Some(prompt))?,
+        None => launch_plan(profile, key, model)?,
     };
     if prompt.is_some() && plan.prompt_dropped {
         return Err(format!(
@@ -2857,6 +2909,18 @@ fn probe_conflicts(
     home: &std::path::Path,
     oa: &crate::agent_specs::OfficialAccountSpec,
 ) -> Vec<String> {
+    probe_conflict_hits(home, oa)
+        .into_iter()
+        .map(|(file, key, note)| format!("~/{file} 中存在 {key}，{note}"))
+        .collect()
+}
+
+/// 探测结果的三元组形态（文件、键名、该探测器的说明）。只回键名不回值——
+/// 调用方各自决定措辞与去向（官方账号：拒绝启动；API 连接：启动预览里提示）。
+fn probe_conflict_hits(
+    home: &std::path::Path,
+    oa: &crate::agent_specs::OfficialAccountSpec,
+) -> Vec<(&'static str, String, &'static str)> {
     let mut out = Vec::new();
     for probe in oa.conflict_probes {
         let Ok(text) = std::fs::read_to_string(home.join(probe.file)) else {
@@ -2870,10 +2934,33 @@ fn probe_conflicts(
             dotenv_conflict_keys(&text, probe.keys)
         };
         for key in hits {
-            out.push(format!("~/{} 中存在 {}，{}", probe.file, key, probe.note));
+            out.push((probe.file, key, probe.note));
         }
     }
     out
+}
+
+/// API 连接启动前的只读提醒：磁盘配置文件里的同名键会盖过 Mesa 本次注入。
+///
+/// 与官方账号防线的区别是**不阻断**——API 连接本来就靠注入这些变量工作，磁盘上有残留
+/// 是可疑而非致命；而 `claude_settings_override` 现在会把 base_url 与 token 一起提升到
+/// `--settings` 层压过磁盘，多数情况已经自愈。这条提醒留给覆盖层管不到的键
+///（例如与 `ANTHROPIC_AUTH_TOKEN` 并存的 `ANTHROPIC_API_KEY`）。
+fn api_launch_conflict_notes(home: &std::path::Path, profile: &Profile) -> Vec<String> {
+    let Some(spec) = agent_spec(&profile.agent) else {
+        return Vec::new();
+    };
+    let Some(oa) = &spec.official_account else {
+        return Vec::new();
+    };
+    probe_conflict_hits(home, oa)
+        .into_iter()
+        .map(|(file, key, _)| {
+            format!(
+                "注意：~/{file} 中存在 {key}，其配置层优先级高于本次启动注入的变量，可能盖掉本连接的设置"
+            )
+        })
+        .collect()
 }
 
 fn clear_conflict_keys_in_file(
@@ -3202,7 +3289,7 @@ mod tests {
             "m4".into(),
             "m5".into(),
         ];
-        let plan = launch_plan(&p, None, Some("m1"));
+        let plan = launch_plan(&p, None, Some("m1")).unwrap();
         assert!(plan
             .env
             .contains(&("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), "m1".into())));
@@ -3229,14 +3316,23 @@ mod tests {
             .env
             .iter()
             .any(|(k, _)| k == "CLAUDE_CODE_SUBAGENT_MODEL"));
-        let settings = plan
+        // --settings 现在传的是 0600 临时文件的路径（密钥不进 argv），内容从文件读回
+        let settings = read_settings_override(&plan);
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "m1");
+        assert_eq!(settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "m3");
+    }
+
+    /// 取 `--settings` 覆盖层的内容：参数是文件路径，读回并解析（测试用）
+    fn read_settings_override(plan: &LaunchPlan) -> serde_json::Value {
+        let path = plan
             .args
             .windows(2)
             .find(|pair| pair[0] == "--settings")
-            .map(|pair| serde_json::from_str::<serde_json::Value>(&pair[1]).unwrap())
-            .unwrap();
-        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "m1");
-        assert_eq!(settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "m3");
+            .map(|pair| pair[1].clone())
+            .expect("启动计划里应有 --settings");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读不到设置覆盖文件 {path}: {e}"));
+        serde_json::from_str(&text).expect("设置覆盖文件不是合法 JSON")
     }
 
     #[test]
@@ -3245,7 +3341,7 @@ mod tests {
         // AUTO_COMPACT_WINDOW（同值）；未知模型（兜底 128K）两个都不注入
         let mut p = profile("claude-code", None);
         p.models = vec!["kimi-k3".into()];
-        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        let plan = launch_plan(&p, None, Some("kimi-k3")).unwrap();
         assert!(plan
             .env
             .contains(&("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "1048576".into())));
@@ -3254,7 +3350,7 @@ mod tests {
             .contains(&("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "1048576".into())));
         let mut p2 = profile("claude-code", None);
         p2.models = vec!["unknown-model".into()];
-        let plan2 = launch_plan(&p2, None, Some("unknown-model"));
+        let plan2 = launch_plan(&p2, None, Some("unknown-model")).unwrap();
         assert!(!plan2
             .env
             .iter()
@@ -3276,7 +3372,7 @@ mod tests {
             "ANTHROPIC_BASE_URL".into(),
             "https://override.example.com".into(),
         );
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         assert!(plan
             .env
             .contains(&("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into())));
@@ -3292,7 +3388,7 @@ mod tests {
     #[test]
     fn claude_plan_sets_only_present_fields() {
         let p = profile("claude-code", Some("https://relay.example.com"));
-        let plan = launch_plan(&p, Some("sk-secret".into()), None);
+        let plan = launch_plan(&p, Some("sk-secret".into()), None).unwrap();
         assert!(plan.args.windows(2).any(|pair| pair[0] == "--settings"));
         assert!(plan.env.contains(&(
             "ANTHROPIC_BASE_URL".into(),
@@ -3301,18 +3397,26 @@ mod tests {
         assert!(plan
             .env
             .contains(&("ANTHROPIC_AUTH_TOKEN".into(), "sk-secret".into())));
+        // 2026-09-27：base_url 与 token 必须在 --settings 层成对出现。只提 base_url 会让
+        // 磁盘 ~/.claude/settings.json 里残留的旧 token 胜出，请求带着别家令牌打到本网关（401）。
+        let settings = read_settings_override(&plan);
+        assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], "https://relay.example.com");
+        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-secret");
         assert!(!plan.env.iter().any(|(k, _)| k == "ANTHROPIC_MODEL"));
     }
 
     #[test]
     fn claude_plan_without_key_omits_token() {
         let p = profile("claude-code", None);
-        let plan = launch_plan(&p, None, Some("claude-sonnet-4"));
+        let plan = launch_plan(&p, None, Some("claude-sonnet-4")).unwrap();
         assert_eq!(plan.env.len(), 1);
         assert!(plan.args.windows(2).any(|pair| pair[0] == "--model"));
         assert!(plan
             .env
             .contains(&("ANTHROPIC_MODEL".into(), "claude-sonnet-4".into())));
+        // 无密钥时覆盖层也不该凭空造一个 token 键出来
+        let settings = read_settings_override(&plan);
+        assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
     }
 
     #[test]
@@ -3380,7 +3484,7 @@ mod tests {
     fn codebuddy_launch_uses_current_effort_and_model_flags() {
         let mut p = profile("codebuddy", Some("https://relay.example.com/anthropic"));
         p.request_policy.reasoning_effort = Some("high".into());
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("m1"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("m1")).unwrap();
         assert!(plan
             .args
             .windows(2)
@@ -3396,7 +3500,7 @@ mod tests {
         // 未实证 agent（codex）：任何策略字段都不产生 env
         let mut p = profile("codex", None);
         p.request_policy.temperature = Some(0.2);
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         assert!(!plan.env.iter().any(|(k, _)| {
             k.contains("EXTRA_BODY")
                 || k.contains("EFFORT")
@@ -3407,7 +3511,7 @@ mod tests {
         let mut p = profile("claude-code", None);
         p.account_type = crate::profiles::AccountType::Official;
         p.request_policy.max_output_tokens = Some(8192);
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         assert!(!plan
             .env
             .iter()
@@ -3423,7 +3527,7 @@ mod tests {
             "CLAUDE_CODE_EXTRA_BODY".into(),
             "{\"temperature\":0.1}".into(),
         );
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         let last = plan
             .env
             .iter()
@@ -3440,7 +3544,7 @@ mod tests {
         p.request_policy
             .header_env
             .insert("X-Region".into(), "MODEL_REGION".into());
-        let plan = launch_plan(&p, None, Some("gpt-x"));
+        let plan = launch_plan(&p, None, Some("gpt-x")).unwrap();
         assert!(plan
             .args
             .iter()
@@ -3454,7 +3558,7 @@ mod tests {
         p2.request_policy
             .header_env
             .insert("X-Region".into(), "MODEL_REGION".into());
-        let plan2 = launch_plan(&p2, None, None);
+        let plan2 = launch_plan(&p2, None, None).unwrap();
         assert!(!plan2.args.iter().any(|a| a.contains("env_http_headers")));
     }
 
@@ -3465,7 +3569,7 @@ mod tests {
         p.request_policy.temperature = Some(0.3);
         p.request_policy.max_output_tokens = Some(4096);
         p.request_policy.reasoning_effort = Some("low".into());
-        let plan = launch_plan(&p, None, Some("m1"));
+        let plan = launch_plan(&p, None, Some("m1")).unwrap();
         let raw = plan
             .env
             .iter()
@@ -3486,13 +3590,13 @@ mod tests {
     fn kimi_request_policy_effort_only_on_kimi_channel() {
         let mut p = profile("kimi", Some("https://api.moonshot.cn"));
         p.request_policy.reasoning_effort = Some("High".into());
-        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        let plan = launch_plan(&p, None, Some("kimi-k3")).unwrap();
         assert!(plan
             .env
             .contains(&("KIMI_MODEL_THINKING_EFFORT".into(), "high".into())));
         // anthropic 兼容通道该 env 被 CLI 静默忽略——干脆不注
         p.protocol = Some("anthropic".into());
-        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        let plan = launch_plan(&p, None, Some("kimi-k3")).unwrap();
         assert!(!plan
             .env
             .iter()
@@ -3502,7 +3606,7 @@ mod tests {
     #[test]
     fn codebuddy_plan_injects_codebuddy_env() {
         let p = profile("codebuddy", Some("https://api.deepseek.com/anthropic"));
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("deepseek-v3-2-volc"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("deepseek-v3-2-volc")).unwrap();
         assert!(plan.env.contains(&(
             "CODEBUDDY_BASE_URL".into(),
             "https://api.deepseek.com/anthropic".into()
@@ -3514,7 +3618,7 @@ mod tests {
             .env
             .contains(&("CODEBUDDY_MODEL".into(), "deepseek-v3-2-volc".into())));
         // 初始 prompt 是位置参数（一键开步注入）
-        let plan = launch_plan_with_prompt(&p, Some("sk-secret".into()), None, Some("干活"));
+        let plan = launch_plan_with_prompt(&p, Some("sk-secret".into()), None, Some("干活")).unwrap();
         assert_eq!(plan.prompt_args, vec!["干活"]);
     }
 
@@ -3522,7 +3626,7 @@ mod tests {
     fn codebuddy_official_plan_purges_api_env() {
         // 官方账号拉起：不注入 API env，且必须 env_remove 残留密钥变量（env 优先压账号，实测 401）
         let p = official_profile("codebuddy");
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         assert!(!plan.env.iter().any(|(k, _)| k.starts_with("CODEBUDDY_")));
         assert!(plan.env_remove.contains(&"CODEBUDDY_API_KEY".to_string()));
         assert!(plan
@@ -3534,7 +3638,7 @@ mod tests {
     fn grok_plan_injects_xai_env() {
         let mut p = profile("grok", Some("https://relay.example.com/v1"));
         p.models = vec!["grok-code-fast-1".into(), "grok-4.5".into()];
-        let plan = launch_plan(&p, Some("xai-secret".into()), Some("grok-code-fast-1"));
+        let plan = launch_plan(&p, Some("xai-secret".into()), Some("grok-code-fast-1")).unwrap();
         assert!(plan.env.contains(&(
             "GROK_MODELS_BASE_URL".into(),
             "https://relay.example.com/v1".into()
@@ -3568,11 +3672,11 @@ mod tests {
             serde_json::json!("grok-code-fast-1")
         );
         // 初始 prompt 是位置参数（一键开步注入）
-        let plan = launch_plan_with_prompt(&p, Some("xai-secret".into()), None, Some("干活"));
+        let plan = launch_plan_with_prompt(&p, Some("xai-secret".into()), None, Some("干活")).unwrap();
         assert_eq!(plan.prompt_args, vec!["干活"]);
         // 空模型列表不注入 GROK_CONFIG（allowed_models 空 = fail-closed 全不匹配）
         let empty = profile("grok", Some("https://relay.example.com/v1"));
-        let plan = launch_plan(&empty, Some("xai-secret".into()), None);
+        let plan = launch_plan(&empty, Some("xai-secret".into()), None).unwrap();
         assert!(!plan.env.iter().any(|(k, _)| k == "GROK_CONFIG"));
     }
 
@@ -3581,7 +3685,7 @@ mod tests {
         // 未选模型时用绑定清单第一个兜底：防回落 config.toml 第一方默认直连 xAI 代理
         let mut p = profile("grok", Some("https://open.bigmodel.cn/api/paas/v4"));
         p.models = vec!["glm-5.3".into(), "glm-5.2".into()];
-        let plan = launch_plan(&p, Some("k".into()), None);
+        let plan = launch_plan(&p, Some("k".into()), None).unwrap();
         assert!(plan
             .env
             .contains(&("GROK_DEFAULT_MODEL".into(), "glm-5.3".into())));
@@ -3595,14 +3699,14 @@ mod tests {
     fn grok_model_fallback_scoped_to_grok() {
         // 空模型清单不兜底（维持原行为）
         let empty = profile("grok", Some("https://relay.example.com/v1"));
-        let plan = launch_plan(&empty, Some("k".into()), None);
+        let plan = launch_plan(&empty, Some("k".into()), None).unwrap();
         assert!(!plan.env.iter().any(|(k, _)| k == "GROK_DEFAULT_MODEL"));
         assert!(!plan.args.iter().any(|a| a == "-m"));
 
         // 显式选模永远优先于兜底（不被清单第一个覆盖）
         let mut p = profile("grok", Some("https://open.bigmodel.cn/api/paas/v4"));
         p.models = vec!["glm-5.3".into(), "glm-5.2".into()];
-        let plan = launch_plan(&p, Some("k".into()), Some("glm-5.2"));
+        let plan = launch_plan(&p, Some("k".into()), Some("glm-5.2")).unwrap();
         assert!(plan
             .env
             .contains(&("GROK_DEFAULT_MODEL".into(), "glm-5.2".into())));
@@ -3630,7 +3734,7 @@ mod tests {
             .unwrap()
         };
         // 显式选模
-        let plan = launch_plan(&p, Some("k".into()), Some("deepseek-v4-flash-0731"));
+        let plan = launch_plan(&p, Some("k".into()), Some("deepseek-v4-flash-0731")).unwrap();
         let v = overlay_of(&plan);
         assert_eq!(
             v["models"]["default"],
@@ -3641,7 +3745,7 @@ mod tests {
             serde_json::json!(["deepseek-v4-flash-0731"])
         );
         // 未选模型 → 兜底绑定清单第一个，default 与 -m 同为它
-        let plan = launch_plan(&p, Some("k".into()), None);
+        let plan = launch_plan(&p, Some("k".into()), None).unwrap();
         let v = overlay_of(&plan);
         assert_eq!(
             v["models"]["default"],
@@ -3656,7 +3760,7 @@ mod tests {
         let mut p = profile("grok", Some("https://relay.example.com/v1"));
         p.models = vec!["glm-5.3".into()];
         for empty in [Some(""), Some("   ")] {
-            let plan = launch_plan(&p, Some("k".into()), empty);
+            let plan = launch_plan(&p, Some("k".into()), empty).unwrap();
             assert!(
                 plan.env
                     .contains(&("GROK_DEFAULT_MODEL".into(), "glm-5.3".into())),
@@ -3726,7 +3830,7 @@ api_backend = "responses"
             .header_env
             .insert("X-Tenant".into(), "TENANT_TOKEN".into());
         // 空模型列表 + 有策略：仍注入（overlay 不止 allowed_models 一个用途）
-        let plan = launch_plan(&p, Some("xai-secret".into()), None);
+        let plan = launch_plan(&p, Some("xai-secret".into()), None).unwrap();
         let grok_config = plan
             .env
             .iter()
@@ -3752,7 +3856,7 @@ api_backend = "responses"
             serde_json::json!({ "X-Tenant": "$TENANT_TOKEN" })
         );
         p.request_policy.reasoning_effort = Some("hign/xhign".into());
-        let plan = launch_plan(&p, Some("xai-secret".into()), Some("gpt-6-sol"));
+        let plan = launch_plan(&p, Some("xai-secret".into()), Some("gpt-6-sol")).unwrap();
         let grok_config = plan
             .env
             .iter()
@@ -3764,7 +3868,7 @@ api_backend = "responses"
         assert!(!plan.args.iter().any(|a| a == "--reasoning-effort"));
         // 无策略、无模型 → 完全不注
         let bare = profile("grok", Some("https://relay.example.com/v1"));
-        let plan = launch_plan(&bare, None, None);
+        let plan = launch_plan(&bare, None, None).unwrap();
         assert!(!plan.env.iter().any(|(k, _)| k == "GROK_CONFIG"));
     }
 
@@ -3772,7 +3876,7 @@ api_backend = "responses"
     fn grok_official_plan_purges_api_env() {
         // 官方账号拉起：不注入 API env，且必须 env_remove 残留密钥变量（凭证优先级 api_key > env_key > 登录 token）
         let p = official_profile("grok");
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         assert!(!plan
             .env
             .iter()
@@ -3790,7 +3894,7 @@ api_backend = "responses"
             &p,
             Some("key-secret".into()),
             Some("claude-opus-4-8[context=1m,effort=high]"),
-        );
+        ).unwrap();
         assert!(plan
             .env
             .contains(&("CURSOR_API_KEY".into(), "key-secret".into())));
@@ -3805,11 +3909,11 @@ api_backend = "responses"
         );
         assert!(!plan.env.iter().any(|(k, _)| k.contains("MODEL")));
         // 空字段不注入：无 base_url/密钥/模型时 env 与 args 都为空
-        let bare = launch_plan(&profile("cursor", None), None, None);
+        let bare = launch_plan(&profile("cursor", None), None, None).unwrap();
         assert!(bare.env.is_empty());
         assert!(bare.args.is_empty());
         // 初始 prompt 是位置参数（一键开步注入）
-        let plan = launch_plan_with_prompt(&p, Some("key-secret".into()), None, Some("干活"));
+        let plan = launch_plan_with_prompt(&p, Some("key-secret".into()), None, Some("干活")).unwrap();
         assert_eq!(plan.prompt_args, vec!["干活"]);
         assert!(!plan.prompt_dropped);
     }
@@ -3818,12 +3922,12 @@ api_backend = "responses"
     fn cursor_official_plan_purges_key_but_keeps_model_flag() {
         // 官方账号拉起：不注入 CURSOR_API_KEY（且 env_remove 残留），模型 flag 照常可用
         let p = official_profile("cursor");
-        let plan = launch_plan(&p, Some("key-secret".into()), Some("gpt-5"));
+        let plan = launch_plan(&p, Some("key-secret".into()), Some("gpt-5")).unwrap();
         assert!(!plan.env.iter().any(|(k, _)| k.starts_with("CURSOR_")));
         assert_eq!(plan.args, vec!["--model", "gpt-5"]);
         assert!(plan.env_remove.contains(&"CURSOR_API_KEY".to_string()));
         // 模型为空：无任何参数
-        let bare = launch_plan(&p, None, None);
+        let bare = launch_plan(&p, None, None).unwrap();
         assert!(bare.args.is_empty());
         assert!(bare.env.is_empty());
     }
@@ -3870,7 +3974,7 @@ api_backend = "responses"
     #[test]
     fn codex_plan_inlines_provider_via_c_args() {
         let p = profile("codex", Some("https://relay.example.com/v1"));
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gpt-5-codex"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gpt-5-codex")).unwrap();
         assert!(plan
             .env
             .contains(&("CODEX_API_KEY".into(), "sk-secret".into())));
@@ -3898,7 +4002,7 @@ api_backend = "responses"
     #[test]
     fn codex_plan_without_model_has_no_display_name_env() {
         let p = profile("codex", Some("https://relay.example.com/v1"));
-        let plan = launch_plan(&p, Some("sk-secret".into()), None);
+        let plan = launch_plan(&p, Some("sk-secret".into()), None).unwrap();
         assert!(!plan
             .env
             .iter()
@@ -3908,7 +4012,7 @@ api_backend = "responses"
     #[test]
     fn codex_plan_without_base_url_has_no_provider_args() {
         let p = profile("codex", None);
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         // 无 provider 参数，只有默认沙箱参数 + 沙箱内联网放开
         assert_eq!(
             plan.args,
@@ -3925,7 +4029,7 @@ api_backend = "responses"
     #[test]
     fn gemini_plan_sets_only_present_fields() {
         let p = profile("gemini", Some("https://relay.example.com"));
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gemini-3-pro"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gemini-3-pro")).unwrap();
         assert!(plan.args.is_empty());
         assert!(plan
             .env
@@ -3938,7 +4042,7 @@ api_backend = "responses"
             .env
             .contains(&("GEMINI_MODEL".into(), "gemini-3-pro".into())));
 
-        let bare = launch_plan(&p, None, None);
+        let bare = launch_plan(&p, None, None).unwrap();
         assert!(bare.env.contains(&(
             "GOOGLE_GEMINI_BASE_URL".into(),
             "https://relay.example.com".into()
@@ -3958,7 +4062,7 @@ api_backend = "responses"
     #[test]
     fn official_plan_injects_no_credentials_and_purges_residual_env() {
         let p = official_profile("claude-code");
-        let plan = launch_plan(&p, Some("sk-secret".into()), None);
+        let plan = launch_plan(&p, Some("sk-secret".into()), None).unwrap();
         // 密钥/base_url 一律不注入，模型为空也不注入模型 env
         assert!(plan.env.is_empty());
         assert!(plan.args.is_empty());
@@ -3971,7 +4075,7 @@ api_backend = "responses"
     #[test]
     fn kimi_official_plan_purges_synth_channel_and_uses_model_flag() {
         let p = official_profile("kimi");
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("kimi-code/k3"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("kimi-code/k3")).unwrap();
         // KIMI_MODEL_* 合成通道会抢 OAuth 登录态：一律 env_remove 且不注入任何 env
         assert!(plan.env.is_empty());
         for var in [
@@ -3991,13 +4095,13 @@ api_backend = "responses"
         assert_eq!(plan.args, vec!["-m", "kimi-code/k3"]);
         assert!(!plan.args.iter().any(|a| a.contains("sk-secret")));
         let blocked = launch_plan(&p, None, Some("deepseek-chat"));
-        assert!(blocked.args.is_empty());
+        assert!(blocked.unwrap().args.is_empty());
     }
 
     #[test]
     fn official_plan_injects_model_only_when_selected() {
         let p = official_profile("claude-code");
-        let plan = launch_plan(&p, None, Some("claude-sonnet-4"));
+        let plan = launch_plan(&p, None, Some("claude-sonnet-4")).unwrap();
         assert_eq!(
             plan.env,
             vec![("ANTHROPIC_MODEL".to_string(), "claude-sonnet-4".to_string())]
@@ -4016,7 +4120,7 @@ api_backend = "responses"
         let mut p = official_profile("claude-code");
         p.extra_env
             .insert("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into());
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         assert_eq!(
             plan.env,
             vec![(
@@ -4029,7 +4133,7 @@ api_backend = "responses"
     #[test]
     fn official_codex_plan_overrides_provider_to_chatgpt_and_keeps_sandbox() {
         let p = official_profile("codex");
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gpt-5-codex"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gpt-5-codex")).unwrap();
         assert!(plan.env.is_empty());
         let joined = plan.args.join(" ");
         // 不写中转 provider 块；只把本进程默认渠道切到内置 ChatGPT
@@ -4047,7 +4151,7 @@ api_backend = "responses"
         assert!(plan.env_remove.contains(&"CODEX_API_KEY".into()));
         assert!(plan.env_remove.contains(&"OPENAI_API_KEY".into()));
         // 模型为空：沙箱 + 本进程切 ChatGPT 渠道
-        let bare = launch_plan(&p, None, None);
+        let bare = launch_plan(&p, None, None).unwrap();
         assert_eq!(
             bare.args,
             vec![
@@ -4064,7 +4168,7 @@ api_backend = "responses"
     #[test]
     fn official_codex_drops_deepseek_model() {
         let p = official_profile("codex");
-        let plan = launch_plan(&p, None, Some("deepseek-v4-flash-0731"));
+        let plan = launch_plan(&p, None, Some("deepseek-v4-flash-0731")).unwrap();
         assert!(
             !plan.args.iter().any(|a| a.contains("deepseek")),
             "{:?}",
@@ -4080,7 +4184,7 @@ api_backend = "responses"
     #[test]
     fn official_gemini_plan_purges_gateway_env() {
         let p = official_profile("gemini");
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gemini-3-pro"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("gemini-3-pro")).unwrap();
         // base URL（GATEWAY 模式）与密钥都不注入，只注入模型
         assert_eq!(
             plan.env,
@@ -4094,7 +4198,7 @@ api_backend = "responses"
     fn official_plan_for_unsupported_agent_is_inert() {
         // 规格未填官方账号的 agent（opencode）：purge 为空、不注入任何凭证/模型，不崩溃
         let p = official_profile("opencode");
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("m1"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("m1")).unwrap();
         assert!(plan.env.is_empty());
         assert!(plan.args.is_empty());
         assert!(plan.env_remove.is_empty());
@@ -4107,7 +4211,8 @@ api_backend = "responses"
         // claude/codex：位置参数（单元素，pty_spawn 追加在命令行最后）
         let p = profile("claude-code", None);
         let plan =
-            launch_plan_with_prompt(&p, None, Some("m1"), Some("读 TASK.md，按简报开始执行"));
+            launch_plan_with_prompt(&p, None, Some("m1"), Some("读 TASK.md，按简报开始执行"))
+                .unwrap();
         assert_eq!(plan.prompt_args, vec!["读 TASK.md，按简报开始执行"]);
         assert!(!plan.prompt_dropped);
         // 位置参数不在 plan.args 里（保证 codex 沙箱/-c、claude --session-id 都在它前面）
@@ -4115,7 +4220,7 @@ api_backend = "responses"
         // gemini/qwen：-i <prompt>（执行后继续交互）
         for agent in ["gemini", "qwen"] {
             let p = profile(agent, None);
-            let plan = launch_plan_with_prompt(&p, None, None, Some("开始干活"));
+            let plan = launch_plan_with_prompt(&p, None, None, Some("开始干活")).unwrap();
             assert_eq!(
                 plan.prompt_args,
                 vec!["-i", "开始干活"],
@@ -4134,7 +4239,7 @@ api_backend = "responses"
             Some("sk-secret".into()),
             Some("gpt-5-codex"),
             Some("开工"),
-        );
+        ).unwrap();
         assert_eq!(plan.prompt_args, vec!["开工"]);
         let joined = plan.args.join(" ");
         assert!(joined.contains("-s workspace-write"));
@@ -4147,17 +4252,17 @@ api_backend = "responses"
     fn prompt_inject_unsupported_marks_dropped() {
         // kimi 没有可用于交互新会话的初始 prompt 参数：不注入 + 标记。
         let p = profile("kimi", None);
-        let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
+        let plan = launch_plan_with_prompt(&p, None, None, Some("开工")).unwrap();
         assert!(plan.prompt_args.is_empty(), "kimi 不得注入");
         assert!(plan.prompt_dropped, "kimi 应置 dropped 标记");
         // OpenCode 1.18.x 的 --prompt 是交互会话可用的显式参数。
         let p = profile("opencode", None);
-        let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
+        let plan = launch_plan_with_prompt(&p, None, None, Some("开工")).unwrap();
         assert_eq!(plan.prompt_args, vec!["--prompt", "开工"]);
         assert!(!plan.prompt_dropped);
         // 未知 agent：无从注入，同样标记
         let p = profile("no-such-agent", None);
-        let plan = launch_plan_with_prompt(&p, None, None, Some("开工"));
+        let plan = launch_plan_with_prompt(&p, None, None, Some("开工")).unwrap();
         assert!(plan.prompt_dropped);
     }
 
@@ -4165,7 +4270,7 @@ api_backend = "responses"
     fn prompt_inject_applies_to_official_account_too() {
         // api / 官方账号两种模式都注入（prompt 与认证方式无关）；purge/凭证语义不受影响
         let p = official_profile("claude-code");
-        let plan = launch_plan_with_prompt(&p, Some("sk-secret".into()), None, Some("开工"));
+        let plan = launch_plan_with_prompt(&p, Some("sk-secret".into()), None, Some("开工")).unwrap();
         assert_eq!(plan.prompt_args, vec!["开工"]);
         assert!(plan.env_remove.contains(&"ANTHROPIC_AUTH_TOKEN".into()));
         assert!(!plan.env.iter().any(|(_, v)| v.contains("sk-secret")));
@@ -4175,12 +4280,12 @@ api_backend = "responses"
     fn prompt_inject_skips_empty_and_blank_prompt() {
         let p = profile("claude-code", None);
         for prompt in [None, Some(""), Some("   ")] {
-            let plan = launch_plan_with_prompt(&p, None, None, prompt);
+            let plan = launch_plan_with_prompt(&p, None, None, prompt).unwrap();
             assert!(plan.prompt_args.is_empty());
             assert!(!plan.prompt_dropped);
         }
         // 前后空白先裁剪再注入
-        let plan = launch_plan_with_prompt(&p, None, None, Some("  开工  "));
+        let plan = launch_plan_with_prompt(&p, None, None, Some("  开工  ")).unwrap();
         assert_eq!(plan.prompt_args, vec!["开工"]);
     }
 
@@ -4407,6 +4512,31 @@ api_backend = "responses"
     }
 
     #[test]
+    fn api_launch_notes_flag_disk_residuals_without_blocking() {
+        // API 连接的提醒：磁盘残留会盖过本次注入——只提示，不进 ensure_launch_credentials 的
+        // Err 路径（那种连接今天本来就能用，硬拦会打断既有工作流）
+        let dir = std::env::temp_dir().join(format!("ccode-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{"env": {"ANTHROPIC_AUTH_TOKEN": "sk-disk-secret"}}"#,
+        )
+        .unwrap();
+        let api = profile("claude-code", Some("https://open.bigmodel.cn/api/anthropic"));
+        let notes = api_launch_conflict_notes(&dir, &api);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("~/.claude/settings.json"));
+        assert!(notes[0].contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!notes[0].contains("sk-disk-secret"), "只报变量名不读值");
+        // 提醒归提醒，凭证检查对带密钥的 API 连接照常放行
+        assert!(ensure_launch_credentials(&api, Some("sk-secret")).is_ok());
+        // 干净配置不产生噪音
+        std::fs::write(dir.join(".claude/settings.json"), r#"{"model": "opus"}"#).unwrap();
+        assert!(api_launch_conflict_notes(&dir, &api).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn external_ps1_script_text_carries_no_env_or_credentials() {
         // audit P0：ps1 只含自删 + 启动命令；密钥走 start 环境块继承，不落脚本
         let text =
@@ -4472,7 +4602,7 @@ api_backend = "responses"
             "qwen",
             Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
         );
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("qwen3-coder"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("qwen3-coder")).unwrap();
         assert!(plan
             .env
             .contains(&("OPENAI_API_KEY".into(), "sk-secret".into())));
@@ -4491,7 +4621,7 @@ api_backend = "responses"
     fn qwen_plan_anthropic_protocol() {
         let mut p = profile("qwen", Some("https://relay.example.com"));
         p.protocol = Some("anthropic".into());
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("claude-sonnet-4"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("claude-sonnet-4")).unwrap();
         assert!(plan
             .env
             .contains(&("ANTHROPIC_API_KEY".into(), "sk-secret".into())));
@@ -4510,7 +4640,7 @@ api_backend = "responses"
     fn opencode_plan_inlines_config_json() {
         let mut p = profile("opencode", Some("https://openrouter.ai/api/v1"));
         p.models = vec!["m1".into(), "m2".into()];
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("m2"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("m2")).unwrap();
         assert!(plan
             .env
             .contains(&("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into())));
@@ -4533,7 +4663,7 @@ api_backend = "responses"
     #[test]
     fn opencode_plan_without_model_omits_top_level_model() {
         let p = profile("opencode", None);
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         let (_, v) = plan
             .env
             .iter()
@@ -4553,7 +4683,7 @@ api_backend = "responses"
     #[test]
     fn kimi_plan_sets_both_env_groups() {
         let p = profile("kimi", Some("https://api.moonshot.cn/v1"));
-        let plan = launch_plan(&p, Some("sk-secret".into()), Some("kimi-k2"));
+        let plan = launch_plan(&p, Some("sk-secret".into()), Some("kimi-k2")).unwrap();
         // 新版合成通道
         assert!(plan
             .env
@@ -4591,7 +4721,7 @@ api_backend = "responses"
     fn kimi_plan_thinking_model_declares_capabilities_on_compat_protocol() {
         let mut p = profile("kimi", Some("https://relay.example.com/v1"));
         p.protocol = Some("openai".into());
-        let plan = launch_plan(&p, None, Some("kimi-k2-thinking"));
+        let plan = launch_plan(&p, None, Some("kimi-k2-thinking")).unwrap();
         // 兼容协议通道：确知思考 → 加 thinking；视觉未确知 → 保留 env 缺省里的 image_in
         // （缺省 ["image_in","thinking"]，见 agents.rs 正文注释的二进制实证）。
         // 该数组是完备声明，未确知就保留缺省成员，不替 CLI 摘掉它。
@@ -4613,7 +4743,7 @@ api_backend = "responses"
         // 只做加法与「确知为假才摘」，估值层猜测不参与。
         let mut p = profile("kimi", Some("https://relay.example.com/v1"));
         p.protocol = Some("openai".into());
-        let plan = launch_plan(&p, None, Some("deepseek-chat"));
+        let plan = launch_plan(&p, None, Some("deepseek-chat")).unwrap();
         assert!(plan
             .env
             .contains(&("KIMI_MODEL_CAPABILITIES".into(), "tool_use,image_in".into())));
@@ -4636,7 +4766,7 @@ api_backend = "responses"
         // 多模态思考模型（kimi-k3）：tool_use + thinking + image_in
         let mut p = profile("kimi", Some("https://relay.example.com/v1"));
         p.protocol = Some("openai".into());
-        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        let plan = launch_plan(&p, None, Some("kimi-k3")).unwrap();
         assert!(plan.env.contains(&(
             "KIMI_MODEL_CAPABILITIES".into(),
             "tool_use,thinking,image_in".into()
@@ -4644,13 +4774,13 @@ api_backend = "responses"
         // 纯视觉非思考模型（gpt-4o）：tool_use + image_in，不带 thinking
         let mut p = profile("kimi", Some("https://relay.example.com/v1"));
         p.protocol = Some("openai".into());
-        let plan = launch_plan(&p, None, Some("gpt-4o"));
+        let plan = launch_plan(&p, None, Some("gpt-4o")).unwrap();
         assert!(plan
             .env
             .contains(&("KIMI_MODEL_CAPABILITIES".into(), "tool_use,image_in".into())));
         // kimi 官方协议通道：CLI 缺省 ["image_in","thinking"] 已合理，不注入
         let p = profile("kimi", None);
-        let plan = launch_plan(&p, None, Some("kimi-k3"));
+        let plan = launch_plan(&p, None, Some("kimi-k3")).unwrap();
         assert!(!plan.env.iter().any(|(k, _)| k == "KIMI_MODEL_CAPABILITIES"));
     }
 
@@ -4658,7 +4788,7 @@ api_backend = "responses"
     fn kimi_plan_respects_protocol_for_provider_type() {
         let mut p = profile("kimi", None);
         p.protocol = Some("anthropic".into());
-        let plan = launch_plan(&p, None, Some("claude-sonnet-4"));
+        let plan = launch_plan(&p, None, Some("claude-sonnet-4")).unwrap();
         assert!(plan
             .env
             .contains(&("KIMI_MODEL_PROVIDER_TYPE".into(), "anthropic".into())));
@@ -4667,7 +4797,7 @@ api_backend = "responses"
     #[test]
     fn kimi_plan_without_model_skips_synthetic_channel() {
         let p = profile("kimi", Some("https://api.moonshot.cn/v1"));
-        let plan = launch_plan(&p, Some("sk-secret".into()), None);
+        let plan = launch_plan(&p, Some("sk-secret".into()), None).unwrap();
         assert!(!plan.env.iter().any(|(k, _)| k.starts_with("KIMI_MODEL_")));
         // 旧版组不受模型缺失影响
         assert!(plan
@@ -4682,7 +4812,7 @@ api_backend = "responses"
     fn opencode_inject_json_registers_every_profile_model() {
         let mut p = profile("opencode", Some("https://openrouter.ai/api/v1"));
         p.models = vec!["m1".into(), "m2".into(), "m3".into()];
-        let plan = launch_plan(&p, None, Some("m2"));
+        let plan = launch_plan(&p, None, Some("m2")).unwrap();
         let (_, v) = plan
             .env
             .iter()
@@ -4728,7 +4858,7 @@ api_backend = "responses"
         // 注册表命中思考模型 → models 条目带 reasoning: true
         let mut p = profile("opencode", Some("https://openrouter.ai/api/v1"));
         p.models = vec!["deepseek-reasoner".into()];
-        let plan = launch_plan(&p, None, None);
+        let plan = launch_plan(&p, None, None).unwrap();
         let (_, v) = plan
             .env
             .iter()
@@ -5081,7 +5211,7 @@ api_backend = "responses"
     fn no_auth_profile_cleans_inherited_credentials() {
         let mut p = profile("codex", Some("http://127.0.0.1:11434/v1"));
         p.no_auth = true;
-        let plan = launch_plan(&p, None, Some("local-model"));
+        let plan = launch_plan(&p, None, Some("local-model")).unwrap();
         assert!(plan.env_remove.contains(&"OPENAI_API_KEY".to_string()));
         assert!(plan.env_remove.contains(&"CODEX_API_KEY".to_string()));
     }

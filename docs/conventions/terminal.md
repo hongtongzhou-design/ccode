@@ -287,8 +287,10 @@
   （keydown/keypress）改写为 kitty CSI-u `\x1b[13;2u`，并吞掉随后 80ms 内 onData 的 `\r`（空输入时 Codex 不提交，
   看起来像换行；有内容时这记 `\r` 会直接发送）。不点亮「生成中」。只改 Codex。
   **Shift+标点丢字**：xterm 的 keydown 只发送 `keyCode ≥ 48` 的单个字符。WKWebView 上 Shift+`/`
-  可能报 keyCode 0，这一下进不了 PTY，再按才出来。`printableKeyFallback`：keyCode 0 当场补发 `e.key`；
-  keyCode 229（输入法占位）等这一拍结束，隐藏输入框没多出字再补，避免和组词各写一遍。带 Ctrl/Alt/⌘ 不补。
+  实测报 **229**（不是 191），这一下 xterm 走 composition 的 `setTimeout(…, 0)` 分支、读到的
+  textarea 还没被 `input` 事件写长 → 不发 → 第一下丢字，再按一下才出来。`printableKeyFallback`：
+  keyCode 0 与 229 都当场补发 `e.key`，再由 `swallowPrintableChar` 哨兵吞掉 xterm 可能补发的那一次。
+  输入法真组词时 `e.key` 是 `"Process"`，被 `e.key.length !== 1` 滤掉，不会走到这里。带 Ctrl/Alt/⌘ 不补。
   **⌘V**：Mac 上先读剪贴板。有图片就走落盘路径，没有再当文本粘贴。Ctrl+V 仍是 `\x16`，让 CLI 自己读系统剪贴板。
 - **文件拖入转路径**：`getCurrentWebviewWindow().onDragDropEvent`（HumanTasksList 同款），只处理 `drop` 且
   坐标命中本终端容器 rect（devicePixelRatio 两口径都试）；隐藏标签 rect 全 0 天然不响应；**只在自己 rect 内响应，

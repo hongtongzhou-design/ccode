@@ -112,7 +112,7 @@ mod tests {
         for case in cases(&file, "cases") {
             let profile = profile_for(&case);
             let model = case.string("model");
-            let plan = crate::agents::launch_plan(&profile, None, model);
+            let plan = crate::agents::launch_plan(&profile, None, model).unwrap();
 
             if let Some(expect) = case.field("expect_env").and_then(|v| v.as_object()) {
                 for (key, want) in expect {

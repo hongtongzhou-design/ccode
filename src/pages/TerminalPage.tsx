@@ -1700,36 +1700,23 @@ const TerminalView = memo(function TerminalView({
         launchNowRef.current();
         return false;
       }
-      // Shift+标点丢字：xterm 只在 keyCode>=48 时把单字符送进 PTY，WKWebView 上 Shift+`/`
-      // 可能报 keyCode 0（这一下整个丢掉），中文输入法组词期常报 229。keyCode 0 当场补；
-      // 229 等一拍，隐藏输入框没多出字才补（多出字说明组词已上屏，xterm 自己发过，再补就重了）。
+      // Shift+标点丢字：WKWebView 上 Shift+`/` 报 keyCode 0 或 229（不是 191），这一下 xterm 都不发，
+      // 当场补发，再由下面的哨兵吞掉 xterm 可能补发的那一次。keyCode >= 48 交给 xterm：它认识
+      // Shift+标点（evaluateKeyboardEvent 的 191:["/","?"] 等键位表），无需宿主插手。
       if (e.type === "keydown") {
         const fallback = printableKeyFallback(e);
         if (fallback) {
           const id = ptyIdRef.current;
-          if (fallback.action === "send") {
-            if (id) {
-              invoke("pty_write", { ptyId: id, data: fallback.data }).catch((err) =>
-                setError(String(err)),
-              );
-            }
-            swallowPrintableChar = fallback.data;
-            swallowPrintableUntil = performance.now() + 120;
-            return false;
-          }
-          const { data } = fallback;
-          const before = term.textarea?.value.length ?? 0;
-          setTimeout(() => {
-            // 字符数变多说明组词已上屏，xterm 自己会发这一下，不再补
-            if ((term.textarea?.value.length ?? 0) > before) return;
-            const pid = ptyIdRef.current;
-            if (pid) {
-              invoke("pty_write", { ptyId: pid, data }).catch((err) =>
-                setError(String(err)),
-              );
-            }
-          }, 0);
-          return true; // 不 return false：组词流程要继续走
+          // PTY 还没就绪时不能补发，但**更不能把这一记吞掉**：原实现无论有没有 id 都设哨兵并
+          // return false，等于 xterm 也被拦住、PTY 也没收到，按键凭空消失。没 id 就原样放行，
+          // 让 xterm 走它自己的路径。
+          if (!id) return true;
+          invoke("pty_write", { ptyId: id, data: fallback.data }).catch((err) =>
+            setError(String(err)),
+          );
+          swallowPrintableChar = fallback.data;
+          swallowPrintableUntil = performance.now() + 120;
+          return false;
         }
       }
       return true;
