@@ -367,6 +367,17 @@
   border-color: rgb(0 0 0 / 0.07);
 }
 
+/* 浅色壳层描线：壳自己不铺实心底，桌面磨砂（underWindowBackground）从窗口底透上来，
+   而材质底色由窗口的 NSAppearance 决定、不跟应用主题——系统深色 + 应用浅色时材质本体
+   近黑，四周 5px 缝与圆角外露处渗出黑边，深色模式两边同向才看不出问题。
+   根治靠原生侧把外观钉到应用主题（Rust setup + App.tsx 的 setTheme），这条是兜底：
+   把「材质渗出来的模糊黑边」读成一条确定的、与主题同色的边界。
+   用 inset box-shadow 不用 border——壳是 h-full 满尺寸，加边框会改盒模型撑出 1px 滚动条；
+   inset 描线不占布局，与上面 .ccode-float-surface 的手法同源，零偏移零模糊。 */
+[data-theme$="-light"] .ccode-app-shell {
+  box-shadow: inset 0 0 0 0.5px var(--color-hairline);
+}
+
 /* Windows 浅色主题：DirectWrite 下浅灰小字更容易显得发虚，
    只压深 l3/l4 两档（正文 l2、标题 l1 保持主题原值），不改变 macOS/Linux 或深色主题。 */
 [data-platform="windows"][data-theme="midnight-light"] {

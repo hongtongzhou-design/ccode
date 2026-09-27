@@ -432,6 +432,12 @@ function App() {
   // 空串 = 禁用；⌘F 已被终端搜索占用故不用。
   const settings = useAppStore((s) => s.settings);
   const lightChrome = isLightTheme(settings?.theme);
+  // 原生窗口外观**不在这里下发**：单一写手是 store.ts 的 applyTheme（loadSettings /
+  // updateSettings / 设置页切主题都会走它）。曾经这里也写一次，结果两个写手互相覆盖——
+  // updateSettings 每次调 applyTheme 都会把外观刷一遍，紧接着本 effect 因 settings
+  // 换引用而重跑再刷回来，表现就是调一下「侧栏 / 顶栏透明度」窗口闪一下（只有浅色模式
+  // 看得出，深色模式下两个写手写的是同一个值）。
+  // 开机态由 Rust setup 侧先定（settings::current_theme_is_light + set_theme），见 lib.rs。
   const navCapsuleDelay = normalizeNavCapsuleDelay(
     settings?.navCapsuleHideDelayMs,
   );
@@ -1050,7 +1056,7 @@ function App() {
         {!chromeHidden && (
         <aside
           className={`ccode-app-rail flex min-h-0 shrink-0 flex-col overflow-hidden rounded-lg transition-[width] duration-150 ${
-            collapsed ? "w-14" : "w-48"
+            collapsed ? "w-14" : "w-44"
           }`}
         >
           {/* 品牌区在展开与图标侧栏之间切换；完全隐藏由 ⌘\\、命令面板或顶部胶囊控制。 */}

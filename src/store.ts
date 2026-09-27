@@ -4,7 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { type Effect } from "@tauri-apps/api/window";
 import { IS_WINDOWS } from "./hotkeys";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { isCustomThemeId } from "./themes";
+import { isCustomThemeId, isLightTheme } from "./themes";
 import {
   applyCustomThemeVars,
   clearCustomThemeVars,
@@ -162,7 +162,9 @@ export interface AppSettings {
 }
 
 /** Windows 整窗 Mica 跟着 Mesa 主题走。配置里的 mica 只跟系统外观，
- *  深色主题配系统浅色时侧栏罩色会对不上。macOS 材质由窗口配置固定，这里不改。 */
+ *  深色主题配系统浅色时侧栏罩色会对不上。
+ *  macOS 侧不走这里——那边的材质外观由 applyTheme 的 setTheme 一并管（同一个 light
+ *  值同时决定 NSAppearance 和 mica 挡位，两个平台口径一致）。 */
 function syncWindowsMica(light: boolean) {
   if (!IS_WINDOWS) return;
   void getCurrentWebviewWindow()
@@ -174,7 +176,11 @@ function syncWindowsMica(light: boolean) {
 
 /** 运行时切主题：Tailwind v4 @theme 的工具类引用 CSS 变量，覆盖 dataset.theme 即生效；
  *  同时同步原生窗口外观——原生 <select> 下拉/滚动条按 NSWindow appearance 渲染，
- *  只改 CSS 变量时深色主题下弹出的仍是系统浅色列表 */
+ *  只改 CSS 变量时深色主题下弹出的仍是系统浅色列表。
+ *
+ *  **窗口外观由本函数独占写入**，不要再在别处加 setTheme（App.tsx 一度也写过一次，
+ *  两个写手互相覆盖：updateSettings 每次都调本函数，于是调一下「侧栏/顶栏透明度」
+ *  就会 深→浅 闪一次）。开机态例外，由 Rust setup 侧先定，见 lib.rs。 */
 export function applyTheme(
   id: string,
   customTheme?: CustomThemeSeeds | null,
@@ -187,20 +193,25 @@ export function applyTheme(
     );
     root.dataset.theme = derived.themeId;
     applyCustomThemeVars(root, derived.tokens);
-    // 窗口外观保持深色。切成浅色时 macOS 会把桌面磨砂染浅，顶栏就不再是 0909 那种透法。
-    // 原生下拉仍按网页 color-scheme 走，不靠窗口外观。
+    // 自定义主题的深浅现算得出（画布亮度），不必再走 id 判定。
+    // 外观必须跟主题走：材质的底色由 NSAppearance 决定，主题浅而材质深时，
+    // 浅色壳那层 78% 罩色压不住近黑的材质，四周缝与圆角处就渗黑边。
+    const light = derived.light;
     void getCurrentWebviewWindow()
-      .setTheme("dark")
+      .setTheme(light ? "light" : "dark")
       .catch(() => {});
-    syncWindowsMica(false);
+    syncWindowsMica(light);
     return;
   }
   const theme = id || "midnight";
   root.dataset.theme = theme;
+  // 判定走 themes.ts 的 isLightTheme（该文件声明它是「原生窗口外观、终端调色板 twin、
+  // 浅色分支」的单一出处），不要在这里另写后缀判断。
+  const light = isLightTheme(theme);
   void getCurrentWebviewWindow()
-    .setTheme("dark")
+    .setTheme(light ? "light" : "dark")
     .catch(() => {});
-  syncWindowsMica(false);
+  syncWindowsMica(light);
 }
 
 /** 工作区页 → 终端页的交接：新开一个标签，预填 cwd + 注入 env（如端口段） */

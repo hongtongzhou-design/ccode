@@ -1171,6 +1171,30 @@ pub(crate) fn current_with_defaults() -> AppSettingsDto {
     with_defaults(read_current())
 }
 
+/// 浅色判定：十四套浅色主题与 custom-light 都以 `-light` 结尾，深色主题与
+/// `custom` 都不是。与前端的 isLightTheme（src/themes.ts）同口径——那边靠 light
+/// 标记字段、这边靠命名后缀，规则一致但实现不同，改名时两边都要动。
+fn theme_is_light(theme: &str) -> bool {
+    theme.ends_with("-light")
+}
+
+/// 当前持久化主题对应的原生窗口外观。
+///
+/// 为什么原生侧要一份：`underWindowBackground` 是 NSVisualEffectView，它的底色由
+/// 窗口的 NSAppearance 决定，**不跟应用主题走**。系统深色 + 应用浅色时，材质本体是
+/// 近黑的，浅色主题那层 78% 罩色压不住，四周 5px 缝（App.tsx 行容器 py/px）与圆角
+/// 外露处就渗出黑边；深色模式两边同向，所以看不出问题。
+///
+/// 走 with_defaults 而不是直接读裸字段：未知/失效的 theme 会被它规范化成
+/// DEFAULT_THEME，且 theme=custom 而 custom_theme 缺失时也回落默认——判定必须
+/// 和用户实际看到的主题一致，不能在启动瞬间按一个被丢弃的值上外观。
+pub(crate) fn current_theme_is_light() -> bool {
+    let theme = current_with_defaults()
+        .theme
+        .unwrap_or_else(|| DEFAULT_THEME.to_string());
+    theme_is_light(&theme)
+}
+
 pub(crate) fn brew_mirror_enabled() -> bool {
     read_current().brew_mirror.unwrap_or(DEFAULT_BREW_MIRROR)
 }

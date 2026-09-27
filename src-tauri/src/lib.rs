@@ -160,6 +160,24 @@ pub fn run() {
             }
             // 配置里的 windowEffects 在建窗时就会套。这里再挂一次，兜住没带上的情况。
             if let Some(window) = app.get_webview_window("main") {
+                // 窗口外观必须先于材质定下来：underWindowBackground 是 NSVisualEffectView，
+                // 底色由 NSAppearance 决定，不跟应用主题走。系统深色 + 应用浅色时材质本体
+                // 是近黑的，浅色那层罩色压不住，四周缝与圆角处就渗黑边。
+                //
+                // 放在 set_effects 之前而不是之后：材质是按当前外观渲染的，先定外观再挂材质，
+                // 首帧就是对的；反过来的话启动瞬间还会闪一下深色材质。
+                let light = settings::current_theme_is_light();
+                let appearance = if light {
+                    tauri::utils::Theme::Light
+                } else {
+                    tauri::utils::Theme::Dark
+                };
+                // Linux / macOS 上主题是应用级（不受 this window 局限，见 tauri Window::set_theme 文档），
+                // 保持单一主窗与 tray 的一致性正是我们要的。
+                if let Err(e) = window.set_theme(Some(appearance)) {
+                    logbuf::record("warn", "window", &format!("窗口外观未挂上: {e}"));
+                }
+
                 let effects = tauri::utils::config::WindowEffectsConfig {
                     effects: vec![
                         tauri::utils::WindowEffect::UnderWindowBackground,
