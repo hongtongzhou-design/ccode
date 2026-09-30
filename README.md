@@ -7,11 +7,11 @@
 <p>
   <a href="https://github.com/hongtongzhou-design/ccode/actions/workflows/build.yml"><img src="https://github.com/hongtongzhou-design/ccode/actions/workflows/build.yml/badge.svg" alt="Build" /></a>
   <a href="https://github.com/hongtongzhou-design/ccode/releases/latest"><img src="https://img.shields.io/github/v/release/hongtongzhou-design/ccode?label=release" alt="Release" /></a>
-  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-blue" alt="Platforms" />
+  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows-blue" alt="Platforms" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" /></a>
 </p>
 
-**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）。底层是九个终端 Agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研、编程、办公流水线：读文献 → 整数据 → 做图 → 写论文。**AI 负责干活，Mesa 负责管环境和验收，人负责拍板。**
+**AI 科研工作台**（桌面应用，Tauri v2 + React/TS + Rust）。底层是九个终端 Agent 的统一控制台（启动器 + 配置中心 + 会话监控台），表面是科研、编程、工作三条流水线：读文献 → 整数据 → 做图 → 写论文。**AI 负责干活，Mesa 负责管环境和验收，人负责拍板。**
 
 为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 管理多套 API 配置（端点 / 密钥 / 模型）与官方账号登录，内嵌终端一键拉起，并解析各 CLI 本地会话文件做可视化浏览。
 
@@ -26,7 +26,7 @@
 | 组 | 页面 | 做什么 |
 |---|---|---|
 | 工作 | **工作台** | 正在进行、待你处理、最近项目 / 对话；关标签后按运行身份找回 |
-| 工作 | **项目** | 科研 / 编程 / 办公三种工作方式：研究流程或目标、工作树、定时任务、文件、Agents 名册 |
+| 工作 | **项目** | 科研 / 编程 / 工作。五个页签都是对话、任务、定时任务、文件、Agents；任务页分别叫科研任务、编程任务、工作任务 |
 | 工作 | **运行** | 内嵌多标签终端（聊天 / 终端同一会话切换）、文件树、改动面板、沉浸阅读 |
 | 工作 | **对话** | 九家 CLI 本地会话的结构化回放、自动起名、归档 / 导出 / 接力 |
 | 资源 | **连接** | 网关 × 绑定；默认启动注入环境变量（零污染），可选「写入 CLI 全局默认」 |
@@ -40,7 +40,7 @@
 ## 功能
 
 - **连接**：Agent × 网关 × 绑定；API 配置与官方账号双轨；密钥 0600 本地存储、绝不回显；CLI 安装 / 更新一键完成
-- **项目**：科研六套研究流程模板（综述 / 论文 / 数据 / 毕业论文 / 投稿返修 / LaTeX）+ 一键开步；无流程科研与办公用「新建目标」（隔离副本，人验收后写回）；编程用独立工作树，合进基准或开 PR
+- **项目**：科研六套研究流程模板（综述 / 论文 / 数据 / 毕业论文 / 投稿返修 / LaTeX）+ 一键开步；不使用研究流程的科研项目，以及「工作」项目，用「新建目标」（隔离副本，人验收后写回）；编程用独立工作树，合进基准或开 PR
 - **运行**：xterm.js 多标签；Agent 退出回落 shell、会话可恢复；Monaco 预览 / 编辑；PDF / docx / 表格 / 图片内嵌预览；选段「◈ 问 AI」；⛶ 沉浸阅读（笔记｜PDF｜终端）
 - **对话**：解析九个 CLI 本地会话（含外部终端里跑的）；按项目 / 步骤整理；pin 快照、标签、归档、批量删除、◈ 摘要、Markdown 导出、会话包换机导入
 - **技能 / MCP**：技能四路导入（目录 / ZIP / GitHub / 收编）与 ZIP 导出；MCP 预设含 Consensus、Undermind、Blender
@@ -55,9 +55,8 @@
 |---|---|---|
 | macOS（Apple 芯片 M1/M2/M3/M4） | `Mesa_x.x.x_aarch64.dmg` | 目前唯一 macOS 包；Intel Mac 暂需自行 `npm run tauri build` 构建 |
 | Windows | `Mesa_x.x.x_x64-setup.exe` | 推荐，安装向导简单；`x64_en-US.msi` 适合企业批量部署，二选一即可 |
-| Linux（Debian/Ubuntu） | `Mesa_x.x.x_amd64.deb` | `sudo dpkg -i` 安装 |
-| Linux（Fedora/RHEL/openSUSE） | `Mesa-x.x.x-1.x86_64.rpm` | `sudo rpm -i` 安装 |
-| Linux（其他发行版） | `Mesa_x.x.x_amd64.AppImage` | 免安装，chmod +x 后直接运行 |
+
+本版本不再发布 Linux 安装包。以前装过的 Linux 版本也收不到应用内更新。
 
 其余 `.sig`、`latest.json`、`.app.tar.gz` 是应用内自动更新用的签名文件，**不用手动下载**。
 
@@ -72,7 +71,8 @@
 
 ## 文档
 
-- [docs/user-guide.md](docs/user-guide.md) — 产品说明书（是什么 / 怎么用；需要后补的图和视频已标位）
+- [docs/tutorial.md](docs/tutorial.md) — 使用教程（第一次上手；英文综述按步骤走完）
+- [docs/user-guide.md](docs/user-guide.md) — 产品说明书（查某个按钮、某种状态、某个页面；需要后补的图和视频已标位）
 - [CHANGELOG.md](CHANGELOG.md) — 版本更新日志
 - [docs/architecture.md](docs/architecture.md) — 架构设计与决策记录
 - [docs/agent-integration-matrix.md](docs/agent-integration-matrix.md) — 九个 CLI 的 env / 配置 / 会话格式调研
@@ -93,7 +93,7 @@ npm run tauri build    # 打包
 
 开发预览必须用 `npm run tauri:dev`（窗口标题 **Mesa Dev - 热更新**，bundle ID `com.ccode.dev.hmr`）。不要用 `/Applications/Mesa.app` 或旧打包前端做界面验收。
 
-三平台 CI：tag `v*` 或手动 dispatch 触发，跑全量测试后打三平台安装包并创建 Release 草稿（含自动更新签名包）。
+推到 main 会跑 macOS 与 Windows 的测试。tag `v*` 或手动 dispatch 打这两个平台的安装包，并创建 Release 草稿（含自动更新签名包）。
 
 ## 反馈
 
