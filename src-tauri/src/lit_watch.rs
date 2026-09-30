@@ -1039,6 +1039,40 @@ pub(crate) fn stamp_paper_identity(
     Some(apply_title_filename(root, &fname, title, doi))
 }
 
+/// 勘误/更正单页：Wiley 等把 CORRECTION 打在首页正文之前。
+/// 只看第一个文本流开始前的字面量，正文里后部提到 correction 不算。
+fn pdf_looks_like_correction(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(48 * 1024)];
+    let upper: Vec<u8> = head.iter().map(|b| b.to_ascii_uppercase()).collect();
+    let Some(at) = upper.windows(10).position(|w| w == b"CORRECTION") else {
+        return false;
+    };
+    let stream = upper.windows(7).position(|w| w == b"STREAM\n" || w == b"STREAM\r");
+    stream.is_none_or(|s| at < s)
+}
+
+/// 同一篇再下一份：已有的是勘误、新的是正文，用正文换掉勘误。两份都是勘误或都是正文则另存。
+fn replace_correction_with_article(papers: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    if pdf_looks_like_correction(bytes) {
+        return None;
+    }
+    let rd = fs::read_dir(papers).ok()?;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("pdf")) {
+            continue;
+        }
+        let Ok(have) = fs::read(&path) else { continue };
+        if !pdf_looks_like_correction(&have) {
+            continue;
+        }
+        if fs::write(&path, bytes).is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// 字节级查重：同尺寸 + md5 相同即认同一份（先比尺寸省哈希；papers/ 文件量
 /// 级下全扫可接受）。命中返回已有文件路径——重复导入不落第二份副本
 fn find_duplicate_pdf(papers: &Path, bytes: &[u8]) -> Option<PathBuf> {
@@ -1145,6 +1179,9 @@ fn save_and_register_pdf(
         let mut existing = register_pdf(root, &path, file_name_hint, "")?;
         existing.dedup = true;
         return Ok(existing);
+    }
+    if let Some(path) = replace_correction_with_article(&papers, bytes) {
+        return register_pdf(root, &path, file_name_hint, "");
     }
     let name = sanitize_pdf_name(file_name_hint);
     let target = unique_pdf_path(&papers, &name);
@@ -1390,6 +1427,9 @@ pub(crate) fn save_paper_bytes_ident(
         let mut existing = register_pdf(root, &path, identity, doi)?;
         existing.dedup = true;
         return Ok(existing);
+    }
+    if let Some(path) = replace_correction_with_article(&papers, bytes) {
+        return register_pdf(root, &path, identity, doi);
     }
     let name = sanitize_pdf_name(hint);
     let target = unique_pdf_path(&papers, &name);
@@ -1795,6 +1835,38 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "pdf"))
             .count();
         assert_eq!(count, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn article_replaces_saved_correction_instead_of_keeping_both() {
+        let dir = tmpdir("correction");
+        let correction = b"%PDF-1.4\n(CORRECTION) Tj\nstream\nThere is an error in the reference list";
+        let article = b"%PDF-1.4\nstream\nAmorphous Cobalt Boride as a Highly Efficient Catalyst\n1 Introduction";
+        assert!(pdf_looks_like_correction(correction));
+        assert!(!pdf_looks_like_correction(article));
+        // 正文流里后部出现 CORRECTION 不是勘误单页
+        assert!(!pdf_looks_like_correction(
+            b"%PDF-1.4\nstream\nAmorphous Cobalt Boride Introduction CORRECTION of a formula"
+        ));
+        let saved = super::save_paper_bytes(&dir, "Amorphous Cobalt Boride", correction).unwrap();
+        assert!(!saved.dedup);
+        let again = super::save_paper_bytes(&dir, "Amorphous Cobalt Boride", article).unwrap();
+        assert!(!again.dedup);
+        assert_eq!(saved.path, again.path);
+        let on_disk = std::fs::read(&again.path).unwrap();
+        assert!(
+            on_disk.windows(16).any(|w| w == b"Cobalt Boride as"),
+            "勘误应被正文换掉，实际 {}",
+            String::from_utf8_lossy(&on_disk)
+        );
+        assert!(!on_disk.windows(10).any(|w| w == b"CORRECTION"));
+        let count = std::fs::read_dir(dir.join("papers"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "pdf"))
+            .count();
+        assert_eq!(count, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

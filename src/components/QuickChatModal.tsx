@@ -1,18 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDirectory } from "@tauri-apps/plugin-dialog";
+import { ChevronDown } from "lucide-react";
 import {
   Checkbox,
-  MenuSelect,
   primaryActionClass,
   secondaryActionClass,
-  surfaceFieldClass,
 } from "./PageFrame";
 import { sessionRuntimeKey, useAppStore } from "../store";
 import { AGENTS, type RunDto, type SessionMetaDto } from "../types";
-import { agentBrandBadgeStyle } from "../agent-colors";
+import { agentBrand, agentBrandBadgeStyle } from "../agent-colors";
 import { relTime } from "../rel-time";
 import { IS_WINDOWS } from "../hotkeys";
-import { abbrevHome } from "../path-utils";
 import { Modal } from "./Modal";
 import {
   pickQuickChatHistory,
@@ -22,6 +22,10 @@ import {
 } from "../quick-chat";
 
 const SCRATCH_PLACEHOLDER = "~/ccode/scratch";
+
+/** 控制台三档槽位：同一时刻只展开一格，其余两格收成一行读数。 */
+type SlotId = "agent" | "link" | "dir";
+const SLOT_ORDER: SlotId[] = ["agent", "link", "dir"];
 
 const LAST_KEY = "ccode.quickChat";
 /** 勾选后侧栏「快速开聊」仍打开弹层。未勾且记住过选择 = 侧栏直达。⌘K 永远开弹层。 */
@@ -209,6 +213,11 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [alwaysAsk, setAlwaysAsk] = useState(quickChatAlwaysAsk);
   const [starting, setStarting] = useState(false);
+  // 记住过选择的人开窗即是三行读数，回车就能开聊；第一次用才把 AGENT 展开。
+  const [slot, setSlot] = useState<SlotId | null>(() =>
+    remembered.agentId ? null : "agent",
+  );
+  const panelRef = useRef<HTMLFormElement>(null);
 
   // 换 agent 时把配置落到该 agent 的可用项（记住的那个可能属于别的 agent）
   useEffect(() => {
@@ -221,7 +230,9 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
     let stale = false;
     invoke<string>("home_dir")
       .then((h) => {
-        if (!stale) setHomeDir(h);
+        if (stale) return;
+        setHomeDir(h);
+        setCwd((c) => (c === SCRATCH_PLACEHOLDER ? `${h}/ccode/scratch` : c));
       })
       .catch(() => {});
     return () => {
@@ -231,6 +242,41 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
 
   const agentLabel =
     AGENTS.find((a) => a.id === agentId)?.label ?? agentId;
+  const activeProfile =
+    agentProfiles.find((p) => p.id === profileId) ?? agentProfiles[0];
+  const linkLabel = activeProfile?.name ?? "这个 Agent 还没有连接";
+  const linkCode = activeProfile
+    ? String(agentProfiles.findIndex((p) => p.id === activeProfile.id) + 1).padStart(2, "0")
+    : "--";
+  const directoryOptions = useMemo(() => {
+    const scratch = homeDir ? `${homeDir}/ccode/scratch` : SCRATCH_PLACEHOLDER;
+    const rows = [
+      { value: scratch, label: "随手聊", code: "SC" },
+      ...(projectPaths ?? []).slice(0, 6).map((path) => ({
+        value: path,
+        label: path.split(/[\\/]/).filter(Boolean).pop() || path,
+        code: "PJ",
+      })),
+    ];
+    if (cwd && !rows.some((row) => row.value === cwd)) {
+      rows.push({
+        value: cwd,
+        label: cwd.split(/[\\/]/).filter(Boolean).pop() || cwd,
+        code: "PK",
+      });
+    }
+    rows.push({ value: "pick", label: "另选文件夹", code: "+" });
+    return rows;
+  }, [cwd, homeDir, projectPaths]);
+  const directoryValue = directoryOptions.some((row) => row.value === cwd) ? cwd : "pick";
+  const dirRow = directoryOptions.find((row) => row.value === cwd);
+  const dirLabel = dirRow?.label ?? cwd;
+  const dirCode = dirRow?.code ?? "PK";
+
+  async function pickDirectory() {
+    const picked = await openDirectory({ directory: true, multiple: false });
+    if (typeof picked === "string" && picked) setCwd(picked);
+  }
 
   function expandCwd(raw: string, home: string): string {
     const t = raw.trim();
@@ -266,10 +312,13 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
         setError("还没有确定开聊目录");
         return;
       }
+      // 行内读数用 activeProfile 兜底，提交也必须用同一个值——否则首帧
+      // profileId 还停在换 Agent 前的旧值，显示的配置和真正启动的不是同一条。
+      const launchProfileId = activeProfile?.id ?? "";
       try {
         localStorage.setItem(
           LAST_KEY,
-          JSON.stringify({ agentId, profileId, cwd: resolvedCwd }),
+          JSON.stringify({ agentId, profileId: launchProfileId, cwd: resolvedCwd }),
         );
         localStorage.setItem(ASK_KEY, alwaysAsk ? "1" : "0");
         localStorage.removeItem(SKIP_KEY);
@@ -281,10 +330,10 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
         extraEnv: {},
         title: `随手聊 · ${agentLabel}`,
         agentId,
-        profileId: profileId || undefined,
-        autoStart: !!profileId,
+        profileId: launchProfileId || undefined,
+        autoStart: !!launchProfileId,
         clean: true,
-        reuseKey: `quickchat:${agentId}:${profileId}:${resolvedCwd}`,
+        reuseKey: `quickchat:${agentId}:${launchProfileId}:${resolvedCwd}`,
       });
       setPage("terminal");
       onClose();
@@ -301,57 +350,134 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
     onClose();
   }
 
+  function focusSlot(id: SlotId) {
+    requestAnimationFrame(() => {
+      panelRef.current
+        ?.querySelector<HTMLButtonElement>(`[data-slot-head="${id}"]`)
+        ?.focus();
+    });
+  }
+
+  function toggleSlot(id: SlotId) {
+    setSlot((cur) => (cur === id ? null : id));
+  }
+
+  /** 选完一档自动进下一档，最后一档选完收起并把焦点交给「开聊」：一路点下去即可 */
+  function advance(from: SlotId) {
+    const next = SLOT_ORDER[SLOT_ORDER.indexOf(from) + 1];
+    if (next) {
+      setSlot(next);
+      focusSlot(next);
+      return;
+    }
+    setSlot(null);
+    requestAnimationFrame(() => {
+      panelRef.current?.querySelector<HTMLButtonElement>('[type="submit"]')?.focus();
+    });
+  }
+
+  /** 档位标题上 ↑/↓ 换档（不回绕），Enter/Space 展开收起走按钮自身 */
+  function navSlot(from: SlotId, step: 1 | -1) {
+    const next = SLOT_ORDER[SLOT_ORDER.indexOf(from) + step];
+    if (!next) return;
+    setSlot(next);
+    focusSlot(next);
+  }
+
+  // 三档共用一套几何：档位标题行 + 展开区。当前档位的强调色随 agent 品牌走，
+  // 目录档退回落款色——切 Agent 时整条控制台换色，这是「科幻感」的来源之一。
+  const accent = agentBrand(agentId);
+  const dirAccent = "var(--color-cta)";
+
   return (
     <Modal open title="快速开聊" description="不建项目，直接开个终端聊。" onClose={onClose} size="md">
 
         <form
+          ref={panelRef}
           onSubmit={(e) => {
             e.preventDefault();
             void start();
           }}
         >
-        <label className="mb-3 block">
-          <span className="mb-1.5 block text-xs text-l3">Agent</span>
-          <MenuSelect
-            aria-label="Agent"
-            value={agentId}
-            onChange={setAgentId}
-            options={agentOptions.map((a) => ({
-              value: a.id,
-              label: installed.has(a.id) ? a.label : `${a.label}（未检测到）`,
-            }))}
-          />
-        </label>
+        <div className="mb-3 overflow-hidden rounded-lg border border-field">
+          <ConsoleSlot
+            id="agent"
+            label="AGENT"
+            tone={accent}
+            open={slot === "agent"}
+            onToggle={() => toggleSlot("agent")}
+            onNav={(step) => navSlot("agent", step)}
+            value={agentLabel}
+            code={agentCode(agentId)}
+          >
+            <ConsoleCells
+              tone={accent}
+              value={agentId}
+              onChange={(next) => {
+                setAgentId(next);
+                advance("agent");
+              }}
+              options={agentOptions.map((agent, index) => ({
+                value: agent.id,
+                label: agent.label,
+                code: String(index + 1).padStart(2, "0"),
+                dim: !installed.has(agent.id),
+              }))}
+            />
+          </ConsoleSlot>
 
-        <label className="mb-3 block">
-          <span className="mb-1.5 block text-xs text-l3">连接</span>
-          <MenuSelect
-            aria-label="连接"
-            value={profileId}
-            onChange={setProfileId}
-            placeholder="该 Agent 还没有连接"
-            options={agentProfiles.map((p) => ({
-              value: p.id,
-              label: p.name,
-            }))}
-            disabled={agentProfiles.length === 0}
-          />
-        </label>
+          <ConsoleSlot
+            id="link"
+            label="LINK"
+            tone={accent}
+            open={slot === "link"}
+            onToggle={() => toggleSlot("link")}
+            onNav={(step) => navSlot("link", step)}
+            value={linkLabel}
+            code={linkCode}
+          >
+            <ConsoleCells
+              tone={accent}
+              value={profileId}
+              empty="这个 Agent 还没有连接"
+              onChange={(next) => {
+                setProfileId(next);
+                advance("link");
+              }}
+              options={agentProfiles.map((profile, index) => ({
+                value: profile.id,
+                label: profile.name,
+                code: String(index + 1).padStart(2, "0"),
+              }))}
+            />
+          </ConsoleSlot>
 
-        <label className="mb-3 block">
-          <span className="mb-1.5 block text-xs text-l3">目录</span>
-          <input
-            className={`${surfaceFieldClass} font-mono text-xs`}
-            value={homeDir ? abbrevHome(cwd, homeDir, IS_WINDOWS) : cwd}
-            onChange={(e) => {
-              const v = e.target.value;
-              if ((v.startsWith("~/") || v === "~") && homeDir)
-                setCwd(v === "~" ? homeDir : `${homeDir}${v.slice(1)}`);
-              else setCwd(v);
-            }}
-            placeholder={SCRATCH_PLACEHOLDER}
-          />
-        </label>
+          <ConsoleSlot
+            id="dir"
+            label="DIR"
+            tone={dirAccent}
+            open={slot === "dir"}
+            onToggle={() => toggleSlot("dir")}
+            onNav={(step) => navSlot("dir", step)}
+            value={dirLabel}
+            code={dirCode}
+            sub={cwd}
+          >
+            <ConsoleCells
+              tone={dirAccent}
+              value={directoryValue}
+              onChange={(next) => {
+                if (next === "pick") {
+                  void pickDirectory();
+                  return;
+                }
+                setCwd(next);
+                advance("dir");
+              }}
+              options={directoryOptions}
+            />
+          </ConsoleSlot>
+        </div>
 
         {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
 
@@ -420,5 +546,166 @@ export default function QuickChatModal({ onClose }: { onClose: () => void }) {
           </div>
         )}
     </Modal>
+  );
+}
+
+/** agent 的两字代号：品牌名首两字（Claude Code → CL）。 */
+function agentCode(id: string): string {
+  const label = AGENTS.find((a) => a.id === id)?.label ?? id;
+  return label.replace(/[^A-Za-z]/g, "").slice(0, 2).toUpperCase() || "··";
+}
+
+/** 收起态的一行读数：档位标题 + 当前值 + 代号，展开时才换成选项网格。 */
+function ConsoleSlot({
+  id,
+  label,
+  tone,
+  open,
+  onToggle,
+  onNav,
+  value,
+  code,
+  sub,
+  children,
+}: {
+  id: SlotId;
+  label: string;
+  tone: string;
+  open: boolean;
+  onToggle: () => void;
+  onNav: (step: 1 | -1) => void;
+  value: string;
+  code: string;
+  sub?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="border-b border-hairline last:border-b-0">
+      <button
+        type="button"
+        data-slot-head={id}
+        aria-expanded={open}
+        title={open ? "收起" : `切换 ${label}`}
+        onClick={onToggle}
+        onKeyDown={(event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            onNav(event.key === "ArrowDown" ? 1 : -1);
+          }
+        }}
+        className={`flex h-9 w-full items-center gap-2.5 px-2.5 text-left transition-colors ${
+          open ? "" : "hover:bg-hover"
+        }`}
+        style={open ? { background: "var(--color-raised)" } : undefined}
+      >
+        {/* 档位色条：展开时实心，收起时只留一截淡色，扫一眼就知道哪档是活的 */}
+        <span
+          aria-hidden="true"
+          className="h-3.5 w-[2px] shrink-0 rounded-full transition-opacity"
+          style={{ background: tone, opacity: open ? 1 : 0.4 }}
+        />
+        <span className="w-14 shrink-0 font-mono text-micro tracking-[0.16em] text-l4">
+          {label}
+        </span>
+        {/* 代号格：等宽 + 淡色底，模仿仪表面板上的编号窗 */}
+        <span
+          className="grid h-4 w-6 shrink-0 place-items-center rounded-sm font-mono text-micro"
+          style={{
+            color: open ? tone : "var(--color-l3)",
+            background: open
+              ? `color-mix(in srgb, ${tone} 16%, transparent)`
+              : "var(--color-inset)",
+          }}
+        >
+          {code}
+        </span>
+        <span
+          className={`min-w-0 flex-1 truncate text-sm ${
+            open ? "text-l1" : "text-l2"
+          }`}
+        >
+          {value}
+        </span>
+        {sub && !open && (
+          <span className="hidden min-w-0 max-w-[45%] truncate font-mono text-micro text-l4 sm:block">
+            {sub}
+          </span>
+        )}
+        <ChevronDown
+          size={13}
+          strokeWidth={1.8}
+          aria-hidden="true"
+          className={`shrink-0 text-l4 transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open && <div className="px-2.5 pb-2.5 pt-1">{children}</div>}
+    </div>
+  );
+}
+
+/** 展开态的选项格：等宽选项号 + 名称；选中用品牌色调字与淡底，不铺实心块。 */
+function ConsoleCells({
+  value,
+  options,
+  onChange,
+  tone,
+  empty,
+}: {
+  value: string;
+  options: { value: string; label: string; code?: string; dim?: boolean }[];
+  onChange: (value: string) => void;
+  tone: string;
+  empty?: string;
+}) {
+  if (options.length === 0) return <p className="px-1 py-1 text-xs text-l4">{empty}</p>;
+  return (
+    <div
+      className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-1"
+      role="radiogroup"
+    >
+      {options.map((option) => {
+        const on = option.value === value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            title={
+              option.dim
+                ? "还没检测到"
+                : option.value === "pick"
+                  ? "打开文件夹"
+                  : option.value
+            }
+            onClick={() => onChange(option.value)}
+            className={`flex h-8 min-w-0 items-center gap-2 rounded-md border px-2 text-left transition-colors ${
+              on
+                ? "border-transparent"
+                : option.dim
+                  ? "border-transparent text-l4 hover:bg-hover"
+                  : "border-transparent text-l2 hover:bg-hover hover:text-l1"
+            }`}
+            style={
+              on
+                ? {
+                    color: tone,
+                    background: `color-mix(in srgb, ${tone} 13%, transparent)`,
+                    boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${tone} 45%, transparent)`,
+                  }
+                : undefined
+            }
+          >
+            <span
+              className="shrink-0 font-mono text-micro"
+              style={{ color: on ? tone : "var(--color-l4)" }}
+            >
+              {option.code ?? "·"}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-xs">{option.label}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }

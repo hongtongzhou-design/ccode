@@ -398,7 +398,7 @@ pub async fn endnote_export_xml(project_root: String) -> Result<String, String> 
         let root_path = Path::new(&root);
         // 精读之后同步：有引文库就按它重写，不再打开检索时的旧文件。
         if root_path.join("references.bib").is_file() {
-            let _ = export_xml(root_path);
+            export_xml(root_path)?;
         }
         let Some(ris) = find_import_ris(root_path) else {
             return Err(
@@ -408,7 +408,7 @@ pub async fn endnote_export_xml(project_root: String) -> Result<String, String> 
         };
         copy_path_to_clipboard(&ris);
         match launch_endnote_with_file(&ris) {
-            Ok(()) => Ok("已交给 EndNote。点「打开 papers」，把 PDF 拖到对应条目上。".into()),
+            Ok(()) => Ok("已交给 EndNote。PDF 用「打开 papers」拖到对应条目。".into()),
             Err(e) => Ok(format!(
                 "文件在 papers/endnote-import.ris。把它拖到 EndNote 图标上（不要拖进窗口）。{e}"
             )),

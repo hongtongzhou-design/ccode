@@ -39,20 +39,23 @@ function allowedFetchTarget(targetUrl, senderUrl) {
   }
 }
 
-// 本扩展自己触发的下载（图标点击等）：完成后把最终落盘路径上报 helper——
-// 浏览器下载位置不在系统 Downloads 时，通道 A 的目录监听根本看不见这个文件
-// （2026-09-17 审计 #17），路径直报后收货链绕过目录假定
-const ownDownloads = new Map(); // id -> true
+// 出版商网页上点的下载，保存位置由浏览器决定。系统「下载」文件夹只是其中一处：
+// 用户改过默认目录，或每次另选位置，目录监听看不见。Chrome 的 downloads 能给出
+// 最终绝对路径，完成后一律上报；收货端仍按 90 秒窗口和文件名决定归哪一篇。
+const reportedDownloads = new Map();
 function watchOwnDownload(downloadId) {
-  ownDownloads.set(downloadId, true);
-  if (ownDownloads.size > 32) {
-    ownDownloads.delete(ownDownloads.keys().next().value);
+  reportedDownloads.set(downloadId, true);
+  if (reportedDownloads.size > 64) {
+    reportedDownloads.delete(reportedDownloads.keys().next().value);
   }
 }
+chrome.downloads.onCreated.addListener((item) => {
+  if (item && item.id != null) watchOwnDownload(item.id);
+});
 chrome.downloads.onChanged.addListener((delta) => {
   if (!delta || delta.state == null || delta.state.current !== 'complete') return;
   const id = delta.id;
-  if (!ownDownloads.delete(id)) return;
+  if (!reportedDownloads.delete(id)) return;
   try {
     chrome.downloads.search({ id }, (items) => {
       const item = items && items[0];

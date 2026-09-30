@@ -140,7 +140,11 @@ export function renderTaskMd(
                 ? `全部目标满足${h.expectedCount != null ? `（${h.expectedCount} 项）` : ""}`
                 : h.completion === "no_placeholders"
                   ? "清除占位后完成"
-                  : "落点出现"
+                  : h.completion === "decisions_cleared"
+                    ? h.title.includes("审查报告")
+                      ? "逐条决定后完成"
+                      : "逐条裁决后完成"
+                    : "落点出现"
           }`,
       );
     }

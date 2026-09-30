@@ -131,7 +131,7 @@ test("content fixPdfUrl：/doi/epdf/ 改写成 /doi/pdf/（终检补：epdf 分�
 function runAllowedFetch(targetUrl: string, senderUrl: string | undefined): boolean {
   const js = readExt("background.js");
   const start = js.indexOf("function allowedFetchTarget");
-  const end = js.indexOf("const ownDownloads");
+  const end = js.indexOf("const reportedDownloads");
   assert.ok(start > 0 && end > start, "allowedFetchTarget 函数边界没找到");
   return vm.runInNewContext(
     `${js.slice(start, end)}\nallowedFetchTarget(${JSON.stringify(targetUrl)}, ${JSON.stringify(senderUrl)})`,
@@ -207,6 +207,7 @@ test("background：同源代取门禁 + 大文件超时口径（结构断言）"
   // 路径字段是 filename（DownloadItem 没有 finalPath——终检二轮抓出的死链）
   assert.ok(bg.includes("mesa-report-download"), "下载完成要上报路径");
   assert.ok(bg.includes("watchOwnDownload"), "要跟踪自己触发的下载");
+  assert.ok(bg.includes("downloads.onCreated"), "网页上的下载也要记 id，才能上报自定义保存位置");
   assert.ok(bg.includes("item.filename"), "上报路径取 DownloadItem.filename");
   // 大文件改道收口在 background 的 downloads API（跨源 a[download] 无效），
   // 下载 id 同样进上报跟踪

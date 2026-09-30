@@ -46,12 +46,14 @@ import {
   splitBalanceAmount,
   walletAccountTitle,
   walletAmountCaption,
+  walletBalanceBar,
   walletExpirySoon,
   walletKeyAmountLine,
   walletKindLabel,
   walletMissingHint,
   walletSpendTone,
   walletTokenQuota,
+  walletUnlimitedFill,
   walletUrl,
   walletUsedPercent,
 } from "../gateway-balance";
@@ -142,7 +144,45 @@ function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-const WALLET_KEY_COLS = "7rem minmax(0,1fr) 4.75rem 11rem";
+/** 次级用量条：订阅余量的次窗（「5 小时已用」）和网关卡的密钥行共用。
+ *  跟着这一行把名称和尾部数字之间的空档填满，百分比贴在条尾。
+ *  不再卡 16rem——卡死之后宽卡片右边会空出一大截。窄窗允许这条先收缩，
+ *  不把倒计时顶出卡片。高度仍细于上面的通栏主条。 */
+function SecondaryUsageTrack({ fill, bar }: { fill: number; bar: string }) {
+  const width = Math.min(100, Math.max(0, fill));
+  return (
+    <span className="min-w-0 flex-1">
+      <span className="block h-1.5 overflow-hidden rounded bg-l4/20">
+        <span
+          className={`block h-full rounded ${width > 0 ? bar : ""}`}
+          style={{ width: `${width}%` }}
+        />
+      </span>
+    </span>
+  );
+}
+
+/** 不限额度没有配额槽。实色淡出、右端留白，避免读成「已经用完百分之几」。 */
+function UnlimitedUsageTrack({ fill }: { fill: number }) {
+  const width = Math.min(100, Math.max(0, fill));
+  return (
+    <span
+      className="min-w-0 flex-1"
+      title="不限额度。长度只比这张卡上各密钥已花掉的多少，末端留白表示额度还开着"
+    >
+      <span className="relative block h-1.5">
+        <span
+          className="absolute inset-y-0 left-0 rounded-l"
+          style={{
+            width: `${width}%`,
+            backgroundImage:
+              "linear-gradient(90deg, color-mix(in srgb, var(--color-cta) 70%, transparent) 55%, transparent)",
+          }}
+        />
+      </span>
+    </span>
+  );
+}
 
 function WalletKeyRow({
   name,
@@ -154,6 +194,7 @@ function WalletKeyRow({
   unlimited,
   hideAmount,
   empty,
+  peers,
 }: {
   name: string;
   title?: string;
@@ -164,63 +205,75 @@ function WalletKeyRow({
   unlimited?: boolean;
   hideAmount?: boolean;
   empty?: string;
+  /** 这张卡上各密钥的已用，给不限额度的开口条做相对长短 */
+  peers?: readonly (number | null | undefined)[];
 }) {
   const tone = walletSpendTone(usedPct ?? 0);
+  const limited = !unlimited && !empty;
   const amount = empty
-    ? empty
+    ? ""
     : walletKeyAmountLine(!!unlimited, used, total, currency, hideAmount);
-  const exhausted = !unlimited && usedPct != null && Math.round(usedPct) >= 100;
-  const status = unlimited
-    ? "不限"
-    : usedPct != null
-      ? `${usedPct.toFixed(0)}%`
-      : "";
+  const exhausted = limited && usedPct != null && Math.round(usedPct) >= 100;
+  const status = limited && usedPct != null ? `${usedPct.toFixed(0)}%` : "";
+  const openFill = unlimited ? walletUnlimitedFill(used, peers ?? []) : null;
   return (
-    <>
-      <span className="truncate text-l2" title={title || name}>
+    <div className="flex items-center gap-2.5">
+      <span className="w-24 max-w-24 shrink-0 truncate text-xs text-l2" title={title || name}>
         {name}
       </span>
-      {unlimited || empty ? (
-        <span className="text-l4">{empty ? "" : "不限额度"}</span>
-      ) : (
-        <div className="h-1.5 overflow-hidden rounded bg-l4/20">
-          {usedPct != null && (
-            <div
-              className={`h-full rounded ${tone.bar}`}
-              style={{ width: `${Math.min(100, Math.max(0, usedPct))}%` }}
-            />
+      {empty ? (
+        <span className="min-w-0 truncate text-xs text-l4">{empty}</span>
+      ) : unlimited ? (
+        <>
+          {openFill != null ? (
+            <UnlimitedUsageTrack fill={openFill} />
+          ) : (
+            <span className="min-w-0 flex-1" />
           )}
-        </div>
-      )}
-      <span
-        className={`text-right font-mono tabular-nums ${
-          unlimited || empty ? "text-l3" : exhausted ? "text-err-text" : tone.text
-        }`}
-      >
-        {exhausted ? (
-          <>
-            <span className="mr-1 text-micro">已用尽</span>
+          <span
+            className="min-w-10 shrink-0 whitespace-nowrap text-xs text-l3"
+          >
+            不限
+          </span>
+          {amount && (
+            <span className="w-44 shrink-0 truncate font-mono text-micro tabular-nums text-l4">
+              {amount}
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          <SecondaryUsageTrack fill={usedPct ?? 0} bar={tone.bar} />
+          <span
+            className={`min-w-10 shrink-0 whitespace-nowrap text-xs tabular-nums ${exhausted ? "text-err-text" : tone.text}`}
+          >
+            {exhausted && <span className="mr-1 text-micro">已用尽</span>}
             {status}
-          </>
-        ) : (
-          status
-        )}
-      </span>
-      <span className="truncate text-right font-mono text-micro tabular-nums text-l4">
-        {amount}
-      </span>
-    </>
+          </span>
+          {amount && (
+            <span className="w-44 shrink-0 truncate font-mono text-micro tabular-nums text-l4">
+              {amount}
+            </span>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
+/** 窗口块：主窗口（最紧的那个）走大字号 + 通栏条；其余窗口收成一行读数。
+ *  `planWindowsByTightness` 已经把最紧的挑到首位，这里让它真的占主位——
+ *  否则排序只存在于 DOM 顺序里，两窗等权并列时看不出该管哪个。 */
 function PlanWindowBlock({
   win,
   now,
   lastReset,
+  primary = false,
 }: {
   win: PlanQuotaWindowDto;
   now: number;
   lastReset: string | null;
+  primary?: boolean;
 }) {
   const { bar, text } = quotaTone(win.usedPercent);
   const abs = planAbsoluteQuotaPair(win.used, win.total);
@@ -230,11 +283,33 @@ function PlanWindowBlock({
     ? [point, lastReset ? `上次重置：${lastReset}` : null].filter(Boolean).join(" · ")
     : "这家没有给出这个窗口的重置时间";
   const fill = Math.min(100, Math.max(0, win.usedPercent));
+  const caption = planWindowCaption(win.window);
+
+  if (!primary) {
+    // 次级窗口：一行说完「哪个窗口 / 用了多少 / 何时重置」。
+    // 条与密钥行共用 SecondaryUsageTrack，倒计时跟在用量后面，不把空档留在行尾。
+    return (
+      <div className="flex items-center gap-2.5">
+        <span className="w-24 max-w-24 shrink-0 truncate text-xs text-l3">{caption}</span>
+        <SecondaryUsageTrack fill={fill} bar={bar} />
+        <span className={`min-w-8 shrink-0 whitespace-nowrap text-xs tabular-nums ${text}`}>
+          {win.usedPercent.toFixed(0)}%
+        </span>
+        {/* 可截断：窄窗下「140,000 / 140,000」不许把整行顶出去 */}
+        {abs && <span className="min-w-0 truncate text-micro tabular-nums text-l4">{abs}</span>}
+        <span
+          className={`shrink-0 text-micro ${remain ? "text-l3" : "text-l4"}`}
+          title={remainTitle}
+        >
+          {remain ?? "暂无重置时间"}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div>
-      <div className="text-xs font-medium tracking-wider text-l4">
-        {planWindowCaption(win.window)}
-      </div>
+      <div className="text-xs font-medium tracking-wider text-l4">{caption}</div>
       <div className="mt-0.5 flex flex-col gap-2">
         <div className="flex items-baseline gap-2">
           <span className={`text-2xl font-semibold tracking-tight tabular-nums ${text}`}>
@@ -242,18 +317,20 @@ function PlanWindowBlock({
             <span className="ml-1 text-base font-medium tracking-normal text-l3">%</span>
           </span>
           {abs && <span className="text-xs tabular-nums text-l3">{abs}</span>}
-          <span
-            className={`ml-auto text-xs ${remain ? "text-l2" : "text-l4"}`}
-            title={remainTitle}
-          >
-            {remain ?? "暂无重置时间"}
-          </span>
         </div>
         <div className="h-2 overflow-hidden rounded bg-l4/20">
           <div
             className={`h-full rounded ${fill > 0 ? bar : ""}`}
             style={{ width: `${fill}%` }}
           />
+        </div>
+        {/* 倒计时描述的是这条的重置时间，贴着条走——原 ml-auto 把它顶到卡右缘，
+            和条之间隔半个屏幕 */}
+        <div
+          className={`text-micro ${remain ? "text-l3" : "text-l4"}`}
+          title={remainTitle}
+        >
+          {remain ?? "暂无重置时间"}
         </div>
       </div>
     </div>
@@ -915,11 +992,12 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                     <p className="text-xs text-err-text">{row.error}</p>
                   )}
                   <div className="space-y-3">
-                    {windows.map((w) => (
+                    {windows.map((w, i) => (
                       <PlanWindowBlock
                         key={w.window}
                         win={w}
                         now={now}
+                        primary={i === 0}
                         lastReset={
                           w.window === "weekly"
                             ? row.resetCards.lastWeekResetAt
@@ -1078,7 +1156,8 @@ export default function StatsPage({ visible }: { visible: boolean }) {
               const usedPct = walletUsedPercent(row.used, row.total);
               const hasAmount = row.remaining != null || row.total != null;
               const amount = splitBalanceAmount(row.remaining ?? row.total ?? NaN, row.currency);
-              const spendTone = usedPct != null ? walletSpendTone(usedPct) : null;
+              // 条画剩余（与大数字同向，满条 = 钱还多）；告警档仍按已消耗判
+              const balanceBar = walletBalanceBar(row.used, row.total);
               const walletAbs =
                 row.used != null && row.total != null
                   ? hideQuota
@@ -1187,36 +1266,37 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                           "—"
                         )}
                       </div>
-                      {row.source === "wallet" && usedPct != null && spendTone && (
-                        <span className={`ml-auto font-mono text-xs tabular-nums ${spendTone.text}`}>
-                          已消耗 {usedPct.toFixed(0)}%
-                        </span>
-                      )}
                       {row.source === "wallet" && walletAbs && (
                         <span className="font-mono text-xs tabular-nums text-l4">{walletAbs}</span>
                       )}
                     </div>
-                    {row.source === "wallet" && usedPct != null && spendTone && (
-                      <div className="mt-2 h-2 overflow-hidden rounded bg-l4/20">
-                        <div
-                          className={`h-full rounded ${spendTone.bar}`}
-                          style={{
-                            width: `${Math.min(100, Math.max(0, usedPct))}%`,
-                          }}
-                        />
-                      </div>
+                    {row.source === "wallet" && balanceBar && (
+                      <>
+                        <div className="mt-2 h-2 overflow-hidden rounded bg-l4/20">
+                          <div
+                            className={`h-full rounded ${balanceBar.bar}`}
+                            style={{ width: `${Math.min(100, Math.max(0, balanceBar.remainPct))}%` }}
+                          />
+                        </div>
+                        {/* 「已消耗」是事实不是告警——条已经用颜色说话了，这里不上色说第二遍 */}
+                        {usedPct != null && (
+                          <div className="mt-1 text-micro tabular-nums text-l4">
+                            已消耗 {usedPct.toFixed(0)}%
+                          </div>
+                        )}
+                      </>
                     )}
                     {group.members.length > 0 && (
                       <div className="mt-5">
                         <div className="text-xs font-medium tracking-wider text-l4">
                           密钥额度
                         </div>
-                        <div
-                          className="mt-3 grid items-center gap-x-3 gap-y-2 text-xs"
-                          style={{ gridTemplateColumns: WALLET_KEY_COLS }}
-                        >
+                        <div className="mt-3 space-y-2">
                           {group.members.map((member) => {
                             const quota = walletTokenQuota(member);
+                            const peers = group.members.map(
+                              (m) => walletTokenQuota(m)?.used ?? null,
+                            );
                             const keyHint = hintOf(member.gatewayId);
                             const note = [
                               member.gatewayName,
@@ -1241,6 +1321,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                                   total={null}
                                   currency={member.currency}
                                   empty={member.error ?? "无数据"}
+                                  peers={peers}
                                 />
                               );
                             }
@@ -1255,6 +1336,7 @@ export default function StatsPage({ visible }: { visible: boolean }) {
                                 total={quota.total}
                                 currency={member.currency}
                                 hideAmount={hideQuota}
+                                peers={peers}
                               />
                             );
                           })}

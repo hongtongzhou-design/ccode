@@ -1,14 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import type { DirEntryDto } from "./FileTree";
 import { readResearchFile } from "../research-report-load";
 import {
-  decisionBadge,
-  decisionToneClass,
-  filterIncludedRecords,
-  includedRecordKey,
-  includedRecordMeta,
-  matchPaperPdf,
   parseIncludedRecords,
   screeningCountLine,
   screeningCounts,
@@ -44,7 +36,6 @@ export default function ScreeningReviewPanel({
   const [toFetch, setToFetch] = useState(0);
   const [searchLog, setSearchLog] = useState("");
   const [truncated, setTruncated] = useState(false);
-  const [pdfFiles, setPdfFiles] = useState<{ name: string; path: string }[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,28 +59,6 @@ export default function ScreeningReviewPanel({
         setToFetch(fetchMd ? countToFetchEntries(fetchMd.text) : 0);
         setSearchLog(screening ? screeningSearchLog(screening.text) : "");
         if (screening?.truncated) setTruncated(true);
-        const pdfRoots = [...new Set([projectRoot, root].filter((p): p is string => Boolean(p)))];
-        const listed = await Promise.all(
-          pdfRoots.map((dir) =>
-            invoke<DirEntryDto[]>("list_dir", {
-              path: `${dir.replace(/[\\/]+$/, "")}/papers`,
-              showHidden: false,
-              root: dir,
-            }).catch(() => [] as DirEntryDto[]),
-          ),
-        );
-        if (cancelled) return;
-        const pdfs: { name: string; path: string }[] = [];
-        const seen = new Set<string>();
-        for (const entries of listed) {
-          for (const entry of entries) {
-            if (entry.isDir || !entry.name.toLowerCase().endsWith(".pdf")) continue;
-            if (seen.has(entry.path)) continue;
-            seen.add(entry.path);
-            pdfs.push({ name: entry.name, path: entry.path });
-          }
-        }
-        setPdfFiles(pdfs);
       } catch (reason) {
         if (!cancelled) {
           setRecords([]);
@@ -100,19 +69,12 @@ export default function ScreeningReviewPanel({
     return () => {
       cancelled = true;
     };
-  }, [projectRoot, root, reload]);
+  }, [root, reload]);
 
   const counts = useMemo(
     () => screeningCounts(records ?? [], toFetch),
     [records, toFetch],
   );
-  const included = useMemo(
-    () => filterIncludedRecords(records ?? [], "included"),
-    [records],
-  );
-  const papersDir = projectRoot
-    ? `${projectRoot.replace(/[\\/]+$/, "")}/papers`
-    : undefined;
 
   return (
     <section aria-label="筛选结果" className="px-4 py-3 text-sm">
@@ -140,10 +102,11 @@ export default function ScreeningReviewPanel({
           </div>
           {truncated && <p className="mt-1 text-xs text-warn-text">清单截断，摘要可能不完整。</p>}
           {error && <p className="mt-1 text-xs text-warn-text">{error}</p>}
-          <p className="mt-3 text-xs text-l4">看纳入的篇目对不对。待确认仍可纳入或排除。</p>
-          {counts.pending > 0 && (
+          <p className="mt-3 text-xs text-l4">待确认可以纳入或排除。已纳入不想要就点移出。</p>
+          {records.length > 0 && (
             <div className="mt-2">
               <PendingConfirmList
+                fill
                 worktreePath={root}
                 projectRoot={projectRoot || root}
                 onOpenPdf={onOpenPdf}
@@ -155,30 +118,6 @@ export default function ScreeningReviewPanel({
               />
             </div>
           )}
-          <ul className="mt-2">
-            {included.map((row) => {
-              const key = includedRecordKey(row);
-              const badge = decisionBadge(row.decision);
-              const meta = includedRecordMeta(row);
-              const pdfPath = matchPaperPdf(row, pdfFiles, papersDir);
-              return (
-                <li key={key} className="border-t border-hairline py-2">
-                  {pdfPath && onOpenPdf ? (
-                    <button
-                      type="button"
-                      className="text-left text-xs leading-5 text-cta-pill-text hover:underline"
-                      onClick={() => onOpenPdf(pdfPath)}
-                    >
-                      {row.title}
-                    </button>
-                  ) : (
-                    <p className="text-xs leading-5 text-l1">{row.title}</p>
-                  )}
-                  <p className={`mt-0.5 text-micro ${decisionToneClass(badge.tone)}`}>{badge.label}{meta ? ` · ${meta}` : ""}</p>
-                </li>
-              );
-            })}
-          </ul>
           {children}
         </>
       )}

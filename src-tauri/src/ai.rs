@@ -728,27 +728,158 @@ fn build_pr_prompt(log: &str, numstat: &str) -> String {
     )
 }
 
-/// 评审「沉淀到下一步」的 AI 起草 prompt（功能键复用 FN_DIGEST）：
-/// 本步的提交清单 + diff 统计 + TASK.md 简报 → 给下一步的任务书草稿小节初稿（人改完才落盘）。
+/// 没有新的交接约束时，起草必须只输出这一行。前端据此留空，不把复述写进下一步。
+const DISTILL_NOTHING_LINE: &str = "不必沉淀。下一步任务书已经覆盖，按已验收产物做。";
+
+/// 评审「沉淀到下一步」的 AI 起草 prompt（功能键复用 FN_DIGEST）。
+/// 对照下一步已有任务书和本步已验收产物，只写下一步还没有的约束。
 fn build_review_distill_prompt(
     step_name: &str,
-    task_brief: &str,
+    current_task: &str,
+    next_task: &str,
+    deliverables: &str,
+    review_notes: &str,
     log: &str,
     numstat: &str,
 ) -> String {
-    let brief_section = if task_brief.trim().is_empty() {
-        "（本步 TASK.md 未读到，按提交材料起草）".to_string()
+    let current = if current_task.trim().is_empty() {
+        "（本步 TASK.md 未读到）".to_string()
     } else {
-        cap_text(task_brief, DIFF_CAP)
+        cap_text(current_task, DIFF_CAP)
+    };
+    let next = if next_task.trim().is_empty() {
+        "（下一步任务书还没有正文，按模板开工时会带上默认简报）".to_string()
+    } else {
+        cap_text(next_task, DIFF_CAP)
+    };
+    let files = if deliverables.trim().is_empty() {
+        "（没有读到本步预期产物正文，不要凭文件名发明结论）".to_string()
+    } else {
+        cap_text_middle(deliverables, DIFF_CAP * 2)
+    };
+    let notes = if review_notes.trim().is_empty() {
+        "（无）".to_string()
+    } else {
+        cap_text(review_notes, DIFF_CAP)
     };
     format!(
-        "你在科研流程的评审现场：步骤刚验收合并，要把评审结论沉淀成给下一步「{step_name}」的草稿小节初稿，\
-         由人改完定稿后写进下一步任务书草稿（.ccode/drafts/）。\n\
-         只输出中文 markdown 正文（不要解释、不要用代码块包裹全文），按以下小节组织：\n\
-         ## 本步验收结论\n## 关键决策与理由\n## 给下一步的要点\n## 风险与待办\n\
-         要求：只基于给出的材料，不要编造未出现的文件或结论；没有内容的小节写「（无）」。\n\n\
-         ## 本步 TASK.md 简报\n{brief_section}\n\n## git log --oneline\n{log}\n\n## diff --numstat\n{numstat}"
+        "步骤刚验收。给人改一版交给下一步「{step_name}」的备忘。\
+         改完才会写进下一步任务书。下一步开工会读自己的任务书，也会读已验收产物。\n\
+         先读「下一步已有任务书」，列出它已经允许和已经禁止的事。\
+         然后只写两类，而且必须具体到文件、章节、图号、表号或结论编号：\n\
+         1. 本步产物里已经做了、下一步照自己的常规会改回去或删掉的决定。\
+         2. 产物里写明还没由人确认、下一步不能当成已通过的事项。\n\
+         下一步任务书已经禁止的事，不要再写一条相同的禁令。\
+         下一步任务书已经允许的做法，不要写成禁止。\
+         通用写作规则、词数、语种、引用格式、验收过程、提交哈希、行数，都不写。\
+         补交上游文件、登录、授权这类不由下一步做的事，也不写。\n\
+         一条都没有时，只输出这一行，不要任何标题或其他字：{DISTILL_NOTHING_LINE}\n\
+         有内容时只输出中文 markdown 正文，不要解释，不要用代码块包裹全文，按下面两节：\n\
+         ## 不要改回去的决定\n## 还没由人确认\n\
+         没有第二类时第二节写「（无）」。只依据给出的材料，不要编造未出现的文件或结论。\n\n\
+         ## 本步 TASK.md\n{current}\n\n## 下一步已有任务书\n{next}\n\n\
+         ## 本步已验收产物\n{files}\n\n## 人在审阅里留下的意见\n{notes}\n\n\
+         ## git log --oneline\n{log}\n\n## diff --numstat\n{numstat}"
     )
+}
+
+/// 模型声明没有新增约束时，不把这段写进下一步任务书。
+fn review_distill_is_empty(text: &str) -> bool {
+    let body = text
+        .trim()
+        .trim_matches('`')
+        .trim()
+        .trim_start_matches("markdown")
+        .trim();
+    body == DISTILL_NOTHING_LINE
+        || body.starts_with(DISTILL_NOTHING_LINE)
+        || body.contains("不必沉淀")
+}
+
+/// 只读本步预期产物里的文本稿。目录展开一层 md；pdf/docx 不读。
+fn read_step_deliverable_text(root: &std::path::Path, patterns: &[String]) -> String {
+    let mut out = String::new();
+    for pattern in patterns {
+        let rel = pattern.trim().trim_start_matches(['/', '\\']);
+        if rel.is_empty() || rel.contains("..") {
+            continue;
+        }
+        if pattern.ends_with('/') || pattern.ends_with('\\') {
+            let entries = match fs::read_dir(root.join(rel)) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            let mut names: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+            names.sort_by_key(|e| e.file_name());
+            for entry in names.into_iter().take(12) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.to_ascii_lowercase().ends_with(".md") {
+                    continue;
+                }
+                push_deliverable_file(&mut out, root, &format!("{rel}{name}"));
+            }
+            continue;
+        }
+        push_deliverable_file(&mut out, root, rel);
+    }
+    out
+}
+
+fn push_deliverable_file(out: &mut String, root: &std::path::Path, rel: &str) {
+    let lower = rel.to_ascii_lowercase();
+    if lower.ends_with(".pdf")
+        || lower.ends_with(".docx")
+        || lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".zip")
+    {
+        return;
+    }
+    let path = root.join(rel);
+    if !crate::paths::path_within(&path.to_string_lossy(), &root.to_string_lossy()) {
+        return;
+    }
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return,
+    };
+    if text.trim().is_empty() {
+        return;
+    }
+    let body = if rel.replace('\\', "/").ends_with("papers/included.md") {
+        distill_included_brief(&text)
+    } else {
+        cap_text(&text, 6 * 1024)
+    };
+    out.push_str(&format!("### {rel}\n{body}\n\n"));
+}
+
+/// 纳入清单动辄数百行。起草只需要篇数、开头几条和待确认，不必把全文送给模型。
+fn distill_included_brief(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.iter().filter(|line| {
+        let t = line.trim_start();
+        t.starts_with(|c: char| c.is_ascii_digit()) && t.contains(". ")
+    }).count();
+    let mut out = format!("（纳入清单共 {total} 条，这里只给开头和待确认）\n");
+    let mut kept = 0usize;
+    for line in &lines {
+        let t = line.trim_start();
+        let numbered = t.starts_with(|c: char| c.is_ascii_digit()) && t.contains(". ");
+        if numbered {
+            if kept >= 12 && !t.contains("待确认") {
+                continue;
+            }
+            kept += 1;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if out.len() > 6 * 1024 {
+            break;
+        }
+    }
+    out
 }
 
 fn build_distill_skill_prompt(excerpt: &str) -> String {
@@ -1557,15 +1688,48 @@ pub async fn ai_distill_review(
             )
             .unwrap_or_default()
         };
-        // TASK.md 是开步脚手架（不进 git），读不到不阻断起草
+        // TASK.md 是开步脚手架（不进 git），读不到不阻断起草。
+        // 产物以保存后的项目根为准；还没保存时读工作树。
+        let material_root = if saved { repo.as_path() } else { wt.as_path() };
         let task_brief = fs::read_to_string(wt.join("TASK.md")).unwrap_or_default();
+        let cfg = crate::projects::read_config_at(&repo).config;
+        let current_step = cfg.steps.iter().find(|s| s.workspace_name == w.name);
+        let next_step = cfg.steps.iter().find(|s| s.name == step_name);
+        let next_rel = next_step
+            .map(|s| crate::projects::draft_rel_path(&s.name, &s.workspace_name))
+            .unwrap_or_default();
+        let next_task = if next_rel.is_empty() {
+            String::new()
+        } else {
+            fs::read_to_string(repo.join(&next_rel)).unwrap_or_default()
+        };
+        let deliverables = read_step_deliverable_text(
+            material_root,
+            current_step.map(|s| s.expected_artifacts.as_slice()).unwrap_or(&[]),
+        );
+        let review_notes = fs::read_to_string(wt.join(".ccode/review-notes.md"))
+            .or_else(|_| fs::read_to_string(repo.join(".ccode/review-notes.md")))
+            .unwrap_or_default();
         let raw = ai_prompt_impl(
             profiles,
             None,
             Some(FN_DIGEST),
-            build_review_distill_prompt(&step_name, &task_brief, &log, &numstat),
+            build_review_distill_prompt(
+                &step_name,
+                &task_brief,
+                &next_task,
+                &deliverables,
+                &review_notes,
+                &log,
+                &numstat,
+            ),
         )?;
-        Ok(crate::sessions::redact_sensitive_text(&raw))
+        let redacted = crate::sessions::redact_sensitive_text(&raw);
+        if review_distill_is_empty(&redacted) {
+            Ok(String::new())
+        } else {
+            Ok(redacted)
+        }
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2153,30 +2317,72 @@ ERROR: Your access token could not be refreshed because your refresh token was r
     }
 
     #[test]
-    fn review_distill_prompt_carries_step_and_materials() {
+    fn review_distill_prompt_asks_only_for_new_constraints() {
         let p = build_review_distill_prompt(
-            "写论文",
-            "# 任务\n做数据分析",
-            "abc123 feat: 分析",
-            "5\t1\tdata/out.csv",
+            "综述初稿",
+            "# 综述大纲\n产出 outline.md",
+            "# 综述初稿\n按 outline.md 写",
+            "### outline.md\n核心只写镁负极",
+            "- 「核心只写镁负极」（outline.md）：背景一句带过",
+            "abc123 feat: 大纲",
+            "228\t0\toutline.md",
         );
-        for section in [
-            "本步验收结论",
-            "关键决策与理由",
-            "给下一步的要点",
-            "风险与待办",
-        ] {
-            assert!(p.contains(section), "缺小节 {section}");
-        }
-        assert!(p.contains("下一步「写论文」"));
-        assert!(p.contains("做数据分析"));
+        assert!(p.contains("不要改回去的决定"));
+        assert!(p.contains("还没由人确认"));
+        assert!(p.contains("不要写成禁止"));
+        assert!(p.contains("已经禁止的事"));
+        assert!(p.contains("不必沉淀"));
+        assert!(p.contains("下一步「综述初稿」"));
+        assert!(p.contains("产出 outline.md"));
+        assert!(p.contains("按 outline.md 写"));
+        assert!(p.contains("核心只写镁负极"));
+        assert!(p.contains("背景一句带过"));
         assert!(p.contains("abc123"));
         assert!(p.contains("不要编造"));
-        // 沉淀去向：写进下一步任务书草稿（不再有「钉卡」口径）
-        assert!(p.contains("任务书草稿"), "{p}");
-        // TASK.md 缺省时给明确占位，不留空段误导模型
-        let p = build_review_distill_prompt("写论文", "", "abc123 x", "");
-        assert!(p.contains("未读到"));
+        let empty = build_review_distill_prompt("综述初稿", "", "", "", "", "abc123 x", "");
+        assert!(empty.contains("未读到"));
+        assert!(empty.contains("还没有正文"));
+        let brief = distill_included_brief(
+            "1. Alpha paper — Smith — 2020 — Nature\n2. Beta paper — Lee — 2021 — Science 待确认\n3. Gamma paper — Wu — 2022 — Cell\n",
+        );
+        assert!(brief.contains("共 3 条"));
+        assert!(brief.contains("Alpha"));
+        assert!(brief.contains("待确认"));
+        assert!(review_distill_is_empty("不必沉淀。下一步任务书已经覆盖，按已验收产物做。"));
+        assert!(review_distill_is_empty(
+            "```\n不必沉淀。下一步任务书已经覆盖，按已验收产物做。\n```"
+        ));
+        assert!(!review_distill_is_empty("## 下一步还没有的约束\n- 可写正文键必须在证据表里"));
+    }
+
+    #[test]
+    fn review_distill_reads_markdown_deliverables_only() {
+        let root = std::env::temp_dir().join(format!(
+            "ccode-distill-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(root.join("outline.md"), "核心只写镁负极").unwrap();
+        fs::write(root.join("notes/a.md"), "笔记甲").unwrap();
+        fs::write(root.join("notes/b.txt"), "不是 md").unwrap();
+        fs::write(root.join("figure.pdf"), "%PDF").unwrap();
+        let text = read_step_deliverable_text(
+            &root,
+            &[
+                "outline.md".into(),
+                "notes/".into(),
+                "figure.pdf".into(),
+                "../outside.md".into(),
+            ],
+        );
+        assert!(text.contains("### outline.md"));
+        assert!(text.contains("核心只写镁负极"));
+        assert!(text.contains("### notes/a.md"));
+        assert!(!text.contains("不是 md"));
+        assert!(!text.contains("figure.pdf"));
+        assert!(!text.contains("outside"));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

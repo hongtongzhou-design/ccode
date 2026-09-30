@@ -63,6 +63,28 @@ export function walletSpendTone(usedPct: number): { bar: string; text: string } 
   return { bar: "bg-cta/70", text: "text-l1" };
 }
 
+/**
+ * 账户余额条的几何：画**剩余**比例，方向与大数字（余额）一致——满条 = 钱还多、
+ * 条短 = 快见底（油量表口径：满 = 安心）。
+ *
+ * 2026-09-30 改向：原先条画已消耗，于是同一行里大数字说「剩 ¥2112」、条却填到 89%，
+ * 两个信号互相拆台（条越满 = 钱越少）。余额卡的主语是余额，条必须跟着主语走。
+ *
+ * **告警档仍按已消耗判**（`walletSpendTone`）：条短且红 = 剩得少且在报警，
+ * 而不是条本身在说消耗。调用方不再拿 `text` 给「已消耗」上色（那是事实不是告警，
+ * 上色会和条的档位说两遍）——颜色只留在条上。
+ *
+ * 返回 null = 无总量可算（不限额度 / 缺数据），此时不画条。
+ */
+export function walletBalanceBar(
+  used: number | null | undefined,
+  total: number | null | undefined,
+): { remainPct: number; bar: string } | null {
+  const usedPct = walletUsedPercent(used, total);
+  if (usedPct == null) return null;
+  return { remainPct: 100 - usedPct, bar: walletSpendTone(usedPct).bar };
+}
+
 /** 密钥行金额：限额 `¥3.05 / ¥203.05`，不限只写已用 `¥4622.53`，不混「已用」前缀 */
 export function walletKeyAmountLine(
   unlimited: boolean,
@@ -123,6 +145,28 @@ export function walletUsedPercent(
     return null;
   }
   return Math.min(100, Math.max(0, (used / total) * 100));
+}
+
+/**
+ * 不限额度没有总量，开口条不能画成「用了百分之几」。
+ * 长度只比这张卡上各密钥已经花掉的多少：花得最多的停在 95（末端留白，额度还开着），
+ * 其余按 log1p 相对它缩短——¥4622 和 ¥10 用线性比，短的那条会缩成看不见。
+ * 已用 ≤ 0 或没有可比数字时返回 null，不画一条假的空槽。
+ */
+export const WALLET_UNLIMITED_BAR_CAP = 95;
+
+export function walletUnlimitedFill(
+  used: number | null | undefined,
+  peers: readonly (number | null | undefined)[],
+): number | null {
+  if (used == null || !Number.isFinite(used) || used <= 0) return null;
+  let peak = used;
+  for (const n of peers) {
+    if (n != null && Number.isFinite(n) && n > peak) peak = n;
+  }
+  if (!(peak > 0)) return null;
+  const ratio = Math.log1p(used) / Math.log1p(peak);
+  return Math.min(WALLET_UNLIMITED_BAR_CAP, Math.max(0, ratio * WALLET_UNLIMITED_BAR_CAP));
 }
 
 /**

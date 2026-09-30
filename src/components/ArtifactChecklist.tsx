@@ -456,7 +456,7 @@ export default function ArtifactChecklist({
                     title={fileTitle(single)}
                     onClick={() => openFile(single)}
                   >
-                    <span className="shrink-0 text-ok-text">✓</span>
+                    <span className="shrink-0 text-done">✓</span>
                     <span className="min-w-0 flex-1 truncate font-mono">
                       {single.name}
                     </span>
@@ -466,7 +466,7 @@ export default function ArtifactChecklist({
                 ) : (
                   <>
                     <div className="flex h-7 items-center gap-2 rounded-sm px-1 text-xs">
-                      <span className="shrink-0 text-ok-text">✓</span>
+                      <span className="shrink-0 text-done">✓</span>
                       <span className="min-w-0 flex-1 truncate font-mono text-l2">
                         {row.entry}
                       </span>

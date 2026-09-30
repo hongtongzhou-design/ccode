@@ -1,6 +1,6 @@
 /**
  * 文献雷达（lit-watch）前端纯逻辑：日分组、周趋势、PDF 直链、精读清单拼接、
- * 已读判定、关联步骤漂移提醒、收件箱候选、快筛解读 prompt/拆节。与 DOM/Tauri 解耦（localStorage 薄层除外），
+ * 已读判定、收件箱候选、快筛解读 prompt/拆节。与 DOM/Tauri 解耦（localStorage 薄层除外），
  * 供 node --test 直接测；组件 LitWatchCard 保持薄。
  * DTO 与 src-tauri/src/lit_watch.rs 的 camelCase 序列化一一对应。
  */
@@ -33,6 +33,56 @@ export interface WatchEntryDto {
   metrics: JournalMetricsDto | null;
   /** 已落盘的快筛解读（`.ccode/watch-explains.json`）；未解读为 null */
   explain: string | null;
+}
+
+/**
+ * 分区标签：淡底 + 同色字 + 细边。不用 ok/warn/cta-pill 的实心底——
+ * 深色主题那三块近黑，浅色主题铺开也发闷。1 区 / TOP 强调色，2 区通过色，3 区提醒色，其余中性。
+ * 定时检索与检索清单共用。
+ */
+const METRIC_CACHE_KEY = "ccode.journalMetricsByDoi";
+
+function metricCache(): Map<string, JournalMetricsDto | null> {
+  try {
+    const raw = localStorage.getItem(METRIC_CACHE_KEY);
+    if (!raw) return new Map();
+    const data = JSON.parse(raw) as Record<string, JournalMetricsDto | null>;
+    return new Map(Object.entries(data));
+  } catch {
+    return new Map();
+  }
+}
+
+/** 这个 DOI 上次查过就返回结果，没查过返回 undefined。null 表示查过但未收录。 */
+export function cachedJournalMetric(doi: string): JournalMetricsDto | null | undefined {
+  const key = doi.trim().toLowerCase();
+  if (!key) return undefined;
+  const cache = metricCache();
+  return cache.has(key) ? cache.get(key) : undefined;
+}
+
+/** 期刊表更新后清掉。旧数字是上一张表对出来的。 */
+export function forgetJournalMetrics() {
+  localStorage.removeItem(METRIC_CACHE_KEY);
+}
+
+export function rememberJournalMetrics(queries: { doi?: string }[], found: (JournalMetricsDto | null)[]) {
+  const cache = metricCache();
+  queries.forEach((query, index) => {
+    const doi = query.doi?.trim().toLowerCase();
+    if (doi) cache.set(doi, found[index] ?? null);
+  });
+  const kept = [...cache.entries()].slice(-800);
+  localStorage.setItem(METRIC_CACHE_KEY, JSON.stringify(Object.fromEntries(kept)));
+}
+
+export function journalMetricTone(kind: "if" | "quartile" | "top", quartile?: number | null): string {
+  if (kind === "top" || quartile === 1) {
+    return "border border-cta-pill-text/30 bg-cta-pill-text/15 text-cta-pill-text";
+  }
+  if (quartile === 2) return "border border-ok-text/30 bg-ok-text/15 text-ok-text";
+  if (quartile === 3) return "border border-warn-text/30 bg-warn-text/15 text-warn-text";
+  return "border border-field bg-inset text-l2";
 }
 
 /** 单条命中的期刊指标（对照 lit_watch.rs 序列化） */
@@ -567,27 +617,6 @@ export function paperResourceFor(
     if (n !== "" && (n.includes(t) || t.includes(n))) return r.path;
   }
   return null;
-}
-
-// ===== 关联步骤漂移提醒 =====
-
-/**
- * 雷达有新命中且晚于关联步骤的最近推进 → 提醒「产物可能过期」（只提醒不阻断）。
- * stepMergedAt = 该步骤绑定工作区的 mergedAt ?? createdAt；null（还没工作区）= 没有可过期的产物，不提醒。
- */
-export function staleLitHint(
-  linkedStep: string | null | undefined,
-  lastRunAt: string | null,
-  newEntries: number | null | undefined,
-  stepMergedAt: string | null,
-): boolean {
-  if (!linkedStep) return false;
-  if (!lastRunAt || !newEntries || newEntries <= 0) return false;
-  if (!stepMergedAt) return false;
-  const run = Date.parse(lastRunAt);
-  const merged = Date.parse(stepMergedAt);
-  if (Number.isNaN(run) || Number.isNaN(merged)) return false;
-  return run > merged;
 }
 
 // ===== 收件箱「文献」候选 =====

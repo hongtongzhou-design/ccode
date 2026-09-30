@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""把正文字体写进源稿 YAML，并做出 Word 用的 reference.docx。
+
+英文默认 Times New Roman，中文默认宋体。PDF 读 YAML 的 mainfont / CJKmainfont；
+Word 读 reference.docx 的主题字体。找不到指定字体就退出，不改成另一套。
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+from xml.sax.saxutils import escape
+
+DEFAULT_LATIN = "Times New Roman"
+DEFAULT_CJK = "宋体"
+CJK_CANDIDATES = ("宋体", "SimSun", "Songti SC", "宋体-简", "Noto Serif CJK SC", "Source Han Serif SC")
+
+
+def families() -> set[str]:
+    try:
+        out = subprocess.run(
+            ["fc-list", ":family"],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except OSError:
+        return set()
+    found = set()
+    for line in out.splitlines():
+        parts = line.split(":")
+        if len(parts) < 2:
+            continue
+        for name in parts[1].split(","):
+            found.add(name.strip())
+    return found
+
+
+def resolve_cjk(requested: str, installed: set[str]) -> str:
+    if requested != DEFAULT_CJK:
+        return requested
+    for name in CJK_CANDIDATES:
+        if name in installed:
+            return name
+    return requested
+
+
+def split_frontmatter(text: str) -> tuple[str, str]:
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end >= 0:
+            return text[4:end], text[end + 4 :]
+    return "", text
+
+
+def set_yaml_line(block: str, key: str, value: str) -> str:
+    lines = block.splitlines()
+    replaced = False
+    out = []
+    for line in lines:
+        if line.startswith(f"{key}:"):
+            out.append(f'{key}: "{value}"')
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f'{key}: "{value}"')
+    return "\n".join(out)
+
+
+def ensure_booktabs(block: str) -> str:
+    """PDF 表格用 booktabs：顶线、表头线、底线。正文首行缩进两个字符。已有 pdf 段也补上。"""
+    extra = "\\usepackage{indentfirst}\n        \\setlength{\\parindent}{2em}\n"
+    if "booktabs" in block:
+        if "parindent" in block:
+            return block
+        return block.replace("\\usepackage{booktabs}\n", "\\usepackage{booktabs}\n        " + extra, 1)
+    needle = "  pdf:\n"
+    insert = (
+        "  pdf:\n    include-in-header:\n      text: |\n        \\usepackage{booktabs}\n        "
+        + extra
+    )
+    if needle in block:
+        return block.replace(needle, insert, 1)
+    return block
+
+
+def ensure_pdf(block: str) -> str:
+    if "\n  pdf:" in f"\n{block}" or block.startswith("  pdf:"):
+        return block
+    if "format:" not in block:
+        block = set_yaml_line(block, "format", "")
+        block = block.replace("format: \"\"", "format:")
+    return block + "\n  pdf:\n    pdf-engine: xelatex\n    documentclass: article\n"
+
+
+def set_pdf_font(block: str, key: str, value: str) -> str:
+    lines = block.splitlines()
+    out = []
+    in_pdf = False
+    replaced = False
+    for line in lines:
+        if line.startswith("  pdf:"):
+            in_pdf = True
+        elif line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":"):
+            if in_pdf and not replaced:
+                out.append(f'    {key}: "{value}"')
+                replaced = True
+            in_pdf = False
+        if in_pdf and line.startswith(f"    {key}:"):
+            out.append(f'    {key}: "{value}"')
+            replaced = True
+            continue
+        out.append(line)
+    if in_pdf and not replaced:
+        out.append(f'    {key}: "{value}"')
+    return "\n".join(out)
+
+
+def write_markdown(path: Path, latin: str, cjk: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    front, body = split_frontmatter(text)
+    if not front:
+        raise SystemExit(f"{path} 没有 YAML 头")
+    front = ensure_pdf(front)
+    front = set_pdf_font(front, "mainfont", latin)
+    front = set_pdf_font(front, "CJKmainfont", cjk)
+    front = ensure_booktabs(front)
+    path.write_text(f"---\n{front.strip()}\n---{body if body.startswith(chr(10)) else chr(10) + body}", encoding="utf-8")
+
+
+def reference_docx(dest: Path, latin: str, cjk: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        sample = Path(tmp) / "sample.md"
+        sample.write_text("# 标题\n\n正文 Body.\n", encoding="utf-8")
+        made = Path(tmp) / "reference.docx"
+        run = subprocess.run(
+            ["quarto", "pandoc", str(sample), "-o", str(made), "-t", "docx"],
+            capture_output=True,
+            text=True,
+        )
+        if run.returncode != 0 or not made.is_file():
+            raise SystemExit(run.stderr.strip() or "做不出 Word 字体模板")
+        theme = zipfile.ZipFile(made).read("word/theme/theme1.xml").decode("utf-8")
+        latin_xml = escape(latin)
+        cjk_xml = escape(cjk)
+        for tag in ("majorFont", "minorFont"):
+            start = theme.find(f":{tag}>")
+            start = theme.rfind("<", 0, start) if start >= 0 else -1
+            end = theme.find(f":{tag}>", start + 1) if start >= 0 else -1
+            if start < 0 or end < 0:
+                raise SystemExit("Word 主题里没有字体槽")
+            block = theme[start:end]
+            block = replace_attr(block, "latin", latin_xml)
+            block = replace_attr(block, "ea", cjk_xml)
+            block = replace_script(block, "Hans", cjk_xml)
+            block = replace_script(block, "Hant", cjk_xml)
+            theme = theme[:start] + block + theme[end:]
+        styles = zipfile.ZipFile(made).read("word/styles.xml").decode("utf-8")
+        styles = style_spacing(styles, "Normal", after="160", line="360")
+        for level, size, before, after, outline in (
+            ("Heading1", "32", "360", "120", "0"),
+            ("Heading2", "28", "280", "80", "1"),
+            ("Heading3", "24", "200", "60", "2"),
+            ("Heading4", "24", "200", "60", "3"),
+            ("Heading5", "22", "160", "40", "4"),
+            ("Heading6", "22", "160", "40", "5"),
+        ):
+            styles = style_heading(styles, level, size, before, after, outline)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp_out = dest.with_suffix(".docx.tmp")
+        with zipfile.ZipFile(made) as src, zipfile.ZipFile(tmp_out, "w") as out:
+            for info in src.infolist():
+                if info.filename == "word/theme/theme1.xml":
+                    data = theme.encode("utf-8")
+                elif info.filename == "word/styles.xml":
+                    data = styles.encode("utf-8")
+                else:
+                    data = src.read(info.filename)
+                out.writestr(info, data)
+        tmp_out.replace(dest)
+
+
+def style_block(styles: str, style_id: str) -> tuple[int, int] | None:
+    marker = f'w:styleId="{style_id}"'
+    start = styles.find(marker)
+    if start < 0:
+        return None
+    start = styles.rfind("<w:style ", 0, start)
+    end = styles.find("</w:style>", start)
+    if start < 0 or end < 0:
+        return None
+    return start, end + len("</w:style>")
+
+
+def style_spacing(styles: str, style_id: str, after: str, line: str) -> str:
+    span = style_block(styles, style_id)
+    if span is None:
+        return styles
+    start, end = span
+    block = styles[start:end]
+    spacing = f'<w:spacing w:after="{after}" w:line="{line}" w:lineRule="auto"/>'
+    indent = '<w:jc w:val="both"/><w:ind w:firstLineChars="200" w:firstLine="480"/>'
+    if "<w:spacing " in block:
+        block = re.sub(r"<w:spacing [^/]*/>", spacing, block, count=1)
+    elif "<w:pPr>" in block:
+        block = block.replace("<w:pPr>", "<w:pPr>" + spacing, 1)
+    else:
+        block = block.replace("</w:style>", f"<w:pPr>{spacing}</w:pPr></w:style>", 1)
+    if style_id == "Normal" and "firstLineChars" not in block:
+        if "<w:pPr>" in block:
+            block = block.replace("<w:pPr>", "<w:pPr>" + indent, 1)
+        else:
+            block = block.replace("</w:style>", f"<w:pPr>{indent}</w:pPr></w:style>", 1)
+    return styles[:start] + block + styles[end:]
+
+
+def style_heading(styles: str, style_id: str, size: str, before: str, after: str, outline: str) -> str:
+    span = style_block(styles, style_id)
+    if span is None:
+        return styles
+    start, end = span
+    block = styles[start:end]
+    spacing = (
+        f'<w:keepNext/><w:outlineLvl w:val="{outline}"/>'
+        f'<w:spacing w:before="{before}" w:after="{after}" w:line="360" w:lineRule="auto"/>'
+    )
+    if "<w:spacing " in block:
+        block = re.sub(r"<w:spacing [^/]*/>", spacing, block, count=1)
+    elif "<w:pPr>" in block:
+        block = block.replace("<w:pPr>", "<w:pPr>" + spacing, 1)
+    size_tag = f'<w:sz w:val="{size}"/>'
+    if "<w:sz " in block:
+        block = re.sub(r"<w:sz [^/]*/>", size_tag, block, count=1)
+    elif "<w:rPr>" in block:
+        block = block.replace("<w:rPr>", "<w:rPr>" + size_tag, 1)
+    return styles[:start] + block + styles[end:]
+
+
+def replace_attr(block: str, tag: str, value: str) -> str:
+    needle = f':{tag} '
+    start = block.find(needle)
+    start = block.rfind("<", 0, start) if start >= 0 else -1
+    if start < 0:
+        return block
+    end = block.find("/>", start)
+    return block[:start] + f'<a:{tag} typeface="{value}"/>' + block[end + 2 :]
+
+
+def replace_script(block: str, script: str, value: str) -> str:
+    marker = f'script="{script}"'
+    start = block.find(marker)
+    if start < 0:
+        return block
+    tag = block.rfind("<", 0, start)
+    end = block.find("/>", start)
+    return block[:tag] + f'<a:font script="{script}" typeface="{value}"/>' + block[end + 2 :]
+
+
+def apply(root: Path, markdown: str, latin: str, cjk: str) -> int:
+    source = root / markdown
+    if not source.is_file():
+        print("找不到源稿", file=sys.stderr)
+        return 1
+    installed = families()
+    latin = latin.strip() or DEFAULT_LATIN
+    cjk = resolve_cjk(cjk.strip() or DEFAULT_CJK, installed)
+    if installed and latin not in installed:
+        print(f"本机没有英文正文字体：{latin}", file=sys.stderr)
+        return 1
+    if installed and cjk not in installed:
+        print(f"本机没有中文正文字体：{cjk}", file=sys.stderr)
+        return 1
+    write_markdown(source, latin, cjk)
+    reference_docx(root / "manuscript" / "reference.docx", latin, cjk)
+    (root / "manuscript" / "typeface.md").write_text(
+        f"英文：{latin}\n中文：{cjk}\n", encoding="utf-8"
+    )
+    print(f"英文 {latin}，中文 {cjk}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Set manuscript body fonts")
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--markdown", required=True)
+    parser.add_argument("--latin", default=DEFAULT_LATIN)
+    parser.add_argument("--cjk", default=DEFAULT_CJK)
+    args = parser.parse_args(argv)
+    return apply(Path(args.root), args.markdown, args.latin, args.cjk)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

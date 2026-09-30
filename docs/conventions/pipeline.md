@@ -47,8 +47,11 @@
 
 - 开工确认在已有产物/输入区之后显示「先看方案，再决定」与「你的决定」。从当前步骤声明的必需/可选/任一输入报告读取明确的决策摘要/方案比较/待决事项，写作等步骤没有决策摘要时可展示上游原有验收摘要；不把 TASK.md 指令或代码块示例当结果。决定状态与说明分开：批准指定范围／仅允许准备／待补证据／不批准。硬暂停只在「批准」时允许正式开工，「仅允许准备」需二次确认后只做无依赖准备；待补、不批准、未选状态、旧纯文本均不能开工。清空就撤回该项；确认开工才由既有任务书链落盘，读取失败不代填批准。旧纯文本不得自动迁移为已批准。
 - 评审按科研工作区绑定步骤的 `expectedArtifacts` 显示验收摘要、质量状态/未决事项、复算与验证。来源路径/行号、原文入口、缺失/截断/错误可见；没有识别到标题的已读报告仍可打开原文。不解释自然语言为机器通过。只读 Run/定时历史不套当前工作区复现操作。
+- **待确认只表示相关性未拍板**（2026-09-30）：`decision=pending` 与 included 同一套题录。有 DOI 时 Agent 在写入前用 Crossref（没有再 OpenAlex）把期刊全称写入 `venue`，并填 `doi`/`url`。书章没有期刊才允许 `venue=待补`。打开清单时用 DOI 补刊名只是旧文件和漏写的兜底，不代替写入时查全。
+- **检索审阅的清单和文件页**（2026-09-30）：清单页签占满剩余高度，底下不再留一块隐藏的 Git 对照区。文件页签只列 `isScreeningReviewFile`：screening.md、included.md、included.json、to-fetch.md、to-fetch.ris、endnote-import.ris。顶栏文件数与侧栏分母用同一份过滤后的数量。脚本、缓存、TASK.md、.gitignore、技能说明不进这一页。非 Git 产物不列产物目录里的检索过程文件（json、jsonl、xml、tsv、log、txt，不限 `search` 这个目录名）。图、表、成稿和 `papers/` 里的清单仍列出。旧快照里若还冻着这些过程文件，下次打开审阅按当前规则重冻。识别靠步骤工作区名 lit-search / lit-survey-search，或同时出现 screening.md 与 included。
 - **检索步先拍 pending 再下载全文**：Agent 筛完后 `to-fetch` 与开放获取只针对 `decision=included`；pending 禁止进待获取。人工事项顺序为「核对待确认篇目」先于「下载付费墙文献全文」。有 pending 时写入 help-wanted，未回复不把 pending 当已纳入。已有项目不静默改档案卡，需在流程编辑器补该事项或本次评审先拍 pending。
 - **待确认拍完自动勾上**：`papers/included.json` 里已有篇目，且每篇 `decision` 都是 `included` 或 `excluded` 时，「核对待确认篇目」自动记为完成。空清单、空白判定或解析失败不算拍完。人手取消过（`explicitCancel`）的不覆盖。步骤卡清单和检索评审清单同一口径。已有项目改任务书后才带上新说明，勾选本身不依赖档案卡改写。
+- **检索清单挂期刊标签，已纳入可移出**（2026-09-29）：步骤卡「文献清单」和检索审阅共用 `PendingConfirmList`。待确认、已纳入、已排除三段都显示；已排除默认折叠。每行打开时用 `lookup_journal_metrics` 现查 IF / 中科院分区 / TOP。刊名优先，ISSN 可写成一个或「印刷, 电子」逐个对。本地表对不上（空、待补、缩写、未收录）且这条有 DOI 时，用 DOI 先问 OpenAlex、没有期刊再问 Crossref，补刊名和 ISSN 再查一次，不写入 included.json，也不用接口里的影响因子数字。标签分级与文献雷达共用 `journalMetricTone`：1 区与 TOP 强调色，2 区通过色，3 区提醒色，4 区与仅 IF 中性。待获取从 DOI 段或紧随的下一段取期刊全称；链接认段内的 DOI / http，DOI 后挂刊名仍算出官网按钮。后端 `to_fetch_looks_link` 与前端同一口径。表未装给下载入口，未收录写在行上。已纳入点「移出」把 decision 改成 `excluded`、理由加「排除：人工移出」，并同步拿掉 included.md 那一行。to-fetch.md 与两份 RIS 整份改写（`drop_fetch_line` / `drop_ris_record`），不走 256 KB 预览上限，编号不重排。文件不存在才说明；改写失败写明哪一份没动。PDF、笔记、references.bib 不删；有笔记路径或 bib 命中 DOI/标题时在行上说明。已排除「恢复为待确认」只改 json 与 included.md，不写回待获取；再次纳入才按原纳入链补回。写入仍走 `save_file_preview` 的版本校验。
 - **检索/筛选步骤例外**（`workspaceName` 为 `lit-search` / `lit-survey-search`，或产物同时含 `papers/screening.md` 与纳入清单）：待确认与待获取在步骤卡决策。审阅在基础检查旁切换整页：清单（二次确认）／过程／文件。默认清单；过程里 Agent 未决不挡保存。可选收尾事项不计入审阅「待做」。付费全文和库授权放「稍后」。表在筛选决定之前；决定表单有 pending 时默认收起，不预填「退回」。Git 对照只在「文件」页签，不再从右侧拉对照抽屉。保存进项目不等于接受清单。
 - `research-report.ts` 提取纯文本章节，`research-report-load.ts` 有界只读加载（最多32个声明路径/40文件，精确文件优先，目录只展开一层）。默认不轮询，仅打开或人刷新读取；旧异步响应不得覆盖切换后的项目。HTML 和命令仅文本显示，不执行、不自动转为批准。
 - 自动报告读取在 `read_file_preview` 指定 `requireWithinRoot=true`，目录列举在 `list_dir` 指定 `root`；后端 canonicalize 校验并拒绝根外 symlink。原手动文件预览的根外 symlink 只读能力不变，省略新可选参数的旧调用保持兼容。
@@ -56,7 +59,7 @@
 - 界面分开三层状态：运行结束、计算检查（脚本自己的 verification）、人工科研验收。零退出码、文件存在、报告自述均不等于科研通过。结果只读本次运行目录，不读项目内任意路径冒充本次结果。
 - 科研验收决定单独记在 `.ccode/research-acceptance.json`：接受／有条件接受／退回，绑定文件版本、结论范围、未关闭阻塞项、可选运行 id。Git 提交/保存进项目仍是保存工作，不因未验收而禁止。文件版本变化后标「需要重新确认」，不要求所有阶段全部重来。
 - **评审壳按步骤类型拼区块**（闭集 `screening` / `files` / `acceptance` / `default`，`step-review.ts`）：一张 `WorkspaceReviewView`，档案声明证据主面、验收表单、文件分组与默认 diff。禁止每步一张独立评审页。检索、精读、大纲、写作、实验同一套顶栏页签（清单 / 笔记或稿件 / 结果／过程／文件），默认内容页不是 Git 对照。文件页只看 Git 对照，不再在顶部再列一条非 Git 产物。「过程」只放这一步怎么做成的记录：检索页用 Markdown 预览打开 papers/screening.md；精读是 notes/index.json 和仍缺的全文；写作是章节状态、引用核对、修改记录；实验是运行清单和实现检查；清洗是清洗清单。help-wanted 和 .ccode 也在这里。脚本、.py、接口缓存、.gitignore 不进「过程」，留在「文件」。对照抽屉（旧 `filesInDrawer`）已整体移除：档案不再有这个字段，文件面一律走顶栏页签。精读、大纲、写作、排版、投稿材料、返修走 files（笔记/稿件/引文分组；`survey/` `submission/` `rebuttal/` 算稿件；渲染 PDF/docx 不抢源稿；无科研决定表；`.ccode/help-wanted.md` 进过程组）。实验执行、结果分析、清洗、EDA 走 acceptance，但页签同为「结果／过程／文件」：结果页放验收摘要、复现和接受退回。有步骤但不是前两类时默认 files。六套模板含返修轮次都必须能分到这四档，files 档预期产物必须进笔记/稿件主面。
-- **综述用图**（2026-09-20）：笔记可引用图 → 大纲每章/小节用图计划 → 初稿 `review-figures` 用随包 `extract_figure.py` / `assemble_panels.py` 裁拼（`figures/figN.png`，图注 Adapted from）。无用图计划则停。裁不到或不能拼则只写「见 [@键] Fig.n」。fail-closed：不对题注不猜最大图、不非等比拉伸、不把整页当图。人必须看 PNG。不在 Mesa 里做独立裁图 GUI。
+- **综述用图**（2026-09-20；2026-09-28 收紧）：笔记可引用图 → 大纲每章/小节用图计划 → 初稿 `review-figures` 用随包 `extract_figure.py` / `assemble_panels.py` 裁拼（`figures/figN.png`，图注 Adapted from）。题注块必须以 `Figure N.` 开头，并只取同栏上方的图；页内「Figure N shows」不算题注。一行最多 4 块，更多用 `--rows`。无用图计划则停。裁不到或不能拼则只写「见 [@键] Fig.n」。fail-closed：不对题注不猜最大图、不非等比拉伸、不把整页当图。Agent 读图不能代替人看 PNG。不在 Mesa 里做独立裁图 GUI。
 - **科研保存链白话**（`review-save-copy.ts`）：按钮「提交并保存进项目 / 保存进项目 / 已保存进项目」，时间线「✓ 保存进项目」，步骤卡「你核对后，保存进项目」。不是编程「合进基准」，也不是科研验收决定。
 - 新组件：`ResearchEvidencePanel` 共用摘要/原文预览，`ResearchDecisionFields` 编辑状态+说明，`ResearchReproductionPanel` 执行并回看本次结果，`ResearchAcceptancePanel` 记科研验收；不另建质量仪表盘，不自动路由/合并/改变模板。
 
@@ -87,7 +90,7 @@
 ## 工作区生命周期（无损口径）
 
 - **非 Git 产物评审绑定（2026-09-11）**：评审通过 `workspace_review_deliverables` 明确冻结 papers/、项目产物目录与 output/ 中
-  未被 Git 跟踪的文件。接口缓存（`api-cache`）、工作区里的 `.py`、`scripts/`、`.gitignore`、`included.json`、`zotero-sync.md` 不进这份清单，留在工作区，不随保存带回项目。私有副本与完整 SHA-256 对应一个 token，静默健康轮询不替换 token。主仓同名文件/保护路径标为跳过，
+  未被 Git 跟踪的文件。接口缓存（`api-cache`）、产物目录里的检索过程文件（json、jsonl、xml、tsv、log、txt，不限目录名）、工作区里的 `.py`、`scripts/`、`.gitignore`、`included.json`、`zotero-sync.md` 不进这份清单，留在工作区，不随保存带回项目。图、表、成稿仍列出。私有副本与完整 SHA-256 对应一个 token，静默健康轮询不替换 token。主仓同名文件/保护路径标为跳过，
   不冒称已接收；单文件 1 GB、合计 4 GB、2000 项预算，超限要求拆分，不把未冻结内容带回。
   合并前必须同时携带已审 Git SHA 与产物 token；新增/删除/修改过可采纳文件须重看，受 Git 跟踪但未提交的改动也拒绝合并。
   Git 成功后只从固定副本发布文件，不能再扫描工作树最新内容作写入源。目标同名文件不覆盖；发布采用同目录私有暂存与不覆盖发布，
@@ -223,7 +226,7 @@
   `auth_status`（`o_auth` / `bearer_token`）、Claude `mcp get` 的 Connected，
   以及 macOS 钥匙串服务名 `Codex MCP Credentials` 里账号以 `undermind` 开头的条目。
   不读令牌。Mesa 连通体检的 401 仍不算配坏。人手取消过的不自动勾回。
-  Consensus 在 MCP 页密钥栏填 API key，Mesa 注入 CONSENSUS_API_KEY，不必设系统环境变量；Undermind 登录在 CLI 里
+  Consensus 在 MCP 页密钥栏填 API key，Mesa 注入 CONSENSUS_API_KEY，不必设系统环境变量；事项说明写明本机已填密钥时可跳过。Undermind 登录在 CLI 里
   （「去终端登录」会带上 `codex mcp login undermind` / `claude mcp login undermind`），
   授权后必须新开会话——点「开始」会注入检索、来不及登录。
   分发后**新开的检索会话**才能用；不配也能跑——OpenAlex/Semantic Scholar 免 key 兜底），
@@ -246,7 +249,15 @@
   `manuscript/template/` 由 agent 读说明适配（无内置解析器）；文档类（elsarticle/IEEEtran/achemso/ctexart/
   学位论文通用架）与 natbib/biblatex 为开工前决策项；引用沿用 references.bib（`\cite{bib键}`），
   章节写作挂 `research-writing`（可选）+ `bib-check`。可吃上游 `paper-final` / `review-final` / `thesis-final` / `draft.md`。
-  **引用样式按项目 PDF 推荐，不设默认**（2026-09-22）：渲染前 `citation_style.py` 看 `papers/*.pdf`，在 `manuscript/citation-style.md` 列出编号、作者-年、按期刊。人写「选定：」之后才生成 `manuscript/citation.csl` 并渲染。选定为空不渲染参考文献。换样式改选定再渲。EndNote 域稿仍是交付副本；人在 Word 里增删后，`sync_docx.py` 只出 `papers/endnote-sync-report.md`，接受的删除和新文献才写回源稿与 `references.bib`。Export Traveling Library 由人在 EndNote 菜单里把文献抄进自己的库。
+  **更换引用样式在流程线上选具体形式**（2026-09-28，取代「先写 citation-style.md 再选定」；2026-09-29 补换刊依据和四份成稿）：编号分方括号 `[1]` 与上标 `¹`；作者-年分 `(Author, Year)` 与 `(Author Year)`；按期刊列出 `references.bib` 里出现最多的刊名，也可自己填。定稿开工先问沿用初稿编号还是改成目标期刊。换期刊读该刊作者须知，并从 `references.bib` 取该刊最近 2–3 篇综述核对实际排法；库里没有就写明，两边不一致就停下来问。点选后回到这一步原来的对话，重渲 PDF 和普通 Word，并重新生成 `output/endnote.docx` 与 `output/zotero.docx`。LaTeX 不生成这两份。不再要求人先填「选定：」，也不因未填而停渲。
+  **引用格式只在定稿步定，起草步不装选择器**（2026-09-29）：三套模板的起草步（综述初稿、论文初稿、学位论文初稿）**不再挂「更换引用样式」**——起草步没有讨论种子与决策项，全局设定（综述角度/目标篇幅/读者与文风/去向/综述深度）也不含引用格式，所以「跟 AI 商量一下」这条路本来就不管格式，唯一入口是流程线选择器。去掉后初稿固定按编号制渲（YAML 写 `csl: citation.csl` 并放随包 `ieee.csl`），各起草步简报写明「引用格式在定稿步的『更换引用样式』里再定」。定稿步（综述「润色与定稿」、科研论文「润色与投稿准备」、毕业论文「格式与定稿」）与投稿返修保持「更换引用样式」（空落点纯脑力事项）。
+  **原「确认引用样式」形态已撤回**（2026-09-28 提出，2026-09-29 撤）：不再有确认面板、`manuscript/citation-confirmed.md` 落盘、绑定 csl 版本与 `isCitationConfirmTask`。引用样式只有「更换」一种形态，`isCitationStyleTask` 认新旧标题（「更换引用样式」/「填写引用样式」）。
+  **任何步骤选期刊都写 `submission/target-journal.md`**（2026-09-28，原先只在「润色与定稿」步写；2026-09-30 起它不再是润色步的必交产物）：来源记「沿用已定」或「本次选定」；打开「按期刊」面板时按「工作区 → 项目根」读回，已定刊名显示成「沿用已定：X」按钮，不再重问。人沿用初稿编号、没有刊名时不要写这份文件，交付检查也不再要求它。投稿格式适配那一步仍然必交，因为那一步的工作就是定期刊。**点选时记下改前 `manuscript/citation.csl` 的样式类别**，人再打开这一排时重读比对——样式文件没变就提示「可能只重渲了 PDF」，不谎报成功；`citation.csl` 不进 `expectedArtifacts`（从没选过样式的稿子不该被机械门卡住）。
+  **初稿正文字体在开工时问**（2026-09-30）：三套初稿在第一次渲染前问一次，默认英文 Times New Roman、中文宋体。问和写都在本步工作区：`manuscript_font.py` 产出 `manuscript/typeface.md` 与 `manuscript/reference.docx`，两份进预期产物。不放进「跟 AI 商量一下」，那条会话只改任务书。
+  **审查报告和待核实在步骤上点**（2026-09-29）：「逐条决定审查报告」和「逐条裁决」展开成条目，按钮是接受、拒绝、修改，另有全部接受。待核实这一行只在定稿还有「待核实」、或引用检查有疑似编造和元数据存疑时才有条目；没有就说明为空，可以勾上跳过。审查报告写该条末尾「决定：接受 / 拒绝 / 修改：说明」；待核实把「裁决：」写成确认、删除该论断或改正为…。两条都用 `decisions_cleared`，每一条都有决定才算完成。全部点完后点「让 Agent 按决定继续」，才勾上并接回这一步原来的对话。去评审仍是看稿、写意见、退回和保存，不负责写入这些决定，也不等这些点完才出现。
+  **域稿刷新收成一句做法**（2026-09-29）：定稿步不再各挂「打开 EndNote 域稿」「打开 Zotero 域稿」。合成可选事项「换样式时打开域稿」：打开 `output/endnote.docx` 或 `output/zotero.docx`，在 Word 里点 Update 或 Refresh。标题不含 EndNote，避免误挂文献库同步三连。文献库同步仍在精读待获取清单。
+  **润色步的裁决清单**（2026-09-28；2026-09-29 改成步骤上点）：agent 按 `[待核实]` 与 citation-check 的「疑似编造/元数据存疑」列全 `manuscript/verification-decisions.md`，**裁决与依据两栏留空、不得代填**。`decisions_cleared` 认「决定：接受/拒绝/修改：…」和「裁决：确认/删除该论断/改正为…」；待裁决、空修改说明不算完成。该判定与 `no_placeholders` 分开：后者认的「待填/待确认/[待补/TODO」在正文里是正常行文，会把这一步误卡死。
+  EndNote 与 Zotero 域稿嵌入正文 `![说明](../figures/figN.png)`，说明里的 `[@键]` 仍写成引用域；缺图不交 docx（2026-09-29）。`output/figures/` 是渲染复制的同一张图，不进非 Git 产物清单。人在 Word 里增删后，`sync_docx.py` 只出 `papers/endnote-sync-report.md`，接受的删除和新文献才写回源稿与 `references.bib`。Export Traveling Library 由人在 EndNote 菜单里把文献抄进自己的库。
 - **流水线编辑器（RX1）是步骤编辑唯一入口**：`src/components/PipelineEditor.tsx` 全宽覆盖层（fixed inset-0 z-30，与评审
   覆盖层同级），每步一张卡片，整体写回 steps；新增步骤相关编辑一律进
   编辑器，不再开第二套入口。**卡片字段分三档（v3.85）**：常驻只留
@@ -630,7 +641,7 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   且未完成时就地展开其 guidance；papers/ 落点事项的「到『文献与数据』导入」按钮按 litSource 传 focus
   高亮对应进料口（zotero→Zotero 入口 / folder→题录入口），与「确定文献来源」节点的落地口径一致。
   **保存后收起意见框（2026-09-24）**：文件已进入项目后，退回意见框不再显示。沉淀起草在已保存时读主仓里带本步分支名的合并提交，不再拿已经并完的工作区 `base..HEAD`（那是空的）去报「分支上还没有提交」。
-  **写作步评审意见（2026-09-21）**：文件交付壳顶栏「基础检查」旁扫源稿机械红线（摘要 `[待核实]`、正文 G 编号、「待绘制」、手写章节号）；人在意见框写下退回要点，落 `.ccode/review-notes.md`。「退回修改」接回该工作区最近会话并把意见当下一轮输入；「按意见重写」同一工作区新开会话。都不保存进项目。上次意见只在打开这一步时读进框里；文件列表刷新不得重读，避免人删掉的字被旧文件填回。◈ AI 起草仍只用于合并后沉淀到下一步，不代替内容审查。
+  **写作步评审意见（2026-09-21）**：文件交付壳顶栏「基础检查」旁扫源稿机械红线（摘要 `[待核实]`、正文 G 编号、「待绘制」、手写章节号）；人在意见框写下退回要点；也可在稿件阅读态划选文字，点「加进意见」写下这一处怎么改，追加进同一个意见框。退回时一起落 `.ccode/review-notes.md`。「退回修改」接回该工作区最近会话并把意见当下一轮输入；「按意见重写」同一工作区新开会话。都不保存进项目。上次意见只在打开这一步时读进框里；文件列表刷新不得重读，避免人删掉的字被旧文件填回。◈ AI 起草仍只用于合并后沉淀到下一步，不代替内容审查。起草先读下一步任务书，只写两类：本步已经定死、下一步照常规会改回去的具体决定；产物里写明还没由人确认的事项。下一步已经禁止的事不再复述，下一步已经允许的做法不得写成禁止。没有这两类时返回空。
   **产物核验就地预览（v3.97 文本；后补 pdf/docx）**：ArtifactChecklist 点 md/txt/ris/bib 开 TASK.md 同款
   居中弹层（marked 渲染 + textarea 编辑 + save_file_preview 原子写，截断只读，Esc/背景点击关闭前
   守未保存改动）；pdf/docx/表格/图同页弹层（`ProjectFilePreview`，不跳运行页）。
@@ -763,10 +774,9 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     解析为 DTO；格式不规整的条目容错跳过。所有操作门槛 = 已注册项目根 + canonicalize 防逃逸 + 读-改-原子写。
   - **收件箱 lit 类别**：key 前缀 `lit:`，胶囊排在「待确认」之后；最近一次成功 run 有 newEntries>0 且 24h 内 →
     条目「<项目名>有N条新命中」（隔离树未采纳则「有N条新命中待评审」），点击跳项目详情；dismiss 走既有签名机制。
-  - **关联步骤 + 漂移提醒**：`Schedule.linkedStep`（可空，update 空串归 None 清除）+ `RunRecord.newEntries`
-    （跑前后数 inbox.md `## ` 标题数取差，超时/失败不记）；staleLitHint = linkedStep 非空 && newEntries>0 &&
-    巡检时间晚于该步骤工作区 mergedAt/createdAt → 雷达卡片警告色小字「雷达有新命中，『X』步的产物可能过期」，
-    复用 staleUpstream 口径，只提醒不阻断。
+  - **不挂步骤**：定时巡检不提供「关联步骤」。新命中只进雷达和收件箱。
+    旧日程里若存过 `linkedStep`，保存时清掉，界面不再显示，也不在步骤圆点上提醒。
+    `RunRecord.newEntries` 仍按跑前后 `inbox.md` 的 `## ` 标题数取差（超时/失败不记）。
   - **精读清单与已读判定**：included.md 是「先攒后读」主路径；已读 = notes/ 有匹配笔记文件（规范化标题互相包含
     判定），纯派生不建状态机；「开读」有已下载 PDF 走 previewReq 预览，没有则主按钮变「↓ 全文」先下载。
   - **期刊指标徽章（journal_metrics.rs）**：条目徽章（IF / 中科院大类分区 / TOP）在 `list_watch_entries` 出口按
@@ -1045,10 +1055,12 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
       90 秒窗前端可见性（按钮进行中态 + 漏收/兜底横幅 + 不依赖 OS 通知权限的
       应用内反馈通道）。
       终检二轮补丁：清除会话先置代际标记再动文件（删 cookie 数百 ms 的窗口期
-      不再复活）；扩展对**自己触发的下载**（图标点击/大文件改道）经
+      不再复活）；扩展对**浏览器里完成的下载**（自己触发的，以及出版商网页上点的，`downloads.onCreated` 记下 id）经
       `mesa-report-download` 把最终落盘路径直报 helper → `dl-reports.jsonl`
       （持久化游标 dl-reports.cursor，重启不重放历史行）→ 收货链增量消费——
-      浏览器下载目录不在系统 Downloads 时不再零反馈；>40MB 大文件改道 background
+      浏览器下载目录不在系统 Downloads 时不再零反馈。没装扩展时，
+      `watch_roots` 同时盯系统下载目录和 Chrome/Edge/Firefox 偏好里设成默认的下载目录
+      （Firefox 仅 folderList=2）；这次另选且未设默认的位置不监听，用「关联」。>40MB 大文件改道 background
       的 downloads API（跨源 a[download] 无效且 Content-Length 预检先于读 body）；
       Fallback 命中同样消费 pending（一个窗口最多错收一次）；>60MB 超限发
       oversize 提示不再静默；启动快照按全路径键控（不再误杀跨目录上报）。
@@ -1095,12 +1107,12 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
 
 ## 科研外部工具与交付合同（2026-09-11）
 
-- 保留六套模板；科研论文在结果分析与初稿之间多一步「论文大纲」，其余模板阶段数不变。会改已有成稿的步骤先出审查报告，人逐条决定后才改稿。工具是项目选择，不增设独立编排系统，不自动路由或自动并行。选择保存在 settings 的闭集 `科研工具/<key>：<value>`（`libraryExport` / `plotting` / `illustration` / `manuscript`），由 `research-tools.ts` 在应用/编辑步骤时补全技能、必需子集、交付、人工事项。**文献从哪来只认 `config.lit_source`**（流程线「确定文献来源」），不再写 `科研工具/literature`；切换来源时重应用合同，选 Zotero 才给检索/精读步挂 `zotero-sync`。外部库**交付**仍走 `libraryExport`，与来源分开；只认一份主 references.bib。Zotero 进库只有文献来源选了 Zotero 时才挂 `zotero-sync`（用户点一下才写库），不跟 `libraryExport` 重复。英文综述的检索步不默认写 `papers/zotero-sync.md`，精读步不出现「导入到 EndNote」。项目设置「文献库」是 Zotero 与 EndNote 的同一种选择，一篇只接一个。选了才在定稿交一份：Zotero 为 `output/zotero.rtf`（导入 RIS 后 RTF Scan 一次），EndNote 为 `output/endnote.docx`（Update 一次）。没有精读步才在期刊格式适配上问这个选项。创建项目时设定屏只填全局设定。稿件载体问在会换正式稿的步骤（期刊格式适配 / 返修 / 投稿材料）；Origin、Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。答案仍是项目级 `科研工具/*`，所有匹配步骤（含以后追加）一起补。不挡在模板列表前面。
+- 保留六套模板；科研论文在结果分析与初稿之间多一步「论文大纲」，其余模板阶段数不变。会改已有成稿的步骤先出审查报告，人逐条决定后才改稿。工具是项目选择，不增设独立编排系统，不自动路由或自动并行。选择保存在 settings 的闭集 `科研工具/<key>：<value>`（`libraryExport` / `plotting` / `illustration` / `manuscript`），由 `research-tools.ts` 在应用/编辑步骤时补全技能、必需子集、交付、人工事项。**文献从哪来只认 `config.lit_source`**（流程线「确定文献来源」），不再写 `科研工具/literature`；切换来源时重应用合同，选 Zotero 才给检索/精读步挂 `zotero-sync`。外部库**交付**仍走 `libraryExport`，与来源分开；只认一份主 references.bib。Zotero 进库只有文献来源选了 Zotero 时才挂 `zotero-sync`（用户点一下才写库），不跟 `libraryExport` 重复。英文综述的检索步不默认写 `papers/zotero-sync.md`，精读步按钮是「同步到文献库」，不再叫「导入到 EndNote」。项目设置「文献库」仍是 Zotero 与 EndNote 的同一种选择，管导入和同步，不管定稿交哪一份。定稿、学位论文格式与定稿、期刊格式适配同时交两份带域的 Word：`output/endnote.docx`（Update 一次）和 `output/zotero.docx`（Refresh 一次）。LaTeX 载体不交。没有精读步才在期刊格式适配上问文献库选项。创建项目时设定屏只填全局设定。稿件载体问在会换正式稿的步骤（期刊格式适配 / 返修 / 投稿材料）；Origin、Blender 问在用得上的那一步且不挡主动作。综述大纲不问 Blender。答案仍是项目级 `科研工具/*`，所有匹配步骤（含以后追加）一起补。不挡在模板列表前面。
 - 自动补入项以简报中的 `mesa-research-tools` 记录，反复应用幂等；撤销只移除本机制加入项。原生稿件替换字段若被手改，拒绝静默覆盖。更新旧步骤必须逐项预览、载入编辑草稿；不改旧 TASK.md 或产物。
 - Zotero 用只读 SQLite 在线备份到内存取得一致快照；不再顺序复制主库/WAL，不产生明文临时数据库。首次 bib、增量唯一候选、条目映射与 PDF 资源可追溯；来源与资源同次配置写回，不得前端回写旧 cfg。链接附件基目录须由人显式选择；读库绝不写个人库。
 - Zotero 导出的新键来自 library/item 稳定身份；已有主库键必须通过 DOI/条目差异人工保留，不自动换键。题录候选按 reference 资源登记；已登记只读外部 PDF 精确放行阅读/建笔记，不放行目录、不复制改名附件。2026-09-16 补：to-fetch 清单有「同步到 Zotero」按钮（zotero_attach_fulltexts，免 agent 会话）——papers/ 已拿到的全文按 DOI 匹配挂 linked_file 附件（引用 papers/ 绝对路径、不复制进 Zotero 存储），条目不存在时优先用同源 to-fetch.ris 的全题录新建（作者/年份/来源；RIS 缺失回落标题+DOI 最小条目）；无 DOI 的不同步（避免重复建条）。前提 Zotero 运行中 + 「允许其他应用与本机通信」+ 首次写入授权。写库规则放宽：技能或 UI 显式动作皆算用户意图。**2026-09-17 实机（Zotero 9.0.6）**：官方 local API（`/api/users/0/items`）只读——源码写明 Write access is not yet supported，POST 回纯文本 `Endpoint does not support method`；对着 `.json()` 会变成 reqwest「error decoding response body」。现先探一次写入，只读则停并提示把 papers/ PDF 拖到对应条目（没有条目先拖 to-fetch.ris）。Connector `/connector/saveItems` 能建条目但不能给已有条目挂 linked_file，不走那条以免复制/重复建条。「同步到 Zotero」打开 `to-fetch.ris`（优先项目根）；导入前 GET 对照 DOI，库里已有则确认防重复。PDF 直接拖进 Zotero，客户端一般按元数据对上已有条目。`zotero-sync` 技能只交 RIS/报告，禁止 POST 只读 `/api/`。
 - `origin-plot` 仅 Windows 有许可证本机，`endnote-bridge` 离线格式桥 + 定稿域稿（`[@键]` → `output/endnote.docx` 的 `ADDIN EN.CITE`，traveling library；未匹配 fail-closed），禁止 COM/点插件；`blender-research` 仅用户指定的科研示意。随包脚本与 SKILL.md 一同播种/更新，执行前核对参数；转换/示意成功不能作为科学真实性证明。Blender MCP 不在 worktree 沙箱内，交互只面向受控工程；最后保存脚本+场景并后台重建。
-- **EndNote 域稿（2026-09-22）**：仅 `libraryExport=endnote` 且定稿/期刊格式适配步（`polish` / `research-paper-polish` / `thesis-final` / `journal-format`）挂 `output/endnote.docx` + `papers/endnote-cite-report.md`。初稿不出域稿。不覆盖 `manuscript/source.docx`。人打开后点一次 Update Citations and Bibliography 才算可换 Output Style。LaTeX 载体不挂。
+- **定稿两份域稿（2026-09-28，取代「文献库选一份才交」）**：`polish` / `research-paper-polish` / `thesis-final` / `journal-format` 默认同时交 `output/endnote.docx`（`ADDIN EN.CITE`）和 `output/zotero.docx`（`ADDIN ZOTERO_ITEM CSL_CITATION`），外加两份 cite-report。未匹配键哪一份都不交。初稿不出域稿。不覆盖 `manuscript/source.docx`。EndNote 打开后点一次 Update Citations and Bibliography；Zotero 打开后点一次 Refresh。LaTeX 载体不挂。`output/zotero.rtf` 不再是定稿产物。生成时只读人指定的一个库。EndNote 的 `.enl` 绝对路径写在项目 `papers/endnote-library.path` 一行里，不扫磁盘。Zotero 只读当前默认配置的 `extensions.zotero.dataDir`，只查用户库。DOI 归一后整段相同且只有一条活记录才写入编号；多条、没有、库不唯一都不猜，报告点名，这条刷新仍用稿内题录。RIS 的 `ID` 导入后不进 Zotero，不能用来对。
 - 开工检测以所选 Agent 的实际技能目录摘要为准，必需技能缺失/漂移不可启动；可选技能缺失只报告。Zotero 通道离线可继续已导入文件；读取可用不等于写入授权；不得把模板选择当成批量写库批准。
 - 原生 LaTeX/Word 投稿、返修合同声明真实输入和正式 PDF/源件，不运行 Markdown 说明文档的 Quarto 脚本冒充成稿；Word 引用域与插件刷新仍由人确认。LaTeX 模板日志统一 `output/compile.log`，latexmk 检测 ctex/fontspec 时用 XeLaTeX；实际引擎/宏包兼容仍需真实编译。
 - 复现入口的 `MESA_REPRODUCE`、`--input/--output`、结果 JSON 合同须与面板解析一致。约定结果缺失或显式失败不可记运行成功。上游人工验收只在证据文件版本一致时引用，引用按钮仅带入准备许可；正式执行仍走本步决定。无条件接受与未关闭阻塞项互斥。

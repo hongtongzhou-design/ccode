@@ -1071,9 +1071,12 @@ fn readonly_cap(spec: &AgentSpec) -> CapabilityFlagDto {
 fn headless_write_cap(agent: &str) -> CapabilityFlagDto {
     match agent {
         "qwen" => flag(false, Some("无头写盘未验证，定时任务请换别家")),
-        "grok" => flag(true, Some("无沙箱（--yolo 全放行）")),
+        // grok 定时任务带 --yolo：自动批准全部工具，不限课题目录
+        "grok" => flag(true, Some("会批准全部操作")),
+        // codex 定时任务是 -s workspace-write，只写课题目录，不必再附注
         "codex" => flag(true, None),
-        _ => flag(true, Some("权限未实测")),
+        // 其余无头能写文件，但没逐项核过默认权限
+        _ => flag(true, Some("按该工具默认权限写文件")),
     }
 }
 
@@ -1609,7 +1612,7 @@ mod tests {
             .find(|c| c.agent == "grok")
             .unwrap();
         assert!(grok_caps.headless_write.supported);
-        assert!(grok_caps.headless_write.reason.unwrap().contains("无沙箱"));
+        assert!(grok_caps.headless_write.reason.unwrap().contains("会批准全部操作"));
         assert_eq!(
             agent_spec("qwen")
                 .unwrap()

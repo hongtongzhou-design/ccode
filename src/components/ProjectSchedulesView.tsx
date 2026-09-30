@@ -3,19 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import LitWatchCard from "./LitWatchCard";
 import ScheduleSection from "./ScheduleSection";
 import { normalizeWorkMode } from "../work-mode";
-import type { ProjectConfigDto, ProjectDto, WorkspaceDto } from "../types";
+import type { ProjectConfigDto, ProjectDto } from "../types";
 
 /** 项目「定时任务」页：文献雷达（科研）+ 本项目全部定时任务。 */
 export default function ProjectSchedulesView({
   project,
-  workspaces,
   focusToken = null,
   focusEntryId = null,
   onFocusHandled,
   onError,
 }: {
   project: ProjectDto;
-  workspaces: WorkspaceDto[];
   focusToken?: number | null;
   focusEntryId?: string | null;
   onFocusHandled?: () => void;
@@ -56,7 +54,6 @@ export default function ProjectSchedulesView({
         <LitWatchCard
           projectRoot={project.path}
           cfg={cfg}
-          workspaces={workspaces}
           focusToken={focusToken}
           focusEntryId={focusEntryId}
           onOpenSchedules={() =>
@@ -69,11 +66,7 @@ export default function ProjectSchedulesView({
         />
       )}
       <div ref={scheduleRef}>
-        <ScheduleSection
-          projectRoot={project.path}
-          steps={cfg?.steps ?? []}
-          layout="card"
-        />
+        <ScheduleSection projectRoot={project.path} layout="card" />
       </div>
     </div>
   );

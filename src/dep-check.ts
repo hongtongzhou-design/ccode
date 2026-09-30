@@ -15,6 +15,14 @@ export interface DepItemDto {
 export interface DepCheckDto {
   git: DepItemDto;
   node: DepItemDto;
+  /** 渲 PDF/Word。缺失只展示，诊断页不代装。 */
+  quarto: DepItemDto;
+  /** xelatex / tectonic / pdflatex 任一在即可。 */
+  tex: DepItemDto;
+  /** 综述拼图裁切。 */
+  pymupdf: DepItemDto;
+  /** 综述拼图排版。 */
+  pillow: DepItemDto;
   /** 一键安装渠道：brew | winget | xcode | none */
   channel: "brew" | "winget" | "xcode" | "none";
   checkedAt: string;
@@ -29,7 +37,7 @@ export interface UpdateResultDto {
   versionAfter: string | null;
 }
 
-export type DepTool = "git" | "node";
+export type DepTool = "git" | "node" | "quarto" | "tex" | "pymupdf" | "pillow";
 export type DepPlatform = "mac" | "win" | "linux";
 
 /** git 缺失错误识别：后端错误串单一出处在 git_info.rs/workspaces.rs/projects.rs
@@ -38,9 +46,28 @@ export function isGitMissingError(msg: string): boolean {
   return msg.includes("找不到 git 可执行文件");
 }
 
-/** 一键安装可行性：git 走 brew/winget/xcode（系统弹窗）均可；node 仅 brew/winget
- *  （xcode 渠道只装 CLT 不含 node，none 只能给指引） */
+const SITES: Record<DepTool, string> = {
+  git: "git-scm.com",
+  node: "nodejs.org",
+  quarto: "quarto.org",
+  tex: "tectonic-typesetting.github.io",
+  pymupdf: "pypi.org/project/pymupdf",
+  pillow: "pypi.org/project/pillow",
+};
+
+const APT: Record<DepTool, string> = {
+  git: "git",
+  node: "nodejs",
+  quarto: "",
+  tex: "tectonic",
+  pymupdf: "python3-pymupdf",
+  pillow: "python3-pil",
+};
+
+/** 一键安装可行性。拼图库走本机 pip，不看 brew/winget。
+ *  git 在 Mac 无 brew 时仍可弹系统安装窗口。其余项要有 brew 或 winget。 */
 export function canOneClickInstall(tool: DepTool, channel: string): boolean {
+  if (tool === "pymupdf" || tool === "pillow") return true;
   if (tool === "git")
     return channel === "brew" || channel === "winget" || channel === "xcode";
   return channel === "brew" || channel === "winget";
@@ -54,16 +81,16 @@ export function installGuidance(
   platform: DepPlatform,
 ): string {
   if (platform === "mac") {
-    // mac 无 brew：git 本可走 xcode 弹窗（可一键装，不会走到这里）；node 无自动渠道
-    return tool === "git"
-      ? "未检测到 Homebrew：点「安装」触发系统安装窗口（Xcode 命令行工具），装完点「重新检测」"
-      : "未检测到 Homebrew：请到 nodejs.org 下载官方安装包，或先安装 Homebrew";
+    if (tool === "git") {
+      return "未检测到 Homebrew：点「安装」触发系统安装窗口（Xcode 命令行工具），装完点「重新检测」";
+    }
+    return `未检测到 Homebrew：请到 ${SITES[tool]} 下载安装包，或先安装 Homebrew，装完点「重新检测」`;
   }
   if (platform === "win") {
-    const site = tool === "git" ? "git-scm.com" : "nodejs.org";
-    return `未检测到 winget：请到 ${site} 下载安装包，装完点「重新检测」`;
+    return `未检测到 winget：请到 ${SITES[tool]} 下载安装包，装完点「重新检测」`;
   }
-  const pkg = tool === "git" ? "git" : "nodejs";
+  const pkg = APT[tool];
+  if (!pkg) return `请到 ${SITES[tool]} 下载安装包，装完点「重新检测」`;
   return `请用发行版包管理器安装（如 sudo apt install ${pkg}），装完点「重新检测」`;
 }
 

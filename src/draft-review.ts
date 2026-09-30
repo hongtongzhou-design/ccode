@@ -41,7 +41,7 @@ export function scanWritingReview(
     hits.push({ id: "placeholder-fig", label: `${drawn} 处「待绘制」` });
   }
   if (/^#{1,6}\s+\d+(\.\d+)*[.\s]/m.test(body)) {
-    hits.push({ id: "manual-numbers", label: "标题手写了序号，渲染会叠号" });
+    hits.push({ id: "manual-numbers", label: "标题里写了序号，渲染时会再自动编号" });
   }
   return hits;
 }
@@ -58,12 +58,47 @@ export function sortWritingPreviewPaths(paths: readonly string[]): string[] {
   return [...paths].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, "zh"));
 }
 
+/** 只扫稿件和大纲。检索记录、纳入清单、任务书里的编号标题不是稿件问题。 */
 export function writingScanSourcePath(paths: readonly string[]): string | null {
   const md = paths.filter((p) => /\.(md|qmd)$/i.test(p.replace(/\\/g, "/")));
-  const draft = md.find((p) => /draft\.md$/i.test(p) || /manuscript\//i.test(p));
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const draft = md.find((p) => /draft\.md$/i.test(p) || /manuscript\//i.test(norm(p)));
   if (draft) return draft;
-  const outline = md.find((p) => /(^|\/)outline\.md$/i.test(p.replace(/\\/g, "/")));
-  return outline ?? md[0] ?? null;
+  return md.find((p) => /(^|\/)outline\.md$/i.test(norm(p))) ?? null;
+}
+
+/** 划选批注的单行上限。整段引用会把意见框撑满，退回时 Agent 也读不清改哪一句。 */
+const ANNOTATION_QUOTE_CAP = 160;
+
+/** 点「加进意见」时记住的选段。空选区不开批注条。 */
+export function annotationDraftFromSelection(selected: string): string | null {
+  const quote = selected.trim();
+  return quote ? quote : null;
+}
+
+function oneLineQuote(excerpt: string): string {
+  const flat = excerpt.replace(/\s+/g, " ").trim();
+  if (flat.length <= ANNOTATION_QUOTE_CAP) return flat;
+  return `${flat.slice(0, ANNOTATION_QUOTE_CAP)}…`;
+}
+
+/**
+ * 把划中的句子收成一条意见，追加到已有意见末尾。
+ * 人还没写批注时先占一行「（待补）」，退回前可以改。
+ * 同一段、同一句批注不重复追加。
+ */
+export function appendReviewAnnotation(
+  notes: string,
+  input: { fileName: string; excerpt: string; comment?: string },
+): string {
+  const quote = oneLineQuote(input.excerpt);
+  if (!quote) return notes;
+  const comment = (input.comment ?? "").replace(/\s+/g, " ").trim() || "（待补）";
+  const line = `- 「${quote}」（${input.fileName}）：${comment}`;
+  const existing = notes.trim();
+  if (!existing) return line;
+  if (existing.split("\n").some((row) => row.trim() === line)) return existing;
+  return `${existing}\n${line}`;
 }
 
 export function writingReturnPrompt(input: {

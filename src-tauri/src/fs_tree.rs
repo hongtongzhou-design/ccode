@@ -238,6 +238,28 @@ fn save_file_preview_sync(
     }
     let _guard = PREVIEW_SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _file_guard = crate::storage::config_lock("preview-save")?;
+    // 定稿选定的目标期刊。文件第一次还不存在，只允许新建这一份。
+    let expanded = expand_tilde(path);
+    let rel = expanded.replace('\\', "/");
+    if !std::path::Path::new(&expanded).exists()
+        && expected_revision == "new"
+        && (rel.ends_with("/submission/target-journal.md") || rel.ends_with("submission/target-journal.md"))
+        && !rel.contains("..")
+    {
+        let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&expand_tilde(root)))
+            .map_err(|e| format!("项目根目录无效: {e}"))?;
+        let parent = std::path::Path::new(&expanded)
+            .parent()
+            .ok_or_else(|| "路径没有父目录".to_string())?;
+        fs::create_dir_all(parent).map_err(|e| format!("建立投稿目录失败: {e}"))?;
+        let parent_c = crate::paths::canonicalize_plain(parent)
+            .map_err(|e| format!("父目录无效: {e}"))?;
+        if !crate::paths::path_within_path(&parent_c, &root_c) {
+            return Err("路径超出项目根目录，拒绝写入".into());
+        }
+        crate::profiles::atomic_write(std::path::Path::new(&expanded), text)?;
+        return Ok(preview_revision(text.as_bytes()));
+    }
     let current = read_file_preview_sync(path, root)?;
     if let Some(reason) = current.read_only_reason {
         return Err(reason);
@@ -254,6 +276,129 @@ fn save_file_preview_sync(
     }
     crate::profiles::atomic_write(&path_c, text)?;
     Ok(preview_revision(text.as_bytes()))
+}
+
+/// 从整份 RIS 里拿掉 DOI 或标题对得上的条目。预览通道只读 256 KB，
+/// 检索清单的 RIS 经常更大，移出不能走那条路。文件不在项目根、或不是普通文件，拒绝。
+fn drop_ris_record_sync(path: &str, root: &str, doi: &str, title: &str) -> Result<bool, String> {
+    let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&expand_tilde(root)))
+        .map_err(|e| format!("项目根目录无效: {e}"))?;
+    let path_c = crate::paths::canonicalize_plain(std::path::Path::new(&expand_tilde(path)))
+        .map_err(|_| "文件不存在".to_string())?;
+    if !crate::paths::path_within_path(&path_c, &root_c) {
+        return Err("路径超出项目根目录，拒绝写入".into());
+    }
+    let name = path_c
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if name != "to-fetch.ris" && name != "endnote-import.ris" {
+        return Err("只能改检索步的两份 RIS".into());
+    }
+    let original = fs::read_to_string(&path_c).map_err(|e| format!("读取 RIS 失败: {e}"))?;
+    let doi_key = doi.trim().trim_start_matches("doi:").trim().to_ascii_lowercase();
+    let title_key = title.trim().to_ascii_lowercase();
+    if doi_key.is_empty() && title_key.is_empty() {
+        return Ok(false);
+    }
+    let newline = if original.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut kept: Vec<String> = Vec::new();
+    let mut removed = false;
+    for block in original.split("\nER  -") {
+        let body = block.trim();
+        if body.is_empty() {
+            continue;
+        }
+        let mut hit = false;
+        for line in body.lines() {
+            let line = line.trim().trim_start_matches('\u{feff}');
+            let Some((tag, value)) = line.split_once("  - ") else { continue };
+            let value = value.trim();
+            if !doi_key.is_empty() && tag.trim() == "DO" && value.to_ascii_lowercase() == doi_key {
+                hit = true;
+            }
+            if !title_key.is_empty() && tag.trim() == "TI" && value.to_ascii_lowercase() == title_key {
+                hit = true;
+            }
+        }
+        if hit {
+            removed = true;
+            continue;
+        }
+        kept.push(format!("{body}{newline}ER  - "));
+    }
+    if !removed {
+        return Ok(false);
+    }
+    let next = if kept.is_empty() {
+        String::new()
+    } else {
+        format!("{}{newline}", kept.join(&format!("{newline}{newline}")))
+    };
+    crate::profiles::atomic_write(&path_c, &next)?;
+    Ok(true)
+}
+
+/// 从整份 to-fetch.md 拿掉含 DOI 或标题的行。编号不重排。超过预览上限的清单也能改。
+fn drop_fetch_line_sync(path: &str, root: &str, doi: &str, title: &str) -> Result<bool, String> {
+    let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&expand_tilde(root)))
+        .map_err(|e| format!("项目根目录无效: {e}"))?;
+    let path_c = crate::paths::canonicalize_plain(std::path::Path::new(&expand_tilde(path)))
+        .map_err(|_| "文件不存在".to_string())?;
+    if !crate::paths::path_within_path(&path_c, &root_c) {
+        return Err("路径超出项目根目录，拒绝写入".into());
+    }
+    if path_c.file_name().and_then(|n| n.to_str()) != Some("to-fetch.md") {
+        return Err("只能改 papers/to-fetch.md".into());
+    }
+    let original = fs::read_to_string(&path_c).map_err(|e| format!("读取待获取失败: {e}"))?;
+    let doi_key = doi.trim().trim_start_matches("doi:").trim().to_ascii_lowercase();
+    let title_key = title.trim();
+    if doi_key.is_empty() && title_key.is_empty() {
+        return Ok(false);
+    }
+    let mut kept = Vec::new();
+    let mut removed = false;
+    for line in original.split_inclusive('\n') {
+        let lower = line.to_ascii_lowercase();
+        let hit = (!doi_key.is_empty() && lower.contains(&doi_key))
+            || (!title_key.is_empty() && line.contains(title_key));
+        if hit {
+            removed = true;
+            continue;
+        }
+        kept.push(line);
+    }
+    if !removed {
+        return Ok(false);
+    }
+    crate::profiles::atomic_write(&path_c, &kept.concat())?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn drop_fetch_line(
+    path: String,
+    root: String,
+    doi: String,
+    title: String,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || drop_fetch_line_sync(&path, &root, &doi, &title))
+        .await
+        .map_err(|e| format!("改写待获取失败: {e}"))?
+}
+
+/// 移出时从整份 RIS 删除一条。返回是否真的删掉了。文件不存在时 removed=false，不报错。
+#[tauri::command]
+pub async fn drop_ris_record(
+    path: String,
+    root: String,
+    doi: String,
+    title: String,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || drop_ris_record_sync(&path, &root, &doi, &title))
+        .await
+        .map_err(|e| format!("改写 RIS 失败: {e}"))?
 }
 
 #[tauri::command]
@@ -427,6 +572,38 @@ mod tests {
         fs::write(&f, b"abc\0def").unwrap();
         let err = read_file_preview_sync(f.to_str().unwrap(), dir.to_str().unwrap()).unwrap_err();
         assert_eq!(err, "二进制文件不支持预览");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drop_ris_record_removes_one_block_past_preview_cap() {
+        let dir = tmpdir("ris");
+        let papers = dir.join("papers");
+        fs::create_dir_all(&papers).unwrap();
+        let path = papers.join("to-fetch.ris");
+        let filler = format!("TY  - JOUR\r\nTI  - Filler\r\nAB  - {}\r\nER  - \r\n", "x".repeat(300));
+        let mut body = filler.repeat(1000);
+        body.push_str("TY  - JOUR\r\nTI  - Keep Me\r\nDO  - 10.1000/keep\r\nER  - \r\n");
+        body.push_str("TY  - JOUR\r\nTI  - Drop Me\r\nDO  - 10.1000/drop\r\nER  - \r\n");
+        fs::write(&path, &body).unwrap();
+        assert!(body.len() > PREVIEW_CAP);
+        let removed = drop_ris_record_sync(
+            path.to_str().unwrap(),
+            dir.to_str().unwrap(),
+            "10.1000/drop",
+            "Drop Me",
+        )
+        .unwrap();
+        assert!(removed);
+        let next = fs::read_to_string(&path).unwrap();
+        assert!(!next.contains("Drop Me"));
+        assert!(next.contains("Keep Me"));
+        assert!(next.contains("Filler"));
+        // 对不上不改文件；别的文件名拒绝
+        assert!(!drop_ris_record_sync(path.to_str().unwrap(), dir.to_str().unwrap(), "10.9/no", "Nope").unwrap());
+        let other = papers.join("notes.ris");
+        fs::write(&other, "TY  - JOUR\r\nER  - \r\n").unwrap();
+        assert!(drop_ris_record_sync(other.to_str().unwrap(), dir.to_str().unwrap(), "10.1000/drop", "").is_err());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -702,6 +879,8 @@ pub struct SearchResultDto {
     pub is_dir: bool,
     /// 相对搜索根的路径（前端展示用，避免前端按根长截断出错）
     pub rel: String,
+    /// 最近修改时间（ISO）；读不到元数据时为 None
+    pub modified: Option<String>,
 }
 
 fn search_skip_dir(name: &str, show_hidden: bool, query: &str) -> bool {
@@ -837,12 +1016,20 @@ fn search_walk(
         *visited += 1;
         let name = e.file_name().to_string_lossy().into_owned();
         let path = e.path();
-        let is_dir = path.is_dir();
+        let Ok(md) = e.metadata() else {
+            continue;
+        };
+        let is_dir = md.is_dir();
         if is_dir && search_skip_dir(&name, show_hidden, &query.raw) {
             continue;
         }
         let name_l = name.to_lowercase();
         if search_entry_matches(&name_l, is_dir, query) {
+            let modified = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| iso_from_unix(d.as_secs()));
             let dto = SearchResultDto {
                 rel: path
                     .strip_prefix(root)
@@ -851,6 +1038,7 @@ fn search_walk(
                 path: path.to_string_lossy().into_owned(),
                 name: name.clone(),
                 is_dir,
+                modified,
             };
             if is_ext_hit(&name_l, is_dir, query) {
                 ext_out.push(dto);
@@ -1155,6 +1343,7 @@ mod search_tests {
         assert_eq!(out.len(), 1);
         assert!(std::path::Path::new(&out[0].path).ends_with("src/deep/apple.rs"));
         assert!(std::path::Path::new(&out[0].rel).ends_with("src/deep/apple.rs"));
+        assert!(out[0].modified.is_some(), "搜索命中应带上最近修改时间");
         // 预览：root 传未展开的 "~" 也应通过词法检查
         let home_file = dirs::home_dir().unwrap().join("ccode-test-tilde.txt");
         fs::write(&home_file, "x").unwrap();

@@ -63,9 +63,10 @@ import {
   entryPassesFilter,
   litWatchFilterActive,
   litWatchFilterLabel,
+  journalMetricTone,
   metricsTooltip,
   pdfUrlFor,
-  staleLitHint,
+
   weeklyTrend,
   normalizeTitle,
   parseWatchExplain,
@@ -89,7 +90,6 @@ import type {
   LitWatchFilterDto,
   ScheduleDto,
   SchedulerRunDonePayload,
-  WorkspaceDto,
 } from "../types";
 
 function HeadIcon({
@@ -242,17 +242,17 @@ function RelevancePills({ entry }: { entry: WatchEntryDto }) {
         </span>
       )}
       {entry.metrics?.impactFactor && (
-        <span className="rounded-full bg-canvas px-1.5 py-px text-micro text-l4">
+        <span className={`rounded-full px-1.5 py-px text-micro ${journalMetricTone("if")}`}>
           IF {entry.metrics.impactFactor}
         </span>
       )}
       {entry.metrics?.casQuartile != null && (
-        <span className="rounded-full bg-canvas px-1.5 py-px text-micro text-l4">
+        <span className={`rounded-full px-1.5 py-px text-micro ${journalMetricTone("quartile", entry.metrics.casQuartile)}`}>
           {entry.metrics.casQuartile}区
         </span>
       )}
       {entry.metrics?.top && (
-        <span className="rounded-full bg-canvas px-1.5 py-px text-micro text-l4">
+        <span className={`rounded-full px-1.5 py-px text-micro ${journalMetricTone("top")}`}>
           TOP
         </span>
       )}
@@ -884,7 +884,6 @@ function FilterModal({
 export default function LitWatchCard({
   projectRoot,
   cfg,
-  workspaces,
   onOpenSchedules,
   onConfigChanged,
   focusToken,
@@ -893,7 +892,6 @@ export default function LitWatchCard({
 }: {
   projectRoot: string;
   cfg: ProjectConfigDto;
-  workspaces: WorkspaceDto[];
   /** 「◔ 定时」：打开项目设置抽屉并滚到定时任务区块 */
   onOpenSchedules: () => void;
   /** 下载 PDF 会登记进 project.toml 资源清单：通知父级重读档案卡 */
@@ -1381,20 +1379,6 @@ export default function LitWatchCard({
           prominent: true,
         }));
   const hasSubs = (subs ?? []).length > 0;
-  // 关联步骤漂移提醒（只提醒不阻断）：任一任务命中即显示
-    const staleStep = radarSchedules.find((s) => {
-    if (!s.linkedStep) return false;
-    const step = cfg.steps.find((st) => st.name === s.linkedStep);
-    if (!step) return false;
-    const ws = workspaces.find((w) => w.name === step.workspaceName);
-    const okRun = lastOkRun(s);
-    return staleLitHint(
-      s.linkedStep,
-      okRun?.at ?? null,
-      okRun?.newEntries ?? 0,
-      ws ? (ws.mergedAt ?? ws.createdAt) : null,
-    );
-  })?.linkedStep;
 
   if (subs !== null && !hasSubs) {
     return (
@@ -1526,11 +1510,6 @@ export default function LitWatchCard({
           >
             去评审
           </button>
-        </p>
-      )}
-      {bodyOpen && staleStep && (
-        <p className="mb-2 text-xs text-warn-text">
-          雷达有新命中，「{staleStep}」步的产物可能过期
         </p>
       )}
       {error && <p className="mb-2 text-xs text-err-text">{error}</p>}

@@ -1,6 +1,13 @@
 import { sanitizeDocumentHtml } from "../document-html";
 import { useRef, useState, useEffect, useLayoutEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  cachedJournalMetric,
+  journalMetricTone,
+  rememberJournalMetrics,
+  type JournalMetricsDto,
+  type JournalMetricsStatusDto,
+} from "../lit-watch";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { marked } from "marked";
@@ -45,6 +52,18 @@ import {
 } from "../step-decisions";
 import { useHumanTasks, RegisterOfferRow } from "./HumanTasksList";
 import { buildWorkspaceTerminalRequest } from "../pipeline-start";
+import {
+  CITATION_STYLE_CHOICES,
+  citationFormFamily,
+  citationRerenderPrompt,
+  isCitationStyleTask,
+  journalAsk,
+  parseTargetJournal,
+  styleFamilyOf,
+  targetJournalDoc,
+  topJournals,
+  type StyleFamily,
+} from "../citation-style-choice";
 
 import {
   ACADEMIC_MCP_PRESETS,
@@ -57,6 +76,12 @@ import {
   type FetchedFulltextDto,
 } from "../inst-access";
 import PendingConfirmList, { type PendingConfirmHandle } from "./PendingConfirmList";
+import ReviewDecisionList from "./ReviewDecisionList";
+import {
+  continueAfterDecisionsPrompt,
+  isInlineDecisionTaskTitle,
+  reviewItemKind,
+} from "../review-decisions";
 import type { ProjectStepDto, WorkspaceDto } from "../types";
 import type { StepRunStatus } from "../step-flow";
 
@@ -136,6 +161,27 @@ function writeToFetchPageScroll(root: string, top: number): void {
     /* 隐私模式写不进就只靠本次 */
   }
 }
+function JournalPills({ metric }: { metric: JournalMetricsDto | null | undefined }) {
+  if (!metric) return null;
+  return (
+    <span className="flex shrink-0 items-center gap-1">
+      {metric.impactFactor && (
+        <span className={`rounded-full px-1.5 py-px text-micro ${journalMetricTone("if")}`}>
+          IF {metric.impactFactor}
+        </span>
+      )}
+      {metric.casQuartile != null && (
+        <span className={`rounded-full px-1.5 py-px text-micro ${journalMetricTone("quartile", metric.casQuartile)}`}>
+          {metric.casQuartile}区
+        </span>
+      )}
+      {metric.top && (
+        <span className={`rounded-full px-1.5 py-px text-micro ${journalMetricTone("top")}`}>TOP</span>
+      )}
+    </span>
+  );
+}
+
 function rememberToFetchPlace(root: string, ul: HTMLUListElement | null): void {
   if (!ul) return;
   writeToFetchScroll(root, ul.scrollTop);
@@ -145,7 +191,7 @@ function rememberToFetchPlace(root: string, ul: HTMLUListElement | null): void {
 
 /** 按钮没说的那一句：可选/跳过的后果。做法进行内按钮 title。 */
 const PAYWALL_HINT = "跳过的篇目下一篇按摘要记。";
-const PENDING_HINT = "纳入且没有 PDF 的会进下面待获取。";
+const PENDING_HINT = "待确认点纳入或排除。已纳入不想要就点移出，笔记和引文留着。";
 
 const LIT_SOURCES: {
   id: string;
@@ -214,6 +260,7 @@ export default function StepFlow({
   reviewConflict,
   onDraftChanged,
   onSeedDraft,
+  draftLoadError,
   onLoadTaskMd,
   discussed = false,
   discussResume = null,
@@ -258,6 +305,8 @@ export default function StepFlow({
   onDraftChanged?: () => void;
   /** 「跟 AI 商量一下」开聊前的播种（v3.90）：空内容先灌模板拼装，由卡片区实现（它有 cfg 与拼装出处） */
   onSeedDraft?: () => Promise<void>;
+  /** 任务书读失败的原因。按钮变灰时把这句话显示在旁边。 */
+  draftLoadError?: string | null;
   /** 「预览/编辑 TASK.md」的统一加载（v3.90）：返回展示内容——已有编辑内容读文件全文，
    *  否则给模板拼装（只读展示不落盘，保存才落地）。由卡片区实现（它有 cfg 与拼装出处） */
   onLoadTaskMd?: () => Promise<{ text: string; revision: string | null }>;
@@ -404,6 +453,19 @@ export default function StepFlow({
    *  v3.90 起先播种（onSeedDraft）：空文件/仅决策答案/仅评审沉淀的文件先灌入模板拼装——
    *  商量改的就是最终落盘的 TASK.md，从零起草会把简报/预期产物/提货单全丢掉 */
   const [chatBusy, setChatBusy] = useState(false);
+  const [decisionNote, setDecisionNote] = useState<string | null>(null);
+  const [decisionOpen, setDecisionOpen] = useState<Map<string, number>>(new Map());
+  const [citeOpen, setCiteOpen] = useState<string | null>(null);
+  const [citeBusy, setCiteBusy] = useState(false);
+  const [citeNote, setCiteNote] = useState<string | null>(null);
+
+  const [journals, setJournals] = useState<{ name: string; count: number }[] | null>(null);
+  const [journalName, setJournalName] = useState("");
+  const [draftJournal, setDraftJournal] = useState<string | null>(null);
+  const [journalSwap, setJournalSwap] = useState(false);
+  // 点选时记下「要哪一类样式」和「改前的样式」，用户回来时据此核对是否真换成。
+  const citeWant = useRef<{ family: StyleFamily | null; label: string } | null>(null);
+  const citeBefore = useRef<StyleFamily | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   // 付费墙任务的待获取清单就地展开（papers/to-fetch.md，只读预览）：
   // 首次点开才读文件，收起不清缓存（agent 不会在展示期间改它）。
@@ -415,6 +477,8 @@ export default function StepFlow({
   const [paywallListOpen, setPaywallListOpen] = useState(() =>
     readPaywallListOpen(projectPath),
   );
+  const [paywallMetrics, setPaywallMetrics] = useState<Map<number, JournalMetricsDto | null>>(new Map());
+  const [paywallMetricsLoading, setPaywallMetricsLoading] = useState(false);
   const [paywallList, setPaywallList] = useState<{
     text: string | null;
     error: string | null;
@@ -425,7 +489,6 @@ export default function StepFlow({
     line: string;
     detail?: string;
   } | null>(null);
-  const [endnoteOpenNote, setEndnoteOpenNote] = useState<string | null>(null);
   const [endnoteSyncing, setEndnoteSyncing] = useState(false);
   const [endnoteSyncResult, setEndnoteSyncResult] = useState<string | null>(null);
   const [endnoteChecked, setEndnoteChecked] = useState(false);
@@ -714,19 +777,15 @@ export default function StepFlow({
   async function openEndnoteImport() {
     if (endnoteSyncing) return;
     setEndnoteSyncing(true);
-    const note = "正在按引文库生成…";
-    setEndnoteOpenNote(note);
+    const note = "正在交给 EndNote…";
     setEndnoteSyncResult(note);
     try {
       const msg = await invoke<string>("endnote_export_xml", {
         projectRoot: projectPath,
       });
-      setEndnoteOpenNote(msg);
       setEndnoteSyncResult(msg);
     } catch (e) {
-      const msg = String(e);
-      setEndnoteOpenNote(msg);
-      setEndnoteSyncResult(msg);
+      setEndnoteSyncResult(String(e));
     } finally {
       setEndnoteSyncing(false);
     }
@@ -808,6 +867,7 @@ export default function StepFlow({
           root: c.root,
         });
         setPaywallList({ text: p.text, error: null, from: c.from });
+        void loadPaywallMetrics(p.text);
         return;
       } catch {
         // 试下一个位置
@@ -820,6 +880,203 @@ export default function StepFlow({
       from: null,
     });
   }
+
+  async function loadPaywallMetrics(text: string) {
+    const items = parseToFetchItems(text).filter((item) => item.venue || item.url);
+    if (items.length === 0) {
+      setPaywallMetrics(new Map());
+      return;
+    }
+    const needsRemote = items.some((item) => !item.venue && item.url);
+    if (needsRemote) setPaywallMetricsLoading(true);
+    try {
+      const status = await invoke<JournalMetricsStatusDto>("journal_metrics_status");
+      if (!status.available) {
+        setPaywallMetrics(new Map());
+        return;
+      }
+      const queries = items.map((item) => ({
+        venue: item.venue,
+        issn: "",
+        doi: item.url,
+      }));
+      const next = new Map<number, JournalMetricsDto | null>();
+      const pending: { line: number; query: (typeof queries)[number] }[] = [];
+      items.forEach((item, index) => {
+        const hit = cachedJournalMetric(queries[index]?.doi ?? "");
+        if (hit !== undefined) next.set(item.line, hit);
+        else pending.push({ line: item.line, query: queries[index]! });
+      });
+      if (pending.length > 0) {
+        const found = await invoke<(JournalMetricsDto | null)[]>("lookup_journal_metrics", {
+          queries: pending.map((row) => row.query),
+        });
+        rememberJournalMetrics(pending.map((row) => row.query), found);
+        pending.forEach((row, index) => next.set(row.line, found[index] ?? null));
+      }
+      setPaywallMetrics(next);
+    } catch {
+      setPaywallMetrics(new Map());
+    } finally {
+      setPaywallMetricsLoading(false);
+    }
+  }
+  // 换步骤就清掉上一步读到的期刊：按需读，不在每步无条件打 IPC。
+  useEffect(() => {
+    setDraftJournal(null);
+    setJournalSwap(false);
+  }, [step.name, projectPath]);
+
+  /** 打开「按期刊」时才读已定期刊：先看工作区，再看项目根（上一步合并前只有工作区里有）。 */
+  async function loadTargetJournal() {
+    const candidates = [
+      ...(ws ? [{ path: `${ws.worktreePath}/submission/target-journal.md`, root: ws.worktreePath }] : []),
+      { path: `${projectPath}/submission/target-journal.md`, root: projectPath },
+    ];
+    for (const c of candidates) {
+      try {
+        const file = await invoke<{ text: string }>("read_file_preview", {
+          path: c.path,
+          root: c.root,
+        });
+        setDraftJournal(parseTargetJournal(file.text));
+        return;
+      } catch {
+        // 试下一个位置
+      }
+    }
+    setDraftJournal(null);
+  }
+
+  async function recordTargetJournal(name: string, source: "沿用已定" | "本次选定") {
+    if (!ws) return;
+    const path = `${ws.worktreePath}/submission/target-journal.md`;
+    let revision = "new";
+    try {
+      const existing = await invoke<{ revision: string | null }>("read_file_preview", {
+        path,
+        root: ws.worktreePath,
+      });
+      if (existing.revision) revision = existing.revision;
+    } catch {
+      revision = "new";
+    }
+    await invoke("save_file_preview", {
+      path,
+      root: ws.worktreePath,
+      text: targetJournalDoc(name, source),
+      expectedRevision: revision,
+    });
+  }
+
+  async function openJournals() {
+    setCiteOpen("journal");
+    if (journals || !ws) return;
+    try {
+      const file = await invoke<{ text: string }>("read_file_preview", {
+        path: `${ws.worktreePath}/references.bib`,
+        root: ws.worktreePath,
+      });
+      setJournals(topJournals(file.text));
+    } catch {
+      setJournals([]);
+    }
+  }
+
+  async function continueAfterDecisions(target: string, title: string) {
+    const kind = reviewItemKind(title);
+    if (!ws || !kind) return;
+    setDecisionNote(null);
+    try {
+      const req = await buildWorkspaceTerminalRequest(
+        ws,
+        continueAfterDecisionsPrompt(target, kind),
+        { autoStart: true, resumeSession: true },
+      );
+      setPendingTerminal(req);
+      setPage("terminal");
+    } catch (reason) {
+      setDecisionNote(String(reason));
+    }
+  }
+
+  async function chooseCitationStyle(
+    ask: string,
+    journal?: { name: string; source: "沿用已定" | "本次选定" },
+    want?: { family: StyleFamily | null; label: string },
+  ) {
+    if (citeBusy || !ws || !ask.trim()) return;
+    setCiteBusy(true);
+    setCiteNote(null);
+    try {
+      // 选期刊：任何步骤都落盘，下一步（含投稿模板）直接沿用，不再重问。
+      if (journal) {
+        await recordTargetJournal(journal.name, journal.source);
+      }
+      // 记下改前的样式，等用户回来时核对这一步到底有没有真换。
+      citeBefore.current = await readStyleFamily();
+      citeWant.current = want ?? null;
+      const req = await buildWorkspaceTerminalRequest(
+        ws,
+        citationRerenderPrompt(ask),
+        { autoStart: true, resumeSession: true },
+      );
+      setPendingTerminal(req);
+      setPage("terminal");
+    } catch (reason) {
+      setCiteNote(String(reason));
+    } finally {
+      setCiteBusy(false);
+    }
+  }
+
+  /** 读当前稿子实际用的 csl：样式族 + 版本指纹。读不到返回 null（还没设过样式）。 */
+  async function readStyleFamily(): Promise<StyleFamily | null> {
+    const roots = [
+      ...(ws ? [ws.worktreePath] : []),
+      ...(projectPath ? [projectPath] : []),
+    ];
+    for (const root of roots) {
+      for (const rel of ["manuscript/citation.csl", "citation.csl"]) {
+        try {
+          const file = await invoke<{ text: string }>("read_file_preview", {
+            path: `${root}/${rel}`,
+            root,
+          });
+          return styleFamilyOf(file.text);
+        } catch {
+          // 试下一个位置
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 人回到本页时核对：想要的样式和稿子实际用的对不对得上。 */
+  async function verifyCitationStyle() {
+    const before = citeBefore.current;
+    const want = citeWant.current;
+    if (want === null) return; // 没选过，不打扰
+    const now = await readStyleFamily();
+    if (now === null) {
+      setCiteNote("还没找到 manuscript/citation.csl——样式可能没落到文件上，回对话里问一句再渲。");
+      return;
+    }
+    if (want !== null && want.family === null) {
+      setCiteNote(`样式文件已存在（${now}）。按期刊的样式请确认 csl 与该刊作者须知一致。`);
+      return;
+    }
+    if (now === before && now !== want.family) {
+      setCiteNote(`样式文件没变，可能只重渲了 PDF——这一步要的样式还没落到 csl 上。`);
+      return;
+    }
+    if (now !== want.family) {
+      setCiteNote(`样式文件现在是 ${now}，和这一步要的不一致，回对话里核对一下。`);
+      return;
+    }
+    setCiteNote(null);
+  }
+
   async function chatDraft() {
     if (!draft || chatBusy) return;
     setChatBusy(true);
@@ -1249,7 +1506,9 @@ export default function StepFlow({
         data-node-key={node.key}
         data-human-task={
           node.kind === "human" && node.human?.target
-            ? node.human.title
+            ? isCitationStyleTask(node.human.title)
+              ? "更换引用样式"
+              : node.human.title
             : undefined
         }
         className={`rounded-sm pr-1.5 transition-colors duration-300 ${
@@ -1276,7 +1535,8 @@ export default function StepFlow({
           human?.timing === "after" &&
           !afterReady(human) &&
           !node.done &&
-          !isPendingConfirmTaskTitle(human.title)
+          !isPendingConfirmTaskTitle(human.title) &&
+          !isInlineDecisionTaskTitle(human.title)
             ? "opacity-45"
             : ""
         }`}
@@ -1317,12 +1577,21 @@ export default function StepFlow({
             <Checkbox
               className="shrink-0"
               checked={node.done}
-              disabled={busyTitle === human.title}
+              disabled={
+                busyTitle === human.title ||
+                (isInlineDecisionTaskTitle(human.title) &&
+                  !node.done &&
+                  (decisionOpen.get(human.title) ?? 1) > 0)
+              }
               onChange={(checked) => void toggle(human, checked)}
               title={
-                node.done
-                  ? "已完成；取消勾选会保留为未完成，需重新勾选确认"
-                  : "勾选 = 人工确认完成（系统不再追问）"
+                isInlineDecisionTaskTitle(human.title) &&
+                !node.done &&
+                (decisionOpen.get(human.title) ?? 1) > 0
+                  ? "还有没决定的条目"
+                  : node.done
+                    ? "已完成；取消勾选会保留为未完成，需重新勾选确认"
+                    : "勾选 = 人工确认完成（系统不再追问）"
               }
             />
           ) : null}
@@ -1376,7 +1645,7 @@ export default function StepFlow({
                 清单 {human.expectedCount}
               </span>
             ) : null
-          ) : node.kind === "human" && human?.hitCount != null ? (
+          ) : node.kind === "human" && human?.hitCount != null && !isCitationStyleTask(human.title) && !isInlineDecisionTaskTitle(human.title) ? (
             <span className="shrink-0 text-micro text-l4">
               已见到 {human.hitCount} 个文件
               {human.expectedCount != null
@@ -1398,6 +1667,147 @@ export default function StepFlow({
           )}
           {nodeActions(node)}
         </div>
+        {node.kind === "human" && isCitationStyleTask(human?.title) && ws && (
+          <div className="ml-9 mt-1.5">
+            <div className="flex flex-wrap items-center gap-1">
+              {CITATION_STYLE_CHOICES.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  disabled={citeBusy}
+                  onClick={() => {
+                    const next = citeOpen === item.id ? null : item.id;
+                    setCiteOpen(next);
+                    // 选过样式的人再打开这一排时，顺便核对落到 csl 上没有。
+                    if (next !== null) void verifyCitationStyle();
+                  }}
+                  className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
+                    citeOpen === item.id
+                      ? "border border-cta-bd bg-cta-pill text-cta-pill-text"
+                      : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled={citeBusy}
+                onClick={() => {
+                  if (citeOpen === "journal") {
+                    setCiteOpen(null);
+                    return;
+                  }
+                  void openJournals();
+                  void loadTargetJournal();
+                }}
+                className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
+                  citeOpen === "journal"
+                    ? "border border-cta-bd bg-cta-pill text-cta-pill-text"
+                    : "bg-inset text-l3 hover:bg-hover hover:text-l1"
+                }`}
+              >
+                按期刊
+              </button>
+            </div>
+            {citeOpen && citeOpen !== "journal" && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {CITATION_STYLE_CHOICES.find((item) => item.id === citeOpen)?.forms.map((form) => (
+                  <button
+                    key={form.id}
+                    type="button"
+                    disabled={citeBusy}
+                    onClick={() =>
+                      void chooseCitationStyle(form.ask, undefined, {
+                        family: citationFormFamily(form.id),
+                        label: form.label,
+                      })
+                    }
+                    className="rounded-sm bg-inset px-2 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                  >
+                    {form.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {citeOpen === "journal" && draftJournal && !journalSwap && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                <button
+                  type="button"
+                  disabled={citeBusy}
+                  onClick={() =>
+                    void chooseCitationStyle(journalAsk(draftJournal), {
+                      name: draftJournal,
+                      source: "沿用已定",
+                    }, { family: null, label: draftJournal })
+                  }
+                  className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+                >
+                  沿用已定：{draftJournal}
+                </button>
+                <button
+                  type="button"
+                  disabled={citeBusy}
+                  onClick={() => {
+                    setJournalSwap(true);
+                    void openJournals();
+                  }}
+                  className="rounded-sm bg-inset px-2 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1"
+                >
+                  更换期刊
+                </button>
+              </div>
+            )}
+            {citeOpen === "journal" && (!draftJournal || journalSwap) && (
+              <form
+                className="mt-1 max-w-md"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void chooseCitationStyle(journalAsk(journalName), {
+                    name: journalName,
+                    source: "本次选定",
+                  }, { family: null, label: journalName });
+                }}
+              >
+                <div className="flex flex-wrap gap-1">
+                  {(journals ?? []).map((item) => (
+                    <button
+                      key={item.name}
+                      type="button"
+                      disabled={citeBusy}
+                      onClick={() =>
+                        void chooseCitationStyle(journalAsk(item.name), {
+                          name: item.name,
+                          source: "本次选定",
+                        }, { family: null, label: item.name })
+                      }
+                      className="rounded-sm bg-inset px-2 py-0.5 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                    >
+                      {item.name}
+                      <span className="ml-1 text-l4">{item.count}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-1 flex gap-1">
+                  <input
+                    value={journalName}
+                    onChange={(event) => setJournalName(event.target.value)}
+                    placeholder="输入期刊名"
+                    className="min-w-0 flex-1 rounded-sm border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4"
+                  />
+                  <button
+                    type="submit"
+                    disabled={citeBusy || !journalName.trim()}
+                    className="rounded-sm bg-inset px-2 py-1 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
+                  >
+                    用这个期刊
+                  </button>
+                </div>
+              </form>
+            )}
+            {citeNote && <p className="mt-1 text-micro text-l4">{citeNote}</p>}
+          </div>
+        )}
         {/* 当前节点的引导与展开操作：种子 chips / 落点说明。
             例外：评审节点的验收引导不看「当前」身份（v3.97）——hint 已按 runStatus 门控
             （待开始无文案、进行中预告、待评审给步骤）；agent 跑完没提交时当前节点一直停在
@@ -1409,8 +1819,8 @@ export default function StepFlow({
             node.key === "continue-notes") &&
           node.hint && (
           <p className="mt-1 pl-9 text-micro leading-5 text-l4">
-            {node.key === "endnote-export" && (endnoteOpenNote || zoteroSyncResult || endnoteSyncResult)
-              ? [node.hint, endnoteOpenNote, zoteroSyncResult?.line, endnoteSyncResult].filter(Boolean).join(" ")
+            {node.key === "endnote-export" && (zoteroSyncResult?.line || endnoteSyncResult)
+              ? [zoteroSyncResult?.line, endnoteSyncResult].filter(Boolean).join(" ")
               : node.hint}
           </p>
         )}
@@ -1755,6 +2165,9 @@ export default function StepFlow({
             {chatError && (
               <p className="text-micro text-err-text">{chatError}</p>
             )}
+            {!draft && draftLoadError && (
+              <p className="text-micro text-err-text">{draftLoadError}</p>
+            )}
             {/* 预置话题 chips：只列还没开聊过的——开过的已经以话题行躺在下面的清单里，
                 两处都显示会让人以为是两个东西。点击 = 只读开聊（同话题清单口径），
                 「让 agent 直接改草稿」是上面那颗「跟 Agent 聊任务书」的活，两者不重叠 */}
@@ -1855,10 +2268,10 @@ export default function StepFlow({
                     onClick={() => setPendingListOpen((open) => !open)}
                     aria-expanded={pendingListOpen}
                     className="flex items-center gap-1 text-xs text-l3 hover:text-l1"
-                    title="Agent 拿不准的篇目，点纳入或排除"
+                    title="待确认点纳入或排除；已纳入点移出"
                   >
                     <FoldMark open={pendingListOpen} />
-                    待确认清单
+                    文献清单
                   </button>
                   {pendingListOpen && pendingMeta.count > 0 && (
                     <button
@@ -1899,12 +2312,43 @@ export default function StepFlow({
               </div>
             </div>
           )}
+        {node.kind === "human" &&
+          human &&
+          reviewItemKind(human.title) &&
+          human.target &&
+          !node.done &&
+          !dense &&
+          (isCurrent || afterReady(human)) && (
+            <div className="mt-1 pl-9">
+              <ReviewDecisionList
+                worktreePath={ws?.worktreePath}
+                projectRoot={projectPath}
+                target={human.target}
+                kind={reviewItemKind(human.title)!}
+                onOpenCount={(count) =>
+                  setDecisionOpen((prev) => {
+                    if (prev.get(human.title) === count) return prev;
+                    const next = new Map(prev);
+                    next.set(human.title, count);
+                    return next;
+                  })
+                }
+                onAllDecided={() => {
+                  void checkPendingConfirmIfOpen(human.title);
+                  if (human.target) void continueAfterDecisions(human.target, human.title);
+                }}
+              />
+              {decisionNote && <p className="mt-1 text-micro text-err-text">{decisionNote}</p>}
+            </div>
+          )}
         {!dense &&
           node.kind === "human" &&
           human &&
           guidance &&
           !isAcademicMcpTaskTitle(human.title) &&
           !isPendingConfirmTaskTitle(human.title) &&
+          !isInlineDecisionTaskTitle(human.title) &&
+          !isCitationStyleTask(human.title) &&
           (isCurrent ||
             (!node.done &&
               human.timing === "after" &&
@@ -1978,6 +2422,9 @@ export default function StepFlow({
                               {browserOpenErr}
                             </p>
                           )}
+                          {paywallMetricsLoading && (
+                            <p className="mb-1 text-micro text-l4">正在按 DOI 补期刊名，影响因子稍后出现。</p>
+                          )}
                           {toFetchItems.length > 0 ? (
                             <ul
                               ref={toFetchListRef}
@@ -2001,7 +2448,7 @@ export default function StepFlow({
                                   <li
                                     key={item.line}
                                     data-to-fetch-line={item.line}
-                                    className={`flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 ${
+                                    className={`flex min-w-0 flex-wrap items-center gap-1 rounded-md px-1 py-0.5 ${
                                       spotlight
                                         ? "bg-cta/10 ring-1 ring-inset ring-cta-bd"
                                         : "hover:bg-hover"
@@ -2018,7 +2465,7 @@ export default function StepFlow({
                                         doneName
                                           ? `在文件页打开 papers/${doneName}`
                                           : item.url
-                                            ? "打开来源网页"
+                                            ? "用右侧「官网」打开这篇的出版商页面"
                                             : item.title
                                       }
                                       onClick={() => {
@@ -2034,34 +2481,15 @@ export default function StepFlow({
                                             ),
                                             token: Date.now(),
                                           });
-                                          return;
                                         }
-                                        if (!item.url) return;
-                                        setBrowserOpenErr(null);
-                                        invoke("inst_browser_open", {
-                                          url: instOpenTarget(item.url),
-                                          projectRoot: projectPath,
-                                          title: item.title,
-                                          doi: item.url,
-                                        })
-                                          .then(() => {
-                                            setBrowserOpenedAt((cur) => ({
-                                              ...cur,
-                                              [item.line]: Date.now(),
-                                            }));
-                                          })
-                                          .catch((e) => {
-                                            setBrowserOpenErr(
-                                              `打开失败：${String(e)}`,
-                                            );
-                                          });
                                       }}
                                     >
                                       {item.title}
                                     </button>
+                                    <JournalPills metric={paywallMetrics.get(item.line)} />
                                     {done ? (
                                       <span
-                                        className={`shrink-0 text-micro ${doneName ? "text-ok-text" : "text-l4"}`}
+                                        className={`shrink-0 text-micro ${doneName ? "text-done" : "text-l4"}`}
                                         title={
                                           doneName
                                             ? `点标题打开 papers/${doneName}`
@@ -2076,7 +2504,7 @@ export default function StepFlow({
                                           <button
                                             type="button"
                                             className={`${inlineActionClass} shrink-0`}
-                                            title="在系统浏览器打开；点站方下载，90 秒内落下的 PDF 会收进 papers/。没收到用「关联」"
+                                            title="去出版商官网打开这篇；点站方下载，90 秒内落下的 PDF 会收进 papers/。没收到用「关联」"
                                             onClick={() => {
                                               setBrowserOpenErr(null);
                                               invoke("inst_browser_open", {
@@ -2099,7 +2527,28 @@ export default function StepFlow({
                                                 });
                                             }}
                                           >
-                                            {waiting ? "等待收货…" : "浏览器"}
+                                            {waiting ? "等待收货…" : "官网"}
+                                          </button>
+                                        )}
+                                        {waiting && (
+                                          <button
+                                            type="button"
+                                            className={`${ghostActionClass} shrink-0`}
+                                            title="这篇不下载了。收货等待取消，之后的 PDF 不会挂到这一行。"
+                                            onClick={() => {
+                                              setBrowserOpenedAt((cur) => {
+                                                const next = { ...cur };
+                                                delete next[item.line];
+                                                return next;
+                                              });
+                                              void invoke("inst_browser_cancel", {
+                                                projectRoot: projectPath,
+                                                title: item.title,
+                                                doi: item.url,
+                                              }).catch(() => {});
+                                            }}
+                                          >
+                                            取消
                                           </button>
                                         )}
                                         <button
@@ -2115,7 +2564,7 @@ export default function StepFlow({
                                     )}
                                     {!done && st?.status === "ok" && (
                                       <span
-                                        className="shrink-0 text-micro text-ok-text"
+                                        className="shrink-0 text-micro text-done"
                                         title={st.note}
                                       >
                                         ✓ 已存

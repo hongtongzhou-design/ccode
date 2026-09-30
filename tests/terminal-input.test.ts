@@ -13,7 +13,9 @@ import {
   KIMI_CSI_U_ENTER,
   KIMI_CSI_U_CTRL_V,
   ptyShiftEnterRewrite,
+  armPrintableEcho,
   printableKeyFallback,
+  takePrintableEcho,
   markdownToPlain,
 } from "../src/terminal-input.ts";
 
@@ -109,15 +111,90 @@ test("printableKeyFallback：keyCode 0 与 229 都当场补发", () => {
     action: "send",
     data: "?",
   });
-  // Shift+/ 实测报 229（不是 191）：xterm 走 composition 的 setTimeout 分支，读到的
-  // textarea 还没被 input 写长 → 不发 → 第一下丢字。故与 0 同样当场补发
-  assert.deepEqual(printableKeyFallback({ ...base, key: "?", keyCode: 229 }), {
-    action: "send",
-    data: "?",
-  });
+  // Shift+/ 实测报 229，且中文输入法下 key 可能不是 "?"。必须带物理键才补。
+  assert.deepEqual(
+    printableKeyFallback({ ...base, key: "?", code: "Slash", keyCode: 229, shiftKey: true }),
+    { action: "send", data: "?" },
+  );
+  assert.equal(printableKeyFallback({ ...base, key: "?", keyCode: 229 }), null);
+  // 中文上屏也是 229，且 key 就是那个字。补发会和输入法再写一次叠成「你你」。
+  assert.equal(printableKeyFallback({ ...base, key: "你", keyCode: 229 }), null);
+  assert.equal(printableKeyFallback({ ...base, key: "！", keyCode: 229 }), null);
+  // 中文输入法开着：key 是 Process，物理键决定符号。
+  assert.deepEqual(
+    printableKeyFallback({
+      ...base,
+      key: "Process",
+      code: "Slash",
+      keyCode: 229,
+      shiftKey: true,
+    }),
+    { action: "send", data: "?" },
+  );
+  assert.deepEqual(
+    printableKeyFallback({
+      ...base,
+      key: "Process",
+      code: "Digit1",
+      keyCode: 229,
+      shiftKey: true,
+    }),
+    { action: "send", data: "!" },
+  );
+  assert.deepEqual(
+    printableKeyFallback({
+      ...base,
+      key: "Process",
+      code: "Digit3",
+      keyCode: 229,
+      shiftKey: true,
+    }),
+    { action: "send", data: "#" },
+  );
+  // 正常 keyCode 的 Shift+3 由 xterm 发，宿主不补，避免变成两个。
+  assert.equal(
+    printableKeyFallback({
+      ...base,
+      key: "#",
+      code: "Digit3",
+      keyCode: 51,
+      shiftKey: true,
+    }),
+    null,
+  );
+  assert.deepEqual(
+    printableKeyFallback({
+      ...base,
+      key: "?",
+      code: "Slash",
+      keyCode: 229,
+      shiftKey: true,
+      isComposing: true,
+    }),
+    { action: "send", data: "?" },
+  );
   // keyCode >= 48：xterm 自己会发（evaluateKeyboardEvent 认识 191:["/","?"]），不干预
   assert.equal(printableKeyFallback({ ...base, key: "?", keyCode: 191 }), null);
   assert.equal(printableKeyFallback({ ...base, key: "a", keyCode: 65 }), null);
+});
+
+test("补发回声按次数吞：连按两次只吞两次回声，第三次真输入留下", () => {
+  const idle = { char: "", count: 0, until: 0 };
+  const once = armPrintableEcho(idle, "#", 1000);
+  assert.deepEqual(once, { char: "#", count: 1, until: 1400 });
+  const twice = armPrintableEcho(once, "#", 1100);
+  assert.equal(twice.count, 2);
+  const first = takePrintableEcho(twice, "#", 1200);
+  assert.equal(first.swallow, true);
+  assert.equal(first.guard.count, 1);
+  const second = takePrintableEcho(first.guard, "#", 1250);
+  assert.equal(second.swallow, true);
+  assert.equal(second.guard.count, 0);
+  const third = takePrintableEcho(second.guard, "#", 1300);
+  assert.equal(third.swallow, false);
+  const other = takePrintableEcho(once, "!", 1100);
+  assert.equal(other.swallow, false);
+  assert.equal(other.guard.count, 1);
 });
 
 test("printableKeyFallback：修饰键、具名键、控制字符、keyup 一律不补", () => {

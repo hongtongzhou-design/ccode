@@ -786,8 +786,9 @@ export interface HumanTaskDto {
   /** 可选事项：不做也不影响这一步跑完；缺省 false = 必办 */
   optional?: boolean;
   /** 完成判定：exists = 落点出现即检测完成；manual = 必须人工确认；
-   * all = 目标通配/清单全部满足；no_placeholders = 文件存在且不含待填占位。 */
-  completion?: "exists" | "manual" | "all" | "no_placeholders";
+   * all = 目标通配/清单全部满足；no_placeholders = 文件存在且不含待填占位；
+   * decisions_cleared = 裁决清单每条的「裁决：」都已填、且无「待裁决」。 */
+  completion?: "exists" | "manual" | "all" | "no_placeholders" | "decisions_cleared";
   /** all 的显式目标总数；缺省时仅对 papers/*.pdf 从 to-fetch.md 推导 */
   expectedCount?: number;
   /** all 的目标清单；每行一个目标，空行与 # 注释行不计数 */
@@ -810,7 +811,7 @@ export interface HumanTaskStateDto {
   /** 待获取清单总篇数（v3.97，仅 papers/*.pdf 落点且存在 to-fetch.md 时有） */
   expectedCount?: number;
   /** 后端采用的完成判定口径 */
-  completion?: "exists" | "manual" | "all" | "no_placeholders";
+  completion?: "exists" | "manual" | "all" | "no_placeholders" | "decisions_cleared";
   /** 人手动勾成完成（勾了系统不再追问） */
   manual: boolean;
   /** 人手动取消过。自动完成不得把它勾回来。 */
@@ -1777,7 +1778,7 @@ export interface ScheduleDto {
   enabled: boolean;
   lastRunAt: string | null;
   lastStatus: string | null;
-  /** 关联步骤名（null/缺省 = 不关联）：雷达新命中晚于该步骤推进时给漂移提醒 */
+  /** 旧字段。2026-09-29 起界面不再设置；保存时写 null 清掉。 */
   linkedStep?: string | null;
   /** 最近 20 条，新的在前 */
   history: RunRecordDto[];
@@ -1792,7 +1793,7 @@ export interface CreateScheduleInput {
   weekday?: number | null;
   hour: number;
   minute: number;
-  /** 关联步骤名（null/缺省 = 不关联） */
+  /** 固定不传。旧客户端若还带着，后端仍能收下，界面不再提供。 */
   linkedStep?: string | null;
 }
 
@@ -1806,6 +1807,7 @@ export interface UpdateSchedulePatch {
   hour?: number;
   minute?: number;
   enabled?: boolean;
+  /** 传 null 清掉旧的关联步骤。 */
   linkedStep?: string | null;
 }
 

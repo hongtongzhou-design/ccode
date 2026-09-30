@@ -53,36 +53,55 @@ test("Blender 只挂研究设计/结构示意，不替代统计图；EndNote 交
   assert.ok(paperPolish.skills.includes("endnote-bridge"));
   assert.ok(paperPolish.expectedArtifacts.includes("output/endnote.docx"));
   assert.ok(paperPolish.expectedArtifacts.includes("papers/endnote-cite-report.md"));
-  assert.ok((paperPolish.humanTasks ?? []).some((h) => h.title === "打开 EndNote 域稿并 Update 一次"));
+  assert.ok((paperPolish.humanTasks ?? []).some((h) => h.title === "换样式时打开域稿"));
+  assert.equal((paperPolish.humanTasks ?? []).some((h) => h.title.includes("EndNote")), true);
+  assert.equal((paperPolish.humanTasks ?? []).filter((h) => h.title.includes("域稿")).length, 1);
   const reviewDraft = withResearchTools(template("review").steps.find((s) => s.workspaceName === "draft")!, tools);
   assert.ok(!reviewDraft.skills.includes("endnote-bridge"));
   const reviewPolish = withResearchTools(template("review").steps.find((s) => s.workspaceName === "polish")!, tools);
   assert.ok(reviewPolish.skills.includes("endnote-bridge"));
+  assert.ok(reviewPolish.skills.includes("zotero-sync"));
   const latexPolish = withResearchTools(template("review").steps.find((s) => s.workspaceName === "polish")!, {
     ...tools,
     manuscript: "latex",
   });
-  assert.ok(!latexPolish.skills.includes("endnote-bridge"));
+  assert.ok(latexPolish.skills.includes("endnote-bridge"));
+  assert.ok(latexPolish.expectedArtifacts.includes("output/zotero.docx"));
+  const latexFormat = withResearchTools(template("submission-rebuttal").steps.find((s) => s.workspaceName === "journal-format")!, {
+    ...tools,
+    manuscript: "latex",
+  });
+  assert.ok(!latexFormat.skills.includes("endnote-bridge"));
+  assert.ok(!latexFormat.expectedArtifacts.includes("output/zotero.docx"));
 });
 
-test("Zotero 与 EndNote 是同一种文献库选择，定稿只交一份", () => {
+test("定稿同时交 EndNote 与 Zotero 两份域稿，不看文献库选项", () => {
   const review = template("review").steps;
   const polish = review.find((s) => s.workspaceName === "polish")!;
   const notes = review.find((s) => s.workspaceName === "lit-notes")!;
-  const zotero = withResearchTools(polish, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "zotero" });
-  assert.ok(zotero.expectedArtifacts.includes("output/zotero.rtf"));
-  assert.ok(zotero.skills.includes("zotero-sync"));
-  assert.equal(zotero.expectedArtifacts.includes("output/endnote.docx"), false);
-  const endnote = withResearchTools(polish, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "endnote" });
-  assert.ok(endnote.expectedArtifacts.includes("output/endnote.docx"));
-  assert.equal(endnote.expectedArtifacts.includes("output/zotero.rtf"), false);
-  assert.equal(withResearchTools(notes, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "zotero" }).expectedArtifacts.includes("output/zotero.rtf"), false);
-  const fromZotero = withResearchTools(polish, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "endnote" }, "artifacts", "zotero");
-  assert.ok(fromZotero.expectedArtifacts.includes("output/endnote.docx"));
+  assert.ok(polish.expectedArtifacts.includes("output/endnote.docx"));
+  assert.ok(polish.expectedArtifacts.includes("output/zotero.docx"));
+  const plain = withResearchTools(polish, DEFAULT_RESEARCH_TOOLS);
+  assert.ok(plain.expectedArtifacts.includes("output/endnote.docx"));
+  assert.ok(plain.expectedArtifacts.includes("output/zotero.docx"));
+  assert.equal(plain.expectedArtifacts.includes("output/zotero.rtf"), false);
+  assert.ok(plain.humanTasks?.some((h) => h.title === "换样式时打开域稿"));
+  assert.equal(plain.humanTasks?.some((h) => /打开 (EndNote|Zotero) 域稿/.test(h.title)), false);
+  assert.equal(withResearchTools(notes, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "zotero" }).expectedArtifacts.includes("output/zotero.docx"), false);
   const notesEndnote = withResearchTools(notes, { ...DEFAULT_RESEARCH_TOOLS, libraryExport: "endnote" });
   assert.ok(notesEndnote.skills.includes("endnote-bridge"));
   assert.match(notesEndnote.brief, /按 references\.bib 重写/);
   assert.equal(notesEndnote.expectedArtifacts.includes("papers/endnote-import.ris"), false);
+  for (const id of ["research-paper", "thesis", "submission-rebuttal"]) {
+    const finals = template(id).steps.filter((s) =>
+      ["research-paper-polish", "thesis-final", "journal-format"].includes(s.workspaceName ?? ""),
+    );
+    assert.ok(finals.length > 0, id);
+    for (const step of finals) {
+      assert.ok(step.expectedArtifacts.includes("output/endnote.docx"), `${id}/${step.name}`);
+      assert.ok(step.expectedArtifacts.includes("output/zotero.docx"), `${id}/${step.name}`);
+    }
+  }
 });
 
 test("Zotero 同步技能跟 lit_source，不跟已废除的 literature 设置", () => {

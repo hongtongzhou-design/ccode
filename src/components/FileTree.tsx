@@ -21,6 +21,8 @@ export interface SearchResultDto {
   isDir: boolean;
   /** 相对搜索根的路径（后端算好，直接展示） */
   rel: string;
+  /** 最近修改时间（ISO） */
+  modified?: string | null;
 }
 
 export interface DirEntryDto {

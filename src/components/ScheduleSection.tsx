@@ -87,13 +87,11 @@ const HISTORY_PREVIEW = 5;
 /** 「＋ 定时巡检」弹层：文献雷达 / 已有巡检技能 / 新建巡检技能（跟 AI 写 SKILL.md，确认才落盘） */
 function CreateScheduleModal({
   projectRoot,
-  steps,
   onClose,
   onCreated,
   onDraftStarted,
 }: {
   projectRoot: string;
-  steps: { name: string }[];
   onClose: () => void;
   onCreated: (warning?: string) => Promise<void>;
   onDraftStarted: () => void;
@@ -108,7 +106,6 @@ function CreateScheduleModal({
   const [weekday, setWeekday] = useState(1);
   const [time, setTime] = useState("09:00");
   const [profileId, setProfileId] = useState("");
-  const [linkedStep, setLinkedStep] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -179,7 +176,6 @@ function CreateScheduleModal({
             hour,
             minute,
             profileId: profileId || null,
-            linkedStep: linkedStep || null,
           },
         });
         beginAskAi({
@@ -209,7 +205,7 @@ function CreateScheduleModal({
           hour,
           minute,
           profileId: profileId || null,
-          linkedStep: linkedStep || null,
+          linkedStep: null,
         },
       });
       if (!isLitWatchSkill(skill)) {
@@ -322,6 +318,9 @@ function CreateScheduleModal({
         </div>
         <label className="mb-4 block text-sm">
           <span className="mb-1 block text-xs text-l3">运行配置（可选）</span>
+          <span className="mb-1 block text-micro text-l4">
+            文献雷达选 Codex。没有后缀的只在课题目录里写。写着「会批准全部操作」的不要用于定时巡检。
+          </span>
           <select
             className={fieldClass}
             value={profileId}
@@ -348,23 +347,6 @@ function CreateScheduleModal({
               <p className="mb-3 text-xs text-warn-text">⚠ {caution}</p>
             ) : null;
           })()}
-        {steps.length > 0 && (
-          <label className="mb-4 block text-sm">
-            <span className="mb-1 block text-xs text-l3">关联步骤（可选）</span>
-            <select
-              className={fieldClass}
-              value={linkedStep}
-              onChange={(e) => setLinkedStep(e.target.value)}
-            >
-              <option value="">不关联</option>
-              {steps.map((s) => (
-                <option key={s.name} value={s.name}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
         {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end gap-2">
           <button
@@ -452,13 +434,11 @@ function RunHistoryItem({
 
 function EditScheduleModal({
   schedule,
-  steps,
   profiles,
   onClose,
   onSaved,
 }: {
   schedule: ScheduleDto;
-  steps: { name: string }[];
   profiles: { id: string; name: string; agent: string }[];
   onClose: () => void;
   onSaved: (warning?: string) => Promise<void>;
@@ -472,7 +452,6 @@ function EditScheduleModal({
   const [weekday, setWeekday] = useState(schedule.weekday ?? 1);
   const [time, setTime] = useState(`${String(schedule.hour).padStart(2, "0")}:${String(schedule.minute).padStart(2, "0")}`);
   const [profileId, setProfileId] = useState(schedule.profileId ?? "");
-  const [linkedStep, setLinkedStep] = useState(schedule.linkedStep ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const caps = useAgentCaps();
@@ -511,7 +490,7 @@ function EditScheduleModal({
           hour,
           minute,
           profileId: profileId || null,
-          linkedStep: linkedStep || null,
+          linkedStep: null,
         },
       });
       if (!isLitWatchSkill(skill)) {
@@ -546,9 +525,8 @@ function EditScheduleModal({
           {frequency === "weekly" && <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">星期</span><select className={fieldClass} value={weekday} onChange={(e) => setWeekday(Number(e.target.value))}>{["一","二","三","四","五","六","日"].map((d, i) => <option key={d} value={i + 1}>周{d}</option>)}</select></label>}
           <label className="block flex-1 text-sm"><span className="mb-1 block text-xs text-l3">时间</span><input className={fieldClass} type="time" required value={time} onChange={(e) => setTime(e.target.value)} /></label>
         </div>
-        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">运行配置</span><select className={fieldClass} value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">自动</option>{profiles.map((p) => { const meta = profileScheduleMeta(p, caps); return <option key={p.id} value={p.id} disabled={meta.disabled}>{meta.label}</option>; })}</select></label>
+        <label className="mb-3 block text-sm"><span className="mb-1 block text-xs text-l3">运行配置</span><span className="mb-1 block text-micro text-l4">文献雷达选 Codex。没有后缀的只在课题目录里写。</span><select className={fieldClass} value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">自动</option>{profiles.map((p) => { const meta = profileScheduleMeta(p, caps); return <option key={p.id} value={p.id} disabled={meta.disabled}>{meta.label}</option>; })}</select></label>
         {profileId && (() => { const p = profiles.find((x) => x.id === profileId); const caution = p ? headlessWriteCaution(caps[p.agent]?.headlessWrite) : null; return caution ? <p className="mb-3 text-xs text-warn-text">⚠ {caution}</p> : null; })()}
-        {steps.length > 0 && <label className="mb-4 block text-sm"><span className="mb-1 block text-xs text-l3">关联步骤</span><select className={fieldClass} value={linkedStep} onChange={(e) => setLinkedStep(e.target.value)}><option value="">不关联</option>{steps.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}</select></label>}
         {error && <p className="mb-3 text-sm text-err-text">{error}</p>}
         <div className="flex justify-end gap-2"><button type="button" onClick={onClose} className="rounded-sm px-3 py-1.5 text-sm text-l2 hover:bg-hover">取消</button><button type="submit" disabled={busy} className="rounded-sm border border-cta-bd bg-cta px-3 py-1.5 text-sm text-cta-text">{busy ? "保存中…" : "保存"}</button></div>
       </form>
@@ -714,12 +692,9 @@ function EditWatchSkillModal({
  */
 export default function ScheduleSection({
   projectRoot,
-  steps = [],
   layout = "fold",
 }: {
   projectRoot: string;
-  /** 项目步骤表：新建弹层「关联步骤」下拉的选项（空表 = 不渲染该下拉） */
-  steps?: { name: string }[];
   /** card = 办公侧栏常驻卡片，不折叠 */
   layout?: "fold" | "card";
 }) {
@@ -1089,7 +1064,7 @@ export default function ScheduleSection({
                       ⋯
                     </button>
                   </div>
-                  {/* meta 行（窄栏不挤主行）：周期 · 技能 · 关联步骤 · 运行配置；
+                  {/* meta 行（窄栏不挤主行）：周期 · 技能 · 运行配置；
                       配置行内可改，hover 才显边框降存在感，绑定被删给出可见标记 */}
                   <div className="ml-9 mt-0.5 flex min-w-0 items-center gap-2">
                     <span className="shrink-0 text-micro text-l3">
@@ -1098,14 +1073,6 @@ export default function ScheduleSection({
                     <span className="shrink-0 text-micro text-l4">
                       {s.skill}
                     </span>
-                    {s.linkedStep && (
-                      <span
-                        className="min-w-0 truncate text-micro text-l4"
-                        title={s.linkedStep}
-                      >
-                        → {s.linkedStep}
-                      </span>
-                    )}
                     <select
                       value={s.profileId ?? ""}
                       onChange={(e) => void changeProfile(s, e.target.value)}
@@ -1198,7 +1165,6 @@ export default function ScheduleSection({
       {createOpen && (
         <CreateScheduleModal
           projectRoot={projectRoot}
-          steps={steps}
           onClose={() => setCreateOpen(false)}
           onCreated={async (warning) => {
             setCreateOpen(false);
@@ -1216,7 +1182,6 @@ export default function ScheduleSection({
       {editSchedule && (
         <EditScheduleModal
           schedule={editSchedule}
-          steps={steps}
           profiles={profiles}
           onClose={() => setEditSchedule(null)}
           onSaved={async (warning) => {

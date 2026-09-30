@@ -120,7 +120,10 @@ test("空落点人工事项必须使用 manual，且推荐技能存在于内置�
   for (const template of PIPELINE_TEMPLATES) {
     for (const step of template.steps) {
       for (const task of step.humanTasks ?? []) {
-        if (!task.target.trim()) assert.equal(task.completion ?? "manual", "manual", `${template.id}/${step.name}/${task.title}`);
+        // 落点可省（行内处理的人工事项没有 target，例如「更换引用样式」）。
+        if (!(task.target ?? "").trim()) {
+          assert.equal(task.completion ?? "manual", "manual", `${template.id}/${step.name}/${task.title}`);
+        }
       }
       for (const skill of step.skills) assert.ok(builtin.has(skill), `${template.id}/${step.name} 使用未播种技能：${skill}`);
     }
@@ -154,7 +157,8 @@ test("每套模板有自己的纪律，没填的全局设定留占位", () => {
   );
 });
 
-test("Zotero 只默认挂到三套科研文献检索步骤，Origin/EndNote 保持可选", () => {
+test("Zotero 检索只默认挂三套科研文献步骤；定稿默认交两份域稿", () => {
+  const citeSteps = new Set(["polish", "research-paper-polish", "thesis-final", "journal-format"]);
   for (const id of ["review", "research-paper", "thesis"]) {
     const template = PIPELINE_TEMPLATES.find((t) => t.id === id);
     assert.ok(template, `缺少模板：${id}`);
@@ -172,11 +176,19 @@ test("Zotero 只默认挂到三套科研文献检索步骤，Origin/EndNote 保�
   }
   for (const template of PIPELINE_TEMPLATES) {
     for (const step of template.steps) {
-      if (!step.skills.includes("lit-search")) {
+      const cites = citeSteps.has(step.workspaceName ?? "");
+      if (!step.skills.includes("lit-search") && !cites) {
         assert.ok(!step.skills.includes("zotero-sync"), `${template.id}/${step.name} 错误挂载 zotero-sync`);
       }
       assert.ok(!step.skills.includes("origin-plot"), `${template.id}/${step.name} 不应默认挂载 origin-plot`);
-      assert.ok(!step.skills.includes("endnote-bridge"), `${template.id}/${step.name} 不应默认挂载 endnote-bridge`);
+      if (cites) {
+        assert.ok(step.skills.includes("endnote-bridge"), `${template.id}/${step.name} 定稿应挂 endnote-bridge`);
+        assert.ok(step.skills.includes("zotero-sync"), `${template.id}/${step.name} 定稿应挂 zotero-sync`);
+        assert.ok(step.expectedArtifacts.includes("output/endnote.docx"));
+        assert.ok(step.expectedArtifacts.includes("output/zotero.docx"));
+      } else {
+        assert.ok(!step.skills.includes("endnote-bridge"), `${template.id}/${step.name} 不应默认挂载 endnote-bridge`);
+      }
     }
   }
 });
@@ -229,7 +241,10 @@ test("quarto-render 随包 CSL 是编号引用", () => {
   assert.match(csl, /prefix="\[" suffix="\]"/);
 });
 
-test("Quarto 渲染步骤先按项目 PDF 选定引用样式，不设默认", () => {
+test("引用格式只在定稿步定：起草步固定编号制，定稿步指向流程线选择器", () => {
+  // 起草步：不装选择器，初稿固定按编号制渲（YAML 挂随包 ieee.csl）。
+  // 定稿步：样式由人在流程线「更换引用样式」上选，简报必须指向那一处。
+  const draftNames = ["综述初稿", "论文初稿"];
   for (const template of PIPELINE_TEMPLATES) {
     const variants =
       template.id === "submission-rebuttal"
@@ -241,9 +256,21 @@ test("Quarto 渲染步骤先按项目 PDF 选定引用样式，不设默认", ()
     for (const steps of variants) {
       for (const step of steps) {
         if (!step.run.some((run) => /quarto render\s+/.test(run.command))) continue;
-        assert.match(step.brief, /citation-style\.md/);
-        assert.match(step.brief, /不设默认样式/);
-        assert.equal(step.brief.includes("ieee.csl"), false, step.name);
+        // 投稿返修的「期刊格式适配」只对特定刊适配，不属起草/定稿两分
+        if (template.id === "submission-rebuttal") {
+          assert.match(step.brief, /更换引用样式/, step.name);
+          continue;
+        }
+        if (draftNames.includes(step.name)) {
+          assert.match(step.brief, /初稿固定用编号制/, step.name);
+          assert.equal(
+            (step.humanTasks ?? []).some((h) => /引用样式/.test(h.title)),
+            false,
+            `${step.name} 不该再挂引用样式事项：格式在定稿步定`,
+          );
+        } else {
+          assert.match(step.brief, /更换引用样式/, step.name);
+        }
       }
     }
   }
@@ -465,10 +492,15 @@ test("综述初稿：不以词数为完成标准，扩写必须回笔记或原�
     (draft.acceptanceCriteria ?? []).some((c) => /首页必须能读出/.test(c)),
     "PDF 验收不得只认非零字节",
   );
-  const after = (draft.humanTasks ?? []).filter((t) => t.timing === "after");
-  assert.ok(
-    after.some((t) => t.title.includes("审阅初稿")),
-    "综述初稿须有「审阅初稿再开润色」，坏稿不能直接进润色",
+  assert.equal(
+    (draft.humanTasks ?? []).some((t) => /审阅|看一眼/.test(t.title)),
+    false,
+    "初稿不再另挂审阅勾或硬伤计数",
+  );
+  const outline = review?.steps.find((s) => s.name === "综述大纲");
+  assert.equal(
+    (outline?.humanTasks ?? []).some((t) => /审阅|看一眼/.test(t.title)),
+    false,
   );
 });
 

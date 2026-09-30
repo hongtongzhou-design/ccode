@@ -166,7 +166,7 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
   const illustration = stepTakesIllustration(step);
   const lit = litSource.trim();
   if (reading && (lit === "zotero" || tools.libraryExport === "zotero")) {
-    mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：导入用「从 Zotero 导入」（只读，不 POST）。用户若把 PDF 拖进 Zotero，它会检索元数据并生成条目，拖完再导入。未使用 Zotero 的项目不要走这条，题录直接写入 references.bib。同步用待获取清单「同步到 Zotero」或拖 to-fetch.ris。已有主 bib 键不改。交付在定稿，交 output/zotero.rtf。");
+    mount("zotero-sync", ["papers/zotero-sync.md"], "Zotero：导入用「从 Zotero 导入」（只读，不 POST）。用户若把 PDF 拖进 Zotero，它会检索元数据并生成条目，拖完再导入。未使用 Zotero 的项目不要走这条，题录直接写入 references.bib。同步用待获取清单「同步到 Zotero」或拖 to-fetch.ris。已有主 bib 键不改。定稿同时交 output/endnote.docx 与 output/zotero.docx。");
   }
   if (reading && (lit === "endnote" || tools.libraryExport === "endnote")) {
     const ownsImport = step.skills.includes("lit-search");
@@ -188,35 +188,10 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
   if (tools.illustration === "blender" && illustration) {
     mount("blender-research", ["analysis/build_scene.py", "figures/blender-manifest.json", "figures/blender-schematic.png", `${outputRoot}/blender/scene.blend`], `Blender：仅用于本步明确的结构/装置/机制示意；不把示意冒充实验观测。先确认真实尺寸、单位、来源/许可与不按比例部分。MCP 无 OS 沙箱，使用新建受控工程；交付脚本、${outputRoot}/blender/scene.blend、figures/blender-schematic.png 和 manifest，后台重建失败非零退出。`, "核对 Blender 结构、比例、来源和示意标注");
   }
-  if ((tools.libraryExport === "endnote" || tools.libraryExport === "zotero") && stepTakesEndnoteCite(step) && tools.manuscript !== "latex") {
-    const md =
-      step.workspaceName === "research-paper-polish"
-        ? "manuscript/paper-final.md"
-        : step.workspaceName === "thesis-final"
-          ? "manuscript/thesis-final.md"
-          : step.workspaceName === "journal-format"
-            ? "submission/formatted.md"
-            : "manuscript/review-final.md";
-    if (tools.libraryExport === "zotero") {
-      mount(
-        "zotero-sync",
-        ["output/zotero.rtf", "papers/zotero-import.ris"],
-        `Zotero 交稿：用技能 scripts/zotero_rtf.py 从 ${md} 的 [@键] 写出 output/zotero.rtf 和 papers/zotero-import.ris。未匹配键不交稿。不点 Zotero 插件。库里还没有这些文献时，先导入这份 RIS；然后对 zotero.rtf 做一次 RTF Scan，再换引用样式。`,
-        "导入 RIS 并对 Zotero 稿做一次 RTF Scan",
-      );
-    } else {
-      mount(
-        "endnote-bridge",
-        ["output/endnote.docx", "papers/endnote-cite-report.md"],
-        `EndNote 交稿：用技能 scripts/cite_docx.py 从 ${md} 的 [@键] 写出 output/endnote.docx（真正的 ADDIN EN.CITE，带 traveling library）。未匹配键只写 papers/endnote-cite-report.md、不交 docx。不覆盖 manuscript/source.docx，不点 Word 插件。人打开域稿后 Update Citations and Bibliography，再换 Output Style。`,
-        "打开 EndNote 域稿并 Update 一次",
-      );
-    }
-  }
   if (tools.manuscript !== "markdown" && /论文|初稿|定稿|格式|投稿|回复/.test(step.name)) {
     notes.push(tools.manuscript === "latex"
       ? "稿件以 LaTeX 原生源码为最终载体：已有稿先保留来源与版本，本步 md 是内容/审查交付；定稿须通过 LaTeX 模板编译并交付源码包与图源。不得把 Markdown 的完成状态当成 TeX 版面验收。"
-      : "稿件以已有 Word 原件为最终载体：本步 Markdown/Quarto 输出只作建议稿或审查材料，不覆盖 source.docx。EndNote 域稿另写 output/endnote.docx，不往 source.docx 里塞假域。由人将变更应用至原件、刷新引用插件并核对最终 PDF 后才提交。");
+      : "稿件以已有 Word 原件为最终载体：本步 Markdown/Quarto 输出只作建议稿或审查材料，不覆盖 source.docx。引用域另写 output/endnote.docx 与 output/zotero.docx，不往 source.docx 里塞假域。由人将变更应用至原件、刷新引用插件并核对最终 PDF 后才提交。");
   }
   // 原生稿件分支有自己的正式交付；不把适配说明的 Quarto 输出当投稿稿。
   const revision = /^rebuttal-r(\d+)$/.exec(step.workspaceName ?? "");
@@ -233,11 +208,16 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
     const nativeOutput = native ? `submission/latex${round ? `-r${round}` : ""}/main.tex`
       : round ? `manuscript/revised-r${round}.docx` : "submission/formatted.docx";
     const pdf = round ? `output/revised-r${round}.pdf` : "output/formatted.pdf";
+    const citeDocs = native
+      ? []
+      : step.expectedArtifacts.filter((p) => p === "output/endnote.docx" || p === "output/zotero.docx");
+    const dropCite = (p: string) => native && (p === "papers/endnote-cite-report.md" || p === "papers/zotero-cite-report.md");
+    const dropSkill = (skill: string) => skill === "quarto-render" || (native && (skill === "endnote-bridge" || skill === "zotero-sync"));
     replace("anyOfInputs", [[input]]);
-    replace("expectedArtifacts", [...new Set([...step.expectedArtifacts.filter((p) => !(p.startsWith("output/") && /\.(pdf|docx)$/.test(p))), nativeOutput, pdf])]);
+    replace("expectedArtifacts", [...new Set([...step.expectedArtifacts.filter((p) => !(p.startsWith("output/") && /\.(pdf|docx)$/.test(p)) && !dropCite(p)), nativeOutput, pdf, ...citeDocs])]);
     replace("run", []);
-    replace("skills", step.skills.filter((skill) => skill !== "quarto-render"));
-    replace("requiredSkills", step.requiredSkills.filter((skill) => skill !== "quarto-render"));
+    replace("skills", step.skills.filter((skill) => !dropSkill(skill)));
+    replace("requiredSkills", step.requiredSkills.filter((skill) => !dropSkill(skill)));
     notes.push(`原生稿件正式交付：输入 ${input}；交付 ${nativeOutput} 与 ${pdf}。原简报的 Markdown 只保留修改/适配说明，不用 Quarto 将说明冒充正式稿；${native ? "将依赖的章节/bib/图按相对路径一起置于该轮源码包，使用期刊要求的 TeX 引擎编译并保存日志" : "在原 Word 稿的副本上人工应用建议并保留插件域，再由 Word 导出 PDF；未完成人工步骤就保持待审"}。不能用换后缀或重新生成普通 docx 替代。`);
     if (!step.humanTasks.some((h) => h.title === "核对原生稿件与正式 PDF")) {
       step.humanTasks.push({ title: "核对原生稿件与正式 PDF", guidance: "确认实际稿件、来源版本、图表和引用插件/TeX 引用，说明文档不是正式稿。", target: "", timing: "after", completion: "manual" });
@@ -250,6 +230,40 @@ export function withResearchTools(source: ProjectStepDto, tools: ResearchTools, 
     (added.replaced ??= {}).inputs = { before: step.inputs ?? null, after: inputs };
     Object.assign(step, { inputs });
     notes.push(`投稿材料必须审阅 ${native} 和 output/formatted.pdf；submission/formatted.md 仅为适配说明，不是审稿正文。科学论断/图表/引用核对以原生稿件及实际 PDF 为准。`);
+  }
+  // 放在 LaTeX 替换之后：原生 TeX 会改写 skills，提前挂上的域稿技能会被写回去。
+  if (stepTakesEndnoteCite(step) && tools.manuscript !== "latex") {
+    const md =
+      step.workspaceName === "research-paper-polish"
+        ? "manuscript/paper-final.md"
+        : step.workspaceName === "thesis-final"
+          ? "manuscript/thesis-final.md"
+          : step.workspaceName === "journal-format"
+            ? "submission/formatted.md"
+            : "manuscript/review-final.md";
+    mount(
+      "endnote-bridge",
+      ["output/endnote.docx", "papers/endnote-cite-report.md"],
+      `EndNote 交稿：用技能 scripts/cite_docx.py 从 ${md} 的 [@键] 写出 output/endnote.docx（真正的 ADDIN EN.CITE，带 traveling library）。运行时加 --project-root，项目根为任务书给出的绝对路径。只读 papers/endnote-library.path 里那一行 .enl 绝对路径，不扫磁盘。DOI 整段相同且只有一条未进废纸篓的记录时，才写入记录号和库编号；多条、没有、没指定库都不猜，写进报告。未匹配键只写 papers/endnote-cite-report.md、不交 docx。不覆盖 manuscript/source.docx，不点 Word 插件。`,
+    );
+    mount(
+      "zotero-sync",
+      ["output/zotero.docx", "papers/zotero-cite-report.md"],
+      `Zotero 交稿：用技能 scripts/zotero_docx.py 从同一份 ${md} 的 [@键] 写出 output/zotero.docx（真正的 ADDIN ZOTERO_ITEM CSL_CITATION，文献嵌在域里）。只读当前默认 Zotero 配置写明的数据目录，只查用户库。DOI 整段相同且只有一条未删除条目时，才写入那条的条目地址；多条或不唯一都不猜，写进报告。未匹配键只写 papers/zotero-cite-report.md、不交 docx。不点 Zotero 插件。`,
+    );
+    const fieldDoc = "换样式时打开域稿";
+    if (!step.humanTasks.some((h) => h.title === fieldDoc || h.title.includes("域稿"))) {
+      step.humanTasks.push({
+        title: fieldDoc,
+        guidance:
+          "打开 output/endnote.docx 或 output/zotero.docx，在 Word 里点一次 Update 或 Refresh，再换样式。文献库同步在精读做过，这里不会替你点 Word。",
+        target: "",
+        timing: "after",
+        completion: "manual",
+        optional: true,
+      });
+      added.human.push(fieldDoc);
+    }
   }
   if (notes.length) step.brief = `${step.brief.trimEnd()}\n\n${START}${JSON.stringify(added)} -->\n本项目选定工具（优先于默认软件示例）：\n${notes.map((n) => `- ${n}`).join("\n")}\n${END}\n`;
   return step;

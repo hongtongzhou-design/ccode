@@ -45,6 +45,7 @@
   **一切实心状态圆点/圆形**使用。**禁止用底色档铺实心形状**——浅色下 `--color-warn` 是浅黄 `#fdf1cd`，
   铺成圆点/22px 步进器大圆会在近白 canvas 上消失（v3.85 已修 `stepCircleClass` 的 blocked、
   任务卡主仓改动点；同为实心圆的 done 本就用 `-text` 档，原先是自相矛盾；大圆右上角待确认角标 2026-09-19 用户拍板拿掉）；
+  **期刊指标标签**（IF / 中科院分区 / TOP）不用 `bg-ok` / `bg-warn` / `bg-cta-pill` 实心底：深色主题这三块近黑，浅色铺开发闷。用同色文字的 15% 淡底 + 30% 细边，1 区与 TOP 走强调色，2 区通过色，3 区提醒色，4 区与仅 IF 走 `bg-inset`。出处 `journalMetricTone`。
   **结果横幅一律 bg-strip/inset 底 + ✓/✗ 语义色文字**，不用整块 bg-ok/bg-err（bg-err
   仅留给需警惕的小 pill）；**diff 增删行铺底走专用令牌 `--color-diff-add-bg/fg`、`--color-diff-del-bg/fg`**（v3.81：
   深色主题沿用深底浅字，浅色主题在 `[data-theme$="-light"]` 统一覆写为 GitHub 式浅底深字——ok/err 深底整行铺在浅底上
@@ -187,6 +188,7 @@
   给页头换底色必须改这条，**不得在 PageHeader JSX 上再铺 `bg-canvas`**（会在玻璃上盖回实心块）。
   项目页身份头（`ProjectIdentityHeader`）复用同一类（rail2 基色自动跟随 `data-surface="workspace"`）；
   全站页面级 sticky 头只此一套玻璃配方，**禁止再各自铺实心底**。
+  **项目页签不进滚动层（2026-09-29）**：课题名和「对话 / 任务 / 定时任务 / 文件 / Agents」钉在项目主区顶部（`PageFrame fill` + `ProjectSurfaceTabs` 的页签行 `shrink-0`）。滚动只发生在页签下面的 `data-project-main-scroll`。文件页、对话页的列表在这块里自己滚，不再用 `100dvh` 估一整屏高度。
 - **终端标签条与画布同底（2026-09-13）**：标签条不再铺 `bg-strip` 实心带；未激活标签 = 裸文字 + hairline
   分隔、激活 `bg-raised` 胶囊。标签胶囊化两轮实验（inset 底色胶囊 / 内容取宽）均被用户否决回退——
   标签视觉维持原始形态，勿再动。「＋」新建钮是同高圆形胶囊，底色用 inset、边线用 hairline、加号用 l4，比激活标签淡一档；悬停只把加号提亮。

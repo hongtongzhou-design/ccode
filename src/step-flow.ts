@@ -1,5 +1,6 @@
 import type { HumanTaskStateDto, ProjectStepDto } from "./types";
 import { REVIEW_SAVE } from "./review-save-copy.ts";
+import { isCitationStyleTask } from "./citation-style-choice.ts";
 
 /** 步骤内协同流程线（v3.71）的纯逻辑：把「这一步里人和 agent 的动作」按先后排成有序节点链，
  *  全部状态派生（无状态机）。节点顺序 = 讨论种子 → before 人工事项 → agent 执行
@@ -76,6 +77,15 @@ export function demoReadPaperResource<T extends { type: string; path: string }>(
 /** 可选分区已经标明「可选」，标题里再写「（可选）」是重复。 */
 export function stripOptionalTitlePrefix(title: string): string {
   return title.replace(/^（可选）\s*/, "");
+}
+
+/**
+ * 人工事项在流程线上的标签。引用样式只有一种形态「更换」——
+ * 旧档案里还可能是「填写引用样式」，按同一件事显示。
+ */
+export function humanTaskLabel(h: { title: string; optional?: boolean }): string {
+  if (isCitationStyleTask(h.title)) return "更换引用样式";
+  return h.optional ? stripOptionalTitlePrefix(h.title) : h.title;
 }
 
 export function buildStepFlow(args: {
@@ -158,7 +168,7 @@ export function buildStepFlow(args: {
       key: `human:${h.title}`,
       kind: "human",
       section: h.optional ? "optional" : "main",
-      label: h.optional ? stripOptionalTitlePrefix(h.title) : h.title,
+      label: humanTaskLabel(h),
       hint: undefined,
       done: h.done,
       human: h,
@@ -179,7 +189,7 @@ export function buildStepFlow(args: {
       key: `human:${h.title}`,
       kind: "human",
       section: h.optional ? "optional" : "main",
-      label: h.optional ? stripOptionalTitlePrefix(h.title) : h.title,
+      label: humanTaskLabel(h),
       hint: undefined,
       done: h.done,
       human: h,
@@ -199,7 +209,7 @@ export function buildStepFlow(args: {
       key: `human:${h.title}`,
       kind: "human",
       section: "main",
-      label: h.optional ? stripOptionalTitlePrefix(h.title) : h.title,
+      label: humanTaskLabel(h),
       hint: undefined,
       done: h.done,
       human: h,
@@ -233,20 +243,20 @@ export function buildStepFlow(args: {
       human: h,
     });
   }
-  if (args.endnoteExport && runStatus !== "pending" && afterEndnote.length === 0) {
+  if (args.endnoteExport && afterEndnote.length === 0) {
     nodes.push({
       key: "endnote-export",
       kind: "human",
       section: "optional",
       label: "同步到文献库",
       hint: runStatus === "done"
-        ? "按 references.bib 重写两份 RIS 再打开。PDF 点「打开 papers」，拖到库里对应的那一条上。"
+        ? "按引文库重写后打开。已有同一 DOI 的不要再导入。PDF 拖到库里那一条上。"
         : "先保存进项目，才可以同步。",
       done: false,
       skipCurrent: true,
     });
   }
-  if (args.continueNotes && runStatus !== "pending") {
+  if (args.continueNotes) {
     nodes.push({
       key: "continue-notes",
       kind: "human",
@@ -419,6 +429,33 @@ export interface ToFetchItem {
   url: string;
   /** 已补齐（编号后有 ✓） */
   done: boolean;
+  /** 行里写出的期刊全称。DOI 后面再挂刊名、缩写时从这里取，不进 url。 */
+  venue: string;
+}
+
+/** 从一段里取出能打开的 DOI 或 http 链接。刊名、缩写、OA 标记留在后面。 */
+export function linkTokenFromSegment(segment: string): string {
+  const marked = segment.match(
+    /(?:https?:\/\/\S+|doi:\s*10\.\d{4,9}\/\S+|10\.\d{4,9}\/\S+)/i,
+  );
+  if (!marked) return "";
+  return marked[0]
+    .replace(/^doi:\s*/i, "")
+    .replace(/[.,;）)]+$/g, "")
+    .trim();
+}
+
+/** DOI 后面紧跟的期刊全称。缩写和〔OA〕不拿来对指标表。 */
+export function venueFromSegment(segment: string, link: string): string {
+  let rest = segment;
+  if (link) {
+    const at = rest.indexOf(link);
+    rest = at >= 0 ? rest.slice(at + link.length) : rest;
+  }
+  rest = rest.replace(/〔[^〕]*〕/g, " ").replace(/\[[^\]]*\]/g, " ");
+  rest = rest.replace(/^[\s—–\-]+/, "").trim();
+  const cut = rest.split(/〔|\[/)[0]?.trim() ?? "";
+  return cut;
 }
 
 /** 解析 to-fetch.md 的条目行，兼容三代格式（2026-09-16 放宽：老项目清单是裸行，
@@ -447,19 +484,30 @@ export function parseToFetchItems(text: string): ToFetchItem[] {
     body = body.trim();
     if (!body) return;
     const segs = body.split(/\s+—\s+|\s+--\s+/);
-    const last = (segs[segs.length - 1] ?? "").trim();
-    const looksLink =
-      /^(?:doi:\s*)?10\.\d{4,9}\/\S+$/i.test(last) ||
-      /^https?:\/\/\S+$/i.test(last);
-    if (segs.length < 2 || !looksLink) {
+    let url = "";
+    let venue = "";
+    let linkAt = -1;
+    for (let s = 1; s < segs.length; s += 1) {
+      const token = linkTokenFromSegment(segs[s] ?? "");
+      if (!token) continue;
+      url = token;
+      venue = venueFromSegment(segs[s] ?? "", token);
+      const next = (segs[s + 1] ?? "").trim();
+      if (!venue && next && !linkTokenFromSegment(next)) {
+        venue = venueFromSegment(next, "");
+      }
+      linkAt = s;
+      break;
+    }
+    if (linkAt < 1) {
       // 编号/列表行没链接也保留（url 空占位）；裸行必须带链接尾巴才算条目
       if (!numbered && !bulleted) return;
-      out.push({ line: i + 1, title: body, url: "", done });
+      out.push({ line: i + 1, title: body, url: "", done, venue: "" });
       return;
     }
-    // 标题 = 最后一段之外的全部（标题内含「 — 」不丢字）
-    const title = segs.slice(0, -1).join(" — ").trim();
-    out.push({ line: i + 1, title, url: last, done });
+    // 标题 = 链接段之前的全部（标题内含「 — 」不丢字）
+    const title = segs.slice(0, linkAt).join(" — ").trim();
+    out.push({ line: i + 1, title, url, done, venue });
   });
   return out;
 }

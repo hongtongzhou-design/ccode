@@ -2777,20 +2777,21 @@ fn strip_to_fetch_marker(line: &str) -> Option<&str> {
     (ws > 0).then(|| &rest[ws..])
 }
 
-/// 裸行条目判定：必须以「 — DOI/链接」尾巴收尾。末段 = 最后一个
-/// 「空白 — 空白」/「空白 -- 空白」分隔之后的部分（对应前端 split(/\s+—\s+|\s+--\s+/) 取末段）
+/// 裸行条目判定：分隔符后面的某一段里含 DOI 或 http 链接。
+/// 不要求链接占满最后一段——DOI 后面再挂刊名、〔OA〕仍是一条。
 fn to_fetch_bare_has_link_tail(line: &str) -> bool {
-    let mut last_tail: Option<&str> = None;
     let mut i = 0;
     while i < line.len() {
         if let Some(after) = strip_to_fetch_separator(&line[i..]) {
-            last_tail = Some(after);
+            if to_fetch_looks_link(after) {
+                return true;
+            }
             i = line.len() - after.len();
         } else {
             i += line[i..].chars().next().map_or(1, char::len_utf8);
         }
     }
-    last_tail.is_some_and(to_fetch_looks_link)
+    false
 }
 
 /// rest 以「空白+（— 或 --）+空白」开头时返回分隔符之后的剩余串
@@ -2812,29 +2813,22 @@ fn strip_to_fetch_separator(rest: &str) -> Option<&str> {
     (ws2 > 0).then(|| &after_dash[ws2..])
 }
 
-/// 末段是否像 DOI/链接（对应前端正则）：`doi:` 前缀可选；
-/// DOI = 10. + 4-9 位数字 + / + 非空白余段；链接 = http(s):// 开头且整体无空白
+/// 段内是否含能打开的 DOI 或 http 链接。整段就是 DOI 时算；DOI 后面再挂刊名、
+/// 〔OA〕、缩写也算。与前端 linkTokenFromSegment 同一口径：链接可以嵌在段里，
+/// 不必占满整段。
 fn to_fetch_looks_link(seg: &str) -> bool {
     let s = seg.trim();
-    let body = match s.get(..4) {
-        Some(p) if p.eq_ignore_ascii_case("doi:") => s[4..].trim_start(),
-        _ => s,
+    let lower = s.to_ascii_lowercase();
+    if lower.contains("http://") || lower.contains("https://") {
+        return true;
+    }
+    let rest = lower.strip_prefix("doi:").unwrap_or(&lower).trim_start();
+    let Some(at) = rest.find("10.") else {
+        return false;
     };
-    if let Some(rest) = body.strip_prefix("10.") {
-        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        if (4..=9).contains(&digits)
-            && rest[digits..].starts_with('/')
-            && !rest[digits + 1..].trim().is_empty()
-            && !rest[digits + 1..].chars().any(char::is_whitespace)
-        {
-            return true;
-        }
-    }
-    let lower = body.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        return !body.chars().any(char::is_whitespace);
-    }
-    false
+    let after = &rest[at + 3..];
+    let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    (4..=9).contains(&digits) && after[digits..].starts_with('/') && after.len() > digits + 1
 }
 
 /// 通用人工事项清单计数：每行一个目标，忽略空行、标题和注释。
@@ -2893,6 +2887,96 @@ fn no_placeholders_hit(root: &Path, target: &str) -> bool {
         .any(|mark| text.contains(mark))
 }
 
+/// 审查报告的「决定：」或待核实清单的「裁决：」是否已经是人的拍板。
+/// 接受/拒绝/修改，以及确认/删除该论断/改正为…，算拍完。待定、待裁决、空着不算。
+fn decision_value_cleared(value: &str) -> bool {
+    let value = value.split(['|', '｜']).next().unwrap_or(value).trim();
+    if value.is_empty() || value.starts_with('（') || value.starts_with('(') {
+        return false;
+    }
+    if value == "接受" || value == "拒绝" || value == "确认" || value == "删除该论断" {
+        return true;
+    }
+    if let Some(note) = value.strip_prefix("修改：").or_else(|| value.strip_prefix("修改:")) {
+        return !note.trim().is_empty();
+    }
+    value.starts_with("改正为") && !value["改正为".len()..].trim().is_empty()
+}
+
+/// 审查条目编号：R001 / S001 / V001，可带标题符或列表符。
+fn review_item_id(line: &str) -> Option<&str> {
+    let line = line
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .trim_start_matches(['-', '*'])
+        .trim();
+    let mut chars = line.chars();
+    let prefix = chars.next()?;
+    if prefix != 'R' && prefix != 'S' && prefix != 'V' {
+        return None;
+    }
+    let digits = chars.clone().take_while(|ch| ch.is_ascii_digit()).count();
+    if digits < 3 {
+        return None;
+    }
+    let end = 1 + digits;
+    if let Some(boundary) = line[end..].chars().next() {
+        if boundary.is_ascii_alphanumeric() {
+            return None;
+        }
+    }
+    Some(&line[..end])
+}
+
+/// `decisions_cleared` 完成判定：文件里每一条都有拍板，且没有「待裁决」。
+/// 审查报告认「决定：接受/拒绝/修改：…」；待核实清单认「裁决：确认/删除该论断/改正为…」。
+/// 只点了一条、其余还空着，不算完成。
+fn decisions_cleared_hit(root: &Path, target: &str) -> bool {
+    let rel = target.trim().trim_end_matches(['/', '\\']);
+    if rel.is_empty() || rel.contains('*') || rel.contains("..") || Path::new(rel).is_absolute() {
+        return false;
+    }
+    if !is_text_target(rel) {
+        return false;
+    }
+    let Ok(text) = fs::read_to_string(root.join(rel)) else {
+        return false;
+    };
+    if text.contains("待裁决") {
+        return false;
+    }
+    let mut ids = Vec::<String>::new();
+    let mut decided = std::collections::HashSet::<String>::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if let Some(id) = review_item_id(line) {
+            let id = id.to_string();
+            if !ids.contains(&id) {
+                ids.push(id.clone());
+            }
+            current = Some(id);
+        }
+        let trimmed = line.trim().trim_start_matches(['-', '*']).trim();
+        let value = trimmed
+            .strip_prefix("决定：")
+            .or_else(|| trimmed.strip_prefix("决定:"))
+            .or_else(|| trimmed.rsplit_once("裁决：").map(|(_, value)| value))
+            .or_else(|| trimmed.rsplit_once("裁决:").map(|(_, value)| value));
+        let Some(value) = value else {
+            continue;
+        };
+        if !decision_value_cleared(value) {
+            return false;
+        }
+        let Some(id) = current.clone() else {
+            return false;
+        };
+        decided.insert(id);
+    }
+    !ids.is_empty() && ids.iter().all(|id| decided.contains(id))
+}
+
 fn human_target_satisfied(
     root: &Path,
     target: &str,
@@ -2909,6 +2993,7 @@ fn human_target_satisfied(
             None => false,
         },
         "no_placeholders" => no_placeholders_hit(root, target),
+        "decisions_cleared" => decisions_cleared_hit(root, target),
         _ => hit_count.is_some(),
     }
 }
@@ -3261,13 +3346,39 @@ fn is_delivery_process_file(path: &str) -> bool {
     if path.contains("/api-cache/") || path.ends_with("/api-cache") {
         return true;
     }
+    // 产物目录里的检索过程：接口响应、候选池、判定草稿、日志。
+    // 不限 search 这一个名字。图、表、成稿不在这里，papers/ 里的清单也不在这里。
+    if is_artifact_process_file(&path) {
+        return true;
+    }
     if path == ".ccode" || path.starts_with(".ccode/") || path.contains("/.ccode/") {
         return true;
     }
     if path == "scripts" || path.starts_with("scripts/") || path.contains("/scripts/") {
         return true;
     }
+    // Quarto 把正文已引用的 figures/ 再拷进 output/figures/。源图已在 Git 里，
+    // 这份副本不是新产物，列出来只显示「同名存在，不覆盖」。
+    if path == "output/figures" || path.starts_with("output/figures/") {
+        return true;
+    }
     base.ends_with(".py")
+}
+
+/// 项目产物目录下的检索过程文件。目录名不限 search，扩展名是接口和草稿常用的那些。
+fn is_artifact_process_file(path: &str) -> bool {
+    let rest = path
+        .strip_prefix("artifacts/")
+        .or_else(|| path.split_once("/artifacts/").map(|(_, tail)| tail));
+    let Some(rest) = rest else { return false };
+    if rest.is_empty() {
+        return false;
+    }
+    let base = rest.rsplit('/').next().unwrap_or(rest).to_ascii_lowercase();
+    matches!(
+        base.rsplit_once('.').map(|(_, ext)| ext),
+        Some("json" | "jsonl" | "xml" | "tsv" | "log" | "txt")
+    )
 }
 
 fn delivery_paths(worktree: &Path, repo: &Path) -> Result<Vec<String>, String> {
@@ -3538,7 +3649,12 @@ pub async fn workspace_review_deliverables(id: String) -> Result<DeliverableRevi
     tauri::async_runtime::spawn_blocking(move || {
         let w = get_workspace(&db()?, &id)?;
         if let Some(pending) = read_delivery_pending(&id)? {
-            return load_delivery_review(&id, &pending.review_token);
+            if let Ok(review) = load_delivery_review(&id, &pending.review_token) {
+                let stale = review.files.iter().any(|file| is_delivery_process_file(&file.path));
+                if !stale {
+                    return Ok(review);
+                }
+            }
         }
         freeze_deliverables(&w, &live_repo_for(&w))
     })
@@ -5032,6 +5148,13 @@ mod tests {
 
     #[test]
     fn delivery_process_files_stay_out_of_review() {
+        assert!(is_delivery_process_file("artifacts/search/openalex/Q_OA1_000.json"));
+        assert!(is_delivery_process_file("artifacts/search/candidates.jsonl"));
+        assert!(is_delivery_process_file("artifacts/raw/openalex/page.json"));
+        assert!(is_delivery_process_file("artifacts/cache/hits.tsv"));
+        assert!(is_delivery_process_file("output/artifacts/search/run.log"));
+        assert!(!is_delivery_process_file("artifacts/figures/fig1.png"));
+        assert!(!is_delivery_process_file("artifacts/results.csv"));
         assert!(is_delivery_process_file("artifacts/api-cache/01b30a.json"));
         assert!(is_delivery_process_file("enrich_metadata.py"));
         assert!(is_delivery_process_file(".gitignore"));
@@ -5039,6 +5162,9 @@ mod tests {
         assert!(!is_delivery_process_file("papers/included.md"));
         assert!(!is_delivery_process_file("papers/to-fetch.ris"));
         assert!(!is_delivery_process_file("papers/endnote-import.ris"));
+        assert!(is_delivery_process_file("output/figures/fig1.png"));
+        assert!(!is_delivery_process_file("output/endnote.docx"));
+        assert!(!is_delivery_process_file("figures/fig1.png"));
     }
 
     fn git_available() -> bool {
@@ -7193,7 +7319,15 @@ mod tests {
         assert!(!to_fetch_line_is_entry("数字不足 — 10.1/abc"));
         assert!(to_fetch_line_is_entry("+ 加号也是列表 — 10.1002/y"));
         assert!(to_fetch_line_is_entry("✓ 开头裸行 — 10.1002/z"));
-        assert!(!to_fetch_line_is_entry("尾巴带空格 — 10.1002/a b"));
+        // DOI 在空白处截断，段内仍有合法 DOI，裸行算一条（与前端 \S+ 截断一致）
+        assert!(to_fetch_line_is_entry("尾巴带空格 — 10.1002/a b"));
+        assert!(!to_fetch_line_is_entry("只有说明 — 没有链接"));
+        // DOI 后面再挂刊名、标记，裸行仍是一条，不能当成说明文字丢掉
+        assert!(to_fetch_line_is_entry(
+            "Boride review — 10.1002/adfm.201906481 — Advanced Functional Materials〔OA〕"
+        ));
+        assert!(to_fetch_looks_link("10.1002/adfm.201906481 — Advanced Functional Materials〔OA〕"));
+        assert!(!to_fetch_looks_link("Advanced Functional Materials〔缩写：Adv. Funct. Mater.〕"));
     }
 
     #[test]
@@ -7245,6 +7379,75 @@ mod tests {
             "all",
             None,
             Some(0),
+            "",
+        ));
+        fs::create_dir_all(root.join("manuscript")).unwrap();
+        fs::write(
+            root.join("manuscript/review-report.md"),
+            "## 严重问题\n\nR001 位置：draft.md:3\n决定：接受\n\nR002 位置：draft.md:9\n决定：修改：改回原文数字\n",
+        )
+        .unwrap();
+        assert!(human_target_satisfied(
+            &root,
+            "manuscript/review-report.md",
+            "decisions_cleared",
+            None,
+            None,
+            "",
+        ));
+        fs::write(
+            root.join("manuscript/review-report.md"),
+            "R001 位置：draft.md:3\n决定：修改：\n",
+        )
+        .unwrap();
+        assert!(!human_target_satisfied(
+            &root,
+            "manuscript/review-report.md",
+            "decisions_cleared",
+            None,
+            None,
+            "",
+        ));
+        fs::write(
+            root.join("manuscript/review-report.md"),
+            "R001 位置：draft.md:3\n决定：接受\n\nR002 位置：draft.md:9\n问题：还没决定。\n",
+        )
+        .unwrap();
+        assert!(
+            !human_target_satisfied(
+                &root,
+                "manuscript/review-report.md",
+                "decisions_cleared",
+                None,
+                None,
+                "",
+            ),
+            "只决定了一条，其余空着不算完成"
+        );
+        fs::write(
+            root.join("manuscript/verification-decisions.md"),
+            "- V001 | 位置：review-final.md:4 | 裁决：确认 | 依据：\n- V002 | 位置：review-final.md:8 | 裁决：改正为12% | 依据：原文\n",
+        )
+        .unwrap();
+        assert!(human_target_satisfied(
+            &root,
+            "manuscript/verification-decisions.md",
+            "decisions_cleared",
+            None,
+            None,
+            "",
+        ));
+        fs::write(
+            root.join("manuscript/verification-decisions.md"),
+            "- V001 | 裁决：待裁决 | 依据：\n",
+        )
+        .unwrap();
+        assert!(!human_target_satisfied(
+            &root,
+            "manuscript/verification-decisions.md",
+            "decisions_cleared",
+            None,
+            None,
             "",
         ));
         fs::remove_dir_all(&dir).ok();

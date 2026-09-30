@@ -2971,7 +2971,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         </Row>
         <Row
           label="依赖体检"
-          hint="Git / Node.js / 安装渠道"
+          hint="Git / Node.js / Quarto / TeX / 拼图库"
           extra={
             depCheck ? (
               <div className="rounded-sm ccode-well p-2">
@@ -2989,6 +2989,38 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   tool="node"
                   channel={depCheck.channel}
                   entry={depInstall.entries.node}
+                  onInstall={(t) => void depInstall.install(t)}
+                />
+                <DepStatusLine
+                  label="Quarto"
+                  item={depCheck.quarto}
+                  tool="quarto"
+                  channel={depCheck.channel}
+                  entry={depInstall.entries.quarto}
+                  onInstall={(t) => void depInstall.install(t)}
+                />
+                <DepStatusLine
+                  label="TeX"
+                  item={depCheck.tex}
+                  tool="tex"
+                  channel={depCheck.channel}
+                  entry={depInstall.entries.tex}
+                  onInstall={(t) => void depInstall.install(t)}
+                />
+                <DepStatusLine
+                  label="PyMuPDF"
+                  item={depCheck.pymupdf}
+                  tool="pymupdf"
+                  channel={depCheck.channel}
+                  entry={depInstall.entries.pymupdf}
+                  onInstall={(t) => void depInstall.install(t)}
+                />
+                <DepStatusLine
+                  label="Pillow"
+                  item={depCheck.pillow}
+                  tool="pillow"
+                  channel={depCheck.channel}
+                  entry={depInstall.entries.pillow}
                   onInstall={(t) => void depInstall.install(t)}
                 />
                 <div className="flex items-center gap-2 py-1 text-xs text-l4">

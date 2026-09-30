@@ -155,7 +155,7 @@ test("after 事项未完成时卡在 after 节点（评审之前）", () => {
   assert.equal(flow.currentKey, "human:下载付费");
 });
 
-test("EndNote 交差在精读保存后出现，不挡开工、不靠项目设置", () => {
+test("EndNote 交差在精读开工前就列出，不挡开工、不靠项目设置", () => {
   const pending = buildStepFlow({
     step: step({}),
     states: [],
@@ -163,7 +163,9 @@ test("EndNote 交差在精读保存后出现，不挡开工、不靠项目设置
     runStatus: "pending",
     endnoteExport: true,
   });
-  assert.equal(pending.nodes.some((n) => n.key === "endnote-export"), false);
+  const early = pending.nodes.find((n) => n.key === "endnote-export");
+  assert.equal(early?.section, "optional");
+  assert.equal(early?.skipCurrent, true);
   const done = buildStepFlow({
     step: step({}),
     states: [],
@@ -180,7 +182,7 @@ test("EndNote 交差在精读保存后出现，不挡开工、不靠项目设置
   );
 });
 
-test("继续精读笔记在 EndNote 底下，不挡开工", () => {
+test("继续精读笔记在 EndNote 底下，开工前也列出，不挡开工", () => {
   const pending = buildStepFlow({
     step: step({ skills: ["lit-notes"] }),
     states: [],
@@ -189,7 +191,7 @@ test("继续精读笔记在 EndNote 底下，不挡开工", () => {
     endnoteExport: true,
     continueNotes: true,
   });
-  assert.equal(pending.nodes.some((n) => n.key === "continue-notes"), false);
+  assert.equal(pending.nodes.find((n) => n.key === "continue-notes")?.section, "optional");
   const done = buildStepFlow({
     step: step({ skills: ["lit-notes"] }),
     states: [],
@@ -447,6 +449,7 @@ test("parseToFetchItems：编号条目行解析（标题 — DOI，✓ 记已补
     title: "Deep Learning for Materials",
     url: "10.1002/adma.202304268",
     done: false,
+    venue: "",
   });
   assert.equal(items[1].done, true);
   assert.equal(items[1].title, "Graph Neural Networks Survey");
@@ -483,6 +486,17 @@ test("parseToFetchItems：旧格式裸行（无编号无符号）也出条目，
   const titled = parseToFetchItems("A study — of two parts — 10.1002/x.1");
   assert.equal(titled[0].title, "A study — of two parts");
   assert.equal(titled[0].url, "10.1002/x.1");
+});
+
+test("parseToFetchItems：DOI 后面的刊名和标记不吞进链接", () => {
+  const line =
+    "1. Boride review — 10.1002/adfm.201906481 — Advanced Functional Materials〔缩写：Adv. Funct. Mater.〕〔OA〕";
+  const [item] = parseToFetchItems(line);
+  assert.equal(item.url, "10.1002/adfm.201906481");
+  assert.equal(item.venue, "Advanced Functional Materials");
+  assert.equal(item.title, "Boride review");
+  const marked = parseToFetchItems("2. [已补] Paper — https://doi.org/10.1016/j.cej.2021.1 — 全文 papers/a.pdf");
+  assert.equal(marked[0].url, "https://doi.org/10.1016/j.cej.2021.1");
 });
 
 

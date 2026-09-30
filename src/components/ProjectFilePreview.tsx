@@ -14,6 +14,7 @@ export default function ProjectFilePreview({
   onOpenFile,
   onOpenReader,
   leading,
+  onAnnotate,
 }: {
   path: string;
   root: string;
@@ -22,6 +23,12 @@ export default function ProjectFilePreview({
   onOpenReader?: () => void;
   /** 文本预览标题栏左侧。审阅里用来放收起后的展开按钮。 */
   leading?: ReactNode;
+  /** 审阅划选：把选段和批注追加进意见框。只对 md 阅读态生效。 */
+  onAnnotate?: (
+    text: string,
+    fileName: string,
+    comment: string,
+  ) => string | null;
 }) {
   const kind = projectFilePreviewKind(path);
   const frame = "flex min-h-0 flex-1 flex-col";
@@ -81,6 +88,7 @@ export default function ProjectFilePreview({
           hideImmersive
           onOpenReader={onOpenReader}
           leading={leading}
+          onAnnotate={onAnnotate}
         />
       </Suspense>
     </div>

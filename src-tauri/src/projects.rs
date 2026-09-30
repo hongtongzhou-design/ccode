@@ -1129,7 +1129,7 @@ fn normalize_human_timing(timing: &str) -> String {
 /// 人工事项完成判定归一：未知值按 exists 处理，保证旧 project.toml 可读。
 pub(crate) fn normalize_human_completion(completion: &str) -> String {
     match completion.trim() {
-        "manual" | "all" | "no_placeholders" => completion.trim().to_string(),
+        "manual" | "all" | "no_placeholders" | "decisions_cleared" => completion.trim().to_string(),
         _ => "exists".into(),
     }
 }
@@ -3508,13 +3508,15 @@ pub async fn write_task_draft(
 }
 
 // ===== 示例课题（首启引导最小版落地，§11.4 backlog） =====
-// 在「文档/Ccode 示例课题」生成带演示数据的完整项目：目录骨架、程序生成的一页示例 PDF、
+// 在「文档/Mesa 示例课题」生成带演示数据的完整项目：目录骨架、程序生成的一页示例 PDF、
 // references.bib、README、英文综述五步流水线档案卡，然后 git 初始化并注册。
 // 幂等：已注册直接返回现有 project（进行中不覆盖）。
 // 目录还在但未注册（删除项目目录后废纸篓/iCloud 还原、或只摘了注册）：
 // 档案卡按当前英文综述模板重写，缺的演示文件才补，已有笔记/PDF/README 不动。
 
-const DEMO_DIR_NAME: &str = "Ccode 示例课题";
+const DEMO_DIR_NAME: &str = "Mesa 示例课题";
+/// 2026-09-30 前创建的示例课题用这个目录名。再点「创建示例课题」时先认它，避免旁边再长出一份。
+const DEMO_DIR_NAME_LEGACY: &str = "Ccode 示例课题";
 const DEMO_PROJECT_NAME: &str = "示例课题（演示）";
 
 const DEMO_BIB: &str = r#"@article{marso2016liraglutide,
@@ -3788,7 +3790,15 @@ fn demo_registered(conn: &Connection, key: &str) -> Result<Option<ProjectDto>, S
 }
 
 fn create_demo_at(base: &Path, conn: &Connection) -> Result<ProjectDto, String> {
-    let dir = base.join(DEMO_DIR_NAME);
+    let current = base.join(DEMO_DIR_NAME);
+    let legacy = base.join(DEMO_DIR_NAME_LEGACY);
+    let dir = if current.is_dir() {
+        current
+    } else if legacy.is_dir() {
+        legacy
+    } else {
+        current
+    };
     if dir.is_dir() {
         let key = canonical_key(&dir);
         if let Some(existing) = demo_registered(conn, &key)? {
@@ -6632,6 +6642,18 @@ resources = ["ghost.pdf"]
         assert_eq!(config.steps[0].brief, canon.steps[0].brief);
         assert!(config.steps[0].seed_complete);
         assert_eq!(task_cards_at(&root).len(), 1, "已有演示卡片不得重复播种");
+
+        // 只有旧目录名时继续用它，不在旁边再造「Mesa 示例课题」
+        remove_project_at(&conn, &root).unwrap();
+        let legacy = base.join(DEMO_DIR_NAME_LEGACY);
+        std::fs::rename(&root, &legacy).unwrap();
+        let p4 = create_demo_at(&base, &conn).unwrap();
+        assert!(
+            Path::new(&p4.path).ends_with(DEMO_DIR_NAME_LEGACY),
+            "应继续用旧目录，实际 {}",
+            p4.path
+        );
+        assert!(!root.exists(), "旧目录还在时不得另建新目录");
         std::fs::remove_dir_all(&dir).ok();
     }
 

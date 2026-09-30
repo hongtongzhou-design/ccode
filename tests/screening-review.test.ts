@@ -5,6 +5,7 @@ import {
   blockerPrimaryText,
   extraDecisionsFromSummary,
   groupReviewFiles,
+  isScreeningReviewFile,
   isScreeningReviewStep,
   appendEndnoteImportRecord,
   appendZoteroImportRecord,
@@ -16,9 +17,18 @@ import {
   pdfNameFromReason,
   parseIncludedRecords,
   pendingConfirmCleared,
+  arrangeScreeningRows,
   includeAllPendingJson,
+  patchIncludedJsonMany,
   patchIncludedJson,
   patchIncludedMd,
+  syncIncludedSummary,
+  removeToFetchEntry,
+  removeRisRecord,
+  notePathForRecord,
+  bibMentionsRecord,
+  removeReason,
+  restorePendingReason,
   defaultScreeningTableFilter,
   filterIncludedRecords,
   isScreeningListFile,
@@ -126,6 +136,11 @@ test("同时有 screening 与 included 时按筛选排文件", () => {
   assert.equal(reviewFileGroup("enrich_metadata.py"), "machine");
   assert.equal(reviewFileGroup(".gitignore"), "machine");
   assert.equal(reviewFileGroup("papers/endnote-import.ris"), "other");
+  assert.equal(isScreeningReviewFile("papers/screening.md"), true);
+  assert.equal(isScreeningReviewFile("papers/to-fetch.ris"), true);
+  assert.equal(isScreeningReviewFile("scripts/build_outputs.py"), false);
+  assert.equal(isScreeningReviewFile("TASK.md"), false);
+  assert.equal(isScreeningReviewFile(".gitignore"), false);
   const groups = groupReviewFiles(paths.map((path) => ({ path })));
   assert.deepEqual(
     groups.map((g) => [g.id, g.files.map((f) => f.path)]),
@@ -253,6 +268,43 @@ test("纳入 JSON 计数与待拍板去重", () => {
     }),
     fetchMd,
   );
+  const removedFetch = removeToFetchEntry(
+    "1. Old — 10.0/aaa\n2. New Paper — 10.0/bbb\n3. Keep — 10.0/ccc\n",
+    { ...emptyRecord, id: "doi:10.0/bbb", title: "New Paper", url: "https://doi.org/10.0/bbb" },
+  );
+  assert.match(removedFetch, /1\. Old/);
+  assert.match(removedFetch, /3\. Keep/);
+  assert.doesNotMatch(removedFetch, /New Paper/);
+  assert.equal(removeToFetchEntry(removedFetch, { ...emptyRecord, id: "", title: "", url: "" }), removedFetch);
+  const ris = [
+    "TY  - JOUR",
+    "TI  - New Paper",
+    "DO  - 10.0/bbb",
+    "ER  - ",
+    "",
+    "TY  - JOUR",
+    "TI  - Keep",
+    "DO  - 10.0/ccc",
+    "ER  - ",
+  ].join("\r\n");
+  const removedRis = removeRisRecord(ris, {
+    ...emptyRecord,
+    id: "doi:10.0/bbb",
+    title: "New Paper",
+    url: "",
+  });
+  assert.doesNotMatch(removedRis, /New Paper/);
+  assert.match(removedRis, /TI  - Keep/);
+  assert.equal(removeRisRecord(removedRis, { ...emptyRecord, id: "", title: "No Such", url: "" }), removedRis);
+  assert.equal(removeReason("纳入：评审确认。题目相关"), "排除：人工移出。题目相关");
+  assert.equal(restorePendingReason("排除：人工移出。题目相关"), "待确认：从排除恢复。题目相关");
+  assert.equal(
+    notePathForRecord(JSON.stringify([{ id: "doi:1", notePath: "notes/1.md" }, { id: "doi:2", notePath: "" }]), "doi:1"),
+    "notes/1.md",
+  );
+  assert.equal(notePathForRecord(JSON.stringify([{ id: "doi:2", notePath: "  " }]), "doi:2"), null);
+  assert.equal(bibMentionsRecord("@a{x, doi = {10.1000/bbb}, title = {Other}}", { ...emptyRecord, id: "doi:10.1000/bbb", title: "New Paper", url: "" }), true);
+  assert.equal(bibMentionsRecord("@a{x, title = {Something else}}", { ...emptyRecord, id: "", title: "New Paper", url: "" }), false);
   const patched = patchIncludedJson(
     JSON.stringify([{ id: "doi:2", title: "B", decision: "pending", reason: "相邻" }]),
     "doi:2",
@@ -267,6 +319,14 @@ test("纳入 JSON 计数与待拍板去重", () => {
     "B — 2026 — doi:2",
   );
   assert.match(md, /## 纳入清单\nB —/);
+  const titled = patchIncludedMd(
+    "# 纳入文献清单\n\n终判纳入 2 篇。\n\n1. A — 2020\n",
+    "B",
+    "included",
+    "1. B — 2021",
+  );
+  assert.match(titled, /终判纳入 2 篇。\n1\. B — 2021\n\n1\. A — 2020/);
+  assert.equal((titled.match(/^## 纳入/m) ?? []).length, 0);
   assert.equal((md.match(/B —/g) ?? []).length, 1);
   assert.equal(defaultScreeningTableFilter(counts), "pending");
   assert.deepEqual(
@@ -274,6 +334,41 @@ test("纳入 JSON 计数与待拍板去重", () => {
     ["B"],
   );
   assert.equal(defaultScreeningTableFilter({ total: 2, included: 2, pending: 0, toFetch: 0 }), "included");
+  const many = patchIncludedJsonMany(
+    JSON.stringify([
+      { id: "doi:1", title: "A", decision: "pending", reason: "相邻" },
+      { id: "doi:2", title: "B", decision: "pending", reason: "也相邻" },
+      { id: "doi:3", title: "C", decision: "included", reason: "已定" },
+    ]),
+    ["doi:1", "doi:2"],
+    "excluded",
+    (previous) => `排除：评审确认。${previous}`,
+  );
+  const manyRows = JSON.parse(many) as { id: string; decision: string }[];
+  assert.equal(manyRows[0].decision, "excluded");
+  assert.equal(manyRows[1].decision, "excluded");
+  assert.equal(manyRows[2].decision, "included");
+  const arranged = arrangeScreeningRows(
+    [
+      { id: "a", if: "2.0" },
+      { id: "b", if: null },
+      { id: "c", if: "20" },
+      { id: "d", if: "9" },
+    ],
+    (row) => ({ impactFactor: row.if }),
+    "if-desc",
+    5,
+  );
+  assert.deepEqual(arranged.map((row) => row.id), ["c", "d", "b"]);
+  assert.deepEqual(
+    arrangeScreeningRows(
+      [{ id: "a", if: "1" }, { id: "b", if: "8" }],
+      (row) => ({ impactFactor: row.if }),
+      "listed",
+      null,
+    ).map((row) => row.id),
+    ["a", "b"],
+  );
   const all = includeAllPendingJson(JSON.stringify([
     { id: "doi:1", title: "A", decision: "included", reason: "已定" },
     { id: "doi:2", title: "B", decision: "pending", reason: "相邻" },
@@ -335,6 +430,23 @@ test("纳入 JSON 计数与待拍板去重", () => {
   assert.match(copied, /J2  - J\. Alloys Compd\./);
   assert.match(copied, /AB  - Sulfur rich spheres\./);
   assert.match(copied, /M3  - Journal Article/);
+});
+
+test("纳入清单开头的篇数按 json 现数改，文献行不动", () => {
+  const md = [
+    "# 纳入文献清单",
+    "终判纳入 **337** 篇（另有待确认 15 篇）。",
+    "1. Alpha paper — Smith — 2020",
+    "2. 待确认的那篇 — Lee — 2021",
+  ].join("\n");
+  const records = [
+    { ...emptyRecord, title: "Alpha paper", decision: "included" as const },
+    { ...emptyRecord, title: "Beta", decision: "excluded" as const },
+  ];
+  const next = syncIncludedSummary(md, records);
+  assert.match(next, /终判纳入 \*\*1\*\* 篇（另有待确认 0 篇）/);
+  assert.match(next, /1\. Alpha paper/);
+  assert.match(next, /2\. 待确认的那篇/);
 });
 
 test("Git 拦截直接写原因，不报问题计数", () => {

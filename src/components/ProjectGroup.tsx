@@ -9,6 +9,8 @@ import PipelineEditor from "./PipelineEditor";
 import HistoryOverlay from "./HistoryOverlay";
 
 import TemplatePicker, { type TemplatePickItem } from "./TemplatePicker";
+import CloseoutPack from "./CloseoutPack";
+import { closeoutPackVisible, closeoutScanEntries } from "../closeout-pack";
 import ArtifactChecklist, {
   absoluteResourcePath,
   formatSize,
@@ -593,6 +595,7 @@ export default function ProjectGroup({
     relPath: string;
     text: string | null;
   } | null>(null);
+  const [focusDraftError, setFocusDraftError] = useState<string | null>(null);
   const [pipelineSaving, setPipelineSaving] = useState(false);
   const [applyingTemplate, setApplyingTemplate] = useState(false);
   const [optingOut, setOptingOut] = useState(false);
@@ -1438,14 +1441,23 @@ export default function ProjectGroup({
   function loadFocusDraft() {
     if (!project || !focusStepName) {
       setFocusDraft(null);
+      setFocusDraftError(null);
       return;
     }
     invoke<{ relPath: string; text: string | null }>("read_task_draft", {
       projectRoot: project.path,
       stepName: focusStepName,
     })
-      .then((d) => setFocusDraft({ stepName: focusStepName, ...d }))
-      .catch(() => setFocusDraft(null));
+      .then((d) => {
+        setFocusDraftError(null);
+        setFocusDraft({ stepName: focusStepName, ...d });
+      })
+      .catch((reason) => {
+        setFocusDraft(null);
+        setFocusDraftError(
+          `任务书没加载出来：${String(reason)}。「跟 AI 商量一下」和「TASK.md」先不能用。`,
+        );
+      });
   }
   useEffect(() => {
     loadFocusDraft();
@@ -1849,6 +1861,16 @@ export default function ProjectGroup({
         >研究流程已就位。</NoticeBar>
       )}
 
+      {cfg && closeoutPackVisible(cfg.steps, stepDoneFlags) && (
+        <CloseoutPack
+            projectRoot={projectPath}
+            worktrees={workspaces
+              .filter((workspace) => workspace.status === "active")
+              .map((workspace) => workspace.worktreePath)}
+            entries={closeoutScanEntries(cfg.steps)}
+          />
+      )}
+
       {/* 人工事项清单已并入聚焦视图（TaskCardsSection 聚焦步骤时顶部渲染）；原 ⋯ 手风琴面板删除 */}
 
       {/* 产物核验手风琴（步骤 ⋯ 菜单触发）：strip 下方就地展开（单开）；root 口径同任务行——已合并读项目根，其余读工作树 */}
@@ -1886,6 +1908,12 @@ export default function ProjectGroup({
           focusDraft={
             focusDraft && focusDraft.stepName === focusStepName
               ? focusDraft
+              : null
+          }
+          focusDraftError={
+            focusDraftError &&
+            !(focusDraft && focusDraft.stepName === focusStepName)
+              ? focusDraftError
               : null
           }
           onDraftChanged={loadFocusDraft}

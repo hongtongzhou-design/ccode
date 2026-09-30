@@ -155,7 +155,8 @@ function toStep(d: StepDraft, index: number): ProjectStepDto {
       .map((t) => ({
         title: t.title.trim(),
         guidance: t.guidance.trim(),
-        target: t.target.trim(),
+        // 落点可省：行内处理的事项（如「更换引用样式」）没有 target 字段。
+        target: (t.target ?? "").trim(),
         timing: t.timing,
         // optional 必须透传：内置模板用它标「不做也能跑」的事项，漏掉会让编辑器一保存
         // 就把这些事项静默升级为必办（v3.85 修）

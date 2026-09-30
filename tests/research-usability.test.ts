@@ -23,7 +23,21 @@ test("任务书减重不靠删阶段/门禁：共用摘要一次，格式适配�
   //     同时挪掉「核心篇名单」那个人工确认门（净减一道停工）。
   //   · 缩写：lit-search 的刊名缩写从 NLM ISSN 查询改成 ISO 4 规则自算，不必联网。
   // 上限取整到百位，比当前文本高一点的余量，留给下一轮微量改字——真加合同仍须回来写明。
-  const before: Record<string, number> = { review: 22700, "research-paper": 32500, "data-processing": 12100, thesis: 30100, "submission-rebuttal": 8600, "latex-paper": 13200 };
+  // 本轮 review 再 +343（实测 22994）：引用样式的交接改成「按流程线选定、结果写 submission/
+  // target-journal.md」，各渲染步简报都写明了选定处；润色步那句同步改成读已定期刊。
+  // 紧接一轮再 +411（实测 23405）：润色步新增 5b——agent 按 [待核实] 与「疑似编造/元数据存疑」
+  // 列全 manuscript/verification-decisions.md（裁决栏留空，不得代填），并升为预期产物；
+  // 人工事项「逐条裁决」改带落点、走 decisions_cleared 判定，未裁决拦住定稿。
+  // 又一轮（review 实测 23447、论文 32484、学位 30103）：三套定稿步的「更换引用样式」
+  // 换成「确认引用样式」——带落点 manuscript/citation-confirmed.md（确认绑定当时 csl 版本，
+  // csl 一变确认失效）并补上核实项说明，比原来的空 guidance 长。
+  // 上限取 23550 / 32550 / 30150，仍在下一轮微量改字的余量内。
+  // 2026-09-29：审查决定改成步骤上点，REVIEW_FIRST 写明「决定：」行。学位模板实测 30305，上限提到 30450。
+  // 同日：初稿增加正文字体确认。综述 23659、论文 32841、学位 30518，上限提到 23800 / 33000 / 30700。
+  // 2026-09-30：初稿字体改到开工时问，并列入 typeface.md / reference.docx；润色步不再必交 target-journal.md。
+  // 同日：论文/学位论文定稿步改成与综述同一句「沿用编号不写 target-journal.md」，并写明沿用 typeface.md。
+  // 实测 review 24378、论文 33079、学位 30881。上限取整到百位，留一点改字余量。
+  const before: Record<string, number> = { review: 24600, "research-paper": 33400, "data-processing": 12100, thesis: 31200, "submission-rebuttal": 8600, "latex-paper": 13200 };
   for (const t of PIPELINE_TEMPLATES) {
     const tasks = md(t.id);
     assert.ok(tasks.reduce((n, s) => n+s.length, 0) < before[t.id], t.id);
@@ -38,6 +52,39 @@ test("任务书减重不靠删阶段/门禁：共用摘要一次，格式适配�
   assert.match(format.brief, /交下一步投稿材料统一关闭/);
   assert.match(find("submission-rebuttal").steps[1].brief, /G5 投稿就绪/);
   assert.match(pipelineStepsForTemplate(find("submission-rebuttal"), "revision", 2)[0].brief, /G5 投稿就绪/);
+});
+
+test("没选引用样式仍渲，不定期刊不交空的目标期刊文件", () => {
+  for (const id of ["review", "research-paper", "thesis"]) {
+    const t = find(id);
+    const draft = t.steps.find((s) =>
+      (s.expectedArtifacts ?? []).some((p) => p === "manuscript/typeface.md"),
+    )!;
+    assert.ok(draft, `${id} 初稿要登记 typeface.md`);
+    assert.ok(
+      (draft.expectedArtifacts ?? []).includes("manuscript/reference.docx"),
+      `${id} 初稿要登记 reference.docx`,
+    );
+    const final = t.steps.find((s) =>
+      ["polish", "research-paper-polish", "thesis-final"].includes(s.workspaceName ?? ""),
+    )!;
+    assert.match(final.brief, /沿用编号就不要写这份文件/);
+    assert.match(final.brief, /不因没选样式停渲|不因没有 citation-style\.md 停渲/);
+    assert.match(final.brief, /manuscript\/typeface\.md/);
+    assert.ok((final.inputs ?? []).includes("manuscript/typeface.md"), `${id} 定稿要读 typeface.md`);
+    assert.ok((final.inputs ?? []).includes("manuscript/reference.docx"));
+    assert.ok(
+      !(final.expectedArtifacts ?? []).includes("submission/target-journal.md"),
+      `${id} 定稿不把目标期刊当必交`,
+    );
+    assert.doesNotMatch(final.brief, /没有就问刊名/);
+  }
+  const journal = find("submission-rebuttal").steps[0];
+  assert.ok((journal.expectedArtifacts ?? []).includes("submission/target-journal.md"));
+  const skill = readFileSync("src-tauri/resources/skills/quarto-render/SKILL.md", "utf8");
+  assert.match(skill, /不因没选样式/);
+  assert.match(skill, /不要先用默认字体渲完再重渲/);
+  assert.doesNotMatch(skill, /然后重渲/);
 });
 
 test("人看决策摘要而非凭空保证；实际复现入口进入产物和下游输入", () => {

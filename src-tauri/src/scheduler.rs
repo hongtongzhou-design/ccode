@@ -884,7 +884,7 @@ fn is_timeout_error(err: &str) -> bool {
 
 /// 无头/定时写盘能力闸（数据单一出处 = agent_specs 能力表，不另抄名单）：
 /// 最终解析出的 agent supported=false（如 qwen 未验证）返回用户可见原因；
-/// 支持（含「权限未实测/无沙箱」警示档）与表外 agent 放行——与能力表 `_` 兜底同口径。
+/// 支持（含「按该工具默认权限写文件 / 会批准全部操作」警示档）与表外 agent 放行。
 fn headless_write_block_reason(agent: &str) -> Option<String> {
     let caps = crate::agent_specs::agent_capabilities();
     let cap = caps.iter().find(|c| c.agent == agent)?;
@@ -2239,7 +2239,7 @@ mod tests {
         assert!(reason.contains("未验证"));
         // codex 已验证：放行
         assert!(headless_write_block_reason("codex").is_none());
-        // grok 支持但带「无沙箱」警示：只警示不拦截（与能力表口径一致）
+        // grok 支持但带「会批准全部操作」：只警示不拦截（与能力表口径一致）
         assert!(headless_write_block_reason("grok").is_none());
         // 表外 agent 与能力表 `_` 兜底同口径：放行
         assert!(headless_write_block_reason("no-such-agent").is_none());

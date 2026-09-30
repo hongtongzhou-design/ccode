@@ -1,0 +1,6 @@
+# Mesa 项目档案卡（工作方式 / 研究流程 / 资源清单）。
+# 删掉此文件后，已添加的项目会按「科研」重新分类。请勿在 Git 客户端里丢弃未跟踪的 .ccode/。
+
+id = "8861e3ab-28a7-4c40-af83-9c0fe878a515"
+artifact_dir = "artifacts"
+work_mode = "coding"

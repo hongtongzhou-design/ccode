@@ -20,21 +20,28 @@ export function PageFrame({
   className = "",
   width = "wide",
   surface = "canvas",
+  fill = false,
 }: {
   children: ReactNode;
   className?: string;
   width?: keyof typeof WIDTHS;
   /** workspace = 项目页工作面，与项目栏同底（rail2），对象统一用 ccode-well 浮起。 */
   surface?: "canvas" | "workspace";
+  /** 占满父级高度。页头留在外面，滚动交给内部区域。 */
+  fill?: boolean;
 }) {
   return (
     <div
       data-surface={surface}
-      className={`ccode-page-frame min-h-full px-6 pb-6 pt-1 ${
-        surface === "workspace" ? "bg-rail2" : "bg-canvas"
-      }`}
+      className={`ccode-page-frame px-6 pt-1 ${
+        fill ? "flex min-h-0 flex-1 flex-col overflow-hidden" : "min-h-full pb-6"
+      } ${surface === "workspace" ? "bg-rail2" : "bg-canvas"}`}
     >
-      <div className={`ccode-page-content mx-auto w-full ${WIDTHS[width]} ${className}`}>
+      <div
+        className={`ccode-page-content mx-auto w-full ${WIDTHS[width]} ${
+          fill ? "flex min-h-0 flex-1 flex-col" : ""
+        } ${className}`}
+      >
         {children}
       </div>
     </div>

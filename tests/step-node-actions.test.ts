@@ -141,6 +141,15 @@ test("压暗与就绪是同一口径的反面：就绪的行不压暗", () => {
     ),
     false,
   );
+  assert.equal(
+    stepNodeWaiting(
+      "active",
+      "working",
+      { ...h, title: "逐条决定审查报告", target: "manuscript/review-report.md", expectedCount: undefined },
+      false,
+    ),
+    false,
+  );
 });
 
 test("human：去笔记夹与资料库同步排在就绪门之前，未就绪时给灰着的按钮", () => {
@@ -180,6 +189,23 @@ test("EndNote 事项按标题也认得出来（模板可以改 key 但改不了�
     kind: "endnote-sync",
     enabled: false,
   });
+});
+
+test("域稿说明含 EndNote 也不挂文献库同步，审查条目不交文件", () => {
+  const field = humanState({
+    title: "打开 EndNote 域稿并 Update 一次",
+    timing: "after",
+    target: "",
+  });
+  assert.equal(stepNodeAction(humanNode(field), ctx({ runStatus: "review" })), null);
+  const merged = humanState({ title: "换样式时打开域稿", timing: "after", target: "" });
+  assert.equal(stepNodeAction(humanNode(merged), ctx({ runStatus: "done" })), null);
+  const report = humanState({
+    title: "逐条决定审查报告",
+    timing: "after",
+    target: "manuscript/review-report.md",
+  });
+  assert.equal(stepNodeAction(humanNode(report), ctx({ runStatus: "review" })), null);
 });
 
 test("文献类交付：去「文献与数据」导入，按来源高亮", () => {

@@ -71,36 +71,101 @@ export function ptyShiftEnterRewrite(agentId: string): string | null {
   return agentId === "codex" ? CODEX_CSI_U_SHIFT_ENTER : null;
 }
 
-/** Shift+标点丢字的补发决议。xterm 的 keydown 只在 `keyCode >= 48` 时把单个字符送进 PTY。
- *  WKWebView 上 Shift+`/` 会报 keyCode 229（而非 191），这一下 xterm 走 `_handleAnyTextareaChanges`
- *  的 `setTimeout(…, 0)` 分支，读到的 textarea 常常还没被 `input` 事件写长 → 不发 → 第一下丢字，
- *  再按一下才出来。故 229 与 0 同样**当场补发**，由 TerminalPage 的哨兵吞掉 xterm 可能补发的那一次。
+/** Shift+标点丢字的补发决议。xterm 在 keyCode 229 时不自己发字符，等 textarea。
+ *  WKWebView 上中文输入法开着时，Shift+数字/标点的 `key` 常是 `"Process"`，
+ *  物理键在 `code`（Digit1、Digit3、Slash）。只认 Slash 时，Shift+1 补不出 `!`；
+ *  Shift+3 第一下靠 xterm 写出 `#`，第二下组词收尾再写一遍，变成 `##`。
+ *  美式键盘的 Shift 档按物理键补那一个符号，并 return false 拦住 xterm 再发。
  *
- *  为什么不会把「一个字母出两个」带回来：真正输入法组词时 `e.key` 是 `"Process"`（长名），
- *  上面的 `e.key.length !== 1` 已滤掉；能走到这里的 229 一定是单字符，补发与哨兵正好一对一。
- *  带 Ctrl/Alt/Cmd 一律不补：那些是终端控制序列，不是可打印字符。 */
+ *  汉字上屏也是 229，但 `code` 不是下面这张表：不补，避免「你你」。
+ *  不按 Shift 的数字、字母交给 xterm。带 Ctrl/Alt/Cmd 不补。 */
 export type PrintableKeyFallback = { action: "send"; data: string };
+
+/** 与 xterm KEYCODE_KEY_MAPPINGS 的 Shift 档一致（美式键盘）。 */
+const SHIFTED_FROM_CODE: Record<string, string> = {
+  Digit1: "!",
+  Digit2: "@",
+  Digit3: "#",
+  Digit4: "$",
+  Digit5: "%",
+  Digit6: "^",
+  Digit7: "&",
+  Digit8: "*",
+  Digit9: "(",
+  Digit0: ")",
+  Minus: "_",
+  Equal: "+",
+  BracketLeft: "{",
+  BracketRight: "}",
+  Backslash: "|",
+  Semicolon: ":",
+  Quote: '"',
+  Comma: "<",
+  Period: ">",
+  Slash: "?",
+  Backquote: "~",
+};
 
 export function printableKeyFallback(e: {
   type: string;
   key: string;
+  code?: string;
   keyCode: number;
+  shiftKey?: boolean;
   ctrlKey: boolean;
   altKey: boolean;
   metaKey: boolean;
 }): PrintableKeyFallback | null {
-  // keyup 也走同一 handler，只认 keydown
   if (e.type !== "keydown") return null;
   if (e.ctrlKey || e.altKey || e.metaKey) return null;
-  // 单字符且可打印：排掉 Shift/Enter/ArrowUp 这类具名键（key 是长名）与控制字符。
-  // 也是输入法组词（key="Process"）被排除在这里，不是靠 keyCode。
+  if (e.shiftKey && e.code) {
+    const shifted = SHIFTED_FROM_CODE[e.code];
+    // keyCode >= 48 时 xterm 自己会发；0 与 229 它发不出。只补这两档，避免正常键变成两个。
+    if (shifted && (e.keyCode === 0 || e.keyCode === 229)) {
+      return { action: "send", data: shifted };
+    }
+  }
   if (e.key.length !== 1) return null;
   const code = e.key.charCodeAt(0);
   if (code < 32 || code === 127) return null;
-  // 0：系统没打算让 xterm 处理这一下；229：xterm 的 composition 路径来不及发。
-  // 两者都当场补发，259 之外的普通 keyCode 交给 xterm（它认识 Shift+标点，见 evaluateKeyboardEvent 键位表）。
-  if (e.keyCode === 0 || e.keyCode === 229) return { action: "send", data: e.key };
+  if (e.keyCode === 0) return { action: "send", data: e.key };
   return null;
+}
+
+/** 补发之后，xterm 仍可能从 textarea / 组词收尾再送出同一个符号。
+ *  同一符号连续补发时把待吞次数加上，两下 Shift+3 得到 `##`，不会被吞成一个，也不会变成四个。 */
+export interface PrintableEchoGuard {
+  char: string;
+  count: number;
+  until: number;
+}
+
+export function armPrintableEcho(
+  guard: PrintableEchoGuard,
+  char: string,
+  now: number,
+  windowMs = 400,
+): PrintableEchoGuard {
+  if (guard.char === char && now < guard.until) {
+    return { char, count: guard.count + 1, until: now + windowMs };
+  }
+  return { char, count: 1, until: now + windowMs };
+}
+
+/** 命中则吞掉这一记并返回更新后的守卫；不是回声则原样交还、守卫不动。 */
+export function takePrintableEcho(
+  guard: PrintableEchoGuard,
+  data: string,
+  now: number,
+): { swallow: boolean; guard: PrintableEchoGuard } {
+  if (guard.count > 0 && now < guard.until && data === guard.char) {
+    const count = guard.count - 1;
+    return {
+      swallow: true,
+      guard: count > 0 ? { ...guard, count } : { char: "", count: 0, until: 0 },
+    };
+  }
+  return { swallow: false, guard };
 }
 
 /** 剪贴板条目里挑出第一张图片（image/*），无图片返回 null（不干预默认文本粘贴） */

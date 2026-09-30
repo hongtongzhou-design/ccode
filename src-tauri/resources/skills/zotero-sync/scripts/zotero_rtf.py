@@ -10,6 +10,7 @@ from pathlib import Path
 CITE_RE = re.compile(
     r"\[((?:-?@[A-Za-z0-9_.:-]+(?:\s*,[^\];]*)?)(?:\s*;\s*-?@[A-Za-z0-9_.:-]+(?:\s*,[^\];]*)?)*)\]"
 )
+BRACE_KEY = re.compile(r"\{#([A-Za-z0-9_.:-]+)\}")
 ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,\s]+)\s*,", re.S)
 
 def load_mesa_iso4() -> dict[str, str]:
@@ -91,55 +92,82 @@ def bib_records(text: str) -> dict[str, dict]:
     return records
 
 
+def load_bridge():
+    from pathlib import Path
+    import importlib.util
+    path = Path(__file__).resolve().parents[2] / "endnote-bridge" / "scripts" / "bridge.py"
+    spec = importlib.util.spec_from_file_location("endnote_bridge", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def markup_title(text: str) -> str:
+    """标题、期刊、摘要里的上下标和化学式空格收成 Unicode。"""
+    return load_bridge().clean(text)
+
+
 def rtf_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
 def write_library_ris(bib_text: str, dest: Path) -> None:
-    """整份 bib 写成 Zotero RIS。同步用，不依赖正文引用。"""
-    records = bib_records(bib_text)
+    """整份 bib 写成 Zotero RIS。用 bridge 解析，避免花括号和括号把作者、标题截断。"""
+    bridge = load_bridge()
+    records = bridge.parse_bibtex(bib_text)
     lines = []
-    for key, rec in records.items():
-        lines.append("TY  - JOUR")
-        lines.append(f"ID  - {key}")
-        if rec["title"]:
-            lines.append(f"TI  - {rec['title']}")
-        for author in [part.strip() for part in rec["author"].split(" and ") if part.strip()]:
-            lines.append(f"AU  - {author}")
-        if rec["year"] and rec["year"] != "n.d.":
+    for rec in records:
+        kind = {"article": "JOUR", "book": "BOOK", "incollection": "CHAP", "inproceedings": "CONF", "phdthesis": "THES"}.get(rec.get("type"), "JOUR")
+        lines.append(f"TY  - {kind}")
+        # Zotero 不读 ID。引用键放进 N1，避免和摘要抢同一格。
+        lines.append(f"N1  - citation key: {rec['id']}")
+        if rec.get("title"):
+            lines.append(f"TI  - {bridge.clean(rec['title'])}")
+        for author in rec.get("authors") or []:
+            lines.append(f"AU  - {bridge.family_comma(author)}")
+        if rec.get("year"):
             lines.append(f"PY  - {rec['year']}")
-        if rec["journal"]:
-            lines.append(f"T2  - {rec['journal']}")
-        short = journal_short(rec["journal"], rec["journalabbreviation"])
+        journal = rec.get("journal") or ""
+        # Zotero：JO/JF 是期刊全称，JA 是缩写。T2/J2 是 EndNote 的格子，写过来会进错字段。
+        if journal:
+            lines.append(f"JO  - {bridge.clean(journal)}")
+            lines.append(f"JF  - {bridge.clean(journal)}")
+        short = journal_short(journal, rec.get("journalAbbreviation") or "")
         if short:
-            lines.append(f"J2  - {short}")
-        if rec["volume"]:
+            lines.append(f"JA  - {short}")
+        if rec.get("volume"):
             lines.append(f"VL  - {rec['volume']}")
-        if rec["number"]:
+        if rec.get("number"):
             lines.append(f"IS  - {rec['number']}")
-        pages = rec["pages"].replace("–", "-").replace("—", "-")
-        parts = [part.strip() for part in pages.split("--" if "--" in pages else "-", 1)] if pages else []
-        if parts and parts[0]:
-            lines.append(f"SP  - {parts[0]}")
-        if len(parts) == 2 and parts[1] and parts[1] != parts[0]:
-            lines.append(f"EP  - {parts[1]}")
-        if rec["date"]:
+        start, end = bridge.split_pages(rec.get("pages") or "")
+        if start:
+            lines.append(f"SP  - {start}")
+        if end and end != start:
+            lines.append(f"EP  - {end}")
+        elif start:
+            lines.append(f"EP  - {start}")
+        if rec.get("date"):
             lines.append(f"DA  - {rec['date']}")
-        if rec["issn"]:
+        if rec.get("issn"):
             lines.append(f"SN  - {rec['issn']}")
-        if rec["doi"]:
-            lines.append(f"DO  - {rec['doi']}")
-        url = rec["url"] or (f"https://doi.org/{rec['doi']}" if rec["doi"] else "")
+        doi = bridge.bare_doi(rec.get("doi") or "")
+        if doi:
+            lines.append(f"DO  - {doi}")
+        url = rec.get("url") or (f"https://doi.org/{doi}" if doi else "")
         if url:
             lines.append(f"UR  - {url}")
-        for word in [part.strip() for part in rec["keywords"].replace("；", ";").split(";") if part.strip()]:
+        for word in rec.get("keywords") or []:
             lines.append(f"KW  - {word}")
-        if rec["abstract"]:
-            lines.append(f"AB  - {rec['abstract']}")
+        if rec.get("abstract"):
+            lines.append(f"AB  - {bridge.clean(rec['abstract'])}")
         lines.append("ER  - ")
         lines.append("")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(("\r\n".join(lines)).encode("utf-8"))
+    header = (
+        f"# 整份引文库，共 {len(records)} 条。不是 papers/to-fetch.md 的待获取名单。\r\n"
+        "# 库里已有同一 DOI 的不要再导入。\r\n"
+    )
+    dest.write_bytes((header + "\r\n".join(lines)).encode("utf-8"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,14 +186,50 @@ def main(argv: list[str] | None = None) -> int:
         print("缺 --input", file=sys.stderr)
         return 2
     markdown = Path(args.input).read_text(encoding="utf-8")
-    records = bib_records(Path(args.bib).read_text(encoding="utf-8"))
+    parsed = {rec["id"]: rec for rec in load_bridge().parse_bibtex(Path(args.bib).read_text(encoding="utf-8"))}
+    records = {}
+    for key, rec in parsed.items():
+        author = " and ".join(rec.get("authors") or [])
+        family = (rec.get("authors") or ["Anon"])[0].split(",")[0].strip()
+        records[key] = {
+            "family": family or "Anon",
+            "year": rec.get("year") or "n.d.",
+            "title": rec.get("title") or "",
+            "author": author,
+            "doi": rec.get("doi") or "",
+            "journal": rec.get("journal") or "",
+            "journalabbreviation": rec.get("journalAbbreviation") or "",
+            "volume": rec.get("volume") or "",
+            "number": rec.get("number") or "",
+            "pages": rec.get("pages") or "",
+            "issn": rec.get("issn") or "",
+            "abstract": rec.get("abstract") or "",
+            "keywords": "; ".join(rec.get("keywords") or []),
+            "date": rec.get("date") or "",
+            "url": rec.get("url") or "",
+        }
     missing = []
     pieces = []
     cursor = 0
     used = []
-    for match in CITE_RE.finditer(markdown):
-        pieces.append(rtf_escape(markdown[cursor:match.start()]))
-        keys = parse_keys(match.group(1))
+    spans = [("cite", m.start(), m.end(), m.group(1)) for m in CITE_RE.finditer(markdown)]
+    spans.extend(("brace", m.start(), m.end(), m.group(1)) for m in BRACE_KEY.finditer(markdown))
+    spans.sort(key=lambda item: item[1])
+    for kind, start, end, payload in spans:
+        if start < cursor:
+            continue
+        pieces.append(rtf_escape(markdown[cursor:start]))
+        if kind == "brace":
+            rec = records.get(payload)
+            if rec:
+                if payload not in used:
+                    used.append(payload)
+                pieces.append("\\{" + f"{rec['family']}, {rec['year']}" + "\\}")
+            else:
+                pieces.append(rtf_escape(payload))
+            cursor = end
+            continue
+        keys = parse_keys(payload)
         cites = []
         for key in keys:
             rec = records.get(key)
@@ -177,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             cites.append(f"{rec['family']}, {rec['year']}")
         if cites:
             pieces.append("\\{" + "; ".join(cites) + "\\}")
-        cursor = match.end()
+        cursor = end
     pieces.append(rtf_escape(markdown[cursor:]))
     report = Path(args.report)
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -195,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         ris_lines.append("TY  - JOUR")
         ris_lines.append(f"ID  - {key}")
         if rec["title"]:
-            ris_lines.append(f"TI  - {rec['title']}")
+            ris_lines.append(f"TI  - {load_bridge().clean(rec['title'])}")
         for author in [part.strip() for part in rec["author"].split(" and ") if part.strip()]:
             ris_lines.append(f"AU  - {author}")
         if rec["year"] and rec["year"] != "n.d.":

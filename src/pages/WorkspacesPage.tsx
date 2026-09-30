@@ -56,6 +56,7 @@ import {
 import {
   attributeToProject,
   buildRunOverview,
+  projectRailStatus,
   runIdForPath,
   workspaceAgentBusy,
   workspaceReviewInboxEligible,
@@ -2253,15 +2254,21 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                     {RAIL_WORK_MODE_LABEL[section.mode]}
                   </p>
                   {section.items.map((group) => {
-                    const groupActive = group.list.filter(
-                      (workspace) => workspace.status === "active",
-                    ).length;
-                    // 待处理 = 工作区冲突/可合并 + 归属本项目的终端待确认/已完成/外部 live 待确认
+                    // 待处理 = 工作区冲突/可合并 + 归属本项目的终端待确认/外部 live 待确认
                     const needsAttention =
                       group.list.filter((workspace) => {
                         const state = health[workspace.id];
                         return state?.conflict || state?.readyToMerge;
                       }).length + (navAttention.get(group.key) ?? 0);
+                    // 绿点只认此刻还在跑的 Agent。未归档工作区本身不亮。
+                    const railDot = projectRailStatus({
+                      needsAttention,
+                      roots: [
+                        group.repoPath,
+                        ...group.list.map((workspace) => workspace.worktreePath),
+                      ],
+                      runs: terminalRunInputs,
+                    });
                     const selected = selectedGroup?.key === group.key;
                     return (
                       <button
@@ -2283,13 +2290,14 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
                             : "text-l3 hover:bg-hover hover:text-l2"
                         }`}
                       >
-                        {/* 状态点只在「有话说」时出现：待处理=黄 / 运行中=绿；闲置不渲染灰点
-                            （一列恒灰圆点是同权重噪音，设计系统「无状态不渲染状态点」），占位保行对齐 */}
-                        {needsAttention > 0 || groupActive > 0 ? (
+                        {/* 状态点只在「有话说」时出现：待处理=黄 / 此刻 Agent 在跑=绿；
+                            未归档工作区、闲置都不渲染（设计系统「无状态不渲染状态点」），占位保行对齐 */}
+                        {railDot ? (
                           <span
                             className={`mt-1 size-2 shrink-0 rounded-full ${
-                              needsAttention > 0 ? "bg-warn-text" : "bg-ok-text"
+                              railDot === "warn" ? "bg-warn-text" : "bg-ok-text"
                             }`}
+                            title={railDot === "warn" ? "待处理" : "运行中"}
                           />
                         ) : (
                           <span className="mt-1 size-2 shrink-0" aria-hidden="true" />
@@ -2318,8 +2326,8 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         )}
       </aside>
 
-      <div data-project-main-scroll className="min-w-0 flex-1 overflow-auto">
-        <PageFrame width="fluid" surface="workspace">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <PageFrame width="fluid" surface="workspace" fill>
       {selectedGroup && (
         <ProjectIdentityHeader
           project={selectedGroup.project}
@@ -2440,7 +2448,6 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
         ) : selectedGroup.project && selectedSurfaceTab === "schedules" ? (
           <ProjectSchedulesView
             project={selectedGroup.project}
-            workspaces={selectedGroup.list}
             focusToken={
               projectFocusReq?.focus === "lit" ? projectFocusReq.token : null
             }
@@ -2858,7 +2865,7 @@ export default function WorkspacesPage({ visible }: { visible: boolean }) {
             {
               label: demoBusy ? "正在创建…" : "✦ 创建示例课题（演示）",
               disabled: demoBusy,
-              title: "在 文档/Ccode 示例课题 生成带演示数据的完整研究流程项目",
+              title: "在 文档/Mesa 示例课题 生成带演示数据的完整研究流程项目。以前建在「Ccode 示例课题」里的，再点仍打开那一份",
               onSelect: () => void onCreateDemo(),
             },
           ]}

@@ -22,7 +22,6 @@ import {
   relevanceRank,
   sourceDisplayName,
   watchEntryScanLine,
-  staleLitHint,
   UNCATEGORIZED_KEYWORD,
   weeklyBuckets,
   weeklyTrend,
@@ -366,25 +365,6 @@ test("paperIsIncluded：文件名与精读标题规范化匹配", () => {
     true,
   );
   assert.equal(paperIsIncluded("papers/unrelated.pdf", included), false);
-});
-
-test("staleLitHint：有关联步骤 + 新命中 + 巡检晚于步骤推进才提醒", () => {
-  assert.equal(
-    staleLitHint("文献检索", "2026-08-18T09:00:00Z", 3, "2026-08-10T10:00:00Z"),
-    true,
-  );
-  // 巡检早于步骤推进：产物是新的，不提醒
-  assert.equal(
-    staleLitHint("文献检索", "2026-08-10T09:00:00Z", 3, "2026-08-18T10:00:00Z"),
-    false,
-  );
-  // 无关联步骤 / 无新命中 / 步骤还没工作区（无可过期产物）
-  assert.equal(staleLitHint(null, "2026-08-18T09:00:00Z", 3, "2026-08-10T10:00:00Z"), false);
-  assert.equal(staleLitHint("文献检索", "2026-08-18T09:00:00Z", 0, "2026-08-10T10:00:00Z"), false);
-  assert.equal(staleLitHint("文献检索", "2026-08-18T09:00:00Z", null, "2026-08-10T10:00:00Z"), false);
-  assert.equal(staleLitHint("文献检索", "2026-08-18T09:00:00Z", 3, null), false);
-  // 坏时间串不提醒（诚实回落）
-  assert.equal(staleLitHint("文献检索", "bad", 3, "2026-08-10T10:00:00Z"), false);
 });
 
 function schedule(patch: Partial<ScheduleDto>): ScheduleDto {

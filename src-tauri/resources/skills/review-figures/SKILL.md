@@ -26,9 +26,10 @@ outputs: [figures/]
 
 ```bash
 python scripts/extract_figure.py --pdf <来源PDF> --fig 3 --out figures/src/<bibKey>-fig3.png
+python scripts/extract_figure.py --pdf <来源PDF> --fig 2 --panel f --out figures/src/<bibKey>-fig2f.png
 ```
 
-按题注 `Figure n` / `Fig. n` / `图 n` 定位，裁题注上方图区。退出码 3 = 无题注，4 = 裁到整页。这两种都**不猜最大图**，该板降级为仅引用，原因写入 `figures/README.md`。缺 PyMuPDF 则打印安装提示后停裁，不假装已裁。
+题注认**单独成行、并且以题注开头**的那一行：`Figure n` / `Fig. n` / `图 n`。题注常和上一行正文粘在同一个文本块里，所以不要求整块开头就是题注。行内「Figure n shows」不算。裁切只取该行同一栏、直到相邻题注为止、离题注更近那一侧的**嵌入图像对象**（图可能在题注上，也可能在题注下），再按这些矩形的外沿渲图。过窄的页眉行不当题注。页面上的正文不在图像矩形里，不会进 PNG。没有图像对象的矢量图退出码 5，该板改「见 [@键] Fig.n」，不改回「题注上方切一条页面」。用图计划点名某一块（如 Fig.2f）时必须加 `--panel f`。退出码 6 = 这张多联图切不出那一块，正文改成「见 [@键] Fig.n(f)」，禁止把整张十几联图放进拼板、图注却写只引用了其中一块。退出码 3 = 无题注，4 = 图像对象接近整页。缺 PyMuPDF 则打印安装提示后停裁，不假装已裁。
 
 禁止：摘要网页截图；整页当 panel；上采样假装分辨率变高。
 
@@ -40,16 +41,16 @@ python scripts/extract_figure.py --pdf <来源PDF> --fig 3 --out figures/src/<bi
 python scripts/assemble_panels.py --out figures/fig2.png --width-cm 8.5 --inputs figures/src/a.png figures/src/b.png
 ```
 
-默认：白底、等高层、等比、间隙 2.5 mm、左上 (a)(b)、300 dpi。宽度用 figure-forge 的通用投稿规格（单栏约 8.5 cm / 双栏约 17 cm）。文献拼板**不做 hero 放大某一篇**（那会看起来像本文数据）。脚本不得改源图像素里的曲线或数值。
+默认：白底、300 dpi、间隙 2.5 mm。宽度用 figure-forge 的通用投稿规格（单栏约 8.5 cm / 双栏约 17 cm）。同一行按各图宽高比分这块栏宽，字母写在图上方，不压在曲线上。不再把每张图拉成一样高后再整页缩小。一行最多 4 块；第 5 块起改 `--rows "a.png b.png c.png" "d.png e.png"`。文献拼板**不做 hero 放大某一篇**。脚本不得改源图像素里的曲线或数值。
 
-每张图先写一句论点（这张拼图让读者看见什么），写不出就不要拼。图注进 `figures/figN.md`：论点 + `Adapted from Fig.n of [@key] and Fig.m of [@key2]`。论断进图注，不进图内。
+每张图先写一句论点（这张拼图让读者看见什么），写不出就不要拼。图注进 `figures/figN.md`，并且写明**实际放进拼板的是哪一块**：只用了 Fig.2(f) 就写 `Adapted from Fig. 2(f) of [@key]`。用图计划要整张时才写整张 Fig. n。论断进图注，不进图内。
 
 ## 写进初稿与复查
 
 - 拼成：`![...](../figures/figN.png)`，图注用 `figN.md`
 - 仅引用：不插图，写「见 [@key] Fig. n」
 - **禁止**在稿里写「Figure N（待绘制）」充产出。计划是「拼」但裁失败 → 降级为仅引用并记 `figures/README.md`，不要留空占位。
-- `figures/README.md` 一行一张：拼成 / 降级原因 / **待人工确认**（agent 读图不可靠，不假装已目验）
+- `figures/README.md` 一行一张：拼成 / 降级原因 / **待人工确认**。Agent 读 PNG 经常只拿到地址、看不全一批图，不得把「已目检」写进完成标准。人没看过 PNG，拼图就还是待确认。
 
 ## 完成标准
 

@@ -37,6 +37,7 @@ import { hydrateMdImages } from "../md-image-hydrate";
 import { isPreviewableImagePath } from "../file-icons";
 import { isHtmlPath, isMarkdownPath } from "../md-path";
 import { hasMermaidFence } from "../mermaid-blocks";
+import { annotationDraftFromSelection } from "../draft-review";
 import {
   decorateMdCodeBlocks,
   handleMdCodeCopyClick,
@@ -119,6 +120,7 @@ function MarkdownView({
   filePath,
   root,
   onDiscuss,
+  onAnnotate,
   onOpenFile,
 }: {
   text: string;
@@ -134,6 +136,12 @@ function MarkdownView({
     fileName: string,
     send?: boolean,
   ) => string | null | Promise<string | null>;
+  /** 审阅划选：把选段和批注收进意见框。返回字符串为提示；返回 null 表示已追加 */
+  onAnnotate?: (
+    text: string,
+    fileName: string,
+    comment: string,
+  ) => string | null;
   /** 相对链接的打开去向（阅读区笔记栏原地打开）；缺省走 store previewReq 终端页预览 */
   onOpenFile?: (absPath: string) => void;
 }) {
@@ -160,6 +168,13 @@ function MarkdownView({
   const setPreviewReq = useAppStore((s) => s.setPreviewReq);
   const [hint, setHint] = useState<string | null>(null);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [annotateDraft, setAnnotateDraft] = useState<string | null>(null);
+  const [annotateComment, setAnnotateComment] = useState("");
+  const pendingExcerptRef = useRef("");
+  useEffect(() => {
+    setAnnotateDraft(null);
+    setAnnotateComment("");
+  }, [filePath]);
 
   const showHint = useCallback((msg: string) => {
     setHint(msg);
@@ -186,6 +201,34 @@ function MarkdownView({
       );
       if (!err) window.getSelection()?.removeAllRanges();
     });
+  }
+
+  /** 审阅批注：按下时先记住选段。WebView 里 click 会清掉选区，那时再读就是空的。 */
+  function rememberExcerpt() {
+    pendingExcerptRef.current = annotationDraftFromSelection(
+      window.getSelection()?.toString() ?? "",
+    ) ?? "";
+  }
+
+  function beginAnnotate() {
+    const selected =
+      pendingExcerptRef.current ||
+      annotationDraftFromSelection(window.getSelection()?.toString() ?? "") ||
+      "";
+    pendingExcerptRef.current = "";
+    if (!selected || !onAnnotate) return;
+    setAnnotateDraft(selected);
+    setAnnotateComment("");
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function commitAnnotate() {
+    if (!annotateDraft || !onAnnotate) return;
+    const err = onAnnotate(annotateDraft, fileName, annotateComment);
+    if (err) showHint(err);
+    else showHint("已加进上面的意见");
+    setAnnotateDraft(null);
+    setAnnotateComment("");
   }
 
   // 每次 layout 都扫剩余 [data-md-src]：父级重绘若把 innerHTML 盖回占位，
@@ -256,33 +299,91 @@ function MarkdownView({
             <MermaidDiagrams hostRef={bodyRef} html={html} />
           </Suspense>
         )}
-        {onDiscuss && (
+        {(onDiscuss || onAnnotate) && (
           <SelectionFloatBar
             containerRef={scrollRef}
             withinSelector=".md-body"
-            reserveWidth={320}
+            reserveWidth={onAnnotate && onDiscuss ? 420 : onAnnotate ? 120 : 320}
           >
-            <button
-              type="button"
-              // preventDefault 保住选区，click 时才读文字
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => discuss()}
-              className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
-            >
-              ◈ 讨论/改写此段
-            </button>
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => discuss(true)}
-              className="rounded-sm border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
-            >
-              ↵ 直接发送
-            </button>
-            <DistillSkillButton onHint={showHint} />
+            {onAnnotate && (
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  rememberExcerpt();
+                }}
+                onClick={beginAnnotate}
+                className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
+              >
+                加进意见
+              </button>
+            )}
+            {onDiscuss && (
+              <>
+                <button
+                  type="button"
+                  // preventDefault 保住选区，click 时才读文字
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => discuss()}
+                  className="rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
+                >
+                  ◈ 讨论/改写此段
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => discuss(true)}
+                  className="rounded-sm border border-field bg-strip px-2 py-1 text-xs text-l2 hover:bg-inset hover:text-l1"
+                >
+                  ↵ 直接发送
+                </button>
+                <DistillSkillButton onHint={showHint} />
+              </>
+            )}
           </SelectionFloatBar>
         )}
       </div>
+      {annotateDraft && (
+        <form
+          className="shrink-0 border-t border-hairline bg-strip px-3 py-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            commitAnnotate();
+          }}
+        >
+          <p className="mb-1 line-clamp-2 text-micro text-l3" title={annotateDraft}>
+            「{annotateDraft.replace(/\s+/g, " ")}」
+          </p>
+          <div className="flex items-center gap-1.5">
+            <input
+              autoFocus
+              value={annotateComment}
+              onChange={(event) => setAnnotateComment(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setAnnotateDraft(null);
+                }
+              }}
+              placeholder="这一处要怎么改"
+              className="min-w-0 flex-1 rounded-sm border border-field bg-canvas px-2 py-1 text-xs text-l2 outline-none placeholder:text-l4 focus:border-l4"
+            />
+            <button
+              type="submit"
+              className="shrink-0 rounded-sm border border-cta-bd bg-cta px-2 py-1 text-xs text-cta-text hover:brightness-110"
+            >
+              加入意见
+            </button>
+            <button
+              type="button"
+              onClick={() => setAnnotateDraft(null)}
+              className="shrink-0 rounded-sm px-2 py-1 text-xs text-l3 hover:bg-hover hover:text-l1"
+            >
+              取消
+            </button>
+          </div>
+        </form>
+      )}
     </div>
   );
 }
@@ -298,6 +399,7 @@ function TextFilePreviewEditor({
   root,
   onDirtyChange,
   onDiscuss,
+  onAnnotate,
   hideImmersive,
   onOpenFile,
   onOpenReader,
@@ -313,6 +415,12 @@ function TextFilePreviewEditor({
     fileName: string,
     send?: boolean,
   ) => string | null | Promise<string | null>;
+  /** 审阅划选「加进意见」：选段和批注追加到意见框 */
+  onAnnotate?: (
+    text: string,
+    fileName: string,
+    comment: string,
+  ) => string | null;
   /** 嵌入阅读区笔记栏等宿主时置 true：自带的 ⺆ 全宽沉浸层是 z-30，压在阅读区 z-40 下面会失灵。
    *  例外：md 阅读态 + onOpenReader 的「进阅读区」按钮照常显示——它跳去真正的 z-40 阅读区，
    *  不经过 z-30 层（文件页 md 预览就靠这个入口，2026-09-20） */
@@ -799,6 +907,7 @@ function TextFilePreviewEditor({
             filePath={path}
             root={root}
             onDiscuss={onDiscuss}
+            onAnnotate={onAnnotate}
             onOpenFile={onOpenFile}
           />
         )
@@ -853,6 +962,7 @@ function TextFilePreviewEditor({
                 filePath={path}
                 root={root}
                 onDiscuss={onDiscuss}
+                onAnnotate={onAnnotate}
                 onOpenFile={onOpenFile}
               />
             )

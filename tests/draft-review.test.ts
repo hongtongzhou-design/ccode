@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  annotationDraftFromSelection,
+  appendReviewAnnotation,
   scanWritingReview,
   sortWritingPreviewPaths,
   writingReturnPrompt,
@@ -48,6 +50,42 @@ test("稿件页：源稿优先，Word 先于 PDF", () => {
     writingScanSourcePath(["output/draft.pdf", "manuscript/draft.md", ".ccode/a.md"]),
     "manuscript/draft.md",
   );
+  assert.equal(
+    writingScanSourcePath(["papers/screening.md", "papers/included.md", "TASK.md"]),
+    null,
+  );
+});
+
+test("空划选不开批注，有文字才记住选段", () => {
+  assert.equal(annotationDraftFromSelection("  \n"), null);
+  assert.equal(annotationDraftFromSelection(" 核心只写镁负极 "), "核心只写镁负极");
+});
+
+test("划选批注追加进已有意见，同一段不重复", () => {
+  const once = appendReviewAnnotation("摘要去掉未核实句。", {
+    fileName: "outline.md",
+    excerpt: "核心只写镁负极与界面",
+    comment: "改成只在背景提一句",
+  });
+  assert.match(once, /摘要去掉未核实句/);
+  assert.match(
+    once,
+    /「核心只写镁负极与界面」（outline\.md）：改成只在背景提一句/,
+  );
+  const again = appendReviewAnnotation(once, {
+    fileName: "outline.md",
+    excerpt: "核心只写镁负极与界面",
+    comment: "改成只在背景提一句",
+  });
+  assert.equal(again, once);
+  const long = "甲".repeat(180);
+  const clipped = appendReviewAnnotation("", {
+    fileName: "draft.md",
+    excerpt: long,
+    comment: "改成见 Fig.1",
+  });
+  assert.match(clipped, /（draft\.md）：改成见 Fig\.1/);
+  assert.ok(!clipped.includes("甲".repeat(161)));
 });
 
 test("退回提示词带上意见和红线", () => {

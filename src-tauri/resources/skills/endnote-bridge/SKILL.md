@@ -62,7 +62,7 @@ outputs: [papers/endnote-report.json, output/endnote.docx, papers/endnote-cite-r
 
 ### 3. 定稿域稿（Markdown [@键] → output/endnote.docx）
 
-只在定稿 / 期刊格式适配（不是初稿每一轮）。源稿仍是 `[@键]`。
+只在定稿 / 学位论文格式与定稿 / 期刊格式适配（不是初稿每一轮）。同一份源稿还要交 `output/zotero.docx`（zotero-sync 的 `zotero_docx.py`）。两份都是交付，不按文献库二选一。源稿仍是 `[@键]`。LaTeX 载体不交这两份。
 
 ```bash
 python3 <技能目录>/scripts/cite_docx.py \
@@ -75,7 +75,10 @@ python3 <技能目录>/scripts/cite_docx.py \
 科研论文用 `manuscript/paper-final.md`，学位论文用 `manuscript/thesis-final.md`。输出必须是新路径，不覆盖 `manuscript/source.docx` 和 Quarto 的 `output/*.docx`。
 
 - 每个 `[@键]` / `[@a; @b]` 写成一条 Word 域：`ADDIN EN.CITE` + traveling library `<record>`（作者/年/题/DOI）。未匹配键 **fail-closed**：写报告、不写 docx、退出码非 0。
-- 可见文字用 `(Author, year)`，禁止花括号临时引用。
+- 生成时只读人指定的一个 EndNote 库。把 `.enl` 的绝对路径单独写一行到 `papers/endnote-library.path`，或运行时加 `--endnote-library`。不扫磁盘挑库。DOI 去掉网址前缀、空白和末尾句点后必须整段相同，并且库里只有一条未进废纸篓的记录，才把记录号和库编号写进域。同一 DOI 多条、没有 DOI、库里没有、或没指定库，都不猜，报告「库绑定」点名；这条仍用稿内题录。
+- 可见文字用 `(Author, year)`，禁止花括号临时引用。正文里的 `{#键}`：键在 bib 里就写成同一条引用域，不在就只留键名。不能把 `{#tbl-…}` 原样留在 Word 里，EndNote 会按它弹「选择匹配参考文献」。
+- 没指定 `papers/endnote-library.path`、库打不开、或同一 DOI 有多条时，域里不写 `foreign-keys`，也不编 `db-id="mesa"` 和顺序记录号。文末已有空的 `EN.REFLIST`，Update 往这里填参考文献表。
+- 正文 `![说明](../figures/figN.png)` 嵌进域稿，说明里的 `[@键]` 仍写成引用域。找不到图或读不出尺寸就停，不交 docx。不另交 `output/figures/`：那是渲染时复制的同一张图，源图在 `figures/`。
 - 文末放空的 `ADDIN EN.REFLIST`，等人点 Update 填参考文献。
 - 报告零未匹配后，人工事项：打开 `output/endnote.docx` → EndNote 工具栏 **Update Citations and Bibliography** → 换 Output Style。合意另存 `manuscript/source.docx`。
 

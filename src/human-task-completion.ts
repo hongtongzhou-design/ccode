@@ -7,6 +7,7 @@ export const HUMAN_COMPLETION_LABELS: Record<HumanCompletion, string> = {
   manual: "必须人工确认",
   all: "全部目标满足",
   no_placeholders: "清除占位后完成",
+  decisions_cleared: "逐条裁决后完成",
 };
 
 function isSupportedWildcardTarget(target: string): boolean {
@@ -23,14 +24,15 @@ function isSupportedWildcardTarget(target: string): boolean {
 /**
  * 完成判定与落点的兼容关系：
  * - `all` 需要一个后端支持的末段通配落点；
- * - `no_placeholders` 需要读取单个文本文件，不能用于目录/通配；
+ * - `no_placeholders` / `decisions_cleared` 需要读取单个文本文件，不能用于目录/通配；
  * - `exists` 与 `manual` 对所有落点都有效。
+ * 落点可省（行内处理的人工事项，如「更换引用样式」），缺省按空串看待。
  */
 export function isCompletionCompatible(
-  target: string,
+  target: string | undefined,
   completion: HumanCompletion,
 ): boolean {
-  const rel = target.trim();
+  const rel = (target ?? "").trim();
   if (completion === "manual") return true;
   if (completion === "exists") return rel.length > 0;
   if (completion === "all") return isSupportedWildcardTarget(rel);
@@ -39,17 +41,17 @@ export function isCompletionCompatible(
 
 /** 旧配置或用户改了落点后，避免保存一个后端永远判不完的组合。 */
 export function normalizeCompletion(
-  target: string,
+  target: string | undefined,
   completion: HumanCompletion | undefined,
 ): HumanCompletion {
-  const value = completion ?? (target.trim() ? "exists" : "manual");
+  const value = completion ?? ((target ?? "").trim() ? "exists" : "manual");
   return isCompletionCompatible(target, value) ? value : "exists";
 }
 
 export function completionOptionsForTarget(
-  target: string,
+  target: string | undefined,
 ): { value: HumanCompletion; label: string }[] {
-  return (["exists", "manual", "all", "no_placeholders"] as const)
+  return (["exists", "manual", "all", "no_placeholders", "decisions_cleared"] as const)
     .filter((value) => isCompletionCompatible(target, value))
     .map((value) => ({ value, label: HUMAN_COMPLETION_LABELS[value] }));
 }

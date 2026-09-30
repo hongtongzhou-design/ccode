@@ -36,8 +36,6 @@ export const REVIEW_SAVE = {
   readonlyRun: "定时 Run 只能只读评审，不能在此提交、保存进项目或归档",
   needDelivery: "非 Git 产物尚未完成评审，请先刷新并查看后再保存进项目",
   ledgerPending: "文件已进入项目，产物接收或验收记录尚未完成",
-  distillFallback: (workspaceName: string) =>
-    `「${workspaceName}」已保存进项目。请读项目根已有产物与本步 TASK.md 接着做，不要编造未出现的文献。`,
   reviewNodeLabel: "你核对后，保存进项目",
   reviewHintReady: "逐文件核对改动与产物，确认无误后提交并保存进项目；有问题回终端继续修改",
   reviewHintActive: "AI 提交产出后，回来核对并保存进项目",

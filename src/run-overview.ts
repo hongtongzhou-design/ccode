@@ -95,6 +95,25 @@ export function workspaceAgentBusy(
   });
 }
 
+/** 项目列表行的状态点：待处理优先；否则只有 Agent 进程还在这个课题里跑才亮绿。
+ *  未归档工作区、回合结束、回落 shell 都不亮。 */
+export function projectRailStatus(input: {
+  needsAttention: number;
+  roots: readonly string[];
+  runs: readonly RunOverviewInput[];
+}): "warn" | "running" | null {
+  if (input.needsAttention > 0) return "warn";
+  const roots = input.roots
+    .map((root) => root.replace(/\\/g, "/").replace(/\/+$/, ""))
+    .filter((root) => root.length > 0);
+  const running = input.runs.some((run) => {
+    if (!run.running || run.shell) return false;
+    const cwd = run.cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+    return roots.some((root) => cwd === root || cwd.startsWith(`${root}/`));
+  });
+  return running ? "running" : null;
+}
+
 /** 收件箱「待评审」：可合并且无冲突，且 Agent 没在出字。 */
 export function workspaceReviewInboxEligible(input: {
   readyToMerge?: boolean | null;

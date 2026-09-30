@@ -13,10 +13,10 @@ export function litSourceSectionLines(
   if (v !== "zotero" && v !== "endnote" && v !== "folder") return null;
   const body =
     v === "zotero"
-      ? "本项目的文献来自用户已有的 Zotero 库。导入：用「从 Zotero 导入」，首次题录见 references.bib，PDF 留在原处。同步：待获取清单上的「同步到 Zotero」。交付：文献库选 Zotero 时，定稿交 output/zotero.rtf。"
+      ? "本项目的文献来自用户已有的 Zotero 库。导入：用「从 Zotero 导入」，首次题录见 references.bib，PDF 留在原处。同步：待获取清单上的「同步到 Zotero」。定稿同时交 output/endnote.docx 与 output/zotero.docx。"
       : v === "endnote"
-        ? "本项目的文献来自用户已有的 EndNote 库。导入：把 EndNote 导出的 XML 或 RIS 放入 papers/imports/，开工时解析，不读 .enl。同步：待获取清单上的「同步到 EndNote」。交付：文献库选 EndNote 时，定稿交 output/endnote.docx。"
-        : "本项目的文献来自用户已有的本地文件夹（见「项目资源」段）。EndNote 导出的 XML/RIS 也走这条，放入 papers/imports/ 后按题录解析。定稿交给哪个软件，看项目设置里的「文献库」。";
+        ? "本项目的文献来自用户已有的 EndNote 库。导入：把 EndNote 导出的 XML 或 RIS 放入 papers/imports/，开工时解析，不读 .enl。同步：待获取清单上的「同步到 EndNote」。定稿同时交 output/endnote.docx 与 output/zotero.docx。"
+        : "本项目的文献来自用户已有的本地文件夹（见「项目资源」段）。EndNote 导出的 XML/RIS 也走这条，放入 papers/imports/ 后按题录解析。定稿同时交 output/endnote.docx 与 output/zotero.docx。";
   return [
     "## 文献来源",
     body,

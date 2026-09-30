@@ -3,7 +3,8 @@
 //! 出版商反爬（Akamai TLS 指纹、SD 对下载式请求回 HTML、blob Finished 挂起）针对
 //! 的是「非浏览器客户端」——内嵌窗里伪装浏览器的整条漏斗注定逐家踩坑。本通道把
 //! 「窗口打开」改为调起系统默认浏览器（用户在真浏览器里登录机构、点站方下载），
-//! Mesa 只干收货的事：监听 ~/Downloads，按时间窗 + 归属匹配把新落的 PDF 收进
+//! Mesa 只干收货的事：监听系统「下载」夹，并读 Chrome / Edge / Chromium / Brave
+//! 偏好里改过的默认下载目录。按时间窗 + 归属匹配把新落的 PDF 收进
 //! 对应项目 papers/（复用既有 stage_relayed_pdf → inst-pdf-relayed 入库链，收货端
 //! 零改动），收完把原文件挪回收站（可反悔）。
 //!
@@ -147,6 +148,134 @@ fn emit_attention_with(
 
 fn downloads_dir() -> Result<PathBuf, String> {
     dirs::download_dir().ok_or_else(|| "无法确定系统下载目录".to_string())
+}
+
+/// 没装扩展时要盯的目录：系统「下载」加上各浏览器设过的默认下载文件夹。
+/// 每次另选、又没设成默认的位置不在这里，收不到就用「关联」。
+fn watch_roots() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(dir) = downloads_dir() {
+        push_watch_dir(&mut out, dir);
+    }
+    for dir in browser_download_dirs() {
+        push_watch_dir(&mut out, dir);
+    }
+    out
+}
+
+fn push_watch_dir(into: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dir.is_dir() {
+        return;
+    }
+    let key = crate::paths::canonicalize_plain(&dir).unwrap_or(dir);
+    // 家目录、磁盘根目录不盯：一次事件就会扫到无关文件
+    let key_text = key.to_string_lossy();
+    if key.parent().is_none()
+        || dirs::home_dir().is_some_and(|home| crate::paths::same_path(&key_text, &home.to_string_lossy()))
+    {
+        return;
+    }
+    if into.iter().any(|have| crate::paths::same_path(&have.to_string_lossy(), &key_text)) {
+        return;
+    }
+    into.push(key);
+}
+
+fn browser_user_data_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(target_os = "macos")]
+    if let Some(home) = dirs::home_dir() {
+        let app = home.join("Library/Application Support");
+        for rel in [
+            "Google/Chrome",
+            "Microsoft Edge",
+            "Chromium",
+            "BraveSoftware/Brave-Browser",
+            "Vivaldi",
+        ] {
+            out.push(app.join(rel));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(local) = dirs::data_local_dir() {
+        for rel in ["Google/Chrome/User Data", "Microsoft/Edge/User Data", "Chromium/User Data", "BraveSoftware/Brave-Browser/User Data"] {
+            out.push(local.join(rel));
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(cfg) = dirs::config_dir() {
+        for rel in ["google-chrome", "microsoft-edge", "chromium", "BraveSoftware/Brave-Browser"] {
+            out.push(cfg.join(rel));
+        }
+    }
+    out
+}
+
+fn chrome_default_directory(preferences: &str) -> Option<PathBuf> {
+    let value: serde_json::Value = serde_json::from_str(preferences).ok()?;
+    let raw = value.pointer("/download/default_directory")?.as_str()?.trim();
+    if raw.is_empty() { None } else { Some(PathBuf::from(raw)) }
+}
+
+fn firefox_custom_directory(prefs: &str) -> Option<PathBuf> {
+    let mut folder_list: Option<i64> = None;
+    let mut dir: Option<String> = None;
+    for line in prefs.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("user_pref(\"browser.download.folderList\",") {
+            folder_list = rest.trim().trim_end_matches(");").trim().parse().ok();
+        }
+        if let Some(rest) = line.strip_prefix("user_pref(\"browser.download.dir\",") {
+            let raw = rest.trim().trim_end_matches(");").trim().trim_matches('"');
+            if !raw.is_empty() {
+                dir = Some(raw.replace("\\\\", "\\"));
+            }
+        }
+    }
+    // 0 桌面、1 系统下载、2 自定义。前两种已经在系统目录里。
+    if folder_list == Some(2) {
+        dir.map(PathBuf::from)
+    } else {
+        None
+    }
+}
+
+fn browser_download_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in browser_user_data_dirs() {
+        let Ok(rd) = std::fs::read_dir(&root) else { continue };
+        for entry in rd.flatten().take(12) {
+            let prefs = entry.path().join("Preferences");
+            if !prefs.is_file() {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(&prefs) {
+                if let Some(dir) = chrome_default_directory(&text) {
+                    out.push(dir);
+                }
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        let profiles = home.join(if cfg!(target_os = "macos") {
+            "Library/Application Support/Firefox/Profiles"
+        } else if cfg!(target_os = "windows") {
+            "AppData/Roaming/Mozilla/Firefox/Profiles"
+        } else {
+            ".mozilla/firefox"
+        });
+        if let Ok(rd) = std::fs::read_dir(profiles) {
+            for entry in rd.flatten().take(8) {
+                let prefs = entry.path().join("prefs.js");
+                if let Ok(text) = std::fs::read_to_string(prefs) {
+                    if let Some(dir) = firefox_custom_directory(&text) {
+                        out.push(dir);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 收货登记落盘（dev 热重启/应用重启后自动恢复；TTL 清理/命中消费同样同步落盘）
@@ -507,6 +636,24 @@ pub(crate) fn consume_pending_after_helper(project_root: &str, doi: &str, title:
     }
 }
 
+/// 打开后不想下了：把这篇从收货登记里拿掉。之后别的 PDF 不会再兜底挂到它上面。
+#[tauri::command]
+pub async fn inst_browser_cancel(
+    project_root: String,
+    title: String,
+    doi: String,
+) -> Result<(), String> {
+    let Ok(mut q) = PENDING.lock() else {
+        return Err("收货登记暂时不可用".into());
+    };
+    let now = std::time::SystemTime::now();
+    if let Some(i) = consume_pending_index(&q, &project_root, &doi, &title, now) {
+        q.remove(i);
+        save_pendings(&q);
+    }
+    Ok(())
+}
+
 /// 「在浏览器打开」：登记收货语境（有项目根时）→ 确保监听在跑 → 调起系统浏览器。
 /// EZproxy/OpenAthens 前缀在打开前改写（浏览器里完成代理登录，同一 profile 持续有效）
 #[tauri::command]
@@ -644,16 +791,15 @@ fn ensure_watcher(app: &tauri::AppHandle) -> Result<(), String> {
     // 闩锁纪律（2026-09-17 修正）：swap 置 true 之后任何提前返回都必须复位，
     // 否则一次瞬时失败（如定位不到下载目录）会把「单实例」永久占死——
     // 后续「在浏览器打开」全被 Ok(()) 假成功吞掉，再无人监听
-    let dir = match downloads_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            WATCHER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
-            return Err(e);
-        }
-    };
+    let dirs = watch_roots();
+    if dirs.is_empty() {
+        WATCHER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+        return Err("找不到可监听的下载目录".into());
+    }
     // 快照既有 PDF：后续事件里命中快照的一律跳过
     let mut snap: HashMap<PathBuf, u64> = HashMap::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
+    for dir in &dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
         for e in rd.flatten() {
             let p = e.path();
             if is_pdf_path(&p) {
@@ -676,10 +822,14 @@ fn ensure_watcher(app: &tauri::AppHandle) -> Result<(), String> {
         }
     }
     let app = app.clone();
-    let dir_disp = dir.display().to_string();
+    let dir_disp = dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join("，");
     if let Err(e) = std::thread::Builder::new()
         .name("download-inbox".into())
-        .spawn(move || watcher_loop(app, dir))
+        .spawn(move || watcher_loop(app, dirs))
     {
         WATCHER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
         return Err(format!("启动收货监听失败: {e}"));
@@ -817,7 +967,7 @@ fn fresh_end(bytes: &[u8], offset: usize) -> usize {
     end
 }
 
-fn watcher_loop(app: tauri::AppHandle, dir: PathBuf) {
+fn watcher_loop(app: tauri::AppHandle, dirs: Vec<PathBuf>) {
     use notify::{RecursiveMode, Watcher};
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = match notify::recommended_watcher(move |res| {
@@ -829,8 +979,14 @@ fn watcher_loop(app: tauri::AppHandle, dir: PathBuf) {
             return;
         }
     };
-    if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        dinbox_log(&format!("watch 失败: {e:?}"));
+    let mut watching = 0;
+    for dir in &dirs {
+        match watcher.watch(dir, RecursiveMode::NonRecursive) {
+            Ok(()) => watching += 1,
+            Err(e) => dinbox_log(&format!("watch 失败 {}: {e:?}", dir.display())),
+        }
+    }
+    if watching == 0 {
         WATCHER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
         return;
     }
@@ -1132,6 +1288,33 @@ mod tests {
             open_url: "https://doi.org/10.1/x".into(),
             opened_at: std::time::SystemTime::now() - ago,
         }
+    }
+
+    #[test]
+    fn browser_download_dirs_read_custom_defaults_only() {
+        let chrome = r#"{"download":{"default_directory":"/Users/me/Literature"},"other":1}"#;
+        assert_eq!(
+            chrome_default_directory(chrome).unwrap(),
+            PathBuf::from("/Users/me/Literature")
+        );
+        assert!(chrome_default_directory(r#"{"download":{"default_directory":""}}"#).is_none());
+        assert!(chrome_default_directory("not json").is_none());
+
+        let firefox = [
+            r#"user_pref("browser.download.folderList", 2);"#,
+            r#"user_pref("browser.download.dir", "/Users/me/Papers");"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            firefox_custom_directory(&firefox).unwrap(),
+            PathBuf::from("/Users/me/Papers")
+        );
+        // 1 是系统下载，不再另加一个目录
+        assert!(firefox_custom_directory(
+            "user_pref(\"browser.download.folderList\", 1);\nuser_pref(\"browser.download.dir\", \"/Users/me/Papers\");"
+        )
+        .is_none());
+        assert!(firefox_custom_directory("user_pref(\"browser.download.folderList\", 2);").is_none());
     }
 
     #[test]

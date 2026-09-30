@@ -76,6 +76,21 @@ export function reviewFileGroup(path: string): ReviewFileGroupId {
   return "other";
 }
 
+/**
+ * 「文件」页签只留给人看的检索产物。脚本、缓存、任务书、技能说明不进这一栏。
+ */
+export function isScreeningReviewFile(path: string): boolean {
+  const base = fileName(normReviewPath(path));
+  return (
+    base === "included.md" ||
+    base === "included.json" ||
+    base === "screening.md" ||
+    base === "to-fetch.md" ||
+    base === "to-fetch.ris" ||
+    base === "endnote-import.ris"
+  );
+}
+
 /** 检索过程文件：缓存、脚本、配置。不进清单主面。 */
 export function isReviewProcessFile(path: string): boolean {
   const p = normReviewPath(path);
@@ -560,9 +575,28 @@ export function paperHasDoiPdf(
   });
 }
 
+/** 只剥掉开头那句判定，句号后面的原理由留下。 */
+function reasonBody(previous: string): string {
+  return previous.replace(/^(纳入|排除|待确认)[：:][^。]*。?/, "").trim();
+}
+
 export function confirmReason(decision: "included" | "excluded", previous: string): string {
   const prefix = decision === "included" ? "纳入：评审确认" : "排除：评审确认";
-  const rest = previous.replace(/^(纳入|排除|待确认)[：:].*/, "").trim();
+  const rest = reasonBody(previous);
+  return rest ? `${prefix}。${rest}` : prefix;
+}
+
+/** 已纳入篇目点「移出」：判定改成排除，记录留在 json。 */
+export function removeReason(previous: string): string {
+  const rest = reasonBody(previous);
+  const prefix = "排除：人工移出";
+  return rest ? `${prefix}。${rest}` : prefix;
+}
+
+/** 已排除篇目点「恢复为待确认」：只改判定，不写回待获取。 */
+export function restorePendingReason(previous: string): string {
+  const rest = reasonBody(previous);
+  const prefix = "待确认：从排除恢复";
   return rest ? `${prefix}。${rest}` : prefix;
 }
 
@@ -597,6 +631,70 @@ export function patchIncludedJson(
   return `${JSON.stringify(data, null, 2)}\n`;
 }
 
+/** 一次改多篇。keys 对 id，对不上再对标题。一篇都没对上则抛错。 */
+export function patchIncludedJsonMany(
+  text: string,
+  keys: string[],
+  decision: "included" | "excluded" | "pending",
+  reasonFor: (previous: string) => string,
+): string {
+  const wanted = new Set(keys.filter(Boolean));
+  if (wanted.size === 0) throw new Error("没有选中的篇目");
+  const data = JSON.parse(text) as unknown;
+  const rows = asRows(data);
+  let found = 0;
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as Record<string, unknown>;
+    const id = typeof rec.id === "string" ? rec.id : "";
+    const title = typeof rec.title === "string" ? rec.title : "";
+    if (!wanted.has(id) && !wanted.has(title)) continue;
+    const previous = typeof rec.reason === "string" ? rec.reason : "";
+    patchIncludedRow(rec, decision, reasonFor(previous));
+    found += 1;
+  }
+  if (found === 0) throw new Error("清单里找不到选中的篇目");
+  return `${JSON.stringify(data, null, 2)}\n`;
+}
+
+export type ScreeningSort = "listed" | "if-desc" | "if-asc";
+
+/** 影响因子能解析成数字才参加排序和最低值。空、未收录不编一个 0。 */
+export function impactFactorValue(metric: { impactFactor: string | null } | null | undefined): number | null {
+  const raw = metric?.impactFactor?.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * 最低影响因子只留下达到的篇。查不到影响因子的篇留在清单里，避免把书章和未收录期刊一起丢掉。
+ * 排序只在有数字的篇之间进行，没有数字的保持原顺序排在后面。
+ */
+export function arrangeScreeningRows<T>(
+  rows: T[],
+  metricOf: (row: T) => { impactFactor: string | null } | null | undefined,
+  sort: ScreeningSort,
+  minIf: number | null,
+): T[] {
+  const kept = rows.filter((row) => {
+    if (minIf == null || !Number.isFinite(minIf)) return true;
+    const value = impactFactorValue(metricOf(row));
+    return value == null || value >= minIf;
+  });
+  if (sort === "listed") return kept;
+  return kept
+    .map((row, index) => ({ row, index, value: impactFactorValue(metricOf(row)) }))
+    .sort((a, b) => {
+      if (a.value == null && b.value == null) return a.index - b.index;
+      if (a.value == null) return 1;
+      if (b.value == null) return -1;
+      const delta = sort === "if-desc" ? b.value - a.value : a.value - b.value;
+      return delta === 0 ? a.index - b.index : delta;
+    })
+    .map((item) => item.row);
+}
+
 /** 一次把全部 pending 改成纳入。reason 按每条原理由生成。 */
 export function includeAllPendingJson(text: string): string {
   const data = JSON.parse(text) as unknown;
@@ -620,6 +718,21 @@ export function includedMdLine(row: Pick<IncludedRecord, "title" | "authors" | "
   return [row.title, who, row.source, tail].filter(Boolean).join(" — ");
 }
 
+/** 开头那句「终判纳入 N 篇」按 json 现数改。编号文献行不动。 */
+export function syncIncludedSummary(md: string, records: readonly IncludedRecord[]): string {
+  const included = records.filter((row) => row.decision === "included").length;
+  const pending = records.filter((row) => row.decision === "pending").length;
+  const excluded = records.filter((row) => row.decision === "excluded").length;
+  return md.replace(/\r\n/g, "\n").split("\n").map((line) => {
+    if (/^\s*\d+\.\s/.test(line)) return line;
+    if (!/纳入/.test(line) || !/篇/.test(line) || !/\d/.test(line)) return line;
+    let next = line.replace(/(纳入\s*(?:\*\*)?)\d+/, `$1${included}`);
+    if (/待确认/.test(next)) next = next.replace(/(待确认\s*(?:\*\*)?)\d+/, `$1${pending}`);
+    if (/排除/.test(next)) next = next.replace(/(排除\s*(?:\*\*)?)\d+/, `$1${excluded}`);
+    return next;
+  }).join("\n");
+}
+
 export function patchIncludedMd(
   md: string,
   title: string,
@@ -629,9 +742,10 @@ export function patchIncludedMd(
   const lines = md.replace(/\r\n/g, "\n").split("\n");
   const kept = lines.filter((row) => !row.includes(title));
   if (decision === "excluded") return kept.join("\n");
+  // 中文标题后面紧跟汉字时没有 \b。纳入文献清单、纳入清单都算这一节。
   const heading = decision === "included"
-    ? /^(#{1,3}\s*)(纳入|Included)\b/i
-    : /^(#{1,3}\s*).*pending/i;
+    ? /^(#{1,6}\s+).*(?:纳入|Included\b)/i
+    : /^(#{1,6}\s+).*(?:pending|待确认)/i;
   let at = kept.findIndex((row) => heading.test(row.trim()));
   if (at < 0) {
     const block = decision === "included"
@@ -641,6 +755,14 @@ export function patchIncludedMd(
   }
   at += 1;
   while (at < kept.length && kept[at].trim() === "") at += 1;
+  while (
+    at < kept.length
+    && kept[at].trim() !== ""
+    && !/^\s*\d+\.\s/.test(kept[at])
+    && !/^#{1,6}\s/.test(kept[at])
+  ) {
+    at += 1;
+  }
   kept.splice(at, 0, line);
   return kept.join("\n");
 }
@@ -662,6 +784,82 @@ export function appendToFetchEntry(md: string, row: IncludedRecord): string {
   const line = `${n}. ${row.title} — ${doi}`;
   if (!md.trim()) return `# 待获取全文\n\n${line}\n`;
   return `${md.replace(/\s*$/, "")}\n${line}\n`;
+}
+
+function lineMentionsRecord(
+  line: string,
+  row: Pick<IncludedRecord, "title" | "id" | "url">,
+): boolean {
+  const doi = doiToken(row.id, row.url);
+  if (doi && line.toLowerCase().includes(doi.toLowerCase())) return true;
+  return Boolean(row.title) && line.includes(row.title);
+}
+
+/**
+ * 移出时拿掉待获取里这一篇。编号不重排，避免和已经勾掉的行错位。
+ * 只删含 DOI 或标题的行；空文件原样返回。
+ */
+export function removeToFetchEntry(
+  md: string,
+  row: Pick<IncludedRecord, "title" | "id" | "url">,
+): string {
+  if (!md.trim()) return md;
+  const lines = md.replace(/\r\n/g, "\n").split("\n");
+  const kept = lines.filter((line) => !lineMentionsRecord(line, row));
+  if (kept.length === lines.length) return md;
+  return `${kept.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+/** 移出时按 DOI 或标题拿掉 RIS 里对应的一整条。对不上则原样返回。 */
+export function removeRisRecord(
+  ris: string,
+  row: Pick<IncludedRecord, "title" | "id" | "url">,
+): string {
+  const doi = doiToken(row.id, row.url).toLowerCase();
+  const title = risValue(row.title).toLowerCase();
+  if (!doi && !title) return ris;
+  const blocks = risBlocks(ris);
+  if (blocks.length === 0) return ris;
+  const kept = blocks.filter((block) => {
+    const blockDoi = doiToken("", blockField(block, "DO")).toLowerCase();
+    const blockTitle = blockField(block, "TI").toLowerCase();
+    if (doi && blockDoi === doi) return false;
+    if (title && blockTitle === title) return false;
+    return true;
+  });
+  if (kept.length === blocks.length) return ris;
+  const body = kept.map((block) => block.trim()).filter(Boolean).join("\r\n\r\n");
+  return body ? `${body}\r\n` : "";
+}
+
+/** 精读索引里这篇已经写了笔记路径。读不到索引、或 notePath 为空，都不算有笔记。 */
+export function notePathForRecord(indexText: string, id: string): string | null {
+  if (!id.trim()) return null;
+  let data: unknown;
+  try {
+    data = JSON.parse(indexText);
+  } catch {
+    return null;
+  }
+  for (const row of asRows(data)) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as Record<string, unknown>;
+    if (rec.id !== id) continue;
+    const path = rec.notePath;
+    if (typeof path === "string" && path.trim()) return path.trim();
+  }
+  return null;
+}
+
+/** references.bib 里出现这篇 DOI 或标题。对不上不提示。 */
+export function bibMentionsRecord(
+  bib: string,
+  row: Pick<IncludedRecord, "title" | "id" | "url">,
+): boolean {
+  const doi = doiToken(row.id, row.url);
+  if (doi && bib.toLowerCase().includes(doi.toLowerCase())) return true;
+  const title = row.title.trim();
+  return title.length >= 8 && bib.includes(title);
 }
 
 function risValue(value: string): string {

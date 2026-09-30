@@ -196,7 +196,7 @@ fn new_skill(
 /// marker 是库目录下的 . 开头文件（发现逻辑跳过），记录已播种到的版本；
 /// 用户删掉某个内置技能后不会被复活——逐技能删除墓碑（BUILTIN_TOMBSTONE_FILE）
 /// 记下用户删过的内置技能名，版本升级补播时跳过墓碑项。
-const BUILTIN_SEED_VERSION: u32 = 6;
+const BUILTIN_SEED_VERSION: u32 = 8;
 const BUILTIN_SEED_MARKER: &str = ".builtin-seed-version";
 
 /// 内置技能删除墓碑（库目录下 . 开头文件，一行一个技能名）：删除内置技能先落墓碑，
@@ -301,6 +301,11 @@ static BUILTIN_SUPPORT: &[(&str, &str, &str)] = &[
         include_str!("../resources/skills/endnote-bridge/scripts/cite_docx.py"),
     ),
     (
+        "endnote-bridge",
+        "scripts/library_match.py",
+        include_str!("../resources/skills/endnote-bridge/scripts/library_match.py"),
+    ),
+    (
         "origin-plot",
         "scripts/plot_origin.py",
         include_str!("../resources/skills/origin-plot/scripts/plot_origin.py"),
@@ -336,6 +341,11 @@ static BUILTIN_SUPPORT: &[(&str, &str, &str)] = &[
         include_str!("../resources/skills/quarto-render/scripts/citation_style.py"),
     ),
     (
+        "quarto-render",
+        "scripts/manuscript_font.py",
+        include_str!("../resources/skills/quarto-render/scripts/manuscript_font.py"),
+    ),
+    (
         "endnote-bridge",
         "scripts/sync_docx.py",
         include_str!("../resources/skills/endnote-bridge/scripts/sync_docx.py"),
@@ -344,6 +354,11 @@ static BUILTIN_SUPPORT: &[(&str, &str, &str)] = &[
         "zotero-sync",
         "scripts/zotero_rtf.py",
         include_str!("../resources/skills/zotero-sync/scripts/zotero_rtf.py"),
+    ),
+    (
+        "zotero-sync",
+        "scripts/zotero_docx.py",
+        include_str!("../resources/skills/zotero-sync/scripts/zotero_docx.py"),
     ),
 ];
 

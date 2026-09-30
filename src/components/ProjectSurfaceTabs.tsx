@@ -43,7 +43,16 @@ export default function ProjectSurfaceTabs({
     if (selectedIndex >= 0) setFocusIndex(selectedIndex);
   }, [selectedIndex]);
 
-  if (!project) return <>{children}</>;
+  if (!project) {
+    return (
+      <div
+        data-project-main-scroll
+        className="min-h-0 flex-1 overflow-auto pb-6"
+      >
+        {children}
+      </div>
+    );
+  }
 
   const labels: Record<ProjectSurfaceTab, string> = {
     chats: "对话",
@@ -71,9 +80,9 @@ export default function ProjectSurfaceTabs({
   }
 
   return (
-    <section aria-label="项目视图">
+    <section aria-label="项目视图" className="flex min-h-0 flex-1 flex-col">
       <div
-        className="mb-4 flex items-center gap-1 border-b border-hairline"
+        className="mb-4 flex shrink-0 items-center gap-1 border-b border-hairline"
         role="tablist"
         aria-label="项目视图"
         onKeyDown={moveFocus}
@@ -105,8 +114,13 @@ export default function ProjectSurfaceTabs({
           );
         })}
       </div>
-      {active === "tasks" && taskPanel}
-      {children}
+      <div
+        data-project-main-scroll
+        className="min-h-0 flex-1 overflow-auto pb-6"
+      >
+        {active === "tasks" && taskPanel}
+        {children}
+      </div>
     </section>
   );
 }

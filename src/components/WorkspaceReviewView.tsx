@@ -6,6 +6,7 @@ import { researchReportPatterns, reproductionEntrypoints } from "../research-rep
 import {
   blockerPrimaryText,
   groupReviewFiles,
+  isScreeningReviewFile,
   sortReviewPaths,
 } from "../screening-review";
 import {
@@ -18,6 +19,7 @@ import {
 } from "../review-file-groups";
 import { resolveStepReviewProfile, reviewPaneTabs, type ReviewPane } from "../step-review";
 import {
+  appendReviewAnnotation,
   scanWritingReview,
   writingReturnPrompt,
   writingScanSourcePath,
@@ -479,12 +481,19 @@ function DeliveryReviewPane({
   activePath,
   onSelect,
   empty,
+  onAnnotate,
 }: {
   root: string;
   paths: readonly string[];
   activePath: string | null;
   onSelect: (path: string) => void;
   empty: string;
+  /** 划选文字追加到审阅意见。只在还能退回时传入。 */
+  onAnnotate?: (
+    text: string,
+    fileName: string,
+    comment: string,
+  ) => string | null;
 }) {
   const [query, setQuery] = useState("");
   const [listOpen, setListOpen] = useState(true);
@@ -559,6 +568,7 @@ function DeliveryReviewPane({
               </button>
             ) : null
           }
+          onAnnotate={onAnnotate}
         />
       </div>
     </div>
@@ -1415,19 +1425,8 @@ function LiveWorkspaceReviewView({
   async function goNextStep() {
     if (!nextStep) return;
     const heading = `上一步（${diff?.workspaceName ?? "未知步骤"}）评审沉淀`;
-    let content = distillText.trim();
-    if (!content && diff) {
-      try {
-        content = (
-          await invoke<string>("ai_distill_review", {
-            id: diff.workspaceId,
-            stepName: nextStep.step.name,
-          })
-        ).trim();
-      } catch {
-        content = REVIEW_SAVE.distillFallback(diff.workspaceName);
-      }
-    }
+    // 只有人在沉淀框里留下的字才写进下一步。空框表示没有新约束，不自动再起草。
+    const content = distillText.trim();
     if (content) {
       try {
         await invoke("append_step_draft", {
@@ -1445,8 +1444,8 @@ function LiveWorkspaceReviewView({
     setNextStep(null);
   }
 
-  /** 「◈ AI 起草」：本步提交清单 + diff 统计 + TASK.md → 初稿填入编辑框；
-   *  失败行内报错可重试，不静默降级（功能键复用设置页 digest 专用 profile） */
+  /** 「◈ AI 起草」：对照下一步任务书和已验收产物，只起草还没有的约束。
+   *  模型判定没有新约束时返回空，留在框里提示，不写盘。 */
   async function draftDistill() {
     if (!diff || !nextStep || distillDrafting) return;
     setDistillDrafting(true);
@@ -1456,7 +1455,15 @@ function LiveWorkspaceReviewView({
         id: diff.workspaceId,
         stepName: nextStep.step.name,
       });
-      setDistillText(draft.trim());
+      const text = draft.trim();
+      if (!text) {
+        setDistillText("");
+        setDistillDraftError(
+          "没有下一步还缺的约束。这一步不必沉淀，直接去下一步即可。",
+        );
+        return;
+      }
+      setDistillText(text);
     } catch (reason) {
       setDistillDraftError(`${reason}（检查设置页「AI 专用配置」是否可用）`);
     } finally {
@@ -1490,6 +1497,19 @@ function LiveWorkspaceReviewView({
       setDistillBusy(false);
     }
   }
+
+  /** 划选追加到意见框。不写盘，退回时才和手写意见一起落 review-notes。 */
+  const addAnnotation = useCallback(
+    (excerpt: string, fileName: string, comment: string) => {
+      const quote = excerpt.trim();
+      if (!quote) return "先划一段文字";
+      setReviewNotes((notes) =>
+        appendReviewAnnotation(notes, { fileName, excerpt: quote, comment }),
+      );
+      return null;
+    },
+    [],
+  );
 
   async function returnToAgent(rewrite: boolean) {
     if (!wsRow || returnBusy) return;
@@ -1673,12 +1693,14 @@ function LiveWorkspaceReviewView({
   );
   const filteredFiles = useMemo(
     () =>
-      (diff?.files ?? []).filter(
-        (file) =>
+      (diff?.files ?? []).filter((file) => {
+        if (reviewProfile.kind === "screening" && !isScreeningReviewFile(file.path)) return false;
+        return (
           !normalizedQuery ||
-          file.path.toLocaleLowerCase().includes(normalizedQuery),
-      ),
-    [diff?.files, normalizedQuery],
+          file.path.toLocaleLowerCase().includes(normalizedQuery)
+        );
+      }),
+    [diff?.files, normalizedQuery, reviewProfile.kind],
   );
   const orderedFiles = useMemo(() => {
     if (!reviewProfile.groupFiles) return filteredFiles;
@@ -2431,7 +2453,7 @@ function LiveWorkspaceReviewView({
             <div className="flex min-w-0 items-center gap-2 text-l3">
               {reviewProfile.headerHint ? (
                 <span className="text-l2">
-                  {diff.files.length} 个文件 · {reviewProfile.headerHint}
+                  {reviewProfile.kind === "screening" ? filteredFiles.length : diff.files.length} 个文件 · {reviewProfile.headerHint}
                 </span>
               ) : (
                 <>
@@ -2443,7 +2465,9 @@ function LiveWorkspaceReviewView({
               <span className="max-w-32 truncate font-mono">
                 {diff.baseBranch}
               </span>
-              <span className="ml-1 text-l4">{diff.files.length} 个文件</span>
+              <span className="ml-1 text-l4">
+                {reviewProfile.kind === "screening" ? filteredFiles.length : diff.files.length} 个文件
+              </span>
               <span className="font-mono text-add">+{diff.totalAdd}</span>
               <span className="font-mono text-del">-{diff.totalDel}</span>
               {health && (health.ahead > 0 || health.behind > 0) && (
@@ -2616,7 +2640,7 @@ function LiveWorkspaceReviewView({
                     className="min-w-0 truncate text-warn-text"
                     title={writingHits.map((hit) => hit.label).join("；")}
                   >
-                    稿件还要改：{writingHits.map((hit) => hit.label).join("；")}
+                    审阅时核对：{writingHits.map((hit) => hit.label).join("；")}
                   </span>
                 )}
                 {contentReview && paneTabs && (
@@ -2649,7 +2673,7 @@ function LiveWorkspaceReviewView({
               {contentReview && !mergeDone && (
                 <div className="mt-2 border-t border-hairline pt-2">
                   <p className="mb-1 text-micro text-l4">
-                    写下意见后退回给 Agent。不会保存进项目。
+                    写下意见，或在稿件里划一段点「加进意见」。退回后交给 Agent。不会保存进项目。
                   </p>
                   <textarea
                     value={reviewNotes}
@@ -2872,14 +2896,13 @@ function LiveWorkspaceReviewView({
               type="button"
               onClick={() => void draftDistill()}
               disabled={distillDrafting || distillBusy}
-              title="按本步提交与 TASK.md 起草沉淀初稿（可再改）"
+              title="对照下一步任务书和已验收产物，只起草下一步还没有的约束"
               className="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs text-l2 hover:bg-hover hover:text-l1 disabled:opacity-50"
             >
-              {distillDrafting ? "◈ 起草中…" : "◈ AI 起草"}
+              {distillDrafting ? "◈ 起草中…模型还在写" : "◈ AI 起草"}
             </button>
             <span className="min-w-0 flex-1 truncate text-micro text-l4">
-              AI 初稿，改完沉淀后写进「{nextStep.step.name}
-              」的 TASK.md
+              只写下一步任务书里还没有的约束。没有就留空，改完才写进「{nextStep.step.name}」的 TASK.md
             </span>
           </div>
           {distillDraftError && (
@@ -2897,7 +2920,7 @@ function LiveWorkspaceReviewView({
           <textarea
             className="w-full rounded-md border border-field bg-canvas px-2 py-1.5 text-sm leading-relaxed text-l2 outline-none placeholder:text-l4 focus:border-l4"
             rows={4}
-            placeholder={`写下评审结论：这步验收了什么、下一步该怎么想（沉淀后写进「${nextStep.step.name}」的 TASK.md）`}
+            placeholder={`只写「${nextStep.step.name}」照自己的任务会改错的决定，以及产物里还没由人确认的事项。没有就留空。`}
             value={distillText}
             onChange={(e) => setDistillText(e.target.value)}
             autoFocus
@@ -2953,6 +2976,7 @@ function LiveWorkspaceReviewView({
             activePath="papers/screening.md"
             onSelect={() => {}}
             empty="还没有筛选记录。"
+            onAnnotate={!mergeDone ? addAnnotation : undefined}
           />
         )}
         {contentReady && !showGitFiles && screeningReview && reviewPane !== "process" && researchContext?.root === worktreePath && (
@@ -3011,9 +3035,10 @@ function LiveWorkspaceReviewView({
                 ? "这一步没有需要看的过程记录。脚本和配置在「文件」。"
                 : "没有稿件或笔记。"
             }
+            onAnnotate={!mergeDone ? addAnnotation : undefined}
           />
         )}
-        <div className={`flex min-h-0 flex-1 ${reviewProfile.hideListDiffs ? "min-h-[42vh]" : ""} ${showGitFiles ? "" : "hidden"}`}>
+        <div className={`flex min-h-0 flex-1 ${showGitFiles ? "" : "hidden"}`}>
           {reviewRailOpen && (
             <button
               type="button"
@@ -3156,7 +3181,7 @@ function LiveWorkspaceReviewView({
                   {conflictMode
                     ? filteredConflictFiles.length
                     : filteredFiles.length}
-                  /{conflictMode ? conflictFiles.length : diff.files.length}
+                  /{conflictMode ? conflictFiles.length : reviewProfile.kind === "screening" ? filteredFiles.length : diff.files.length}
                 </span>
               </div>
             </div>

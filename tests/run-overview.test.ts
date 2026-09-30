@@ -5,6 +5,7 @@ import {
   buildRunOverview,
   cwdBasename,
   itemRank,
+  projectRailStatus,
   workspaceAgentBusy,
   workspaceHasLiveAgent,
   workspaceReviewInboxEligible,
@@ -80,6 +81,80 @@ test("workspaceAgentBusy：出字或等确认才算忙，回合结束不算", ()
     false,
   );
   assert.equal(workspaceAgentBusy(ws, [input({ cwd: "/other", attention: "working" })]), false);
+});
+
+test("项目列表绿点只认还在跑的 Agent，未归档工作区不亮", () => {
+  const roots = [
+    "/Users/me/Documents/综述流程测试",
+    "/Users/me/ccode/workspaces/综述流程测试/polish",
+  ];
+  assert.equal(
+    projectRailStatus({ needsAttention: 0, roots, runs: [] }),
+    null,
+  );
+  assert.equal(
+    projectRailStatus({
+      needsAttention: 0,
+      roots,
+      runs: [
+        input({
+          cwd: "/Users/me/ccode/workspaces/综述流程测试/polish",
+          running: false,
+          attention: "done",
+        }),
+      ],
+    }),
+    null,
+  );
+  assert.equal(
+    projectRailStatus({
+      needsAttention: 0,
+      roots,
+      runs: [
+        input({
+          cwd: "/Users/me/ccode/workspaces/综述流程测试/polish",
+          running: true,
+          shell: true,
+        }),
+      ],
+    }),
+    null,
+  );
+  assert.equal(
+    projectRailStatus({
+      needsAttention: 0,
+      roots,
+      runs: [
+        input({
+          cwd: "/Users/me/ccode/workspaces/综述流程测试/polish/manuscript",
+          running: true,
+          shell: false,
+        }),
+      ],
+    }),
+    "running",
+  );
+  assert.equal(
+    projectRailStatus({
+      needsAttention: 2,
+      roots,
+      runs: [
+        input({
+          cwd: "/Users/me/ccode/workspaces/综述流程测试/polish",
+          running: true,
+        }),
+      ],
+    }),
+    "warn",
+  );
+  assert.equal(
+    projectRailStatus({
+      needsAttention: 0,
+      roots,
+      runs: [input({ cwd: "/Users/me/Documents/综述流程测试2", running: true })],
+    }),
+    null,
+  );
 });
 
 test("收件箱待评审：可合并才进，出字中和冲突都不进", () => {

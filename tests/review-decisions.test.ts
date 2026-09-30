@@ -1,0 +1,85 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  applyReportVerdict,
+  applyVerifyVerdict,
+  continueAfterDecisionsPrompt,
+  isInlineDecisionTaskTitle,
+  parseReviewItems,
+  reviewItemsCleared,
+} from "../src/review-decisions.ts";
+
+const REPORT = `## 严重问题
+
+R001 位置：manuscript/draft.md:12
+问题：摘要把 12% 写成 21%。
+类别：数据
+
+## 一般问题
+
+### R002 位置：manuscript/draft.md:40
+问题：转场空转。
+
+## 建议
+
+无
+`;
+
+test("审查报告按编号拆条，决定行不算进正文", () => {
+  const once = applyReportVerdict(REPORT, "R001", "接受");
+  const twice = applyReportVerdict(once, "R001", "修改", "改回 12%");
+  const items = parseReviewItems(twice, "report");
+  assert.deepEqual(
+    items.map((item) => item.id),
+    ["R001", "R002"],
+  );
+  assert.equal(items[0]?.verdict, "修改");
+  assert.equal(items[0]?.note, "改回 12%");
+  assert.equal(items[1]?.verdict, null);
+  assert.equal(reviewItemsCleared(items), false);
+  assert.match(twice, /决定：修改：改回 12%/);
+  assert.equal(twice.split("决定：").length, 2);
+});
+
+test("待核实清单把三个按钮写成确认、删除、改正为", () => {
+  const source =
+    "- V001 | 位置：review-final.md:4 | 原文摘要：容量 21% | 来源：[@lee] | 裁决：待裁决 | 依据：\n" +
+    "- V002 | 位置：review-final.md:9 | 原文摘要：循环 200 次 | 来源：[@wu] | 裁决：待裁决 | 依据：\n";
+  const accepted = applyVerifyVerdict(source, "V001", "接受");
+  const revised = applyVerifyVerdict(accepted, "V002", "修改", "180 次");
+  const items = parseReviewItems(revised, "verify");
+  assert.equal(items[0]?.verdict, "接受");
+  assert.equal(items[1]?.verdict, "修改");
+  assert.match(revised, /V001 \| 位置：review-final\.md:4 \| 原文摘要：容量 21% \| 来源：\[@lee\] \| 裁决：确认 \| 依据：/);
+  assert.match(revised, /裁决：改正为180 次 \| 依据：180 次/);
+  assert.equal(reviewItemsCleared(items), true);
+  assert.equal(reviewItemsCleared(parseReviewItems(source, "verify")), false);
+});
+
+test("拒绝写删除该论断，旧的确认和删除也能读回来", () => {
+  const line = "- V003 | 裁决：待裁决 | 依据：\n";
+  const next = applyVerifyVerdict(line, "V003", "拒绝");
+  assert.match(next, /裁决：删除该论断/);
+  const old = "- V004 | 裁决：确认 | 依据：DOI 10.1/a\n";
+  assert.equal(parseReviewItems(old, "verify")[0]?.verdict, "接受");
+});
+
+test("全部接受只给还没决定的条目写接受", () => {
+  const once = applyReportVerdict(REPORT, "R001", "拒绝");
+  const items = parseReviewItems(once, "report");
+  let next = once;
+  for (const item of items) {
+    if (item.verdict == null) next = applyReportVerdict(next, item.id, "接受");
+  }
+  const after = parseReviewItems(next, "report");
+  assert.equal(after.find((item) => item.id === "R001")?.verdict, "拒绝");
+  assert.equal(after.find((item) => item.id === "R002")?.verdict, "接受");
+});
+
+test("点完接回对话，不把人送去评审", () => {
+  assert.match(continueAfterDecisionsPrompt("manuscript/review-report.md", "report"), /决定：/);
+  assert.match(continueAfterDecisionsPrompt("manuscript/verification-decisions.md", "verify"), /删除该论断/);
+  assert.equal(isInlineDecisionTaskTitle("逐条决定审查报告"), true);
+  assert.equal(isInlineDecisionTaskTitle("逐条裁决 [待核实] 与存疑条目"), true);
+  assert.equal(isInlineDecisionTaskTitle("换样式时打开域稿"), false);
+});

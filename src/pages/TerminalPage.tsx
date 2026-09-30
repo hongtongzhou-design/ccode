@@ -44,7 +44,9 @@ import {
   KIMI_CSI_U_ENTER,
   markdownToPlain,
   pasteImageFeedback,
+  armPrintableEcho,
   printableKeyFallback,
+  takePrintableEcho,
   ptyShiftEnterRewrite,
   shouldReportTerminalColors,
   xtermOscColorReport,
@@ -1593,8 +1595,7 @@ const TerminalView = memo(function TerminalView({
     let swallowShiftEnterCrUntil = 0;
     // Shift+标点已由宿主补发过一次的字符：随后 xterm 的 keypress/input 若再发同一个字，
     // 这里吞掉，避免「?」变「??」。窗口取得短，只兜同一记按键的重复来源。
-    let swallowPrintableChar: string | null = null;
-    let swallowPrintableUntil = 0;
+    let printableEcho = { char: "", count: 0, until: 0 };
     // Cmd/Ctrl+F 在终端聚焦时也呼出搜索条（拦在 xterm 之前，避免 Ctrl+F 字符进 PTY）
     term.attachCustomKeyEventHandler((e) => {
       // kimi 的 TUI 开了 kitty 键盘协议（\x1b[>7u）后只认 CSI-u 形式的 Enter，
@@ -1714,8 +1715,11 @@ const TerminalView = memo(function TerminalView({
           invoke("pty_write", { ptyId: id, data: fallback.data }).catch((err) =>
             setError(String(err)),
           );
-          swallowPrintableChar = fallback.data;
-          swallowPrintableUntil = performance.now() + 120;
+          printableEcho = armPrintableEcho(
+            printableEcho,
+            fallback.data,
+            performance.now(),
+          );
           return false;
         }
       }
@@ -1833,18 +1837,10 @@ const TerminalView = memo(function TerminalView({
           swallowShiftEnterCrUntil = 0;
           return;
         }
-        // Shift+标点已由宿主补发过一次：xterm 随后若仍把同一个字发出来，吞掉这一记，
-        // 否则「?」会变「??」。只比对补发过的那个字符，且限在同一记按键的时间窗内。
-        if (
-          swallowPrintableChar !== null &&
-          performance.now() < swallowPrintableUntil
-        ) {
-          if (data === swallowPrintableChar) {
-            swallowPrintableChar = null;
-            return;
-          }
-          swallowPrintableChar = null;
-        }
+        // 宿主刚补过的符号：xterm 组词收尾若再送出同一个，按次数吞掉。
+        const echo = takePrintableEcho(printableEcho, data, performance.now());
+        printableEcho = echo.guard;
+        if (echo.swallow) return;
         markInteraction();
         if (ptyInputLooksLikeSubmit(data, KIMI_CSI_U_ENTER)) armPtyWorking();
         const id = ptyIdRef.current;

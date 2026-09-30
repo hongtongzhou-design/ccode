@@ -55,6 +55,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   components/LaunchMenu.tsx  # 启动栏下拉菜单组件：portal 到 body、分组标题、键盘导航，替代原生 select
                              # （Agent/配置/模型三段共用；隐藏配置沉「已停用（可手选）」组）
   components/StepEvidenceChip.tsx # 步骤卡证据徽标：读当前步骤报告，显示质量状态与未决标记计数（解析在 step-evidence.ts）
+  components/ReviewDecisionList.tsx # 步骤上的审查/待核实清单：逐条接受、拒绝、修改，写回报告后再接回对话
+  components/PendingConfirmList.tsx # 检索步文献清单：待确认纳入/排除、已纳入移出、已排除恢复；行上现查 IF/分区/TOP
+  components/CloseoutPack.tsx # 项目卡「完结文件」：按脉络列出已写出的文件，点开到文件页
   components/QuickChatHistoryMenu.tsx # 侧栏「快速开聊」右键的 scratch 历史浮层（继续上次）
                              # 记住选择后左键直达、右键回看；行样式与弹层「继续上次」一致
   reasoning-effort.ts        # 网关思考档：逗号多选 + @开场默认；单词旧值=单档（tests/reasoning-effort.test.ts）
@@ -91,7 +94,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # （isAdoptedMcp/mcpDeleteImpact/mcpOriginLabel，tests/mcp-display.test.ts）+
                              # 分发状态徽标 mcpDistBadge（modified/missing/disabled_externally 三异常态文案与识别色）+
                              # 命令路径告警徽标 mcpCmdPathBadge（relative/missing）与收编解析附注 mcpPathResolveNote
-  run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）
+  run-overview.ts            # 运行中聚合视图纯逻辑（按「要你管」排序）+ 项目列表状态点 projectRailStatus
   run-model.ts               # Project→Task→Run 前端镜像：inferTaskKind / 工作台白名单 isWorkbenchSurfaceRun
                              # （登录/无头/空闲 shell 不进「正在进行」；阅读标签还开着则进）/
                              # pickRecoverableRun 找回可恢复 Run（排除 internal/login/watch/reader——阅读关掉就离开，
@@ -107,7 +110,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # （tests/project-context.test.ts）
   coding-lanes.ts            # 编程车道覆盖层：有树无行按分支现算、theme 分组、空闲/Agent
                              # （tests/coding-lanes.test.ts）
-  agent-caps.ts              # 能力表前端消费：定时任务禁选未验证无头、grok 无沙箱附注
+  agent-caps.ts              # 能力表前端消费：定时任务禁选未验证无头；Grok 标「会批准全部操作」
                              # （tests/agent-caps.test.ts）
   work-mode.ts               # 项目工作方式（科研/编程/办公）与编程状态归类、办公文档类型/预览形态；
                              # 文件行「进行中」只认 officeFileReuseKey 对上的活标签（仓级仍 isOfficeInProgress）；
@@ -136,7 +139,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 与最近对话默认最多 10 条（tests/workbench-hero.test.ts）
   lit-watch.ts               # 文献雷达纯逻辑：日分组/关键词分组（groupEntriesByKeyword，取 keywordsHit 首词、
                              # 未分类恒末）/趋势/直链转换/全文可得性分流（fulltextLinkFor：arxiv abs 与 .pdf 直链=可下载，
-                             # DOI/落地页=来源，不再摆禁用下载钮）/已读判定/漂移提醒/雷达筛选（entryPassesFilter
+                             # DOI/落地页=来源，不再摆禁用下载钮）/已读判定/雷达筛选（entryPassesFilter
                              # 与 lit_watch.rs 双端镜像，指标未知放行不误伤；快筛解读 watchExplainPrompt /
                              # parseWatchExplain 五节学术口径；卡片展开按项目记忆（默认收起）；
                              # tests/lit-watch.test.ts）
@@ -150,7 +153,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # 锚点实测修正不用公式，连续滚动与单页预览同一套；对齐官方 pdf.js viewer，
                              # 勿退回整层 transform 跟手）/
                              # 画布像素上限 pdfCanvasOutputScale（tests/reader.test.ts）
-  draft-review.ts            # 写作步评审机械红线（摘要待核实/G编号/待绘制/叠号）与退回提示词
+  draft-review.ts            # 写作步评审机械红线（摘要待核实/G编号/待绘制/叠号）、划选批注追加与退回提示词
   md-path.ts                 # 阅读版式覆盖的 md 族（md/markdown/mdx/qmd）与 html 判定
   md-toc.ts                  # md 浮动目录：≥3 标题才出、slug/展开 details
   md-code-chrome.ts          # 阅读态代码块语言名 + 复制；mermaid 围栏打标
@@ -160,7 +163,8 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   md-math.ts                 # md 阅读版式公式渲染（批次 E）：marked 扩展按 Pandoc 口径切分 $/$$
                              # （边界规则/转义/代码块不渲染/货币不误判）+ renderMathInto 懒加载
                              # katex+CSS（独立 chunk 不进主包，失败回落原文，tests/md-math.test.ts 25 例）
-  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/卡片 kind（idea 想法卡 / draft 讨论卡）过滤
+  task-cards.ts              # 任务卡纯逻辑：按步骤分桶/卡片排序/会话按卡分组/卡片 kind（idea 想法卡 / draft 讨论卡）过滤；
+                             # 「＋ 话题」占位按当前步骤给例子（ideaTopicPlaceholder，综述大纲不写对照实验）
                              # （tests/task-cards.test.ts）
   step-flow.ts               # 步骤内协同流程线纯逻辑：种子→before→agent→during→after→评审节点链
                              # （v3.97 起 after 档一律进主干，可选项带徽标但不抢当前节点；
@@ -196,6 +200,7 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   main-history-save.ts       # 科研步骤卡一键「存进历史」：冲突拦截 / 白话说明 / 路径（tests/main-history-save.test.ts）
   terminal-input.ts          # 终端输入侧纯逻辑：shell 路径转义 escapeShellPath、拖入多路径拼接 joinDroppedPaths、
                              # 聊天拖入 joinDroppedChatPaths、dropHitsRect、Kimi CSI-u 序列、
+                             # Shift+标点补发（229 只补 ASCII 标点，中文上屏不补，避免一字两遍）、
                              # 剪贴板图片条目判定/MIME→扩展名/粘贴反馈文案（tests/terminal-input.test.ts）
   terminal-welcome.ts        # 终端未启动空态：isTerminalIdle / 卡上「将在 … 启动」目录文案
                              # （tests/terminal-welcome.test.ts）
@@ -241,11 +246,13 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              #   walletTokenQuota（三条分支合一：token 数据 > billing 提升值 > null；
                              #   **回落提升值必须带 source !== "wallet"**，否则拿钱包余额冒充密钥额度）+
                              #   walletExpirySoon（只有临近/已过期才在卡面露到期，0 = 无到期不算 1970）+
-                             #   walletUnlimitedLine（不限额度也要把已用说出来）
+                             #   walletUnlimitedLine（不限额度也要把已用说出来）+
+                             #   walletUnlimitedFill（开口条：同卡已用的 log1p 比，最长停在 95，已用 ≤ 0 不画）
                              #   （tests/gateway-balance.test.ts；与 gateway_balance.rs WALLET_HOSTS 双端镜像）
   plan-quota.ts              # 订阅余量卡纯逻辑（用量页，与 gateway-balance.ts 并排的第二张卡）：
                              #   供应商显示名/切换标签/窗口名/重置倒计时/重置卡；
-                             #   **双窗同构**（2026-09-21）：5 小时与本周同一套「指标名 + 百分比 + 绝对值 + 粗条 + 倒计时」，
+                             #   **双窗同构**（2026-09-21）：最紧的窗口走大数字 + 通栏粗条，另一窗收成一行
+                             #   （名称 + 随行拉长的条 + 百分比贴条尾 + 绝对值 + 倒计时；条与密钥行共用，见 StatsPage SecondaryUsageTrack），
                              #   最紧的窗口排第一（planWindowsByTightness / planPrimaryWindowIndex，并列取靠前者）——
                              #   本机实测 5 小时 0%、周 100%，固定锚 5 小时会把爆掉的周额度藏住；
                              #   planResetRemain：卡面只写「还有 28 小时 51 分」，时刻放悬停（formatResetPoint）；
@@ -294,10 +301,15 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
   project-context-load.ts    # 启动环境说明拼装：读档案卡和顶层目录，失败仍返回能用的短包
   research-report.ts         # 研究报告节抽取/相对路径解析（只认显式报告节，不认 TASK 指令或推断结论）
   screening-review.ts        # 检索/筛选评审主面：计数/待拍板/筛选决定、表默认 pending、文件分组；included.md/json 不与表并列摊 diff；
+                             # 移出：removeToFetchEntry 不重排编号、removeRisRecord 按 DOI/标题删整条、notePathForRecord / bibMentionsRecord 只提示不删；
                              # 接口缓存、脚本、.gitignore 进「过程」，不进非 Git 产物清单；
                              # pendingConfirmCleared = 有篇且无 pending，步骤卡据此自动勾「核对待确认篇目」（tests/screening-review.test.ts）
   review-file-groups.ts      # 精读/写作评审文件分组：笔记/稿件/引文/待获取/过程（tests/review-file-groups.test.ts）
-  research-tools.ts          # 科研工具注入 withResearchTools；旧「文献主来源」设置键写回时剥除——来源只认 lit_source
+  closeout-pack.ts           # 项目卡完结清单：最终稿 / 源稿 / 图 / 文献 / 核对 / 笔记（tests/closeout-pack.test.ts）
+  research-tools.ts          # 科研工具注入 withResearchTools；定稿步同时挂 output/endnote.docx 与 output/zotero.docx（LaTeX 不挂）；
+                             # 域稿刷新收成一句可选「换样式时打开域稿」，不挂文献库同步按钮；来源只认 lit_source
+  review-decisions.ts        # 审查报告 R/S 与待核实 V 的拆条、接受/拒绝/修改写回、点完后的继续提示
+                             # （tests/review-decisions.test.ts）
   academic-mcp.ts            # 检索步「配置学术检索 MCP」：预设名、登录注入；登录态由 academic_mcp_login_status 回一句现状（tests/academic-mcp.test.ts）
   session-filter.ts          # 对话页筛选纯逻辑（tests/session-filter.test.ts）
   session-search.ts          # 对话搜索纯逻辑：分词、元数据即时过滤、正文命中合并排序
@@ -675,7 +687,7 @@ src-tauri/src/
                              #   SD复合/签名直链八型），为一家修问题只动该家命中的最窄分支、禁改通用路径，
                              #   收尾逐一回归各型——细则见 pipeline.md「机构访问通道」⑦。
                              #   收货通道 A/B/C（同日深夜用户定稿「让真实浏览器干浏览器的事」，Mesa 只收货）：
-                             #   A download_inbox.rs 监听 ~/Downloads 收 PDF（inst_browser_open 调起系统浏览器
+                             #   A download_inbox.rs 监听系统下载目录 + Chrome/Edge/Firefox 自定义默认下载目录收 PDF（inst_browser_open 调起系统浏览器
                              #   + 登记归属，六层过滤链收货进既有入库链——高置信命中收完进回收站、
                              #   兜底关联（文件名没对上号）原件留在下载夹并弹 inst-pdf-attention 横幅；
                              #   终端只印启动/失败/收货结果，不去重跳过刷屏——macOS 一次落盘连发多条
@@ -687,7 +699,7 @@ src-tauri/src/
                              #   + browser_bridge.rs（装 NativeMessagingHosts
                              #   清单）。内嵌窗漏斗保留为过渡，通道 C 稳定后退役——细则见 pipeline.md ⑧
   fonts.rs                   # 终端字体打包与 brew 一键安装（Maple/Sarasa/Iosevka）
-  ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报/评审沉淀起草生成；
+  ai.rs                      # 无头 AI 调用层：一次性 prompt + 提交信息/摘要/PR 描述/冲突建议/提炼接力简报/评审沉淀起草（只写下一步还没有的约束，无新约束返回空）；
                              # resolve_profile_from 最近使用回落跳过官方账号（OAuth 过期会甩 CLI 日志；显式/专用仍尊重）；
                              # 失败走 summarize_headless_error，不把 stderr 整段回给前端；401 invalid_api_key 按
                              #   「报错 URL host × 绑定 base_url host」细分：发去 api.openai.com 而配置是网关 = 渠道路由错
@@ -699,7 +711,7 @@ src-tauri/src/
                              # （漏跑 coalesce 只补一次）、无头拉起 agent 在任务隔离 worktree 跑技能（先从主仓播种订阅/台账；项目根只用于归属与采纳；非 Git 项目明确失败；显式 sentinel 才允许主仓写入；人点「采纳进主仓」才拷产出；默认 lit-watch，prompt 按技能分派：
                              # lit-watch 专用文案不动、其他技能通用模板，非 lit-watch 跑前检查已分发，10 分钟超时）、
                              # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）；
-                             # v3.95 起 Schedule.linkedStep 关联步骤（可空，update 空串归 None）+ RunRecord.newEntries 新命中计数
+                             # RunRecord.newEntries 新命中计数；2026-09-29 起界面不再写关联步骤，保存时清掉旧 linkedStep
                              # （跑 lit-watch 前后数 inbox.md `## ` 标题数取差，超时/失败不记；项目配了雷达筛选时
                              # 前后各数一次过滤后条目取差，推送/收件箱胶囊只算符合筛选的）
   lit_watch.rs               # 文献雷达应用层（v3.95）：巡检产物解析 DTO（notes/inbox.md 有效文献块含 watch-run 批次标记日期、上限 500 条；
@@ -716,11 +728,13 @@ src-tauri/src/
                              # HashMap（normalize_title 规范化精确匹配，miss 时剥末尾出版商括号尾巴（「(Wiley)」「（ACS）」可多级）
                              # 重试，仍 miss = None 不虚构；前端 lit-watch.ts sourceDisplayName 同口径剥尾，两处同步），RwLock 进程内缓存；
                              # list_watch_entries 出口 enrichment 进 WatchEntryDto.metrics（展示时现算不落 inbox.md，
-                             # 旧条目装表即生效）；download_journal_metrics（jsDelivr→raw 回落、.tmp 原子落盘、完清缓存）+
+                             # 旧条目装表即生效）；lookup_journal_metrics 给检索清单按刊名优先、ISSN 兜底批量现查（不写项目文件）；
+                             # download_journal_metrics（jsDelivr→raw 回落、.tmp 原子落盘、完清缓存）+
                              # journal_metrics_status（含 downloadedAt：两份 CSV 取较新 mtime）+ check_journal_metrics_update
                              # （GitHub commits API 按数据目录查最近 commit，与本地 mtime 比对出 hasUpdate，前端静默失败）
   research_quality.rs        # 科研复现运行记录与验收决定：独立输出 ~/ccode/reproductions/；验收写 .ccode/research-acceptance.json，不替代 Git 合并
   endnote.rs                 # EndNote 出库：references.bib 经 endnote-bridge/scripts/bridge.py 生成
+                             # library_match.py：定稿域稿只读本机 .enl / zotero.sqlite，DOI 唯一才写入记录号或条目地址
                              # papers/endnote-import.xml、.ris、.enw。RIS 作者一人一行，期刊/缩写/卷/期/页/日期/ISSN/摘要/关键词
                              # 随 bib 字段写入；没有的不编造。按钮「同步到 EndNote」把 RIS 放到下载并 open -a 交给 EndNote。
   research_tools.rs          # 科研外部工具开工 preflight（research_tool_preflight）：Zotero 本地通道 / Origin 平台门槛
@@ -765,6 +779,7 @@ src-tauri/src/
   git_info.rs                # git 状态/累计 diff/逐 hunk/勾选提交临时索引；
                              # MERGE_HEAD → merging + git_abort_merge；porcelain 冲突码归 U
   fs_tree.rs                 # 文件树与文件操作（删除走系统回收站 trash；重要路径删除保护，canonicalize 双校验；
+                             # drop_ris_record / drop_fetch_line：移出时整份改写超过 256 KB 的 RIS 与 to-fetch.md
                              #   家目录直下系统目录标 isSystem 供前端置灰）
   pdf.rs                     # PDF/docx 字节读取：read_pdf_bytes 白名单 + canonicalize + 上限，base64 传输
   sheet_preview.rs           # Excel/ODS 预览：同一套白名单读字节，calamine 抽指定工作表（200×256）+
@@ -774,10 +789,11 @@ src-tauri/src/
                              #   run_streaming_pty/run_streaming/emit_done/winget_args 为 pub(crate)，dep_check 复用同一管线
   watch_review.rs            # 定时巡检产物评审：工作目录可复用，但评审和采纳只读每次执行冻结的副本
                              #   （基线文件 + 技能产出契约，与 task_review.rs 同构不合并）
-  dep_check.rs               # 依赖体检 + 一键安装（git/node，非九 CLI 本身）：check_dependencies（git 三态 ok/missing/
-                             #   clt_stub + node + 渠道 brew/winget/xcode/none，启动时前端拉一次进 store）+ install_dependency
-                             #   （macOS brew 优先、无 brew 时 git 触发 xcode-select --install 系统弹窗不等待；Windows winget
-                             #   Git.Git/OpenJS.NodeJS.LTS；Linux 只给指引）；缺 git 走收件箱 dep: 类别常驻提醒（不造横幅）
+  dep_check.rs               # 依赖体检 + 一键安装（git/node/quarto/tex/pymupdf/pillow）：check_dependencies（git 三态
+                             #   ok/missing/clt_stub，TeX 认 xelatex/tectonic/pdflatex 任一，拼图库问 python 能否导入）
+                             #   + install_dependency（quarto 走 brew --cask / winget Posit.Quarto；tex 装 tectonic；
+                             #   pymupdf/pillow 走 python -m pip，externally-managed 再加 --user；Linux 只给指引）；
+                             #   缺 git 走收件箱 dep: 类别常驻提醒（不造横幅）
   logbuf.rs                  # 诊断日志环形缓冲
   diagnostics.rs             # 诊断包：系统/WebView/GPU/输入法、功能开关、日志、进程生命周期采集与 ZIP 导出
   config_dump.rs             # 生效配置自省（只读，不建/不改任何用户配置文件）：dump_effective_config /

@@ -138,58 +138,71 @@ function RelayToasts(props: {
   onDismiss: (id: number) => void;
   onCollect: (t: RelayToast) => void;
 }) {
+  const [raised, setRaised] = useState<number | null>(null);
   if (!props.toasts.length) return null;
+  const ordered = raised == null
+    ? props.toasts
+    : [
+        ...props.toasts.filter((t) => t.id === raised),
+        ...props.toasts.filter((t) => t.id !== raised),
+      ];
   return (
-    <div className="pointer-events-none fixed bottom-16 right-4 z-50 flex w-80 flex-col gap-2">
-      {props.toasts.map((t) => (
-        <div
-          key={t.id}
-          className={`pointer-events-auto rounded-md border px-3 py-2 text-xs leading-5 shadow-lg ${
-            t.kind === "err"
-              ? "border-err-text/40 bg-rail text-err-text"
-              : t.kind === "attention"
-                ? "border-cta-bd bg-rail text-l2"
-                : "border-hairline bg-rail text-l2"
-          }`}
-        >
-          <div className="flex items-start gap-2">
-            <span className="min-w-0 flex-1 whitespace-pre-wrap">
-              {t.text}
-              {t.detail ? <span className="block text-micro text-l4">{t.detail}</span> : null}
-            </span>
-            <button
-              type="button"
-              className="shrink-0 text-l4 hover:text-l1"
-              aria-label="关闭"
-              onClick={() => props.onDismiss(t.id)}
-            >
-              ×
-            </button>
-          </div>
-          {t.choices && t.choices.length > 0 ? (
-            <div className="mt-1 flex flex-col gap-1">
-              {t.choices.map((c, i) => (
-                <button
-                  key={`${c.title}-${i}`}
-                  type="button"
-                  className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-left text-micro text-cta-text hover:brightness-110"
-                  onClick={() => props.onCollect({ ...t, collect: c })}
-                >
-                  收进「{c.title.slice(0, 28)}」
-                </button>
-              ))}
+    <div className="pointer-events-none fixed bottom-16 right-4 z-50 flex w-80 flex-col gap-1">
+      {ordered.map((t) => {
+        const actionable = Boolean(t.collect || (t.choices && t.choices.length > 0));
+        const open = actionable || raised === t.id;
+        return (
+          <div
+            key={t.id}
+            className={`pointer-events-auto rounded-md border px-3 py-1.5 text-xs leading-5 shadow-lg ${
+              t.kind === "err"
+                ? "border-err-text/40 bg-rail text-err-text"
+                : t.kind === "attention"
+                  ? "border-cta-bd bg-rail text-l2"
+                  : "border-hairline bg-rail text-l2"
+            }`}
+            onMouseEnter={() => setRaised(t.id)}
+            onMouseLeave={() => setRaised((cur) => (cur === t.id ? null : cur))}
+          >
+            <div className="flex items-start gap-2">
+              <span className={`min-w-0 flex-1 ${open ? "whitespace-pre-wrap" : "truncate"}`}>
+                {t.text}
+                {open && t.detail ? <span className="block text-micro text-l4">{t.detail}</span> : null}
+              </span>
+              <button
+                type="button"
+                className="shrink-0 text-l4 hover:text-l1"
+                aria-label="关闭"
+                onClick={() => props.onDismiss(t.id)}
+              >
+                ×
+              </button>
             </div>
-          ) : t.collect ? (
-            <button
-              type="button"
-              className="mt-1 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
-              onClick={() => props.onCollect(t)}
-            >
-              收进「{t.collect.title.slice(0, 24)}」
-            </button>
-          ) : null}
-        </div>
-      ))}
+            {open && t.choices && t.choices.length > 0 ? (
+              <div className="mt-1 flex flex-col gap-1">
+                {t.choices.map((c, i) => (
+                  <button
+                    key={`${c.title}-${i}`}
+                    type="button"
+                    className="rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-left text-micro text-cta-text hover:brightness-110"
+                    onClick={() => props.onCollect({ ...t, collect: c })}
+                  >
+                    收进「{c.title.slice(0, 28)}」
+                  </button>
+                ))}
+              </div>
+            ) : open && t.collect ? (
+              <button
+                type="button"
+                className="mt-1 rounded-sm border border-cta-bd bg-cta px-2 py-0.5 text-micro text-cta-text hover:brightness-110"
+                onClick={() => props.onCollect(t)}
+              >
+                收进「{t.collect.title.slice(0, 24)}」
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }

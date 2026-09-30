@@ -28,6 +28,17 @@ const REMOTE_DIR: &str =
 
 // ===== DTO（camelCase，风格同 lit_watch.rs） =====
 
+/// 检索清单一次送来的查询。刊名和 ISSN 都空、又没有 DOI 时，对应结果为 null。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalMetricsQuery {
+    pub venue: String,
+    pub issn: String,
+    /// 刊名写成「待补」时用来向 OpenAlex 补一次刊名。不写回项目文件。
+    #[serde(default)]
+    pub doi: String,
+}
+
 /// 单刊合并指标（两表任一命中即返回）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -69,7 +80,7 @@ fn metrics_dir() -> Option<PathBuf> {
 }
 
 /// 表缓存：RwLock<Option<Arc<..>>> 而非 OnceLock——下载完成后要 invalidate 重建
-static TABLE_CACHE: RwLock<Option<Arc<HashMap<String, JournalMetricsDto>>>> = RwLock::new(None);
+static TABLE_CACHE: RwLock<Option<Arc<MetricsTables>>> = RwLock::new(None);
 
 /// 下载完成后清缓存（下次 lookup 重新解析）
 pub(crate) fn invalidate_cache() {
@@ -79,31 +90,17 @@ pub(crate) fn invalidate_cache() {
 }
 
 /// 取合并表（首次调用时解析磁盘文件；文件不存在/解析失败按空表处理，不报错）
-fn table() -> Arc<HashMap<String, JournalMetricsDto>> {
+fn table() -> Arc<MetricsTables> {
     if let Ok(guard) = TABLE_CACHE.read() {
         if let Some(t) = guard.as_ref() {
             return t.clone();
         }
     }
-    let loaded = Arc::new(load_from_disk());
+    let loaded = Arc::new(load_tables());
     if let Ok(mut guard) = TABLE_CACHE.write() {
         *guard = Some(loaded.clone());
     }
     loaded
-}
-
-fn load_from_disk() -> HashMap<String, JournalMetricsDto> {
-    let mut map: HashMap<String, JournalMetricsDto> = HashMap::new();
-    let Some(dir) = metrics_dir() else {
-        return map;
-    };
-    if let Ok(text) = fs::read_to_string(dir.join(JCR_FILE)) {
-        parse_jcr(&text, &mut map);
-    }
-    if let Ok(text) = fs::read_to_string(dir.join(FQB_FILE)) {
-        parse_fqb(&text, &mut map);
-    }
-    map
 }
 
 // ===== 解析（注入文本，便于单测） =====
@@ -246,7 +243,132 @@ fn strip_trailing_paren(name: &str) -> Option<String> {
 
 /// 文献雷达 enrichment 用：规范化精确匹配，miss / 无表文件返回 None
 pub(crate) fn lookup(journal_name: &str) -> Option<JournalMetricsDto> {
-    lookup_in(&table(), journal_name)
+    lookup_in(&table().by_name, journal_name)
+}
+
+/// 检索清单的第二把钥匙：ISSN / EISSN 去横线、转大写后精确匹配。长度不是 8 的不查。
+fn normalize_issn(raw: &str) -> String {
+    let key: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let key = key.to_ascii_uppercase();
+    if key.len() == 8 { key } else { String::new() }
+}
+
+fn remember_issn(into: &mut HashMap<String, String>, journal: &str, raw: &str) {
+    let name = crate::lit_watch::normalize_title(journal.trim());
+    let issn = normalize_issn(raw);
+    if name.is_empty() || issn.is_empty() {
+        return;
+    }
+    into.insert(issn, name);
+}
+
+/// 从 JCR 的 ISSN、EISSN 列记下「ISSN → 规范化刊名」
+fn collect_jcr_issns(text: &str, into: &mut HashMap<String, String>) {
+    let mut rdr = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(text.as_bytes());
+    let Ok(headers) = rdr.headers() else { return };
+    let Some(i_journal) = col_index(headers, "Journal", None) else {
+        return;
+    };
+    let i_issn = col_index(headers, "ISSN", None);
+    let i_eissn = col_index(headers, "EISSN", None);
+    if i_issn.is_none() && i_eissn.is_none() {
+        return;
+    }
+    for rec in rdr.records().flatten() {
+        let Some(journal) = rec.get(i_journal) else { continue };
+        for idx in [i_issn, i_eissn].into_iter().flatten() {
+            if let Some(raw) = rec.get(idx) {
+                remember_issn(into, journal, raw);
+            }
+        }
+    }
+}
+
+/// 中科院表的 `ISSN/EISSN` 是 `印刷/电子`，斜杠两边各记一条
+fn collect_fqb_issns(text: &str, into: &mut HashMap<String, String>) {
+    let mut rdr = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(text.as_bytes());
+    let Ok(headers) = rdr.headers() else { return };
+    let (Some(i_journal), Some(i_issn)) = (
+        col_index(headers, "Journal", None),
+        col_index(headers, "ISSN/EISSN", None),
+    ) else {
+        return;
+    };
+    for rec in rdr.records().flatten() {
+        let (Some(journal), Some(raw)) = (rec.get(i_journal), rec.get(i_issn)) else {
+            continue;
+        };
+        for part in raw.split(['/', '／']) {
+            remember_issn(into, journal, part);
+        }
+    }
+}
+
+struct MetricsTables {
+    by_name: HashMap<String, JournalMetricsDto>,
+    /// ISSN → 规范化刊名。解析完两表后再指回 by_name，避免先克隆丢分区。
+    issn_to_name: HashMap<String, String>,
+}
+
+fn load_tables() -> MetricsTables {
+    let mut by_name = HashMap::new();
+    let mut issn_to_name = HashMap::new();
+    let Some(dir) = metrics_dir() else {
+        return MetricsTables { by_name, issn_to_name };
+    };
+    if let Ok(text) = fs::read_to_string(dir.join(JCR_FILE)) {
+        parse_jcr(&text, &mut by_name);
+        collect_jcr_issns(&text, &mut issn_to_name);
+    }
+    if let Ok(text) = fs::read_to_string(dir.join(FQB_FILE)) {
+        parse_fqb(&text, &mut by_name);
+        collect_fqb_issns(&text, &mut issn_to_name);
+    }
+    MetricsTables { by_name, issn_to_name }
+}
+
+fn lookup_issn_in(tables: &MetricsTables, issn: &str) -> Option<JournalMetricsDto> {
+    for key in issn_keys(issn) {
+        if let Some(name) = tables.issn_to_name.get(&key) {
+            if let Some(found) = tables.by_name.get(name) {
+                return Some(found.clone());
+            }
+        }
+    }
+    None
+}
+
+/// 一条记录里常写成「印刷号, 电子号」或用斜杠、分号隔开。逐个按 8 位去对，不把两段拼成一条。
+fn issn_keys(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in raw.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+        let key = normalize_issn(part);
+        if key.len() == 8 && !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    if out.is_empty() {
+        let whole = normalize_issn(raw);
+        if whole.len() == 8 {
+            out.push(whole);
+        }
+    }
+    out
+}
+
+/// 刊名优先，对不上再用 ISSN。两边都空或都未收录返回 None。
+fn resolve_metrics(tables: &MetricsTables, venue: &str, issn: &str) -> Option<JournalMetricsDto> {
+    if let Some(found) = lookup_in(&tables.by_name, venue) {
+        return Some(found);
+    }
+    lookup_issn_in(tables, issn)
 }
 
 /// 本地表的下载时间：两份 CSV 的 mtime 取较新者（原子落盘即刷新 mtime，无需另记 meta）
@@ -266,8 +388,8 @@ fn compute_status() -> JournalMetricsStatusDto {
         metrics_dir().is_some_and(|d| d.join(JCR_FILE).exists() || d.join(FQB_FILE).exists());
     let t = table();
     JournalMetricsStatusDto {
-        available: any_file && !t.is_empty(),
-        journal_count: t.len() as u32,
+        available: any_file && !t.by_name.is_empty(),
+        journal_count: t.by_name.len() as u32,
         downloaded_at: local_downloaded_at(),
     }
 }
@@ -311,6 +433,170 @@ fn save_csv(dir: &PathBuf, file_name: &str, bytes: &[u8]) -> Result<(), String> 
 }
 
 // ===== Tauri commands =====
+
+/// 本地表对不上时才允许外查。已有 ISSN 也算本地能查，不再打 OpenAlex。
+fn needs_remote_venue(tables: &MetricsTables, venue: &str, issn: &str) -> bool {
+    resolve_metrics(tables, venue, issn).is_none()
+}
+
+fn doi_token(raw: &str) -> Option<String> {
+    let marked = raw.trim().trim_start_matches("doi:").trim();
+    let start = marked.find("10.")?;
+    let tail = &marked[start..];
+    let end = tail
+        .find(|c: char| c.is_whitespace() || matches!(c, '，' | '。' | '；' | ',' | ';' | ')' | '）'))
+        .unwrap_or(tail.len());
+    let doi = tail[..end].trim_end_matches(['.', ',']).to_string();
+    if doi.len() > 8 && doi.contains('/') { Some(doi) } else { None }
+}
+
+fn encode_doi(doi: &str) -> String {
+    let mut out = String::with_capacity(doi.len());
+    for b in doi.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn source_names(source: &serde_json::Value) -> Option<(String, String)> {
+    let venue = source
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let issn = source
+        .get("issn_l")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            source
+                .get("issn")
+                .and_then(|v| v.as_array())
+                .and_then(|list| list.iter().find_map(|v| v.as_str()))
+        })
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if venue.is_empty() && issn.is_empty() {
+        None
+    } else {
+        Some((venue, issn))
+    }
+}
+
+/// OpenAlex：先主位置，主位置没有期刊时再在 locations 里找 type=journal。
+fn openalex_venue(value: &serde_json::Value) -> Option<(String, String)> {
+    if let Some(found) = value.pointer("/primary_location/source").and_then(source_names) {
+        if !found.0.is_empty() || !found.1.is_empty() {
+            return Some(found);
+        }
+    }
+    value
+        .get("locations")
+        .and_then(|v| v.as_array())
+        .and_then(|list| {
+            list.iter().find_map(|loc| {
+                let source = loc.get("source")?;
+                if source.get("type").and_then(|v| v.as_str()) != Some("journal") {
+                    return None;
+                }
+                source_names(source)
+            })
+        })
+}
+
+/// Crossref 的 container-title 是期刊全称。不用 short-container-title，缩写对不上表。
+fn crossref_venue(value: &serde_json::Value) -> Option<(String, String)> {
+    let message = value.get("message").unwrap_or(value);
+    let venue = message
+        .get("container-title")
+        .and_then(|v| v.as_array())
+        .and_then(|list| list.iter().find_map(|v| v.as_str()))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let issn = message
+        .get("ISSN")
+        .and_then(|v| v.as_array())
+        .and_then(|list| list.iter().find_map(|v| v.as_str()))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if venue.is_empty() && issn.is_empty() {
+        None
+    } else {
+        Some((venue, issn))
+    }
+}
+
+async fn get_json(client: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
+    client.get(url).send().await.ok()?.json().await.ok()
+}
+
+/// 刊名缺失时按 DOI 补全称和 ISSN。OpenAlex 没有期刊就问 Crossref。数字仍只认本地表。
+async fn venue_for_doi(client: &reqwest::Client, doi: &str) -> Option<(String, String)> {
+    let encoded = encode_doi(doi);
+    let openalex = format!(
+        "https://api.openalex.org/works/https://doi.org/{encoded}?mailto=mesa-litwatch@noreply.github.com"
+    );
+    if let Some(value) = get_json(client, &openalex).await {
+        if let Some(found) = openalex_venue(&value) {
+            if !found.0.is_empty() || !found.1.is_empty() {
+                return Some(found);
+            }
+        }
+    }
+    let crossref = format!("https://api.crossref.org/works/{encoded}");
+    get_json(client, &crossref).await.and_then(|value| crossref_venue(&value))
+}
+
+/// 检索清单现查：按入参顺序返回，未收录或表未装为 null。不写项目文件。
+#[tauri::command]
+pub async fn lookup_journal_metrics(
+    queries: Vec<JournalMetricsQuery>,
+) -> Result<Vec<Option<JournalMetricsDto>>, String> {
+    let tables = tauri::async_runtime::spawn_blocking(table)
+        .await
+        .map_err(|e| format!("读取期刊指标表失败: {e}"))?;
+    let mut out: Vec<Option<JournalMetricsDto>> = queries
+        .iter()
+        .map(|q| resolve_metrics(&tables, &q.venue, &q.issn))
+        .collect();
+    let missing: Vec<usize> = queries
+        .iter()
+        .enumerate()
+        .filter(|(i, q)| {
+            out[*i].is_none() && needs_remote_venue(&tables, &q.venue, &q.issn) && doi_token(&q.doi).is_some()
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if missing.is_empty() {
+        return Ok(out);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent("Mesa journal-metrics (https://github.com/hongtongzhou-design/ccode)")
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+    for chunk in missing.chunks(6) {
+        let mut jobs = Vec::with_capacity(chunk.len());
+        for &idx in chunk {
+            let doi = doi_token(&queries[idx].doi).unwrap_or_default();
+            let client = client.clone();
+            jobs.push(tauri::async_runtime::spawn(async move {
+                venue_for_doi(&client, &doi).await
+            }));
+        }
+        for (idx, job) in chunk.iter().zip(jobs) {
+            let Ok(Some((venue, issn))) = job.await else { continue };
+            out[*idx] = resolve_metrics(&tables, &venue, &issn);
+        }
+    }
+    Ok(out)
+}
 
 #[tauri::command]
 pub async fn journal_metrics_status() -> Result<JournalMetricsStatusDto, String> {
@@ -522,6 +808,71 @@ Advanced Materials,2025,0935-9648/1521-4095,否,否,否,SCIE,,材料科学,1 [8/
         assert!(lookup_in(&map, "arxiv").is_none());
         assert!(lookup_in(&map, "").is_none());
         assert!(lookup_in(&map, "  ").is_none());
+    }
+
+    fn sample_tables() -> MetricsTables {
+        let mut by_name = HashMap::new();
+        let mut issn_to_name = HashMap::new();
+        parse_jcr(JCR_SAMPLE, &mut by_name);
+        collect_jcr_issns(JCR_SAMPLE, &mut issn_to_name);
+        parse_fqb(FQB_SAMPLE, &mut by_name);
+        collect_fqb_issns(FQB_SAMPLE, &mut issn_to_name);
+        MetricsTables { by_name, issn_to_name }
+    }
+
+    #[test]
+    fn issn_hits_when_venue_is_abbreviation() {
+        let tables = sample_tables();
+        // 检索记录常写缩写，刊名对不上；ISSN 去横线后命中同一条
+        let hit = resolve_metrics(&tables, "Adv. Mater.", "0935-9648").unwrap();
+        assert_eq!(hit.impact_factor.as_deref(), Some("29.1"));
+        assert_eq!(hit.cas_quartile, Some(1));
+        assert!(hit.top);
+        // 电子 ISSN、大小写、空格同样命中
+        assert!(lookup_issn_in(&tables, "1521 4095").is_some());
+        assert!(lookup_issn_in(&tables, "2053-1583").is_some());
+        // 刊名优先：对得上就不用 ISSN
+        let named = resolve_metrics(&tables, "Advanced Materials", "0000-0000").unwrap();
+        assert_eq!(named.impact_factor.as_deref(), Some("29.1"));
+        // 两边都空、ISSN 位数不对、表里没有，都不编数字
+        assert!(resolve_metrics(&tables, "", "").is_none());
+        assert!(resolve_metrics(&tables, "Adv. Mater.", "待补").is_none());
+        assert!(resolve_metrics(&tables, "arxiv", "9999-9999").is_none());
+        // 一条记录里两个 ISSN 用逗号或斜杠隔开，逐个对，不拼成一条
+        assert!(lookup_issn_in(&tables, "0935-9648, 1521-4095").is_some());
+        assert!(lookup_issn_in(&tables, "2053-1583/2053-1583").is_some());
+        assert!(needs_remote_venue(&tables, "待补", ""));
+        assert!(needs_remote_venue(&tables, "Adv. Mater.", ""));
+        assert!(!needs_remote_venue(&tables, "Adv. Mater.", "0935-9648"));
+        assert!(!needs_remote_venue(&tables, "Advanced Materials", ""));
+    }
+
+    #[test]
+    fn doi_lookup_reads_journal_from_either_api() {
+        let openalex = serde_json::json!({
+            "primary_location": { "source": null },
+            "locations": [
+                { "source": { "type": "repository", "display_name": "PubMed" } },
+                { "source": { "type": "journal", "display_name": "Advanced Materials", "issn_l": "0935-9648" } }
+            ]
+        });
+        let (venue, issn) = openalex_venue(&openalex).unwrap();
+        assert_eq!(venue, "Advanced Materials");
+        assert_eq!(issn, "0935-9648");
+        assert!(openalex_venue(&serde_json::json!({"primary_location": {"source": null}})).is_none());
+
+        let crossref = serde_json::json!({
+            "message": {
+                "container-title": ["ChemistrySelect"],
+                "short-container-title": ["ChemistrySelect"],
+                "ISSN": ["2365-6549", "2365-6549"]
+            }
+        });
+        let (venue, issn) = crossref_venue(&crossref).unwrap();
+        assert_eq!(venue, "ChemistrySelect");
+        assert_eq!(issn, "2365-6549");
+        // 书章没有期刊全称
+        assert!(crossref_venue(&serde_json::json!({"message": {"container-title": []}})).is_none());
     }
 
     #[test]

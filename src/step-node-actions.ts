@@ -15,6 +15,8 @@
  */
 
 import type { HumanTaskStateDto } from "./types";
+import { isCitationStyleTask } from "./citation-style-choice.ts";
+import { isInlineDecisionTaskTitle } from "./review-decisions.ts";
 import {
   isEndnoteTaskTitle,
   isPaywallTaskTitle,
@@ -26,6 +28,14 @@ import {
 
 /** agent 会话尾部判定：正在出字 / 等确认 / 已跑完（在等你）/ 无 */
 export type AgentAttention = "working" | "confirm" | "done" | null;
+
+/**
+ * 域稿刷新是一句做法，不是文献库同步。
+ * 旧标题「打开 EndNote 域稿并 Update 一次」含 EndNote，会误挂「同步到 Zotero / EndNote / 打开 papers」。
+ */
+export function isFieldDocRefreshTitle(title: string): boolean {
+  return title.includes("域稿");
+}
 
 /** 落点在 papers/ 的事项 = 文献类交付，入口统一引到「文献与数据」 */
 export function isPapersTarget(target: string | undefined): boolean {
@@ -86,7 +96,8 @@ export function stepNodeWaiting(
     human.timing === "after" &&
     !stepNodeReady(runStatus, agentAttention, human) &&
     !done &&
-    !isPendingConfirmTaskTitle(human.title)
+    !isPendingConfirmTaskTitle(human.title) &&
+    !isInlineDecisionTaskTitle(human.title)
   );
 }
 
@@ -150,7 +161,9 @@ export function stepNodeAction(
       // 2. 资料库同步：同上，按 key 或按标题认（模板改标题时由 pipeline-task-titles 兜住）
       if (
         node.key === "endnote-export" ||
-        (human && isEndnoteTaskTitle(human.title))
+        (human &&
+          isEndnoteTaskTitle(human.title) &&
+          !isFieldDocRefreshTitle(human.title))
       ) {
         return { kind: "endnote-sync", enabled: ctx.runStatus === "done" };
       }
@@ -162,7 +175,15 @@ export function stepNodeAction(
       ) {
         return null;
       }
-      // 4. 文献类交付统一去「文献与数据」：那里三个进料口齐全，在每个事项行再复制
+      // 4. 行内点选与域稿说明不交文件。排在文献落点之前，避免报告落在 papers/ 时被送去导入。
+      if (
+        isCitationStyleTask(human.title) ||
+        isInlineDecisionTaskTitle(human.title) ||
+        isFieldDocRefreshTitle(human.title)
+      ) {
+        return null;
+      }
+      // 5. 文献类交付统一去「文献与数据」：那里三个进料口齐全，在每个事项行再复制
       //    一套入口等于把同一件事摆三个地方。付费墙/待确认例外——它们的入口是行内
       //    的清单展开，列表钮会抢右缘。
       if (isPapersTarget(human.target)) {
@@ -179,7 +200,7 @@ export function stepNodeAction(
           hasLibrary: hasLitLibrary(ctx.litSource),
         };
       }
-      // 5. 其余带落点的事项保留直接提交；纯脑力事项（无落点）只能勾选
+      // 6. 其余带落点的事项保留直接提交；纯脑力事项（无落点）只能勾选
       return human.target && !node.done
         ? { kind: "submit-deliverable" }
         : null;

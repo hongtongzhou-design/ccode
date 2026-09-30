@@ -379,7 +379,12 @@ pub(crate) fn strip_ansi(input: &str) -> String {
 /// 73KB/s；非 ghcr URL（tap/cask 的 GitHub Release 等）代理 404 后 brew 自动
 /// 交错回落原地址，无回归。抽成纯函数便于测试镜像开关。
 pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String)> {
-    let mut env = vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())];
+    // Homebrew 7 起 install 默认询问 [y/n]。诊断页和更新没有输入框，
+    // 不设 HOMEBREW_NO_ASK 会停在「安装中」直到闲置超时。
+    let mut env = vec![
+        ("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string()),
+        ("HOMEBREW_NO_ASK".to_string(), "1".to_string()),
+    ];
     if program == "brew" && mirror {
         // formulae.brew.sh 托管在 GitHub Pages，国内拉几十 MB 元数据要几分钟
         if std::env::var_os("HOMEBREW_API_DOMAIN").is_none() {
@@ -408,6 +413,15 @@ pub(crate) fn brew_env_pairs(program: &str, mirror: bool) -> Vec<(String, String
 /// reader 同时客串最小终端应答：子进程（实测 npm on Windows ConPTY）会发 DSR 光标
 /// 位置查询（ESC[6n）并读 stdin 等回答，无人应答就永久挂起——reader 代答
 /// ESC[24;120R（与下方 PtySize 一致）。展示前 strip_ansi 会把查询序列剥掉。
+/// brew 安装和诊断页依赖安装若仍打出 `[y/n]`，reader 再写一次 `y`。最多 5 次。
+/// 诊断页和 brew 安装没有输入框。输出里仍出现确认问句时自动回答 y。
+pub(crate) fn auto_confirm_prompt(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("[y/n]")
+        || lower.contains("(y/n)")
+        || lower.contains("proceed with the installation")
+}
+
 /// 同一 key 同时只允许一个 run：入口抢占，并发请求直接拒绝。
 /// updater（key=agent_id）与 fonts（key="fonts"）共用本函数。
 pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
@@ -494,6 +508,7 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
         let mut reader = reader;
         let mut pending: Vec<u8> = Vec::new();
         let mut buf = [0u8; 4096];
+        let mut confirms = 0u8;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
@@ -510,6 +525,13 @@ pub(crate) fn run_streaming_pty<F: Fn(&str) + Send + 'static>(
                             let _ = w.flush();
                         }
                         let text = strip_ansi(&text);
+                        // HOMEBREW_NO_ASK 没盖住时，诊断页仍会停在 [y/n]。代答 y，最多 5 次。
+                        if confirms < 5 && auto_confirm_prompt(&text) {
+                            confirms += 1;
+                            let mut w = writer.lock().unwrap();
+                            let _ = w.write_all(b"y\n");
+                            let _ = w.flush();
+                        }
                         if !text.is_empty() {
                             emit(&text);
                             collected2.lock().unwrap().push_str(&text);
@@ -1284,8 +1306,19 @@ mod tests {
             "镜像关闭时不注入镜像域名"
         );
         assert!(!off.iter().any(|(k, _)| k == "HOMEBREW_ARTIFACT_DOMAIN"));
-        // NO_AUTO_UPDATE 无论开关都保留；非 brew 命令不注入镜像
+        // NO_AUTO_UPDATE 与 NO_ASK 无论开关都保留；非 brew 命令不注入镜像
         assert!(off.iter().any(|(k, _)| k == "HOMEBREW_NO_AUTO_UPDATE"));
+        assert!(off.iter().any(|(k, _)| k == "HOMEBREW_NO_ASK"));
+    }
+
+    #[test]
+    fn auto_confirm_answers_yes_no_prompts_only() {
+        assert!(auto_confirm_prompt(
+            "Do you want to proceed with the installation? [y/n]"
+        ));
+        assert!(auto_confirm_prompt("Proceed (Y/n)?"));
+        assert!(!auto_confirm_prompt("Downloaded bottle manifests"));
+        assert!(!auto_confirm_prompt("synonym"));
         assert!(!brew_env_pairs("npm", true)
             .iter()
             .any(|(k, _)| k == "HOMEBREW_API_DOMAIN"));

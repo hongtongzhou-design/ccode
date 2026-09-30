@@ -1,7 +1,7 @@
 ---
 name: zotero-sync
 description: Zotero 文献库同步规范。当用户明确要求把检索结果写入 Zotero，或按需从 Zotero 导出项目文献时使用。内核 zotero_import 仍是只读进料口。Zotero 7–9 本地 /api/ 只读，进库走 RIS/BibTeX 原生导入（清单「同步到 Zotero」或拖文件），禁止 POST 假装写库。不可用时回落纯文件口径，不阻塞文献流程。
-outputs: [papers/zotero-sync.md]
+outputs: [papers/zotero-sync.md, output/zotero.docx, papers/zotero-cite-report.md]
 ---
 
 # Zotero 文献库同步（zotero-sync）
@@ -10,7 +10,7 @@ outputs: [papers/zotero-sync.md]
 
 - 按钮：打开 `papers/to-fetch.ris`，走 Zotero 原生导入（RIS/BibTeX/CSL JSON）。
 - 内核「从 Zotero 导入」：只读 sqlite 快照进项目，绝不写回个人库。
-- 本技能：检索时盘点已有库，定稿时把 `[@键]` 写成 Zotero 能扫描的 RTF。不点 Zotero 的 Word 插件。
+- 本技能：检索时盘点已有库，定稿时把 `[@键]` 写成带 Zotero 域的 Word（`output/zotero.docx`）。不点 Zotero 的 Word 插件。`zotero_rtf.py` 只留给旧的 RTF Scan 稿，定稿不再交 RTF。
 
 ## 何时使用
 
@@ -43,17 +43,25 @@ outputs: [papers/zotero-sync.md]
 - 不要默认调用 Better BibTeX `autoexport.add`，不得悄然修改用户 BBT 配置
 - 已有 bib 键一律不改；与 lit-notes 冲突时保留既有键并在报告列出
 
-### 3. 定稿交稿（与 EndNote 域稿同一位置）
+### 3. 定稿域稿（与 EndNote 域稿同一位置，两份都交）
 
-项目设置「文献库」选了 Zotero，并且这一步是定稿或期刊格式时：
+定稿、学位论文格式与定稿、期刊格式适配都交两份带域的 Word。Zotero 这一份：
 
 ```bash
-python3 <技能目录>/scripts/zotero_rtf.py --input manuscript/review-final.md --bib references.bib --rtf output/zotero.rtf --ris papers/zotero-import.ris --report papers/zotero-cite-report.md
+python3 <技能目录>/scripts/zotero_docx.py \
+  --input manuscript/review-final.md \
+  --bib references.bib \
+  --output output/zotero.docx \
+  --report papers/zotero-cite-report.md
 ```
 
-科研论文改 `manuscript/paper-final.md`，学位论文用 `manuscript/thesis-final.md`，期刊格式用 `submission/formatted.md`。
+科研论文改 `manuscript/paper-final.md`，学位论文用 `manuscript/thesis-final.md`，期刊格式用 `submission/formatted.md`。同一份源稿再跑 endnote-bridge 的 `cite_docx.py`，写出 `output/endnote.docx`。
 
-未匹配的 `[@键]` 不写 rtf。人先把 `papers/zotero-import.ris` 拖进 Zotero（库里已有就跳过），再对 `output/zotero.rtf` 做一次 **RTF Scan**，然后在 Zotero 里换引用样式。不点插件，不生成 EndNote 域。
+- 每个 `[@键]` 写成一条 Word 域：`ADDIN ZOTERO_ITEM CSL_CITATION`。域里带 `citationID`、`formattedCitation`、`plainCitation`、`noteIndex`。文末预先放 `ADDIN ZOTERO_BIBL … CSL_BIBLIOGRAPHY`，刷新时填参考文献表，不再现场插域。可见文字用 `(Author, year)`。正文里的 `{#键}`：键在 bib 里就写成同一条域，不在就只留键名，不把 `{#tbl-…}` 原样留进 Word。
+- 生成时只读当前默认 Zotero 配置里 `extensions.zotero.dataDir` 指明的 `zotero.sqlite`（换库用 `--zotero-db`）。配置不止一个、没有默认、或没写数据目录时不猜。只查用户库，不查群组库。DOI 去掉网址前缀、空白和末尾句点后必须整段相同，并且只有一条未删除条目，才把 `http://zotero.org/users/local/<本机用户键>/items/<条目键>` 写进域。同一 DOI 多条、没有 DOI、或库里没有，不猜，报告「库绑定」点名；这条仍用稿内题录。RIS 的 `ID` 导入时不进库，不能用来对。
+- 未匹配键 **fail-closed**：写报告、不写 docx、退出码非 0。
+- 不点 Zotero 插件。人打开 `output/zotero.docx` 后在 Zotero 工具栏点一次 **Refresh**，再换引用样式。
+- `zotero_rtf.py` 只留给旧的 RTF Scan 稿，定稿不再交 `output/zotero.rtf`。
 
 ### 4. 边界与报告
 

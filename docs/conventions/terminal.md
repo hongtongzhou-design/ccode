@@ -248,6 +248,7 @@
   「M 个待处理」，活跃任务数删除）；**瞬态反馈自动消退**（「✓ 工作区已创建」横幅 10s 自收，setup 失败除外）；**常驻 pill 降裸字**
   （标签「可恢复」、启动栏「端口段已注入/上次任务」去底色去 link 蓝）；**无限脉冲禁留**（标签「工作中」与项目区同用有界
   `animate-pulse-brief`）；端口「N 个监听中」只在展开后显示；产物清单「刚更新」标记删除。新状态指示进界面前先过「是否阻塞人的决策」闸。
+  **项目列表绿点只认此刻还在跑的 Agent**（2026-09-29）：`projectRailStatus` 看 `terminalRunInputs` 里 `running && !shell`、cwd 落在该课题根或工作树内；未归档工作区、回合结束、回落 shell 不亮。黄点仍是待处理，优先于绿点。
   **v3.59 起导航行「待处理」与收件箱同口径按项目摊开**：终端待确认与外部 live 待确认按 cwd 最长前缀归属项目根/
   工作树（`run-overview.ts attributeToProject` 纯逻辑，段边界防误中），收件箱给总数、导航行给分布。同批：收件箱条目数
   镜像进 store（`inboxCount`，WorkspacesPage 唯一写入方）。**侧栏不挂任何徽标**（终端运行数、工作区待处理全部取消，
@@ -289,8 +290,12 @@
   **Shift+标点丢字**：xterm 的 keydown 只发送 `keyCode ≥ 48` 的单个字符。WKWebView 上 Shift+`/`
   实测报 **229**（不是 191），这一下 xterm 走 composition 的 `setTimeout(…, 0)` 分支、读到的
   textarea 还没被 `input` 事件写长 → 不发 → 第一下丢字，再按一下才出来。`printableKeyFallback`：
-  keyCode 0 与 229 都当场补发 `e.key`，再由 `swallowPrintableChar` 哨兵吞掉 xterm 可能补发的那一次。
-  输入法真组词时 `e.key` 是 `"Process"`，被 `e.key.length !== 1` 滤掉，不会走到这里。带 Ctrl/Alt/⌘ 不补。
+  keyCode 0 当场补发 `e.key`。keyCode 229 且按着 Shift 时，按物理键补美式键盘
+  的那个符号（Digit1→`!`、Digit3→`#`、Slash→`?` 等）：中文输入法下 `key` 常是
+  `"Process"`，只认 Slash 会让 Shift+1 没反应，Shift+3 则第一下靠 xterm、第二下组词
+  收尾再写一遍变成 `##`。补发后 `return false` 拦住 xterm，回声按次数吞
+  （`armPrintableEcho` / `takePrintableEcho`，400ms）。汉字上屏的 `code` 不在这张表，不补。
+  带 Ctrl/Alt/⌘ 不补。正常 keyCode（≥48）不补，避免和 xterm 各写一次。
   **⌘V**：Mac 上先读剪贴板。有图片就走落盘路径，没有再当文本粘贴。Ctrl+V 仍是 `\x16`，让 CLI 自己读系统剪贴板。
 - **文件拖入转路径**：`getCurrentWebviewWindow().onDragDropEvent`（HumanTasksList 同款），只处理 `drop` 且
   坐标命中本终端容器 rect（devicePixelRatio 两口径都试）；隐藏标签 rect 全 0 天然不响应；**只在自己 rect 内响应，

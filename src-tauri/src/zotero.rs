@@ -1334,7 +1334,7 @@ pub async fn zotero_open_papers(project_root: String) -> Result<(), String> {
     .map_err(|e| format!("{e}"))?
 }
 
-/// 按 references.bib 重写 papers/to-fetch.ris。精读保存后同步用。
+/// 按 references.bib 重写 papers/zotero-library.ris。不改 papers/to-fetch.ris。
 pub fn refresh_library_ris(project_root: &Path) -> Result<PathBuf, String> {
     let root =
         crate::paths::canonicalize_plain(project_root).map_err(|e| format!("项目目录无效: {e}"))?;
@@ -1344,7 +1344,7 @@ pub fn refresh_library_ris(project_root: &Path) -> Result<PathBuf, String> {
     }
     let papers = root.join("papers");
     std::fs::create_dir_all(&papers).map_err(|e| format!("无法创建 papers/: {e}"))?;
-    let ris = papers.join("to-fetch.ris");
+    let ris = papers.join("zotero-library.ris");
     let stamp = uuid::Uuid::new_v4();
     let script = std::env::temp_dir().join(format!("ccode-zotero-ris-{stamp}.py"));
     crate::storage::atomic_write(
@@ -1382,7 +1382,7 @@ pub fn refresh_library_ris(project_root: &Path) -> Result<PathBuf, String> {
         });
     }
     if !ris.is_file() {
-        return Err("转换结束但没有 papers/to-fetch.ris".into());
+        return Err("转换结束但没有 papers/zotero-library.ris".into());
     }
     Ok(ris)
 }
@@ -1396,10 +1396,13 @@ pub async fn zotero_open_import(path: String, root: String) -> Result<String, St
         let path_exp = crate::sessions::expand_tilde(&path);
         let root_c = crate::paths::canonicalize_plain(std::path::Path::new(&root_exp))
             .map_err(|e| format!("目录无效: {e}"))?;
-        let refreshed = refresh_library_ris(&root_c).ok();
-        let open_path = refreshed.unwrap_or_else(|| std::path::PathBuf::from(&path_exp));
+        let open_path = if root_c.join("references.bib").is_file() {
+            refresh_library_ris(&root_c)?
+        } else {
+            std::path::PathBuf::from(&path_exp)
+        };
         let path_c = crate::paths::canonicalize_plain(&open_path)
-            .map_err(|_| "找不到 to-fetch.ris（精读保存后会按引文库生成）".to_string())?;
+            .map_err(|_| "找不到 papers/zotero-library.ris（精读保存后会按引文库生成）".to_string())?;
         if !crate::paths::path_within_path(&path_c, &root_c) {
             return Err("导入文件不在项目目录内".into());
         }

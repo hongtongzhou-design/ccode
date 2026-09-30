@@ -500,6 +500,8 @@ export default function HumanTasksList({
                         ? `全部目标已满足${task.expectedCount != null ? `（清单共 ${task.expectedCount} 篇）` : ""}`
                         : task.completion === "no_placeholders"
                           ? "已清除占位"
+                          : task.completion === "decisions_cleared"
+                            ? "已逐条裁决"
                       : task.hitCount != null
                         ? `已见到 ${task.hitCount} 个文件${task.expectedCount != null ? `（清单共 ${task.expectedCount} 篇）` : ""}`
                         : "已见到文件"}

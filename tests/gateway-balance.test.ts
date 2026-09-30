@@ -17,9 +17,11 @@ import {
   walletKeyAmountLine,
   walletSpendTone,
   walletTokenQuota,
+  walletUnlimitedFill,
   walletUnlimitedLine,
   walletUrl,
   walletUsedPercent,
+  WALLET_UNLIMITED_BAR_CAP,
 } from "../src/gateway-balance.ts";
 
 function gw(url: string) {
@@ -103,6 +105,23 @@ test("不限额度也把已用说出来", () => {
   assert.equal(walletUnlimitedLine(4622.53, "CNY"), "不限 · 已用 ¥4622.53");
   assert.equal(walletUnlimitedLine(null, "CNY"), "不限");
   assert.equal(walletUnlimitedLine(4622.53, "CNY", true), "不限 · 已用 ¥•••");
+});
+
+test("不限额度开口条：同卡已用的对数比，最多停在留白处", () => {
+  const peers = [4622.64, 9.89];
+  assert.equal(walletUnlimitedFill(4622.64, peers), WALLET_UNLIMITED_BAR_CAP);
+  const small = walletUnlimitedFill(9.89, peers);
+  // 差两个数量级：线性比会缩成不到 1，对数比仍能看见，又明显短于最长的那条
+  assert.ok(small != null && small > 10 && small < WALLET_UNLIMITED_BAR_CAP / 2);
+  // 只差一倍时两条仍靠近，不按线性拉成一半
+  const close = walletUnlimitedFill(100, [100, 200]);
+  assert.ok(close != null && close > 60);
+  assert.equal(walletUnlimitedFill(200, [100, 200]), WALLET_UNLIMITED_BAR_CAP);
+  // 单独一把也留白，不画成满条
+  assert.equal(walletUnlimitedFill(100, []), WALLET_UNLIMITED_BAR_CAP);
+  assert.equal(walletUnlimitedFill(0, [10]), null);
+  assert.equal(walletUnlimitedFill(null, [10]), null);
+  assert.equal(walletUnlimitedFill(-3, [10]), null);
 });
 
 test("消耗条：主题强调色过渡，正常档压透明度", () => {

@@ -22,6 +22,10 @@ export function useDepInstall(
   const [entries, setEntries] = useState<Record<DepTool, DepInstallEntry>>({
     git: IDLE,
     node: IDLE,
+    quarto: IDLE,
+    tex: IDLE,
+    pymupdf: IDLE,
+    pillow: IDLE,
   });
   // onDone 走 ref：调用方回调常捕获组件态，不为它重建 install
   const onDoneRef = useRef(onDone);

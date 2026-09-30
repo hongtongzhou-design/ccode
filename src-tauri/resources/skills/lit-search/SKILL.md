@@ -1,7 +1,7 @@
 ---
 name: lit-search
-description: 文献检索与筛选规范。当用户要求围绕某个课题检索学术文献、做系统综述检索、制定纳入/排除标准、或把候选文献筛选成最终清单时使用。按深度分档（快筛/标准/系统综述）执行，检索过程全程留痕可复现。产出 papers/screening.md 与 papers/included.md 两份固定格式文件；付费墙文献列入 papers/to-fetch.md 并附 to-fetch.ris 供导入 Zotero。
-outputs: [papers/]
+description: 文献检索与筛选规范。当用户要求围绕某个课题检索学术文献、做系统综述检索、制定纳入/排除标准、或把候选文献筛选成最终清单时使用。按深度分档（快筛/标准/严格检索）执行，检索过程全程留痕可复现。严格检索档不等于完整系统综述。产出 papers/screening.md、papers/included.md、papers/included.json、papers/to-fetch.md、papers/to-fetch.ris、papers/endnote-import.ris。
+outputs: [papers/screening.md, papers/included.md, papers/included.json, papers/to-fetch.md, papers/to-fetch.ris, papers/endnote-import.ris]
 ---
 
 # 文献检索与筛选
@@ -90,6 +90,8 @@ Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索
 - 系统综述按方案分别记录标题摘要和全文判定，不因候选少跳过全文；普通调研可按规模合并操作，但保留逐条证据和判定；
 - 每篇给出纳入/排除及理由；排除理由从固定枚举里选：**年份不符 / 语言不符 / 来源级别不符 / 主题无关 / 重复 / 非实证研究**，都不沾边才写自由理由；
 - **拿不准相关性的一律保留候选，并标注「待确认」**——不允许自行裁掉，也不能冒充最终纳入；「多源命中」不等于证据更强。全文未得的判定及其对覆盖的影响单列。
+- **开头那句篇数从 included.json 现数来。** 「终判纳入 N 篇」「另有待确认 M 篇」必须等于 json 里 `decision=included` / `pending` 的条数。后来改了判定，先改这句再交。不要留检索当时的旧数字。
+- **「待确认」不是题录没查全。** `decision=pending` 只表示相关性等人拍板。期刊全称、ISSN、`doi`、`url` 与已纳入同一套：有 DOI 就必须先向 Crossref 取 `container-title` 写入 `venue`，没有再问 OpenAlex。书章没有期刊才把 `venue` 写成「待补」。禁止因为这篇还没拍板，就把 `venue`/`doi`/`url` 整列写成「待补」或留空。
 - **先拍 pending，再下载全文**：`to-fetch.md` 与开放获取下载都只针对 `decision=included`。禁止把 pending 写入待获取或先下其全文。有 pending 时写入 `.ccode/help-wanted.md` 请人逐篇纳入或排除（未回复则不把 pending 当已纳入）；人改成 included 后才允许补进 to-fetch。
 
 ### 5. 引用扩展与停止
@@ -118,7 +120,7 @@ Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索
 
 - `papers/screening.md`：固定结构——深度档与假设 → 纳入/排除标准 → 概念块与检索词 → 检索日志表（六字段）→ 逐条判定（含「待确认」「多源命中」标注）→ 引用扩展轮次记录 → **覆盖缺口声明**（哪些库没检、意味着什么缺失，如「未检 CNKI，中文核心期刊覆盖缺失」「WoS 无订阅未检」）
 - `papers/included.md`：纳入清单（一行一篇，固定行格式；尚待确认单列，不冒充已决）
-- `papers/included.json`：与 included.md 一一对应的记录数组。每条有稳定非空字符串 `id`、`title`、`decision`、`reason`。decision 为 included / pending。**pending 与 included 同一套题录，检索时一次查全**，不要等纳入后再查：`authors`（数组，`姓, 名`）、`year`、`venue`、`volume`、`issue`、`pages`、`date`、`epubDate`、`articleType`、`issn`、`journalAbbreviation`、`abstract`、`keywords`、`language`、`doi`、`url`。查不到的写「待补」。人点纳入时 Mesa 把这条原样追加进 `endnote-import.ris` 和 `to-fetch.ris`，不再另查。空清单用 `[]`。不用修改 id 隐藏旧记录。
+- `papers/included.json`：与 included.md 一一对应的记录数组。每条有稳定非空字符串 `id`、`title`、`decision`、`reason`。decision 为 included / pending。**pending 与 included 同一套题录，检索时一次查全**，不要等纳入后再查。pending 只是相关性未拍板，不是期刊未知。有 DOI 时 `venue` 必须是期刊全称（书章除外），`doi` 与 `url` 不得留空：`authors`（数组，`姓, 名`）、`year`、`venue`、`volume`、`issue`、`pages`、`date`、`epubDate`、`articleType`、`issn`、`journalAbbreviation`、`abstract`、`keywords`、`language`、`doi`、`url`。查不到的写「待补」。人点纳入时 Mesa 把这条原样追加进 `endnote-import.ris` 和 `to-fetch.ris`，不再另查。空清单用 `[]`。不用修改 id 隐藏旧记录。
 - `papers/to-fetch.md`：仅 **已纳入（decision=included）** 且未获得全文的付费墙清单，**不得列入 pending**（2026-09-15 收紧格式——裸「标题 — DOI」堆叠没编号，用户无法对照追踪进度）：**编号列表，每行 `N. 标题 — DOI`，N 从 1 连续**，顺序与 to-fetch.ris 条目一致；补齐全文的行在编号后加 `✓`（如 `3. ✓ 标题 — DOI`），编号不重排；无待获取则注明为空
 - 两份 RIS 同一批篇目、标签分开。pending 的完整题录写在 included.json。人把 pending 改成纳入后，Mesa 按各自标签追加（同一 DOI 或标题已在则不重复）。排除的不写。不在纳入这一下重新检索。
 - `papers/to-fetch.ris` 给 Zotero。RIS 2004、CRLF，顺序与 to-fetch.md 一致。一位作者一条 `AU`（`姓, 名`）。期刊全称只写 `T2`，缩写与全称不同才写 `J2`。再写 `PY`、`VL`、`IS`、`SP`、`EP`、`SN`、`DO`、`KW`（一词一条）、`AB`、`UR`。不要写 `JO`/`JF`/`JA`/`N1`/`N2`/`M1`：Zotero 把 `JO` 放进期刊缩写，把 `N1` 放进笔记。

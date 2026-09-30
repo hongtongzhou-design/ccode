@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -127,6 +128,15 @@ def bib_records(text):
     return records
 
 
+def parse_bibtex(text):
+    stamp = Path(tempfile.mkstemp(suffix=".bib")[1])
+    try:
+        stamp.write_text(text, encoding="utf-8")
+        return load(stamp)
+    finally:
+        stamp.unlink(missing_ok=True)
+
+
 def load(path):
     with path.open('rb') as source:
         data = source.read(32 * 1024 * 1024 + 1)
@@ -217,10 +227,39 @@ def escape_bib(value):
     return ''.join('\\'+c if c in '&%_#{}$' else c for c in str(value))
 
 
+_SUB = str.maketrans('0123456789+-xy', '₀₁₂₃₄₅₆₇₈₉₊₋ₓᵧ')
+_SUP = str.maketrans('0123456789+-', '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻')
+
+
+def _shift_marks(text, table):
+    return text.translate(table)
+
+
 def clean(value):
     if value is None:
         return ''
-    return re.sub(r'\s+', ' ', str(value).replace('\r', ' ').replace('\n', ' ')).strip()
+    text = str(value).replace('\r', ' ').replace('\n', ' ')
+    # 先去掉斜体粗体标签，再把上下标收成 Unicode。两个库都按字符显示，不再留 <sup> 或变成 S0。
+    text = re.sub(r'</?(?:i|b|em|strong)>', '', text, flags=re.I)
+    text = re.sub(r'<sup>(.*?)</sup>', lambda m: _shift_marks(m.group(1), _SUP), text, flags=re.I)
+    text = re.sub(r'<sub>(.*?)</sub>', lambda m: _shift_marks(m.group(1), _SUB), text, flags=re.I)
+    text = re.sub(r'<[^>]+>', '', text)
+    # Crossref 把下标写成空格：CF 3、) 2、MgCl 2。只收元素符号或右括号后面的数字，不动 Figure 2。
+    def sub_num(token):
+        return _shift_marks(token, _SUB)
+
+    def sup_num(token):
+        return _shift_marks(token, _SUP)
+
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r'([A-Za-z])[ \t]*(\d{1,2}\+)', lambda m: m.group(1) + sup_num(m.group(2)), text)
+        text = re.sub(r'([A-Z][a-z]?|\))[ \t]+(\d{1,2})(?![0-9+])', lambda m: m.group(1) + sub_num(m.group(2)), text)
+        text = re.sub(r'(?<![A-Za-z])([A-Z][a-z]?)(\d{1,2})(?![0-9+])', lambda m: m.group(1) + sub_num(m.group(2)), text)
+        text = re.sub(r'([₀₁₂₃₄₅₆₇₈₉ₓᵧ])[ \t]+([A-Z][a-z]?)(?![a-z])', r'\1\2', text)
+        text = re.sub(r'([₀₁₂₃₄₅₆₇₈₉ₓᵧ])[ \t]+\)', r'\1)', text)
+    return re.sub(r'\s+', ' ', text).strip()
 
 
 def split_pages(pages):
@@ -250,6 +289,10 @@ def xml_date(parent, tag, value):
         if match.group(2):
             el.set('day', str(int(match.group(2))))
     return el
+
+
+def bare_doi(value):
+    return re.sub(r'^https?://(?:dx\.)?doi\.org/', '', clean(value), flags=re.I)
 
 
 def family_comma(author):
@@ -291,8 +334,8 @@ def render(records, suffix):
             put('rec-number', i)
             put('ref-type', code, {'name': type_name.get(code, 'Generic')})
             for author in r.get('authors', []): put('contributors/authors/author', family_comma(author))
-            if r.get('title'): put('titles/title', r['title'])
-            if r.get('journal'): put('titles/secondary-title', r['journal'])
+            if r.get('title'): put('titles/title', clean(r['title']))
+            if r.get('journal'): put('titles/secondary-title', clean(r['journal']))
             short = r.get('journalAbbreviation') or iso4_abbreviation(r.get('journal')) or r.get('journal') or ''
             if short:
                 # EndNote.dtd 里期刊缩写在 periodical/abbr-1。EndNote 2025 期刊类型的
@@ -319,7 +362,7 @@ def render(records, suffix):
                 if r.get('date'):
                     xml_date(ET.SubElement(dates, 'pub-dates'), 'date', r['date'])
             if r.get('issn') or r.get('isbn'): put('isbn', r.get('issn') or r.get('isbn'))
-            if r.get('abstract'): put('abstract', r['abstract'])
+            if r.get('abstract'): put('abstract', clean(r['abstract']))
             # label 在 DTD 里位于 abstract 与 notes 之间
             put('label', r['id'])
             if r.get('notes'): put('notes', r['notes'])
@@ -333,7 +376,8 @@ def render(records, suffix):
                     pdfs = ET.SubElement(urls, 'pdf-urls')
                     for attachment in r['attachments']:
                         ET.SubElement(pdfs, 'url').text = clean(attachment)
-            if r.get('doi'): put('electronic-resource-num', r['doi'])
+            if r.get('doi'):
+                put('electronic-resource-num', bare_doi(r['doi']))
             if r.get('language'): put('language', r['language'])
         return ET.tostring(root, encoding='unicode', xml_declaration=True) + '\n'
     if suffix == '.ris':
@@ -383,7 +427,7 @@ def render(records, suffix):
             if r.get('issn') or r.get('isbn'):
                 result.append(line('SN', r.get('issn') or r.get('isbn')))
             if r.get('doi'):
-                result.append(line('DO', r['doi']))
+                result.append(line('DO', bare_doi(r['doi'])))
             for word in r.get('keywords') or []:
                 result.append(line('KW', word))
             if r.get('abstract'):

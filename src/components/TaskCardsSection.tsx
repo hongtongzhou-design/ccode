@@ -9,6 +9,7 @@ import FuseDraftModal from "./FuseDraftModal";
 import { useAppStore } from "../store";
 import {
   bucketCardsByStep,
+  ideaTopicPlaceholder,
   topicCardsForStep,
   unstartedSeeds,
 } from "../task-cards";
@@ -82,6 +83,7 @@ export default function TaskCardsSection({
   onReadPaper,
   readPaperPrimary,
   focusDraft,
+  focusDraftError,
   onDraftChanged,
   onOpenResources,
   onSetLitSource,
@@ -128,6 +130,8 @@ export default function TaskCardsSection({
   readPaperPrimary?: boolean;
   /** 聚焦步骤的任务书草稿（v3.72；ProjectGroup 单一加载点下发）：discuss 节点状态与「聊任务书」指令用 */
   focusDraft?: { relPath: string; text: string | null } | null;
+  /** 任务书读失败时的原因。有正文时不显示。 */
+  focusDraftError?: string | null;
   /** 「◈ 沉淀进任务书」落盘后回调：ProjectGroup 即刻重读 focusDraft（不等页面刷新） */
   onDraftChanged?: () => void;
   /** 展开「文献与数据」面板：流程线里的文献类交付统一引到那里（focus 高亮对应进料入口） */
@@ -852,7 +856,7 @@ export default function TaskCardsSection({
                         className={`${fieldSm} min-w-0 flex-1`}
                         value={ideaName}
                         onChange={(e) => setIdeaName(e.target.value)}
-                        placeholder="话题名，如 要不要加对照实验（回车开聊）"
+                        placeholder={ideaTopicPlaceholder(focusStepDto?.name)}
                         autoFocus
                         required
                       />
@@ -880,11 +884,9 @@ export default function TaskCardsSection({
                       ＋ 话题
                     </button>
                   )}
-                  {/* 跟随想法区同步出现（v3.89，用户要求）：没聊过话题时它没有约束对象，
-                      孤零零挂在右下角只会让人问「这管的是什么」 */}
                   {ideaCards.length > 0 && (
                   <span
-                    className="flex shrink-0 items-center gap-1"
+                    className="ml-auto flex shrink-0 items-center gap-1"
                     title={
                       guardHard
                         ? `开启后以只读/计划模式启动 ${guardAgentLabel}——进程级参数，约束工具执行（计划模式不等同于 OS 沙箱）`
@@ -935,6 +937,7 @@ export default function TaskCardsSection({
             }
             onDraftChanged={onDraftChanged}
             onSeedDraft={seedDraftForChat}
+            draftLoadError={focusDraftError}
             onLoadTaskMd={loadTaskMdForStep}
             discussed={discussed}
             discussResume={discussResume}

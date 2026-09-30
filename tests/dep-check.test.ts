@@ -8,12 +8,18 @@ import {
   type DepCheckDto,
 } from "../src/dep-check.ts";
 
+const absent = { status: "missing" as const, version: null, path: null };
+
 function dep(partial: Partial<DepCheckDto["git"]>, nodeOk = true): DepCheckDto {
   return {
     git: { status: "ok", version: "2.51.0", path: "/usr/bin/git", ...partial },
     node: nodeOk
       ? { status: "ok", version: "22.0.0", path: "/usr/local/bin/node" }
       : { status: "missing", version: null, path: null },
+    quarto: absent,
+    tex: absent,
+    pymupdf: absent,
+    pillow: absent,
     channel: "brew",
     checkedAt: "2026-09-02 10:00:00",
   };
@@ -27,15 +33,19 @@ test("isGitMissingError：命中后端固定错误串，误伤不识别", () => 
   assert.ok(!isGitMissingError(""));
 });
 
-test("canOneClickInstall：git 三渠道可，node 仅 brew/winget", () => {
+test("canOneClickInstall：git 三渠道可，node/quarto/tex 仅 brew/winget，拼图库始终可", () => {
   for (const ch of ["brew", "winget", "xcode"])
     assert.ok(canOneClickInstall("git", ch), `git/${ch}`);
   assert.ok(!canOneClickInstall("git", "none"));
   assert.ok(!canOneClickInstall("git", "unknown"));
-  for (const ch of ["brew", "winget"])
-    assert.ok(canOneClickInstall("node", ch), `node/${ch}`);
-  assert.ok(!canOneClickInstall("node", "xcode"));
-  assert.ok(!canOneClickInstall("node", "none"));
+  for (const tool of ["node", "quarto", "tex"] as const) {
+    for (const ch of ["brew", "winget"])
+      assert.ok(canOneClickInstall(tool, ch), `${tool}/${ch}`);
+    assert.ok(!canOneClickInstall(tool, "xcode"));
+    assert.ok(!canOneClickInstall(tool, "none"));
+  }
+  assert.ok(canOneClickInstall("pymupdf", "none"));
+  assert.ok(canOneClickInstall("pillow", "xcode"));
 });
 
 test("installGuidance：mac 无 brew 时 node 指 nodejs.org、git 指系统弹窗", () => {
@@ -63,6 +73,9 @@ test("installGuidance：linux 指包管理器，git/node 包名分开", () => {
   assert.ok(gitLinux.includes("apt install git"));
   assert.ok(!gitLinux.includes("nodejs"));
   assert.ok(installGuidance("node", "none", "linux").includes("apt install nodejs"));
+  assert.ok(installGuidance("tex", "none", "linux").includes("apt install tectonic"));
+  assert.ok(installGuidance("quarto", "none", "linux").includes("quarto.org"));
+  assert.ok(installGuidance("pymupdf", "none", "linux").includes("python3-pymupdf"));
 });
 
 test("depInboxItem：git missing → 常驻条目；clt_stub → CLT 文案", () => {

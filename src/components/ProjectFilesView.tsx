@@ -31,6 +31,7 @@ import {
 import FileKindFilters from "./FileKindFilters";
 import { IS_WINDOWS } from "../hotkeys";
 import { pathWithin, samePath } from "../path-utils";
+import { absTime, relTime } from "../rel-time";
 import {
   ancestorDirsToReveal,
   fileMatchesProjectFilter,
@@ -54,6 +55,23 @@ import ProjectFilePreview from "./ProjectFilePreview";
 import { Modal } from "./Modal";
 
 type EntryCache = Record<string, DirEntryDto[]>;
+
+function modifiedLabel(iso: string | null | undefined): string {
+  return relTime(iso ?? null);
+}
+
+function FileModified({ iso }: { iso: string | null | undefined }) {
+  const label = modifiedLabel(iso);
+  if (!label) return null;
+  return (
+    <span
+      className="shrink-0 text-micro text-l4"
+      title={absTime(iso ?? null) || undefined}
+    >
+      {label}
+    </span>
+  );
+}
 
 function asFileEntry(file: {
   path: string;
@@ -472,10 +490,11 @@ export default function ProjectFilesView({
               >
                 <span className="w-[13px] shrink-0" />
                 <FileTypeMark path={entry.path} />
-                <span className="truncate">{entry.name}</span>
+                <span className="min-w-0 flex-1 truncate">{entry.name}</span>
                 {goalMarkFor(entry.path) && (
                   <span className="shrink-0 text-micro text-warn-text">{pendingMark}</span>
                 )}
+                <FileModified iso={entry.modified} />
               </button>
             )}
             <span className="absolute inset-y-0 right-1 hidden items-center bg-hover pl-1 group-hover:flex group-focus-within:flex">
@@ -538,7 +557,9 @@ export default function ProjectFilesView({
     });
   }
 
-  function renderFlat(files: { path: string; name: string; rel?: string }[]) {
+  function renderFlat(
+    files: { path: string; name: string; rel?: string; modified?: string | null }[],
+  ) {
     if (files.length === 0) {
       return <p className="px-2 py-3 text-xs text-l4">{query.trim() ? "没有匹配" : "没有这类文件"}</p>;
     }
@@ -568,6 +589,7 @@ export default function ProjectFilesView({
                     {file.rel}
                   </span>
                 )}
+                <FileModified iso={file.modified} />
               </button>
               <span className="absolute inset-y-0 right-1 hidden items-center bg-hover pl-1 group-hover:flex group-focus-within:flex">
                 <button
@@ -665,7 +687,7 @@ export default function ProjectFilesView({
 
   return (
     <>
-      <div className="flex h-[calc(100dvh-9rem)] min-h-[20rem] overflow-hidden">
+      <div className="flex h-full min-h-0 overflow-hidden">
         <section
           className={`flex h-full min-h-0 shrink-0 flex-col ${
             preview ? "w-full lg:w-[22rem] lg:pr-6" : "w-full"
