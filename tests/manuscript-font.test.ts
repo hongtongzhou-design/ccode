@@ -40,7 +40,8 @@ test("初稿字体写入 YAML：英文新罗马，中文宋体", () => {
       [script, "--root", root, "--markdown", "manuscript/draft.md", "--latin", "Times New Roman", "--cjk", "Songti SC"],
       { encoding: "utf8" },
     );
-    if (/本机没有 quarto/.test(result.stderr)) return;
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    if (result.status !== 0 && /quarto not found|本机没有 quarto/.test(output)) return;
     assert.equal(result.status, 0, result.stderr);
     const text = readFileSync(md, "utf8");
     assert.match(text, /mainfont: "Times New Roman"/);

@@ -145,7 +145,10 @@ def reference_docx(dest: Path, latin: str, cjk: str) -> None:
                 text=True,
             )
         except OSError:
-            raise SystemExit("做不出 Word 字体模板：本机没有 quarto") from None
+            # 先打一行 ASCII。英文 Windows 的 stderr 是 cp1252，中文 SystemExit 会变成
+            # 反斜杠转义，调用方认不出「没有 quarto」。
+            print("quarto not found", file=sys.stderr)
+            raise SystemExit(1)
         if run.returncode != 0 or not made.is_file():
             raise SystemExit(run.stderr.strip() or "做不出 Word 字体模板")
         theme = zipfile.ZipFile(made).read("word/theme/theme1.xml").decode("utf-8")
