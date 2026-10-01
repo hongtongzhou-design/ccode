@@ -55,6 +55,15 @@ export function summarizeUpdateCheckError(raw: string): string {
     s.includes("valid release")
   )
     return "未读到有效的更新清单，请稍后重试";
+  // 插件原文：the platform `darwin-x86_64` was not found in the response `platforms` object
+  // / None of the fallback platforms … were found —— 只发 Apple 芯片包，Intel Mac 自构建版
+  // 每次启动都会撞上，归成一句可行动的话而不是「失败」
+  if (
+    s.includes("was not found in the response") ||
+    s.includes("fallback platforms") ||
+    s.includes("targetnotfound")
+  )
+    return "本机平台没有对应的更新包（如 Intel Mac 需自行构建），不会收到应用内更新";
   if (
     s.includes("network") ||
     s.includes("dns") ||

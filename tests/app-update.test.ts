@@ -71,6 +71,20 @@ test("summarizeUpdateCheckError：网络/超时/签名/清单 收成中文，不
     summarizeUpdateCheckError("Could not fetch a valid release JSON from the remote"),
     "未读到有效的更新清单，请稍后重试",
   );
+  // 插件原文：the platform `darwin-x86_64` was not found in the response `platforms` object
+  // （Intel Mac 自构建版每次启动都会撞上，不能归成「失败」吓用户）
+  assert.equal(
+    summarizeUpdateCheckError(
+      "the platform `darwin-x86_64` was not found in the response `platforms` object",
+    ),
+    "本机平台没有对应的更新包（如 Intel Mac 需自行构建），不会收到应用内更新",
+  );
+  assert.equal(
+    summarizeUpdateCheckError(
+      "None of the fallback platforms `[\"a\", \"b\"]` were found in the response `platforms` object",
+    ),
+    "本机平台没有对应的更新包（如 Intel Mac 需自行构建），不会收到应用内更新",
+  );
   assert.equal(summarizeUpdateCheckError("weird plugin panic"), "检查更新失败，请稍后重试");
 });
 

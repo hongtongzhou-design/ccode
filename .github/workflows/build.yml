@@ -89,3 +89,56 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'Ccode ${{ github.ref_name }}'
           releaseDraft: true
+
+  # updater 查 latest.json 用的是裸键 windows-x86_64（插件不做 -nsis/-msi 后缀回退）。
+  # 2026-10-01 审计：targets:"all" 时该键曾指向 MSI，NSIS 装机的用户更新会装出第二份
+  # 应用。现已收窄 targets 只出 NSIS，这里逐版锁死：windows 必须指向 setup.exe。
+  verify-release:
+    name: 校验更新清单
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载草稿里的 latest.json 并校验
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ID=$(gh api "repos/${{ github.repository }}/releases" --paginate --jq \
+            '.[] | select(.draft and .tag_name == "${{ github.ref_name }}") | .id' | head -n1)
+          if [ -z "$ID" ]; then echo "没找到 ${{ github.ref_name }} 的草稿 Release"; exit 1; fi
+          ASSET=$(gh api "repos/${{ github.repository }}/releases/$ID" \
+            --jq '.assets[] | select(.name == "latest.json") | .id' | head -n1)
+          if [ -z "$ASSET" ]; then echo "草稿里没有 latest.json：tauri-action 没产出更新清单"; exit 1; fi
+          gh api "repos/${{ github.repository }}/releases/assets/$ASSET" \
+            -H "Accept: application/octet-stream" > latest.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const m = JSON.parse(readFileSync("latest.json", "utf8"));
+            const p = m.platforms ?? {};
+            const errs = [];
+            const win = p["windows-x86_64"];
+            if (!win) {
+              errs.push("缺 windows-x86_64（updater 实际查找的键，不查 -nsis/-msi 后缀键）");
+            } else {
+              if (!String(win.url).endsWith("x64-setup.exe")) {
+                errs.push("windows-x86_64 指向 " + win.url + " —— 必须是 NSIS setup.exe；指向 MSI 会让 NSIS 装机用户装出第二份应用");
+              }
+              if (!win.signature) errs.push("windows-x86_64 缺 minisign 签名");
+            }
+            const mac = p["darwin-aarch64"];
+            if (!mac || !String(mac.url ?? "").endsWith(".app.tar.gz") || !mac.signature) {
+              errs.push("darwin-aarch64 缺失，或不是 app.tar.gz + 签名");
+            }
+            if (errs.length) { console.error(errs.join("\n")); process.exit(1); }
+            console.log("latest.json 校验通过：Windows → NSIS setup.exe，macOS → app.tar.gz");
+          '
+      - name: 发版提醒
+        run: |
+          {
+            echo "## 发版检查"
+            echo ""
+            echo "- ✅ latest.json 校验通过（Windows 更新包指向 NSIS setup.exe）"
+            echo "- ⚠️ Release 还是草稿。releases/latest/download/latest.json 只对**已发布**的 Release 生效，不发布用户就收不到更新。"
+            echo "- 发布入口：仓库 Releases 页 → 编辑该草稿 → Publish release。"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -32,7 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg", "nsis"],
     "createUpdaterArtifacts": true,
     "externalBin": ["binaries/mesa_helper"],
     "resources": ["extension-src/**/*"],

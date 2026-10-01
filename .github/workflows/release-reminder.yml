@@ -1,0 +1,39 @@
+# 发版流程提醒：tauri-action 建的是 Release 草稿，releases/latest/download/latest.json
+# 只对已发布的 Release 生效——草稿忘发布，所有已装用户都「已是最新版本」且无任何报错。
+# 这里每天巡一次，草稿滞留超过 72 小时（留出验机时间）就让 CI 红掉提醒发布。
+name: release-reminder
+
+on:
+  schedule:
+    # 02:31 UTC = 北京时间 10:31，避开整点扎堆
+    - cron: "31 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  # 草稿 Release 只对有写权限的 token 可见；本工作流只做只读 gh api 查询
+  contents: write
+
+jobs:
+  nag:
+    name: 草稿滞留巡检
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检查草稿是否滞留
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          STALE=$(gh api "repos/${{ github.repository }}/releases" --paginate --jq '
+            .[]
+            | select(.draft)
+            | select((now - (.created_at | fromdateiso8601)) > 72 * 3600)
+            | .tag_name + "（" + (.created_at | fromdateiso8601 | strftime("%Y-%m-%d")) + " 建的草稿）"')
+          if [ -n "$STALE" ]; then
+            {
+              echo "以下 Release 草稿超过 72 小时没发布，这个版本的用户收不到应用内更新："
+              echo "$STALE"
+              echo "发布入口：仓库 Releases 页 → 编辑草稿 → Publish release。"
+            } | tee "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "没有滞留的草稿。"
