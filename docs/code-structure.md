@@ -785,6 +785,9 @@ src-tauri/src/
   sheet_preview.rs           # Excel/ODS 预览：同一套白名单读字节，calamine 抽指定工作表（200×256）+
                              #   xlsx 合并区（load_merged_regions，裁进窗口）
   storage.rs                 # 本机文件持久化原语：跨进程读改写锁、私有临时文件（0600）、安全替换
+  uninstall.rs               # 一键卸载：Mesa 独占目录（配置 ccode/、~/ccode/、本机数据 ccode/、
+                             #   com.ccode.dev 的网页数据）移入回收站；浏览器桥清单与 Windows
+                             #   注册表键复用 browser_bridge 的目录表。课题文件夹与各 CLI 数据不动
   updater.rs                 # CLI 安装/更新（brew TUNA、npm_for 同目录 npm、Windows winget 渠道：claude/codex/opencode/kimi/grok 五家有官方包）+ 应用自身 Tauri updater；
                              #   run_streaming_pty/run_streaming/emit_done/winget_args 为 pub(crate)，dep_check 复用同一管线
   watch_review.rs            # 定时巡检产物评审：工作目录可复用，但评审和采纳只读每次执行冻结的副本

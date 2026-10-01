@@ -22,9 +22,9 @@ const bundle = await build({
         useAppStore.setState = value => Object.assign(window.__settingsUiHost.store, value);
         export const applyTheme = (...args) => window.__settingsUiHost.themeChanges.push(args);`,
       "../toast": "export const toast = (...args) => window.__settingsUiHost.toasts.push(args);",
-      "../components/ConfirmDialog": "export const confirmDialog = async () => false;",
+      "../components/ConfirmDialog": "export const confirmDialog = async () => false; export const alertDialog = async () => {};",
       "@tauri-apps/api/event": "export const listen = async () => () => {};",
-      "@tauri-apps/plugin-process": "export const relaunch = async () => { throw new Error('不应触发重启'); };",
+      "@tauri-apps/plugin-process": "export const relaunch = async () => { throw new Error('不应触发重启'); }; export const exit = async () => { throw new Error('不应触发退出'); };",
     };
     b.onResolve({ filter: /App\.css\?raw$/ }, () => ({ path: "app-css", namespace: "settings-css" }));
     b.onLoad({ filter: /.*/, namespace: "settings-css" }, () => ({ contents: `export default ${JSON.stringify(appCss)};`, loader: "js" }));

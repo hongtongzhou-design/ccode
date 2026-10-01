@@ -119,6 +119,15 @@
      额外放行的索引写点仅 `~/.kimi-code/session_index.jsonl`、`~/.kimi/kimi.json`、gemini `.project_root`、grok 组目录 `.cwd`（codex `config.toml` 走现有注册命令，不经本模块直写）；
      已存在同 agent 同 sessionId 一律跳过不覆盖；写入走 `atomic_write_bytes`（tmp+rename）；索引类读-改-写。
      导出是只读拷贝：会话原文进包（可能含密钥），弹层明示「分享前请自查」；密钥/网关/profile 不进包；B 机浏览仍过 `redact_sensitive_text`。
+  6. **卸载 Mesa**（`uninstall.rs`：设置 → 数据与存储。两次确认，第二次须输入「卸载」）。
+     只把 Mesa 独占目录移入回收站：平台配置目录 `ccode/`、主目录 `~/ccode/`、本机数据目录
+     `ccode/`（目标副本），以及打包身份 `com.ccode.dev` 的网页数据（macOS 的
+     `~/Library/WebKit/<身份>`、Caches、Saved Application State；Windows 的
+     `%LOCALAPPDATA%\<身份>\EBWebView`）。进程退出前的最后一次写入可能把网页数据再建出来。
+     浏览器收货桥清单走 `browser_bridge::native_host_dirs` 同一份目录（Windows 再删对应
+     HKCU 注册表键）。前端在调用卸载命令前同步清掉 WebView localStorage 里的 `ccode.*`
+     界面记忆键，兜住进程退出前的最后一次写入。课题文件夹、论文、各 CLI 的配置与会话
+     一律不动。应用本体不在这里删。
 - **「设为全局」/MCP 写入/技能分发的各家支持面统一查 AgentSpec 能力表**（agent_specs.rs 的 set_global/mcp_write/
   skill_dist 三字段，fail-loud：不支持必须带用户可见原因，后端报错与前端置灰同源），不再散写硬编码名单
   （mcp.rs 的 grok 只读、skills.rs 的 allow_symlink_for 等旧硬编码均已改查表）。

@@ -4,7 +4,7 @@ import { Search, X } from "lucide-react";
 import { searchSettings, type SettingSectionId } from "../settings-search.ts";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { applyTheme, useAppStore } from "../store";
 import type { AppSettings } from "../store";
 import {
@@ -76,7 +76,7 @@ import {
   parseThemeSwatchesFromCss,
   themeSwatchFor,
 } from "../theme-swatch";
-import { confirmDialog } from "../components/ConfirmDialog";
+import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
 import {
   addCustomThemeCard,
   chipInk,
@@ -618,6 +618,106 @@ function HotkeysSection({
         </div>
       </div>
     </>
+  );
+}
+
+/** 一键卸载：清 Mesa 自己的数据，课题文件夹不动。确认两次，第二次要原样输入「卸载」。 */
+function UninstallRow() {
+  const [busy, setBusy] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const [typed, setTyped] = useState("");
+  async function uninstall() {
+    if (busy || typed.trim() !== "卸载") return;
+    setBusy(true);
+    // 界面记忆（最近项目、偏好等 ccode.* 键）在 WebView 的 localStorage 里，
+    // 后端够不到；两次确认都已通过，就在动手前同步清掉。应用马上退出，无需保留
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key?.startsWith("ccode.")) localStorage.removeItem(key);
+    }
+    try {
+      const result = await invoke<{
+        trashed: string[];
+        errors: string[];
+      }>("uninstall_mesa");
+      if (result.errors.length > 0) {
+        await alertDialog(
+          `有 ${result.errors.length} 项没能清掉，应用先不退出：\n${result.errors.join("\n")}`,
+        );
+        setBusy(false);
+        return;
+      }
+      await exit(0);
+    } catch (reason) {
+      await alertDialog(`卸载没有完成：${String(reason)}`);
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="mt-3 rounded-md border border-field px-3 py-2.5">
+      <div className="flex items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm text-l2">卸载 Mesa</span>
+          <span className="block text-micro text-l4">
+            本机数据移入回收站。课题文件夹保留。完成后应用退出。
+          </span>
+        </span>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void (async () => {
+            const ok = await confirmDialog(
+              "卸载 Mesa 的本机数据？\n\n" +
+                "会移入回收站：配置与密钥、技能库、会话索引、工作副本、定时任务记录，以及界面记住的最近项目和偏好。\n" +
+                "课题文件夹、论文和各家 AI 自己的会话不会动。\n\n" +
+                "应用本身还在：Mac 把 Mesa.app 拖进废纸篓；Windows 在「设置 → 应用」里卸载。",
+              { danger: true, confirmText: "继续", focusCancel: true },
+            );
+            if (ok) setArmed(true);
+          })()}
+          className="shrink-0 rounded-sm border border-err-text/40 px-2 py-1 text-xs text-err-text hover:bg-hover disabled:opacity-50"
+        >
+          卸载…
+        </button>
+      </div>
+      {armed && (
+        <form
+          className="mt-2 flex items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void uninstall();
+          }}
+        >
+          <input
+            autoFocus
+            value={typed}
+            disabled={busy}
+            onChange={(event) => setTyped(event.target.value)}
+            placeholder="输入「卸载」"
+            aria-label="输入卸载以确认"
+            className={`${fieldClass} min-w-0 flex-1`}
+          />
+          <button
+            type="submit"
+            disabled={busy || typed.trim() !== "卸载"}
+            className="shrink-0 rounded-sm border border-err-text/40 px-2 py-1 text-xs text-err-text hover:bg-hover disabled:opacity-50"
+          >
+            {busy ? "正在卸载…" : "确认卸载"}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setArmed(false);
+              setTyped("");
+            }}
+            className="shrink-0 rounded-sm px-2 py-1 text-xs text-l3 hover:bg-hover disabled:opacity-50"
+          >
+            取消
+          </button>
+        </form>
+      )}
+    </div>
   );
 }
 
@@ -1502,9 +1602,29 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
     }
   }
 
-  // 下载并安装应用更新：成功后 relaunch 进新版本；失败恢复按钮可重试
+  // 下载并安装应用更新：成功后 relaunch 进新版本；失败恢复按钮可重试。
+  // 重启会杀掉后台无头任务，安装前先查一遍，有活着的任务必须用户明确点头
   async function installUpdate() {
     if (!appUpdate || installing) return;
+    try {
+      const active = await invoke<
+        { agent: string; taskRef: string | null }[]
+      >("active_background_runs");
+      if (active.length > 0) {
+        const first = active[0];
+        const label =
+          first.taskRef || first.agent || "后台任务";
+        const ok = await confirmDialog(
+          `有 ${active.length} 个后台任务正在运行（如「${label}」）。\n\n` +
+            "更新安装完成后应用会重启，这些任务会被直接中断，未保存的进度会丢失。\n\n" +
+            "可以先去「后台任务」停止它们再更新。仍要现在安装？",
+          { danger: true, confirmText: "仍然安装", focusCancel: true },
+        );
+        if (!ok) return;
+      }
+    } catch {
+      // 查询失败不拦更新：用户主动点的安装，别因诊断性查询挂掉主流程
+    }
     setInstalling(true);
     setInstallProgress({ downloaded: 0, total: null });
     setError(null);
@@ -3165,6 +3285,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         <p className="pt-2 text-micro text-l4">
           快照 / 备份 / 缓存可以直接删，配置与索引别手动删。
         </p>
+        <UninstallRow />
         <CustomRuntimeBlock onError={setError} onNotice={setNotice} />
       </Section>
 

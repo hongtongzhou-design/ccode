@@ -113,7 +113,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
     label: "数据与存储",
     aliases: [
       "数据", "存储", "目录", "项目目录", "位置", "路径", "导出", "备份",
-      "清理", "缓存", "打开文件夹", "定位",
+      "清理", "缓存", "打开文件夹", "定位", "卸载", "删除", "回收站",
       "storage", "data", "folder", "path",
     ],
   },

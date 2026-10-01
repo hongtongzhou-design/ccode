@@ -8,7 +8,7 @@
 //! - Windows：清单任意位置 + HKCU 注册表键指向它（写注册表经 background_command，
 //!   不闪 conhost）
 
-const HOST_NAME: &str = "dev.ccode.mesa";
+pub(crate) const HOST_NAME: &str = "dev.ccode.mesa";
 /// 与 extension/manifest.json 内置 key 派生的 ID 一致（装错 ID 浏览器会拒连）。
 /// 派生口径：SHA-256(manifest key 的 DER) 前 128 bit → 32 位十六进制 → a-p 映射
 /// （2026-09-17 修正：旧值 16 字符不是合法 Chrome ID，allowed_origins 永不匹配）
@@ -77,8 +77,8 @@ fn write_manifest(dir: &std::path::Path, body: &str) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 各浏览器 NativeMessagingHosts 清单目录（平台分支单一出处）
-fn native_host_dirs() -> Vec<(&'static str, std::path::PathBuf)> {
+/// 各浏览器 NativeMessagingHosts 清单目录（平台分支单一出处）。卸载走同一份。
+pub(crate) fn native_host_dirs() -> Vec<(&'static str, std::path::PathBuf)> {
     let Some(base) = dirs::config_dir() else {
         return Vec::new();
     };
@@ -100,6 +100,16 @@ fn native_host_dirs() -> Vec<(&'static str, std::path::PathBuf)> {
             ("Edge", base.join("Microsoft\\Edge\\NativeMessagingHosts")),
         ]
     }
+}
+
+/// Windows 收货桥的 HKCU 键。安装写入、卸载删除都用这一份。Chromium 没有对应键。
+pub(crate) fn windows_bridge_reg_key(browser: &str) -> Option<String> {
+    let root = match browser {
+        "Chrome" => r"Software\Google\Chrome",
+        "Edge" => r"Software\Microsoft\Edge",
+        _ => return None,
+    };
+    Some(format!(r"HKCU\{root}\NativeMessagingHosts\{HOST_NAME}"))
 }
 
 /// 桥清单自愈（启动时调用）：清单把安装当时的 helper 绝对路径写死了——用户从
@@ -297,12 +307,10 @@ pub fn install_browser_bridge() -> Vec<String> {
                     continue;
                 }
             };
-            let reg_root = if browser == "Chrome" {
-                "Software\\Google\\Chrome"
-            } else {
-                "Software\\Microsoft\\Edge"
+            let Some(key) = windows_bridge_reg_key(browser) else {
+                out.push(format!("{browser}：✗ 没有对应的注册表位置"));
+                continue;
             };
-            let key = format!(r"HKCU\{reg_root}\NativeMessagingHosts\{HOST_NAME}");
             let ok = crate::process::background_command("reg")
                 .args(["add", &key, "/ve", "/t", "REG_SZ", "/d", &manifest, "/f"])
                 .output()

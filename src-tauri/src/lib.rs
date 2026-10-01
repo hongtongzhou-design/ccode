@@ -105,6 +105,7 @@ mod storage;
 mod subscription_quota;
 mod task_review;
 mod tray;
+mod uninstall;
 mod updater;
 mod usage;
 mod watch_review;
@@ -600,6 +601,7 @@ pub fn run() {
             settings::get_settings,
             settings::detect_outbound_proxy,
             settings::app_storage_usage,
+            uninstall::uninstall_mesa,
             mcp::mcp_distribution_status,
             settings::update_settings,
             hooks::set_hooks_attention,
