@@ -54,7 +54,9 @@
 | 平台 | 选哪个 | 说明 |
 |---|---|---|
 | macOS（Apple 芯片 M1/M2/M3/M4） | `Mesa_x.x.x_aarch64.dmg` | 目前唯一 macOS 包；Intel Mac 暂需自行 `npm run tauri build` 构建 |
-| Windows | `Mesa_x.x.x_x64-setup.exe` | 推荐，安装向导简单；`x64_en-US.msi` 适合企业批量部署，二选一即可 |
+| Windows | `Mesa_x.x.x_x64-setup.exe` | 唯一的 Windows 安装包；批量部署用静默安装 `setup.exe /S` |
+
+不再提供 `.msi`：应用内更新只认 NSIS 渠道，混用会装出两份应用。以前用 `.msi` 装过的机器，请先用系统卸载再用 `setup.exe` 装一次。
 
 本版本不再发布 Linux 安装包。以前装过的 Linux 版本也收不到应用内更新。
 
@@ -95,13 +97,23 @@ npm run tauri build    # 打包
 
 推到 main 会跑 macOS 与 Windows 的测试。tag `v*` 或手动 dispatch 打这两个平台的安装包，并创建 Release 草稿（含自动更新签名包）。
 
-## 反馈
+## 反馈与参与
 
-遇到问题或有想法，欢迎到 [Issues](../../issues) 提出；附上应用内「设置 → 诊断」导出的日志能加快定位。
+遇到问题或有想法，到 [Issues](../../issues) 提出。缺陷请附应用内「设置 → 诊断」导出的日志。不要在 Issue 里贴 API 密钥或 token。
+
+想改代码先看 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题的报告方式见 [SECURITY.md](SECURITY.md)。
+
+## 现在不做
+
+- macOS 安装包还没有 Apple 签名公证。首次打开若提示「已损坏」，按上面的 `xattr` 命令处理。
+- 只提供 Apple 芯片的 macOS 包。Intel Mac 需要自己构建。
+- 本版本不发布 Linux 安装包。
+- 不是系统综述工具，也不做 Meta 分析。
+- 不做 PDF 批注、多人协作、SSH 远程执行、云端会话同步。
 
 ## 开源协议
 
-[MIT](LICENSE)
+本项目按 [MIT](LICENSE) 发布。内嵌的 JetBrains Mono 字体按 SIL OFL 1.1 再分发；第三方组件清单见 [docs/licenses/THIRD-PARTY.md](docs/licenses/THIRD-PARTY.md)。
 
 ## 技术栈
 

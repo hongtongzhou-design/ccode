@@ -1,0 +1,25 @@
+name: 想法
+description: 缺一个功能，或现在的用法让人走不通
+title: "想法："
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: scene
+    attributes:
+      label: 你在做什么
+      description: 例如：英文综述写到第几步，或编程项目里哪一个动作
+    validations:
+      required: true
+  - type: textarea
+    id: want
+    attributes:
+      label: 希望 Mesa 怎么做
+    validations:
+      required: true
+  - type: checkboxes
+    id: secret
+    attributes:
+      label: 确认
+      options:
+        - label: 这段文字里没有密钥、token、网关地址里的口令
+          required: true

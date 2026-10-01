@@ -41,6 +41,20 @@ src-tauri/binaries/
 # 参考实现镜像（不提交）
 .reference/
 
-# Ccode 接力简报（过程文件，不进版本库）
-.ccode/handoff-*.md
+# 其他 AI 工具在本仓的运行残留（会话、规划、插件缓存，含本机绝对路径，不进版本库）
+.v2c/
+.video_agent/
+.zcode/
+.claude/
+
+# tsc 增量构建产物
+*.tsbuildinfo
+
+# 本仓统一用 npm；pnpm 偶发运行留下的文件不提交
+pnpm-lock.yaml
+pnpm-workspace.yaml
+
+# Ccode 运行期产物不进版本库；仓库自身的项目卡（dogfooding）除外
+.ccode/*
+!.ccode/project.toml
 src-tauri/extension-src/

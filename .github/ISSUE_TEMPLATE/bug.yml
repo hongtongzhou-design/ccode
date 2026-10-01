@@ -1,0 +1,49 @@
+name: 缺陷
+description: 某个按钮、某一步或某次安装和预期不一样
+title: "bug："
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Mesa 版本
+      description: 设置 → 关于
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统
+      options:
+        - macOS（Apple 芯片）
+        - macOS（Intel）
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 怎么出现的
+      description: 你点了哪里，屏幕上写了什么
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 你以为会怎样
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: 诊断包或日志（可选）
+      description: 设置 → 诊断 导出。不要贴 API 密钥或 token。
+  - type: checkboxes
+    id: secret
+    attributes:
+      label: 确认
+      options:
+        - label: 这段文字里没有密钥、token、网关地址里的口令
+          required: true

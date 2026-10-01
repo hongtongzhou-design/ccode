@@ -100,7 +100,7 @@ node --experimental-strip-types --test tests/research-usability.test.ts
 
 实际试跑根目录：
 
-`/Users/tongzhouhong/.codex/visualizations/2026/09/07/01a07b4b-b9be-72f2-b4bc-048ff713a141/research-pilots-20260908-final`
+`~/.codex/visualizations/2026/09/07/<本次运行目录>/research-pilots-20260908-final`
 
 其中 `command-rebuild-computational`、`command-rebuild-literature` 来自单独启动交付脚本；`task-contracts/` 保存实际模板渲染出的任务书。人类门禁没有被伪造为已批准；这些是执行助手的有限试跑，不是UI自动跑完生产项目。
 
