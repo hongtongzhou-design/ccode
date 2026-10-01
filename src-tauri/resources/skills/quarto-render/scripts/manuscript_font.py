@@ -138,11 +138,14 @@ def reference_docx(dest: Path, latin: str, cjk: str) -> None:
         sample = Path(tmp) / "sample.md"
         sample.write_text("# 标题\n\n正文 Body.\n", encoding="utf-8")
         made = Path(tmp) / "reference.docx"
-        run = subprocess.run(
-            ["quarto", "pandoc", str(sample), "-o", str(made), "-t", "docx"],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            run = subprocess.run(
+                ["quarto", "pandoc", str(sample), "-o", str(made), "-t", "docx"],
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            raise SystemExit("做不出 Word 字体模板：本机没有 quarto") from None
         if run.returncode != 0 or not made.is_file():
             raise SystemExit(run.stderr.strip() or "做不出 Word 字体模板")
         theme = zipfile.ZipFile(made).read("word/theme/theme1.xml").decode("utf-8")

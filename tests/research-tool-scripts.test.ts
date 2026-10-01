@@ -9,6 +9,13 @@ const python = process.platform === "win32" ? "python" : "python3";
 const bridge = resolve("src-tauri/resources/skills/endnote-bridge/scripts/bridge.py");
 const citeDocx = resolve("src-tauri/resources/skills/endnote-bridge/scripts/cite_docx.py");
 const run = (script: string, args: string[]) => spawnSync(python, [script, ...args], { encoding: "utf8", timeout: 20_000 });
+// Windows 控制台默认 cp1252，docx 里的中文标题直接 print 会把整个断言打空。
+const zipXml = (docx: string, names = ["word/document.xml"]) =>
+  spawnSync(
+    python,
+    ["-c", "import sys; sys.stdout.reconfigure(encoding='utf-8'); import zipfile; z=zipfile.ZipFile(sys.argv[1]);\n[print(z.read(n).decode()) for n in sys.argv[2].split(',')]", docx, names.join(",")],
+    { encoding: "utf8", timeout: 10_000 },
+  );
 
 test("EndNote bridge converts XML/RIS/BibTeX and preserves stable keys without changing original", () => {
   const root = mkdtempSync(join(tmpdir(), "mesa-bib-bridge-"));
@@ -112,7 +119,7 @@ test("EndNote 域稿：匹配键写出 ADDIN EN.CITE，未匹配不写 docx", ()
     let result = run(citeDocx, ["--input", md, "--bib", bib, "--output", docx, "--report", report]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(existsSync(docx), true);
-    const zip = spawnSync(python, ["-c", "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.read('word/document.xml').decode())", docx], { encoding: "utf8", timeout: 10_000 });
+    const zip = zipXml(docx);
     assert.equal(zip.status, 0, zip.stderr);
     assert.match(zip.stdout, /ADDIN EN\.CITE/);
     assert.match(zip.stdout, /ADDIN EN\.REFLIST/);
@@ -121,7 +128,7 @@ test("EndNote 域稿：匹配键写出 ADDIN EN.CITE，未匹配不写 docx", ()
     const marked = join(root, "marked.docx");
     result = run(citeDocx, ["--input", md, "--bib", bib, "--output", marked, "--report", join(root, "mark.md")]);
     assert.equal(result.status, 0, result.stderr);
-    const markZip = spawnSync(python, ["-c", "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.read('word/document.xml').decode()); print(z.read('word/styles.xml').decode())", marked], { encoding: "utf8", timeout: 10_000 });
+    const markZip = zipXml(marked, ["word/document.xml", "word/styles.xml"]);
     assert.match(markZip.stdout, /Heading1/);
     assert.match(markZip.stdout, /w:val="both"/);
     assert.match(markZip.stdout, /firstLineChars="200"/);
@@ -131,7 +138,7 @@ test("EndNote 域稿：匹配键写出 ADDIN EN.CITE，未匹配不写 docx", ()
     const fronted = join(root, "front.docx");
     result = run(citeDocx, ["--input", md, "--bib", bib, "--output", fronted, "--report", join(root, "front.md")]);
     assert.equal(result.status, 0, result.stderr);
-    const frontZip = spawnSync(python, ["-c", "import zipfile,sys; print(zipfile.ZipFile(sys.argv[1]).read('word/document.xml').decode())", fronted], { encoding: "utf8" });
+    const frontZip = zipXml(fronted);
     assert.match(frontZip.stdout, /A Title/);
     assert.match(frontZip.stdout, /Abstract/);
     assert.match(frontZip.stdout, /Keywords/);
@@ -143,7 +150,7 @@ test("EndNote 域稿：匹配键写出 ADDIN EN.CITE，未匹配不写 docx", ()
     const linked = join(root, "linked.docx");
     result = run(citeDocx, ["--input", md, "--bib", bib, "--output", linked, "--report", join(root, "link.md")]);
     assert.equal(result.status, 0, result.stderr);
-    const linkZip = spawnSync(python, ["-c", "import zipfile,sys; print(zipfile.ZipFile(sys.argv[1]).read('word/document.xml').decode())", linked], { encoding: "utf8" });
+    const linkZip = zipXml(linked);
     assert.match(linkZip.stdout, /Figure 1/);
     assert.match(linkZip.stdout, /Table 1/);
     assert.doesNotMatch(linkZip.stdout, /@fig-1|@tbl-1/);
@@ -157,7 +164,7 @@ test("EndNote 域稿：匹配键写出 ADDIN EN.CITE，未匹配不写 docx", ()
     const tabled = join(root, "table.docx");
     result = run(citeDocx, ["--input", md, "--bib", bib, "--output", tabled, "--report", join(root, "table.md")]);
     assert.equal(result.status, 0, result.stderr);
-    const tableZip = spawnSync(python, ["-c", "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.read('word/document.xml').decode())", tabled], { encoding: "utf8", timeout: 10_000 });
+    const tableZip = zipXml(tabled);
     assert.match(tableZip.stdout, /<w:tbl>/);
     assert.match(tableZip.stdout, /w:val="nil"/);
     assert.doesNotMatch(tableZip.stdout, /insideV w:val="single"/);
@@ -171,7 +178,7 @@ test("EndNote 域稿：匹配键写出 ADDIN EN.CITE，未匹配不写 docx", ()
     const braced = join(root, "braced.docx");
     result = run(citeDocx, ["--input", md, "--bib", bib, "--output", braced, "--report", join(root, "brace.md")]);
     assert.equal(result.status, 0, result.stderr);
-    const braceZip = spawnSync(python, ["-c", "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.read('word/document.xml').decode())", braced], { encoding: "utf8", timeout: 10_000 });
+    const braceZip = zipXml(braced);
     assert.match(braceZip.stdout, /ADDIN EN\.CITE/);
     assert.match(braceZip.stdout, /tbl-benchmark/);
     assert.doesNotMatch(braceZip.stdout, /\{#/);
@@ -330,7 +337,7 @@ z.commit()
     const endnote = join(root, "endnote.docx");
     let result = run(citeDocx, ["--input", md, "--bib", bib, "--output", endnote, "--report", join(root, "en.md"), "--endnote-library", enl]);
     assert.equal(result.status, 0, result.stderr);
-    const enXml = spawnSync(python, ["-c", "import zipfile,sys; print(zipfile.ZipFile(sys.argv[1]).read('word/document.xml').decode())", endnote], { encoding: "utf8" });
+    const enXml = zipXml(endnote);
     assert.match(enXml.stdout, /abc123libraryid/);
     assert.match(enXml.stdout, /&lt;RecNum&gt;392&lt;\/RecNum&gt;/);
     assert.doesNotMatch(enXml.stdout, /&lt;RecNum&gt;10&lt;\/RecNum&gt;/);
@@ -349,7 +356,7 @@ z.commit()
     result = run(citeDocx, ["--input", md, "--bib", bib, "--output", unbound, "--report", join(root, "unbound.md")]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(readFileSync(join(root, "unbound.md"), "utf8"), /未指定 EndNote 库/);
-    const unboundXml = spawnSync(python, ["-c", "import zipfile,sys; print(zipfile.ZipFile(sys.argv[1]).read('word/document.xml').decode())", unbound], { encoding: "utf8" });
+    const unboundXml = zipXml(unbound);
     assert.doesNotMatch(unboundXml.stdout, /abc123libraryid/);
     assert.doesNotMatch(unboundXml.stdout, /db-id="mesa"/);
     assert.doesNotMatch(unboundXml.stdout, /foreign-keys/);
@@ -358,7 +365,7 @@ z.commit()
     const zoteroScript = resolve("src-tauri/resources/skills/zotero-sync/scripts/zotero_docx.py");
     result = run(zoteroScript, ["--input", md, "--bib", bib, "--output", zoteroDocx, "--report", join(root, "zo.md"), "--zotero-db", zotero]);
     assert.equal(result.status, 0, result.stderr);
-    const zoXml = spawnSync(python, ["-c", "import zipfile,sys; print(zipfile.ZipFile(sys.argv[1]).read('word/document.xml').decode())", zoteroDocx], { encoding: "utf8" });
+    const zoXml = zipXml(zoteroDocx);
     assert.match(zoXml.stdout, /users\/local\/UserKey1\/items\/ONLYKEY8/);
     assert.doesNotMatch(zoXml.stdout, /DUPKEY0/);
     assert.doesNotMatch(zoXml.stdout, /ITEM-/);
@@ -382,7 +389,7 @@ test("Zotero 域稿写出 ADDIN ZOTERO_ITEM，缺键不交 docx", () => {
     const docx = join(root, "zotero.docx");
     let result = run(script, ["--input", md, "--bib", bib, "--output", docx, "--report", join(root, "report.md")]);
     assert.equal(result.status, 0, result.stderr);
-    const zip = spawnSync(python, ["-c", "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.read('word/document.xml').decode()); print(z.read('word/styles.xml').decode())", docx], { encoding: "utf8", timeout: 10_000 });
+    const zip = zipXml(docx, ["word/document.xml", "word/styles.xml"]);
     assert.equal(zip.status, 0, zip.stderr);
     assert.match(zip.stdout, /ADDIN ZOTERO_ITEM CSL_CITATION/);
     assert.match(zip.stdout, /citationID/);
@@ -397,7 +404,7 @@ test("Zotero 域稿写出 ADDIN ZOTERO_ITEM，缺键不交 docx", () => {
     const braced = join(root, "braced.docx");
     result = run(script, ["--input", md, "--bib", bib, "--output", braced, "--report", join(root, "brace.md")]);
     assert.equal(result.status, 0, result.stderr);
-    const braceZip = spawnSync(python, ["-c", "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); print(z.read('word/document.xml').decode())", braced], { encoding: "utf8", timeout: 10_000 });
+    const braceZip = zipXml(braced);
     assert.match(braceZip.stdout, /ADDIN ZOTERO_ITEM CSL_CITATION/);
     assert.match(braceZip.stdout, /tbl-benchmark/);
     assert.doesNotMatch(braceZip.stdout, /\{#/);

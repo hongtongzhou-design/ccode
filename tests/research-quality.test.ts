@@ -160,7 +160,12 @@ test("有文件落点的科研人工判断仍须手动确认，不能以产物�
   for (const [id, workspace] of [["research-paper", "research-paper-polish"], ["submission-rebuttal", "submission-materials"], ["data-processing", "data-inspect"]]) {
     const tasks = step(id, workspace).humanTasks!.filter((h) => h.timing === "after");
     assert.ok(tasks.length > 0);
-    for (const task of tasks) assert.equal(task.completion, "manual", task.title);
+    for (const task of tasks) {
+      // 「逐条决定审查报告」的完成条件就是裁决清单清空（decisions_cleared，5a86579
+      // 引入），不算「以产物出现自动完成」；其余人工判断仍须手动勾选
+      const expected = task.title === "逐条决定审查报告" ? "decisions_cleared" : "manual";
+      assert.equal(task.completion, expected, task.title);
+    }
   }
   for (const [id, workspace] of [["research-paper", "exp-run"], ["thesis", "thesis-exp-run"]]) {
     const ethical = step(id, workspace).humanTasks!.find((h) => h.title.includes("伦理/数据许可"))!;

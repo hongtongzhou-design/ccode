@@ -129,9 +129,12 @@ def bib_records(text):
 
 
 def parse_bibtex(text):
-    stamp = Path(tempfile.mkstemp(suffix=".bib")[1])
+    # 先关句柄再交给解析。Windows 上没关的临时文件删不掉（WinError 32）。
+    fd, name = tempfile.mkstemp(suffix=".bib")
+    stamp = Path(name)
     try:
-        stamp.write_text(text, encoding="utf-8")
+        with open(fd, "w", encoding="utf-8", closefd=True) as handle:
+            handle.write(text)
         return load(stamp)
     finally:
         stamp.unlink(missing_ok=True)
