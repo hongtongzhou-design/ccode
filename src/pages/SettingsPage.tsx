@@ -8,11 +8,13 @@ import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { applyTheme, useAppStore } from "../store";
 import type { AppSettings } from "../store";
 import {
+  compactPrimaryActionClass,
   fieldClass,
   ghostActionClass,
   hoverRevealClass,
   PageFrame,
   PageHeader,
+  primaryActionClass,
   rowActionClass,
   Checkbox,
   FoldMark,
@@ -378,11 +380,14 @@ function Section({
 function Row({
   label,
   hint,
+  labelTitle,
   extra,
   children,
 }: {
   label: string;
   hint?: string;
+  /** 文案克制（v3.88）：说不完的机制说明压成一句 hint，全文挂标签上悬浮可读 */
+  labelTitle?: string;
   /** 行下方全宽区域（如字体安装的流式输出），不传不渲染 */
   extra?: React.ReactNode;
   children: React.ReactNode;
@@ -390,7 +395,9 @@ function Row({
   return (
     <div className="grid grid-cols-1 items-start gap-x-5 gap-y-2 py-3 @min-[40rem]/settings:grid-cols-[minmax(12rem,20rem)_minmax(0,1fr)] @min-[40rem]/settings:items-center">
       <div className="min-w-0">
-        <div className="text-sm text-l2">{label}</div>
+        <div className="text-sm text-l2" title={labelTitle}>
+          {label}
+        </div>
         {hint && <p className="mt-0.5 max-w-lg text-micro leading-4 text-l4">{hint}</p>}
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-start gap-2">{children}</div>
@@ -548,15 +555,17 @@ function HotkeysSection({
           label="页面切换"
         />
       </Row>
+      {/* 成组编辑器统一内容卡（design-system 设置页条目）：「页面快捷键」「全局快捷键」
+          各收一张卡，卡内标准列表行 = 功能名在左、控件靠右，宽屏双列；行不铺底色块 */}
       <div className="mt-2 rounded-lg ccode-well p-3">
         {/* 总开关关闭时整组弱化示意（仍可编辑，方便先配好再开） */}
         <div className={pageSwitchOn ? "" : "opacity-50"}>
           <div className="mb-2 text-xs font-medium text-l3">页面快捷键</div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 gap-1 lg:grid-cols-2">
             {PAGE_HOTKEY_DEFS.map((p) => (
               <div
                 key={p.id}
-                className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover"
+                className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-hover"
               >
                 <span className="min-w-0 truncate text-sm text-l2">{p.label}</span>
                 <HotkeyCapture
@@ -585,9 +594,11 @@ function HotkeysSection({
             ))}
           </div>
         </div>
-        <div className="mb-2 mt-3 text-xs font-medium text-l3">全局快捷键</div>
-        <div className="grid grid-cols-3 gap-2">
-          <div className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover">
+      </div>
+      <div className="mt-2 rounded-lg ccode-well p-3">
+        <div className="mb-2 text-xs font-medium text-l3">全局快捷键</div>
+        <div className="grid grid-cols-1 gap-1 lg:grid-cols-2">
+          <div className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-hover">
             <span className="min-w-0 truncate text-sm text-l2" title="页面跳转 / 主题 / 侧栏">
               命令面板
             </span>
@@ -601,7 +612,7 @@ function HotkeysSection({
               setCapturing={setCapturing}
             />
           </div>
-          <div className="flex items-center justify-between gap-2 rounded-md bg-canvas px-2 py-1.5 hover:bg-hover">
+          <div className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-hover">
             <span className="min-w-0 truncate text-sm text-l2" title="界面只剩工作内容">
               隐藏侧栏
             </span>
@@ -798,10 +809,13 @@ function CustomRuntimeBlock({
   }
 
   return (
-    <div className="mt-4 border-t border-hairline pt-3">
+    <div className="mt-4 rounded-lg ccode-well p-3">
       <div className="mb-1 text-sm text-l2">自定义运行时</div>
-      <p className="mb-2 text-micro text-l4">
-        登记一条本机命令，在当前终端目录当普通终端跑。不注入密钥、不解析会话。相对路径命令不能用。默认工作目录只在随手聊或空目录时启用，不会覆盖项目根或工作树。
+      <p
+        className="mb-2 text-micro text-l4"
+        title="登记一条本机命令，在当前终端目录当普通终端跑。不注入密钥、不解析会话。相对路径命令不能用。默认工作目录只在随手聊或空目录时启用，不会覆盖项目根或工作树。"
+      >
+        登记本机命令当普通终端跑；命令须绝对路径
       </p>
       {list.length > 0 && (
         <ul className="mb-2 space-y-1">
@@ -1744,13 +1758,26 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
   return (
     <PageFrame width="fluid">
       <PageHeader title="设置" meta="外观、终端与应用集成" />
-      {error && <p role="alert" className="mb-3 text-sm text-err-text">{error}</p>}
-      {notice && <p role="status" className="mb-3 text-xs text-ok-text">{notice}</p>}
+      {/* 结果横幅统一口径：well 底 + ✓/✗ 语义色文字，不铺整块 bg-ok/bg-err */}
+      {error && (
+        <div role="alert" className="mb-3 flex items-start gap-2 rounded-md ccode-well px-3 py-2.5 text-xs leading-5 text-l2">
+          <span className="shrink-0 text-err-text">✗</span>
+          <span className="min-w-0 flex-1">{error}</span>
+        </div>
+      )}
+      {notice && (
+        <div role="status" className="mb-3 flex items-start gap-2 rounded-md ccode-well px-3 py-2.5 text-xs leading-5 text-l2">
+          <span className="shrink-0 text-ok-text">✓</span>
+          <span className="min-w-0 flex-1">{notice}</span>
+        </div>
+      )}
 
       <div className="@container">
         <div className="grid min-w-0 gap-5 @min-[48rem]:grid-cols-[11rem_minmax(0,1fr)] @min-[48rem]:gap-7">
           <nav aria-label="设置分区" className="self-start @min-[48rem]:sticky @min-[48rem]:top-16">
-            <div className="mb-3 flex h-8 items-center gap-2 rounded-md border border-field bg-canvas px-2">
+            {/* 搜索框无描边口径（与 searchFieldClass 同配方）：inset 底、聚焦加深；
+                带图标/清除钮，聚焦态挂在容器 focus-within 上 */}
+            <div className="mb-3 flex h-8 items-center gap-2 rounded-md bg-inset px-2.5 transition-colors focus-within:bg-raised">
               <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
               <input
                 value={sectionQuery}
@@ -1804,7 +1831,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                           {label}
                           {id === "update" && appUpdate && (
                             <span className="inline-flex shrink-0 items-center gap-1 text-micro text-ok-text">
-                              <span aria-hidden="true" className="size-1.5 rounded-full bg-ok-text" />
+                              <span aria-hidden="true" className="size-2 rounded-full bg-ok-text" />
                               可更新
                             </span>
                           )}
@@ -1836,8 +1863,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         active={activeSection === "appearance"}
       >
         {/* 主题：七列深浅成对。色卡是该主题的小窗（左栏 + 画布 + 强调点），
-            名称写在画布上用该主题自己的标题色，深浅一眼可辨。 */}
-        <div className="border-b border-hairline py-3">
+            名称写在画布上用该主题自己的标题色，深浅一眼可辨。
+            成组编辑器收统一内容卡（同快捷键卡口径），块间分隔用留白不画横线。 */}
+        <div className="mb-3 rounded-lg ccode-well p-3">
           <div className="mb-2 text-sm text-l2">主题</div>
           <div className="grid grid-cols-7 gap-2 overflow-x-auto">
             {themeSwatches.map((t) => {
@@ -1851,7 +1879,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 }}
                 title={`切换到${t.name}`}
                 className={`min-w-0 overflow-hidden rounded-md text-left ${
-                  selected ? "ring-2 ring-l1 ring-offset-1 ring-offset-canvas" : "ring-1 ring-hairline hover:ring-field"
+                  selected ? "ring-2 ring-l1" : "ring-1 ring-hairline hover:ring-field"
                 }`}
                 style={{ background: t.canvas }}
               >
@@ -1886,7 +1914,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               title="自定义主题"
               className={`h-14 w-[7.5rem] overflow-hidden rounded-md text-left ${
                 customSelected
-                  ? "ring-2 ring-l1 ring-offset-1 ring-offset-canvas"
+                  ? "ring-2 ring-l1"
                   : "ring-1 ring-hairline hover:ring-field"
               }`}
               style={{ background: customDerived.tokens.canvas }}
@@ -1994,7 +2022,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                       title={`${card.name}（双击改名）`}
                       className={`h-14 w-full overflow-hidden rounded-md text-left ${
                         selected
-                          ? "ring-2 ring-l1 ring-offset-1 ring-offset-canvas"
+                          ? "ring-2 ring-l1"
                           : "ring-1 ring-hairline hover:ring-field"
                       }`}
                       style={{ background: derived.tokens.canvas }}
@@ -2066,10 +2094,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="侧栏 / 顶栏透明度"
-          hint="立即生效。100% 是各主题本来的样子，0% 则完全不铺罩色、文字直接压在壁纸上。侧栏选中行的底色也跟着一起变淡，最透时只剩文字和图标变色。深浅主题与图标态各有自己的底色，同一个百分数看起来的浓淡会不同"
+          hint="立即生效。100% 是主题默认，0% 完全透出壁纸"
+          labelTitle="立即生效。100% 是各主题本来的样子，0% 则完全不铺罩色、文字直接压在壁纸上。侧栏选中行的底色也跟着一起变淡，最透时只剩文字和图标变色。深浅主题与图标态各有自己的底色，同一个百分数看起来的浓淡会不同"
         >
           <select
-            className={fieldClass + " w-36"}
+            className={`${fieldFixed} w-36`}
             value={normalizeChromeOpacity(settings?.chromeOpacity)}
             onChange={(e) =>
               void patch({ chromeOpacity: Number(e.target.value) })
@@ -2222,7 +2251,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                   onClick={() => installFont(INSTALLABLE_FONTS[fontFamily])}
                   disabled={fontInstalling}
                   title="通过 Homebrew 安装该字体"
-                  className="h-7 shrink-0 rounded-sm border border-cta-bd bg-cta px-2.5 text-xs text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className={`${compactPrimaryActionClass} shrink-0`}
                 >
                   {fontInstalling &&
                   fontInstallTarget === INSTALLABLE_FONTS[fontFamily]
@@ -2379,7 +2408,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           hint="仅影响下次启动；运行中仍可通过侧栏按钮或 ⌘\\ 临时切换"
         >
           <select
-            className={fieldClass + " w-52"}
+            className={`${fieldFixed} w-52`}
             value={resolveStartupNavMode(
               settings?.startupNavMode,
               localStorage.getItem("ccode.navCollapsed") === "1",
@@ -2400,10 +2429,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         </Row>
         <Row
           label="顶部岛自动收起"
-          hint="完全隐藏时，岛始终停在顶部，只留「恢复侧栏」；鼠标移入或键盘聚焦展开完整导航，移开后按此延时收起。选「立即」适合只借岛点一下就走，不留停在半开的岛"
+          hint="完全隐藏时，鼠标移开后按此延时收起岛"
+          labelTitle="完全隐藏时，岛始终停在顶部，只留「恢复侧栏」；鼠标移入或键盘聚焦展开完整导航，移开后按此延时收起。选「立即」适合只借岛点一下就走，不留停在半开的岛"
         >
           <select
-            className={fieldClass + " w-28"}
+            className={`${fieldFixed} w-28`}
             value={normalizeNavCapsuleDelay(settings?.navCapsuleHideDelayMs)}
             onChange={(e) =>
               void patch({ navCapsuleHideDelayMs: Number(e.target.value) })
@@ -2418,7 +2448,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         </Row>
         <Row
           label="顶部岛跑完播报"
-          hint="Agent 跑完一个回合或进程断开时，在休眠态那一行报一句，4 秒后自己消失。只报这两种「刚发生的事」——等待确认、冲突等待处理属于收件箱，岛不重复持有它们的计数"
+          hint="Agent 跑完或断开时在顶部报一句，4 秒消失"
+          labelTitle="Agent 跑完一个回合或进程断开时，在休眠态那一行报一句，4 秒后自己消失。只报这两种「刚发生的事」——等待确认、冲突等待处理属于收件箱，岛不重复持有它们的计数"
         >
           <Toggle
             label="顶部岛跑完播报"
@@ -2428,10 +2459,11 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         </Row>
         <Row
           label="顶部岛导航内容"
-          hint="完全隐藏时控制展开态里显示符号、文字，设置修改后立即生效"
+          hint="完全隐藏时岛展开显示什么；立即生效"
+          labelTitle="完全隐藏时控制展开态里显示符号、文字，设置修改后立即生效"
         >
           <select
-            className={fieldClass + " w-40"}
+            className={`${fieldFixed} w-40`}
             value={normalizeNavCapsuleDisplayMode(settings?.navCapsuleDisplayMode)}
             onChange={(e) =>
               void patch({
@@ -2463,7 +2495,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               全部显示
             </button>
           </div>
-          <div className="flex flex-wrap gap-2">
+          {/* 密集短项固定列轨对齐（design-system）：flex-wrap 第二行会错位 */}
+          <div className="grid grid-cols-[repeat(5,max-content)] gap-2">
             {NAV_CAPSULE_SETTING_ITEMS.map((item) => {
               const selected = normalizeNavCapsuleVisibleItems(
                 settings?.navCapsuleVisibleItems,
@@ -2669,34 +2702,40 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           </select>
         </Row>
 
-        {AI_FN_ROWS.map((fn) => (
-          <Row
-            key={fn.key}
-            label={fn.label}
-            hint="留空则跟随默认（上方「AI 专用配置」）"
-          >
-            <select
-              className={fieldFixed}
-              value={selectedAiProfileChoice(
-                settings?.aiProfiles?.[fn.key],
-                settings?.aiProfileModels?.[fn.key],
-                profiles,
-              )}
-              onChange={(e) => patchAiFnProfile(fn.key, e.target.value)}
-            >
-              <option value="">跟随默认</option>
-              {aiChoices.map((choice) => (
-                <option key={choice.value} value={choice.value}>
-                  {choice.label}
-                </option>
-              ))}
-            </select>
-          </Row>
-        ))}
+        {/* 同权控件分级（跨页三原则 #1）：按功能的七条收进一张卡，不再与上方默认行排成一堵墙 */}
+        <div className="rounded-lg ccode-well p-3">
+          <div className="mb-2 text-xs font-medium text-l3">
+            按功能单独配置（留空跟随上方默认）
+          </div>
+          <div className="flex flex-col gap-2">
+            {AI_FN_ROWS.map((fn) => (
+              <div key={fn.key} className="flex items-center justify-between gap-3">
+                <span className="min-w-0 truncate text-sm text-l2">{fn.label}</span>
+                <select
+                  className={`${fieldFixed} w-56 shrink-0`}
+                  value={selectedAiProfileChoice(
+                    settings?.aiProfiles?.[fn.key],
+                    settings?.aiProfileModels?.[fn.key],
+                    profiles,
+                  )}
+                  onChange={(e) => patchAiFnProfile(fn.key, e.target.value)}
+                >
+                  <option value="">跟随默认</option>
+                  {aiChoices.map((choice) => (
+                    <option key={choice.value} value={choice.value}>
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+        </div>
 
         <Row
           label="外部终端"
-          hint="对话页「⇗ 外部恢复」使用的终端应用，立即生效。Windows 可在命令提示符和 PowerShell 之间切换：cmd 不经过 PowerShell，通常更快"
+          hint="「⇗ 外部恢复」用哪个终端；立即生效"
+          labelTitle="对话页「⇗ 外部恢复」使用的终端应用，立即生效。Windows 可在命令提示符和 PowerShell 之间切换：cmd 不经过 PowerShell，通常更快"
         >
           <select
             className={fieldFixed}
@@ -2711,35 +2750,43 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
           </select>
         </Row>
 
-        {hookSupport.map((h) => {
-          const label = AGENTS.find((a) => a.id === h.agent)?.label ?? h.agent;
-          const baseHint = h.supported
-            ? `比默认推断更准；会写入 ${h.configPath ?? `${label} 配置`}（自动备份，不影响已有配置）`
-            : "暂不支持";
-          return (
-            <Row
-              key={h.agent}
-              label={`精确注意力标记（${label}）`}
-              hint={h.note ? `${baseHint}；${h.note}` : baseHint}
-            >
-              {h.supported ? (
-                <Toggle
-                  label={`精确注意力标记（${label}）`}
-                  checked={settings?.hooksAttention?.[h.agent] ?? false}
-                  onChange={(checked) => void toggleHooks(h.agent, label, checked)}
-                />
-              ) : (
-                <span className="pointer-events-none opacity-40">
-                  <Toggle
-                    label={`精确注意力标记（${label}）`}
-                    checked={false}
-                    onChange={() => {}}
-                  />
-                </span>
-              )}
-            </Row>
-          );
-        })}
+        {/* 九家收一张卡：行标签只写 agent 名（「精确注意力标记」由卡头承担），写入位置放行内 micro 说明 */}
+        {hookSupport.length > 0 && (
+          <div className="rounded-lg ccode-well p-3">
+            <div className="mb-2 text-xs font-medium text-l3">精确注意力标记</div>
+            <div className="flex flex-col gap-2">
+              {hookSupport.map((h) => {
+                const label = AGENTS.find((a) => a.id === h.agent)?.label ?? h.agent;
+                const hint = h.supported
+                  ? `写入 ${h.configPath ?? `${label} 配置`}（自动备份）${h.note ? `；${h.note}` : ""}`
+                  : "暂不支持";
+                return (
+                  <div key={h.agent} className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm text-l2">{label}</div>
+                      <p className="mt-0.5 break-all text-micro leading-4 text-l4">{hint}</p>
+                    </div>
+                    {h.supported ? (
+                      <Toggle
+                        label={`精确注意力标记（${label}）`}
+                        checked={settings?.hooksAttention?.[h.agent] ?? false}
+                        onChange={(checked) => void toggleHooks(h.agent, label, checked)}
+                      />
+                    ) : (
+                      <span className="pointer-events-none shrink-0 opacity-40">
+                        <Toggle
+                          label={`精确注意力标记（${label}）`}
+                          checked={false}
+                          onChange={() => {}}
+                        />
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </Section>
 
       <Section
@@ -2748,7 +2795,8 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
       >
         <Row
           label="出网代理"
-          hint="用于官方账号登录与安装/更新下载（网关启动不走；国内镜像自动直连不绕代理）。空 = 不使用。「检测」探测本机代理（Clash / V2Ray 等），点候选即填。"
+          hint="官方登录与更新下载用；空 = 不使用"
+          labelTitle="用于官方账号登录与安装/更新下载（网关启动不走；国内镜像自动直连不绕代理）。空 = 不使用。「检测」探测本机代理（Clash / V2Ray 等），点候选即填。"
         >
           <div className="flex max-w-[34rem] flex-col gap-2">
             <div className="flex items-center gap-2">
@@ -2774,7 +2822,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 type="button"
                 onClick={() => void detectProxy()}
                 disabled={proxyDetecting}
-                className="h-8 shrink-0 rounded-sm border border-hairline px-3 text-sm text-l2 hover:bg-hover disabled:opacity-50"
+                className={`${secondaryActionClass} shrink-0`}
               >
                 {proxyDetecting ? "检测中…" : "检测"}
               </button>
@@ -2838,14 +2886,15 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         </Row>
         <Row
           label="学校图书馆"
-          hint="登录一次，之后待获取清单点「浏览器」下载，PDF 自动进项目。不存账号密码。"
+          hint="登录一次即可下载全文；不存账号密码"
+          labelTitle="登录一次，之后待获取清单点「浏览器」下载，PDF 自动进项目。不存账号密码。"
         >
           <div className="flex max-w-[34rem] flex-col gap-2">
             <button
               type="button"
               onClick={() => void openInstLogin()}
               disabled={instBusy !== null}
-              className="h-8 w-fit shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+              className={`${primaryActionClass} w-fit shrink-0`}
             >
               {instBusy === "login" ? "打开中…" : "登录学校账号"}
             </button>
@@ -2978,7 +3027,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         badge={
           appUpdate ? (
             <span className="ml-1 inline-flex items-center gap-1 rounded-sm bg-inset px-1.5 py-0.5 text-xs font-normal text-l3">
-              <span className="size-1.5 rounded-full bg-ok-text" />
+              <span className="size-2 rounded-full bg-ok-text" />
               v{appUpdate.version} 可更新
             </span>
           ) : undefined
@@ -2998,7 +3047,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 <button
                   onClick={installUpdate}
                   disabled={installing}
-                  className="h-8 shrink-0 rounded-sm border border-cta-bd bg-cta px-3 text-sm text-cta-text hover:brightness-110 disabled:opacity-50"
+                  className={`${primaryActionClass} shrink-0`}
                 >
                   {installing
                     ? appUpdateProgressLabel(
@@ -3254,7 +3303,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         ) : (
           <ul>
             {storage.map((e) => (
-              <li key={e.path} className="flex items-center gap-2 rounded-md px-2 py-2 hover:bg-hover">
+              <li key={e.path} className="group flex items-center gap-2 rounded-md px-2 py-2 hover:bg-hover">
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm text-l2">
                     {e.label}
@@ -3269,12 +3318,13 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
                 <span className="shrink-0 font-mono text-xs text-l3">
                   {e.exists ? formatBytes(e.bytes) : "—"}
                 </span>
+                {/* 行级低频动作：hover 才现的 ghost 钮，不再每行常驻描边次按钮 */}
                 <button
                   type="button"
                   disabled={!e.exists}
                   onClick={() => void openStorageEntry(e.path)}
                   title="在系统文件管理器中定位"
-                  className={`${secondaryActionClass} shrink-0 disabled:opacity-40`}
+                  className={`${ghostActionClass} ${hoverRevealClass} shrink-0 disabled:opacity-40`}
                 >
                   定位
                 </button>
