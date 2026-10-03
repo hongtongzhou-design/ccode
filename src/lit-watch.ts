@@ -409,6 +409,40 @@ export function weeklyBuckets(
   }));
 }
 
+/** 上海日历日 YYYY-MM-DD。巡检批次只认这个，不用论文发表日期。 */
+export function shanghaiDay(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(t));
+  const pick = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  const day = `${pick("year")}-${pick("month")}-${pick("day")}`;
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
+/** 成功巡检里，收件箱漏写批次标记的那几次。按完成日去重，旧的在前。 */
+export function undatedWatchRuns(
+  schedules: readonly { skill: string; history: readonly { status: string; newEntries?: number | null; finishedAt?: string | null; at: string; adopted?: boolean }[] }[],
+): { day: string }[] {
+  const days = new Set<string>();
+  for (const schedule of schedules) {
+    if (schedule.skill !== "lit-watch") continue;
+    for (const run of schedule.history) {
+      if (run.status !== "ok" || run.adopted === false) continue;
+      if ((run.newEntries ?? 0) <= 0) continue;
+      const day = shanghaiDay(run.finishedAt ?? run.at);
+      if (day) days.add(day);
+    }
+  }
+  return [...days].sort().map((day) => ({ day }));
+}
+
 /** 缺日期与确实为零分开呈现；趋势仍统计全部命中，不受忽略/筛选影响。 */
 export function weeklyTrend(
   entries: readonly WatchEntryDto[],

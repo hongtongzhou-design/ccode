@@ -25,6 +25,8 @@ import {
   UNCATEGORIZED_KEYWORD,
   weeklyBuckets,
   weeklyTrend,
+  shanghaiDay,
+  undatedWatchRuns,
   parseWatchExplain,
   watchExplainPrompt,
   litWatchBodyOpenKey,
@@ -187,6 +189,38 @@ test("weeklyBuckets：近 8 周计数，周一起点，无 date 不计", () => {
   assert.equal(buckets[7].label, "8月17日周");
   // 桶首必为周一
   assert.equal(buckets[7].start.getDay(), 1);
+});
+
+test("shanghaiDay：巡检完成时刻按上海日历日，跨过零点不算前一天", () => {
+  assert.equal(shanghaiDay("2026-10-02T16:30:00Z"), "2026-10-03");
+  assert.equal(shanghaiDay("2026-10-03T05:36:19Z"), "2026-10-03");
+  assert.equal(shanghaiDay("not-a-date"), null);
+  assert.equal(shanghaiDay(null), null);
+});
+
+test("undatedWatchRuns：只收已采纳且有新增的成功巡检，按上海日去重", () => {
+  const schedule = {
+    skill: "lit-watch",
+    history: [
+      {
+        status: "ok",
+        newEntries: 6,
+        adopted: true,
+        at: "2026-10-03T05:36:19Z",
+        finishedAt: "2026-10-03T05:36:19Z",
+      },
+      { status: "timeout", newEntries: null, at: "2026-10-02T18:10:16Z" },
+      {
+        status: "ok",
+        newEntries: 2,
+        adopted: false,
+        at: "2026-10-01T02:00:00Z",
+        finishedAt: "2026-10-01T02:00:00Z",
+      },
+    ],
+  };
+  assert.deepEqual(undatedWatchRuns([schedule]), [{ day: "2026-10-03" }]);
+  assert.deepEqual(undatedWatchRuns([{ skill: "other", history: schedule.history }]), []);
 });
 
 test("weeklyTrend：无命中与全部缺日期不画零柱，提示各自原因", () => {

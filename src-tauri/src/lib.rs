@@ -634,6 +634,7 @@ pub fn run() {
             scheduler::commit_watch_skill_draft,
             scheduler::ensure_schedule_skill_distributed,
             lit_watch::list_watch_entries,
+            lit_watch::repair_watch_batch_dates,
             lit_watch::save_watch_explain,
             lit_watch::list_watch_subscriptions,
             lit_watch::save_watch_subscriptions,

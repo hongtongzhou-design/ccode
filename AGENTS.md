@@ -132,6 +132,9 @@ docs/            architecture.md（总体设计 + §10 决策记录 + §12 当�
   `latest.json`，不认 git tag / architecture 决策号；不 bump 则已安装用户永远看不到「可更新」。内部决策记录
   （v3.x）不是应用版本。有可用更新时提示走收件箱 `update:`（不造顶部横幅、侧栏不挂徽标），设置页「更新」分区
   是安装入口。
+- **嵌套进 camelCase DTO 的结构体必须整体 `#[serde(rename_all = "camelCase")]`**（2026-10-03 实证：`RunRecord` 以蛇形
+  `isolation_path` 出线、前端 `isolationPath` 恒 undefined，雷达「去评审」从未出现）。与磁盘共用一个结构体时加蛇形
+  `alias` 兼容读旧档；单词字段天然一致不算，逐字段 rename 只修一个字段是这类 bug 的温床——新增多词字段时整结构体统一。
 - **路径比较与文件名统一走方言层**（2026-08-29 Windows 协作批确立）：后端跨来源路径比较一律 `paths::same_path` /
   `path_within` / `path_key`（禁字符串 == / starts_with / 拼 `/` 前缀），落盘与显示先 `strip_verbatim`；前端同口径在
   `src/path-utils.ts`。新建/重命名文件（夹）名走 `paths::validate_fs_name`（报错），自动生成走 `sanitize_fs_name`

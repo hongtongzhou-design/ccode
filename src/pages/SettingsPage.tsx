@@ -665,7 +665,7 @@ function UninstallRow() {
     }
   }
   return (
-    <div className="mt-3 rounded-md border border-field px-3 py-2.5">
+    <div className="mt-3 rounded-lg ccode-well p-3">
       <div className="flex items-center gap-3">
         <span className="min-w-0 flex-1">
           <span className="block text-sm text-l2">卸载 Mesa</span>
@@ -686,7 +686,7 @@ function UninstallRow() {
             );
             if (ok) setArmed(true);
           })()}
-          className="shrink-0 rounded-sm border border-err-text/40 px-2 py-1 text-xs text-err-text hover:bg-hover disabled:opacity-50"
+          className="inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-err-text/40 px-2.5 text-xs text-err-text transition-colors hover:bg-hover disabled:opacity-50"
         >
           卸载…
         </button>
@@ -711,7 +711,7 @@ function UninstallRow() {
           <button
             type="submit"
             disabled={busy || typed.trim() !== "卸载"}
-            className="shrink-0 rounded-sm border border-err-text/40 px-2 py-1 text-xs text-err-text hover:bg-hover disabled:opacity-50"
+            className="inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-err-text/40 px-2.5 text-xs text-err-text transition-colors hover:bg-hover disabled:opacity-50"
           >
             {busy ? "正在卸载…" : "确认卸载"}
           </button>
@@ -722,7 +722,7 @@ function UninstallRow() {
               setArmed(false);
               setTyped("");
             }}
-            className="shrink-0 rounded-sm px-2 py-1 text-xs text-l3 hover:bg-hover disabled:opacity-50"
+            className={`${ghostActionClass} shrink-0`}
           >
             取消
           </button>
@@ -1776,8 +1776,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         <div className="grid min-w-0 gap-5 @min-[48rem]:grid-cols-[11rem_minmax(0,1fr)] @min-[48rem]:gap-7">
           <nav aria-label="设置分区" className="self-start @min-[48rem]:sticky @min-[48rem]:top-16">
             {/* 搜索框无描边口径（与 searchFieldClass 同配方）：inset 底、聚焦加深；
-                带图标/清除钮，聚焦态挂在容器 focus-within 上 */}
-            <div className="mb-3 flex h-8 items-center gap-2 rounded-md bg-inset px-2.5 transition-colors focus-within:bg-raised">
+                带图标/清除钮，聚焦态挂在容器 focus-within 上；ccode-search-shell
+                豁免内部 input 的全局 focus 环（未入层规则压过 outline-none，会出直角方框） */}
+            <div className="ccode-search-shell mb-3 flex h-8 items-center gap-2 rounded-md bg-inset px-2.5 transition-colors focus-within:bg-raised">
               <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-l4" />
               <input
                 value={sectionQuery}
@@ -2495,8 +2496,9 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
               全部显示
             </button>
           </div>
-          {/* 密集短项固定列轨对齐（design-system）：flex-wrap 第二行会错位 */}
-          <div className="grid grid-cols-[repeat(5,max-content)] gap-2">
+          {/* 密集短项固定五列对齐（design-system）：max-content 轨在整宽卡里右侧留死空间，
+              等宽 1fr 轨填满卡宽（2026-10-03 用户反馈「右边空一块」） */}
+          <div className="grid grid-cols-[repeat(5,minmax(0,1fr))] gap-2">
             {NAV_CAPSULE_SETTING_ITEMS.map((item) => {
               const selected = normalizeNavCapsuleVisibleItems(
                 settings?.navCapsuleVisibleItems,

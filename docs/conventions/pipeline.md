@@ -742,7 +742,8 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   多次漏跑 coalesce 只补一次；防重入用进程内 Mutex<HashSet>，tick 与「立即跑」共用。
 - **执行复用 ai.rs 无头链路**（`run_agent_task`）：cwd 用隔离 worktree（`~/ccode/watch-worktrees/<仓>/<日程id>`，
   项目根只用于归属与播种；非 Git 项目 fail-closed），`headless_task_args`（codex 用 `-s workspace-write`，
-  巡检要写 notes/inbox.md 与 watch-seen.md，read-only 跑不了）；10 分钟超时记 `timeout` 与真失败 `error` 分列；安全口径照旧（密钥拉起瞬间注入、
+  巡检要写 notes/inbox.md 与 watch-seen.md，read-only 跑不了）；超时 30 分钟（2026-10-03 由 10 分钟提高：GLM 跑 lit-watch 实测超 10 分钟，
+  600s 在掐死健康任务；定时任务无人等，超时只担防僵尸职责）记 `timeout` 与真失败 `error` 分列；安全口径照旧（密钥拉起瞬间注入、
   background_command、出站脱敏）。建树后从主仓播种订阅/台账，跑完只读评审，人点「采纳进主仓」才拷产出回项目根。**codex 参数顺序坑（v3.98 实测踩坑）**：`exec` 是子命令，plan 注入的
   `-c`/`-m` 必须跟在子命令头之后，且 plan 默认带的 `-s workspace-write` 要剥离、由 headless 尾部的档位定夺
   （`-s` 单值参数，重复直接报「cannot be used multiple times」）；统一由 `compose_headless_args` 拼装
@@ -769,6 +770,9 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     新产出必须写 `<!-- watch-run: YYYY-MM-DD -->` 注释批次标记；只读解析兼容旧版 `##/### YYYY-MM-DD 巡检（自动雷达）` 标题，按最近的批次边界归属。
     日期须通过日历校验；不以论文发表日期、文件修改时间或最近任务时间猜测。旧条目的 ID 仍按标题 + 原注释日期计算，补识别标题日期不得使既有忽略记录失效。
     趋势图常驻「近 8 周新命中」标题；无条目/全部缺日期用文字空态而非零柱，部分缺日期只统计已知日期并说明漏计数量。
+    巡检日只认批次标记，不用论文发表日期。模型漏写时：冻结前按本次完成日（上海）补一行；
+    打开雷达时，若全部条目都缺日期且该项目有已采纳的成功巡检，按最近一次完成日补上。
+    已有任一条带日期则不猜归属，空态给出「按巡检日补记」（`repair_watch_batch_dates`，同样只在全部缺日期时写）。
   - **解析口径**：lit_watch.rs 把 `notes/inbox.md`（上限 500 条）、`papers/watch-followup.md`（付费墙待办）、
     `papers/watchlist.md`（订阅读写：整表写回、保留注释行）、`papers/included.md`（精读清单增删、规范化标题去重）
     解析为 DTO；格式不规整的条目容错跳过。所有操作门槛 = 已注册项目根 + canonicalize 防逃逸 + 读-改-原子写。
@@ -786,9 +790,8 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
     下载命令 jsDelivr 优先、raw 回落，.tmp 原子落盘后清进程内缓存）。匹配 = normalize_title 规范化精确匹配 +
     末尾出版商括号尾巴剥除重试（来源常写成「Advanced Functional Materials (Wiley)」，前端 sourceDisplayName 同口径），
     miss / 未装表一律 None 不虚构；合并表 HashMap 进程内 RwLock 缓存（7MB 不能每次 list 重解析）。
-    **条目行版式（2026-09-07）**：默认对齐精读清单密度，不是摘要墙。收起 = 标题截断一行（「推荐」+ IF/分区/TOP
-    贴标题右侧，操作组贴右）+ 第二行中文一句话 · 期刊名（日期靠右）。英文摘要与解读只在点开后出现。
-    不强制一行一条。禁止每条常驻铺英文摘要；也禁止回到标题被期刊名+徽章压成窄列的单行全挤（2026-08-25 否决仍有效）。
+    **条目行版式（2026-10-03）**：固定两行。第一行只有标题（截断；点开才换行）。第二行左侧是中文一句话 · 期刊，右侧依次是推荐/IF/分区/TOP、巡检相对时间、加入精读。解读、打开来源、⋯ 在第二行悬停或展开才出现。英文摘要与解读只在点开后出现。
+    不在标题行插操作（2026-10-03 实测：悬停图标插进标题和徽章之间，把两行摘要行高撑乱）。禁止每条常驻铺英文摘要；也禁止标题被期刊名+徽章压成窄列（2026-08-25 否决仍有效）。
     **更新发现（v3.99+）**：status 带 downloadedAt（两份 CSV 取较新 mtime，不另记 meta）；check_journal_metrics_update
     用 GitHub commits API 按数据目录查最近 commit，与本地 mtime 严比（解析失败/未装表 = 无新版，不虚构提醒），
     前端卡头按钮有新版时标「（有新表）」、tooltip 显示下载于何时——只提示不自动下载，下载动作恒由用户发起。
@@ -802,7 +805,12 @@ agent 之前，未交代来源时它就是当前节点。**通则：凡是开工
   - **无头 AI 不进本项目会话（v3.193 / v3.194）**：解读与定时巡检归对话页「内部 AI」。问 AI（「看这份文件」）、沉浸阅读注入、接力简报也不进项目页会话列表，但仍在对话页。`sessionExcludedFromProjectList` 是项目列表口径；不要把项目路径写入 `usage_provenance.internal`。
   - **下载白名单与资源登记**：download_paper_pdf 仅 http/https、60MB 上限流式中止、%PDF- 魔数校验、文件名
     sanitize、落 papers/ 重名 -2/-3、自动登记 project.toml `[[resources]]` type="paper"；非直链（出版商页）前端
-    禁用并提示手动下载，付费墙文献仍走 watch-followup.md「待人工下载」。
+    付费墙文献走 watch-followup.md「待人工下载」。
+    能免费直接下的 PDF（arXiv `/pdf/` 或以 `.pdf` 结尾）由巡检 Agent 在结束前下到隔离树 `papers/`；
+    采纳时 `adopt_watch_pdfs` 把主仓还没有的 PDF 拷进项目根并登记。界面不再放「获取全文」：
+    出版商页和 DOI 落地页大多下不成，逐篇获取会把行撑乱。
+    待人工下载对照 `to_fetch_progress`，已存显示「✓ 已存」、点标题到文件页打开；
+    未存给「官网 / 等待收货…+取消 / 关联」，底下「打开 papers/」。官网走 `inst_browser_open` 收货。
   - **机构访问通道（2026-09-16，fetch_paper_fulltext 逐篇获取阶梯）**：形态是**人登录一次、系统复用会话**——
     用户在检索步「下载付费墙文献全文」展开「待获取」后点「登录学校账号」（跳到设置 → 网络），或自己打开设置 → 网络「学校图书馆」点「登录学校账号」（默认 CARSI，不摆地址框）完成学校
     SSO（含 MFA），后端 `inst_access.rs` 读取登录窗 Cookie 落 0600 `inst-session.json`（与 keys.json 同纪律，

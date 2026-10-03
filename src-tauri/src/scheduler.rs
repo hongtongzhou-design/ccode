@@ -16,7 +16,10 @@ use std::time::Duration;
 use tauri::Emitter;
 
 /// 单条任务执行超时：无头 CLI 巡检 10 分钟足够
-const RUN_TIMEOUT: Duration = Duration::from_secs(600);
+/// 定时任务单次预算。v3.75 定 600s；2026-10-03 提高到 30 分钟——实测 GLM 跑 lit-watch
+/// （三路检索 + 去重 + 写文件）超 10 分钟，600s 在掐死健康任务；定时任务是后台哨兵、
+/// 无人等它，超时只担防僵尸职责，放宽代价小（用户拍板方案 A，不做每任务可配）。
+const RUN_TIMEOUT: Duration = Duration::from_secs(1800);
 /// 调度 tick 间隔
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
 /// 历史只留最近 20 条（新的在前）
@@ -26,14 +29,16 @@ const SUMMARY_CAP: usize = 2000;
 
 /// 任务 prompt 模板按技能分派：lit-watch 用文献巡检专用文案（一字不动），
 /// 其他技能用通用模板（技能自有规范为准，调度器不复制关键词/路径口径）
-const TASK_PROMPT_LIT_WATCH: &str = "请使用 {skill} 技能执行一次文献巡检：按 papers/watchlist.md 的订阅清单检索新文献，去重、精选后把命中追加到 notes/inbox.md，结束时输出三行以内的简报（检索了几条关键词/来源、新命中几篇、其中推荐几篇、哪些来源未达）。本任务由 Mesa 定时雷达自动触发。";
+const TASK_PROMPT_LIT_WATCH: &str = "请使用 {skill} 技能执行一次文献巡检：按 papers/watchlist.md 的订阅清单检索新文献，去重、精选后把命中追加到 notes/inbox.md。追加本次条目前必须先单独写一行 <!-- watch-run: YYYY-MM-DD -->（本次巡检的本地日期，上海时区），已有批次标记的旧条目不要改。能免费直接下载的 PDF（arXiv /pdf/ 直链或以 .pdf 结尾）在结束前用 curl 下到项目根 papers/，文件名用标题，并确认以 %PDF- 开头；出版商页、DOI 落地页和付费墙不要下，题录留在 papers/watch-followup.md。结束时输出三行以内的简报（检索了几条关键词/来源、新命中几篇、其中推荐几篇、哪些来源未达、免费全文下了几篇）。本任务由 Mesa 定时雷达自动触发。";
 const TASK_PROMPT_GENERIC: &str = "请使用 {skill} 技能在项目内执行一次定时巡检，按该技能的既定规范产出结果，结束时输出三行以内简报。本任务由 Mesa 定时雷达自动触发。";
 
 // ===== 数据模型 =====
 
-/// 单次运行记录（at/status/summary 均为单词，snake_case 与 camelCase 一致，存储/前端共用；
-/// new_entries 是两词字段，按前端 DTO 约定序列化为 newEntries，老记录缺省 None）
+/// 单次运行记录（存储/前端共用）。整体 camelCase 序列化（随 ScheduleDto 直出前端）；
+/// 多词字段带蛇形 alias 兼容读旧 schedules.json（历史上 started_at/run_id/isolation_path
+/// 以蛇形落盘，2026-10-03 修「isolationPath 从未到达前端」时统一驼峰并保留 alias）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct RunRecord {
     pub at: String,
     /// "ok" | "error"
@@ -41,19 +46,19 @@ pub struct RunRecord {
     /// 脱敏后截 2000 字符的简报/错误信息
     pub summary: String,
     /// 本次运行新增的收件箱条目数（仅 lit-watch 类任务、仅成功时记；超时/失败为 None）
-    #[serde(default, rename = "newEntries")]
+    #[serde(default, alias = "new_entries")]
     pub new_entries: Option<u32>,
     /// 本次运行的时间窗与直接产物，供历史追踪；老记录缺省兼容。
-    #[serde(default)]
+    #[serde(default, alias = "started_at")]
     pub started_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "finished_at")]
     pub finished_at: Option<String>,
     #[serde(default)]
     pub artifacts: Vec<String>,
     /// 本次运行的 Run 身份与实际隔离目录；旧记录缺省兼容。
-    #[serde(default)]
+    #[serde(default, alias = "run_id")]
     pub run_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "isolation_path")]
     pub isolation_path: Option<String>,
     /// 隔离树产物是否已采纳进主仓；旧记录缺省 false。
     #[serde(default)]
@@ -692,6 +697,8 @@ pub(crate) const WATCH_ADOPT_FILES: &[&str] = &[
     "papers/watch-seen.md",
     "papers/watch-followup.md",
     "notes/references.bib",
+    // 巡检结束时收下的免费全文。目录模式：采纳时按隔离树里新增的 PDF 拷进主仓。
+    "papers/",
 ];
 
 /// 某次巡检的可采纳契约（§4.9 后半）：四类文献台账是基线；非 lit-watch 技能并上其
@@ -855,6 +862,18 @@ pub fn adopt_watch_run(app: tauri::AppHandle, run_id: String) -> Result<Vec<Stri
         &protected,
         &patterns,
     )?;
+    // 免费全文是二进制，文本冻结带不走。隔离树 papers/ 里主仓还没有的 PDF 直接拷过来并登记。
+    let mut copied = copied;
+    if schedule.skill == "lit-watch" {
+        match crate::lit_watch::adopt_watch_pdfs(&isolation, &project) {
+            Ok(pdfs) => copied.extend(pdfs),
+            Err(e) => {
+                return Err(format!(
+                    "文本已采纳，但免费全文没拷进 papers/：{e}。可再执行一次采纳补拷"
+                ));
+            }
+        }
+    }
     let fact = crate::projects::AcceptanceLogEntry {
         goal_id: String::new(),
         goal_name: schedule.skill.clone(),
@@ -1085,6 +1104,21 @@ fn execute_one(id: &str) -> RunDonePayload {
         )
         .and_then(|(output, id)| {
             run_id = Some(id);
+            // 模型漏写 <!-- watch-run --> 时，在冻结前用本次完成日（上海）补上。
+            // 只补还没有批次的条目；已有标记不动（忽略 id 按标题+原注释日期算）。
+            // 补不上不挡冻结：趋势仍可在打开雷达时再补。
+            if is_lit_watch {
+                if let Some(day) = crate::lit_watch::shanghai_calendar_day(&crate::sessions::now_iso())
+                {
+                    if let Err(e) = crate::lit_watch::stamp_undated_inbox(root, &day) {
+                        crate::logbuf::record(
+                            "warn",
+                            "scheduler",
+                            &format!("补巡检批次日期失败: {e}"),
+                        );
+                    }
+                }
+            }
             crate::watch_review::freeze_at(
                 &crate::watch_review::review_dir()?,
                 evidence,
@@ -2002,6 +2036,46 @@ mod tests {
     }
 
     #[test]
+    fn run_record_camelcase_over_the_wire_and_snake_alias_on_disk() {
+        // 2026-10-03 修：RunRecord 嵌在 camelCase 的 ScheduleDto 里直出前端，此前以蛇形
+        // isolation_path/run_id/started_at 出线，前端 isolationPath 恒 undefined——
+        // 雷达「隔离树有 N 条新命中 · 去评审」从未出现过。老盘（蛇形）必须还能读。
+        let old_disk = r#"[{
+            "id": "t1", "name": "文献雷达", "project_root": "/tmp/p", "skill": "lit-watch",
+            "profile_id": null, "frequency": "daily", "weekday": null, "hour": 9, "minute": 0,
+            "enabled": true, "last_run_at": "2026-10-03T05:36:19Z", "last_status": "ok",
+            "history": [{
+                "at": "2026-10-03T05:36:19Z", "status": "ok", "summary": "巡检完成",
+                "newEntries": 6, "started_at": "2026-10-03T05:24:37Z",
+                "finished_at": "2026-10-03T05:36:19Z", "artifacts": [],
+                "run_id": "53da57e5-0000-0000-0000-000000000000",
+                "isolation_path": "/Users/x/watch-worktrees/p/t1", "adopted": false
+            }]
+        }]"#;
+        let list: Vec<Schedule> = serde_json::from_str(old_disk).unwrap();
+        let rec = &list[0].history[0];
+        assert_eq!(rec.new_entries, Some(6));
+        assert_eq!(
+            rec.isolation_path.as_deref(),
+            Some("/Users/x/watch-worktrees/p/t1")
+        );
+        assert_eq!(
+            rec.run_id.as_deref(),
+            Some("53da57e5-0000-0000-0000-000000000000")
+        );
+        assert_eq!(rec.started_at.as_deref(), Some("2026-10-03T05:24:37Z"));
+        assert!(!rec.adopted);
+        // 出线契约：前端 types.ts RunRecordDto 读驼峰键
+        let dto = serde_json::to_value(ScheduleDto::from(list.into_iter().next().unwrap())).unwrap();
+        let hist = &dto["history"][0];
+        assert_eq!(hist["isolationPath"], "/Users/x/watch-worktrees/p/t1");
+        assert_eq!(hist["runId"], "53da57e5-0000-0000-0000-000000000000");
+        assert_eq!(hist["startedAt"], "2026-10-03T05:24:37Z");
+        assert_eq!(hist["newEntries"], 6);
+        assert!(hist.get("isolation_path").is_none(), "蛇形键不得再出线");
+    }
+
+    #[test]
     fn create_validation_rejects_bad_fields() {
         let dir =
             std::env::temp_dir().join(format!("ccode-scheduler-test-dir-{}", uuid::Uuid::new_v4()));
@@ -2067,7 +2141,7 @@ mod tests {
         // lit-watch 专用文案一字不动（回归钉死）
         assert_eq!(
             build_task_prompt("lit-watch"),
-            "请使用 lit-watch 技能执行一次文献巡检：按 papers/watchlist.md 的订阅清单检索新文献，去重、精选后把命中追加到 notes/inbox.md，结束时输出三行以内的简报（检索了几条关键词/来源、新命中几篇、其中推荐几篇、哪些来源未达）。本任务由 Mesa 定时雷达自动触发。"
+            "请使用 lit-watch 技能执行一次文献巡检：按 papers/watchlist.md 的订阅清单检索新文献，去重、精选后把命中追加到 notes/inbox.md。追加本次条目前必须先单独写一行 <!-- watch-run: YYYY-MM-DD -->（本次巡检的本地日期，上海时区），已有批次标记的旧条目不要改。能免费直接下载的 PDF（arXiv /pdf/ 直链或以 .pdf 结尾）在结束前用 curl 下到项目根 papers/，文件名用标题，并确认以 %PDF- 开头；出版商页、DOI 落地页和付费墙不要下，题录留在 papers/watch-followup.md。结束时输出三行以内的简报（检索了几条关键词/来源、新命中几篇、其中推荐几篇、哪些来源未达、免费全文下了几篇）。本任务由 Mesa 定时雷达自动触发。"
         );
         // 其他技能走通用模板：替换技能名、不带文献巡检的路径口径
         let p = build_task_prompt("data-clean");

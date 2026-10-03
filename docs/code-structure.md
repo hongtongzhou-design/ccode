@@ -26,7 +26,9 @@ src/                         # 前端 React + TS + Tailwind v4（vite 插件接�
                              # StepSkillsChips（步骤推荐技能 chip 区：只读/可编辑两态 + 产物冲突/跨步骤链路 ⚠ 警告行）、
                              # HumanTasksList（人工事项清单 + useHumanTasks 共享逻辑；待确认清完且未手动取消才自动勾）、StepFlow（步骤内协同流程线；付费墙行「登录学校账号」跳设置网络分区）、
                              # ScheduleSection（定时任务：有流程在项目设置抽屉；无流程主区雷达下；编程/办公右侧会话栏）、
-                             # LitWatchCard（「◔ 文献雷达」卡片：新命中/精读清单双页签 + 近 8 周趋势 + →精读/◈解读/↓全文 +
+                             # LitWatchCard（「◔ 文献雷达」卡片：近 8 周趋势（全部缺巡检日时可按巡检日补记）+
+                             #   命中固定两行（标题一行；第二行摘要+徽章+日期+精读，解读/来源/⋯ 悬停才现；无获取全文）+
+                             #   待人工下载：官网/等待收货+取消/关联/✓已存/打开 papers/ +
                              #   新命中默认两行对齐精读清单密度（摘要点开才见）+
                              #   期刊徽章（IF/中科院分区/TOP，数据源 journal_metrics.rs）+ 新命中按日期/按关键词分组切换 +
                              #   卡头期刊指标表入口常驻（未装=↓下载 / 已装=↻重下即更新）+ 卡头「筛选」弹层
@@ -709,14 +711,17 @@ src-tauri/src/
   scheduler.rs               # 定时雷达（v3.75；v3.79 起技能可选；v3.218 新建巡检技能：草稿 .ccode/drafts/watch-*，确认才入库分发）：
                              # schedules.json（每日/每周+时分，本地时区）、60s tick + 启动补跑
                              # （漏跑 coalesce 只补一次）、无头拉起 agent 在任务隔离 worktree 跑技能（先从主仓播种订阅/台账；项目根只用于归属与采纳；非 Git 项目明确失败；显式 sentinel 才允许主仓写入；人点「采纳进主仓」才拷产出；默认 lit-watch，prompt 按技能分派：
-                             # lit-watch 专用文案不动、其他技能通用模板，非 lit-watch 跑前检查已分发，10 分钟超时）、
+                             # lit-watch 专用文案不动、其他技能通用模板，非 lit-watch 跑前检查已分发，30 分钟超时（2026-10-03 由 600s 提高））、
                              # 历史留 20 条、跑完发 scheduler-run-done 事件（App.tsx 全局监听弹 OS 通知，复用长任务通知开关）；
                              # RunRecord.newEntries 新命中计数；2026-09-29 起界面不再写关联步骤，保存时清掉旧 linkedStep
                              # （跑 lit-watch 前后数 inbox.md `## ` 标题数取差，超时/失败不记；项目配了雷达筛选时
                              # 前后各数一次过滤后条目取差，推送/收件箱胶囊只算符合筛选的）
   lit_watch.rs               # 文献雷达应用层（v3.95）：巡检产物解析 DTO（notes/inbox.md 有效文献块含 watch-run 批次标记日期、上限 500 条；
+                             # 漏写批次时 stamp_undated_inbox 只插入标记行：冻结前按本次完成日、打开雷达时按最近已采纳成功巡检；
+                             # repair_watch_batch_dates 供空态「按巡检日补记」，已有任一条带日期则不写；
                              # papers/watch-followup.md 付费墙待办、watchlist.md 订阅读写整表写回保留注释行、included.md 精读清单
                              # 增删去重）+ download_paper_pdf 白名单下载（仅 http/https、60MB 流式上限、%PDF- 魔数校验、
+                             # adopt_watch_pdfs：采纳时把隔离树 papers/ 里主仓没有的 %PDF- 拷进项目根并登记，同名不覆盖；
                              # 落 papers/ 自动登记 project.toml 资源）+ attach_paper_pdf 关联本地 PDF（付费墙手动下载后
                              # 一步复制进 papers/ 并登记，源文件同口径校验、复制非移动）；门槛 = 注册项目根 + canonicalize + 读-改-原子写；
                              # 雷达筛选判定 metrics_pass_filter / count_inbox_entries_matching（scheduler 推送计数用，

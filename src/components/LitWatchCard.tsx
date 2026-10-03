@@ -27,7 +27,7 @@ import { Modal } from "./Modal";
 
 // monaco 体积大，与终端页同款懒加载，避免拖慢工作区页首屏
 const FilePreviewEditor = lazy(() => import("./FilePreviewEditor"));
-import { HoverTip, useHoverTip } from "./HoverTip";
+import { HoverTip } from "./HoverTip";
 import {
   FoldMark,
   LoadingRows,
@@ -35,25 +35,20 @@ import {
   fieldClass,
   ghostActionClass,
   iconActionClass,
+  inlineActionClass,
   projectWellClass,
   searchFieldClass,
 } from "./PageFrame";
 import { LIST_PREVIEW_CAP } from "../lit-list";
-import {
-  canAttemptFulltext,
-  fulltextViaLabel,
-  instActiveFrom,
-  instOpenTarget,
-  type FetchedFulltextDto,
-} from "../inst-access";
+import { instOpenTarget } from "../inst-access";
 import { ListPreviewToggle } from "./FolderGroupedList";
+import { toFetchPaperRel } from "../step-flow";
 import { useAppStore } from "../store";
 import { relTime } from "../rel-time";
 import { schedulesForProject } from "../schedule-tasks";
 import {
   dismissLitEntry,
   filterLitDismissed,
-  fulltextLinkFor,
   groupEntriesByDay,
   groupEntriesByKeyword,
   includedLineFor,
@@ -65,9 +60,8 @@ import {
   litWatchFilterLabel,
   journalMetricTone,
   metricsTooltip,
-  pdfUrlFor,
-
   weeklyTrend,
+  undatedWatchRuns,
   normalizeTitle,
   parseWatchExplain,
   watchExplainPrompt,
@@ -124,7 +118,18 @@ function HeadIcon({
 
 
 /** 近 8 周命中迷你趋势（手绘 SVG 柱，不引图表库）；悬停出 HoverTip（禁原生 title） */
-function TrendChart({ trend }: { trend: ReturnType<typeof weeklyTrend> }) {
+function TrendChart({
+  trend,
+  repairDays,
+  repairing,
+  onRepair,
+}: {
+  trend: ReturnType<typeof weeklyTrend>;
+  /** 成功巡检漏写批次标记、可以按完成日补上的日期 */
+  repairDays: string[];
+  repairing: boolean;
+  onRepair: () => void;
+}) {
   const { buckets, showChart, note } = trend;
   const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(
     null,
@@ -187,7 +192,25 @@ function TrendChart({ trend }: { trend: ReturnType<typeof weeklyTrend> }) {
           })}
         </svg>
       )}
-      {note && <p className="mt-1 text-micro text-l4">{note}</p>}
+      {note && (
+        <p className="mt-1 text-micro text-l4">
+          {note}
+          {repairDays.length > 0 && (
+            <>
+              {" "}
+              <button
+                type="button"
+                className="underline hover:text-l1 disabled:opacity-50"
+                disabled={repairing}
+                title={`按巡检完成日 ${repairDays.join("、")} 补上批次标记。不改已有日期，也不用论文发表日期。`}
+                onClick={onRepair}
+              >
+                {repairing ? "补记中…" : "按巡检日补记"}
+              </button>
+            </>
+          )}
+        </p>
+      )}
       <HoverTip tip={tip} text={tip?.text ?? ""} up />
     </div>
   );
@@ -260,19 +283,15 @@ function RelevancePills({ entry }: { entry: WatchEntryDto }) {
   );
 }
 
-/** 新命中默认对齐精读清单密度：标题截断一行 + 中文一句话/期刊/日期；
- *  英文摘要点开才见。精读图标常驻，解读 / 全文 / ⋯ hover 或展开才现 */
+/** 新命中固定两行：标题独占一行；徽章、日期和操作在第二行。
+ *  免费全文由巡检结束时收下，这里不再放「获取全文」。英文摘要点开才见。 */
 function WatchEntryRow({
   entry,
   explain,
-  downloading,
   onAddIncluded,
   onExplain,
   onCloseExplain,
   onRerun,
-  onDownload,
-  onFetch,
-  canFetch,
   onOpenSource,
   onAttach,
   onDismiss,
@@ -281,15 +300,10 @@ function WatchEntryRow({
 }: {
   entry: WatchEntryDto;
   explain: ExplainState | null;
-  downloading: boolean;
   onAddIncluded: () => void;
   onExplain: () => void;
   onCloseExplain: () => void;
   onRerun: () => void;
-  onDownload: () => void;
-  /** 「来源」态（无开放直链）时的逐篇获取：走 开放副本/机构通道 阶梯 */
-  onFetch: () => void;
-  canFetch: boolean;
   /** 打开来源页：有机构会话时开进机构登录窗（带会话能过反爬墙），否则系统浏览器 */
   onOpenSource: () => void;
   onAttach: () => void;
@@ -302,9 +316,6 @@ function WatchEntryRow({
     if (startOpen) setExpanded(true);
   }, [startOpen]);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const fulltext = fulltextLinkFor(entry.url);
-  const pdfRef = useRef<HTMLButtonElement>(null);
-  const pdfTip = useHoverTip(pdfRef, true);
   const open = expanded || !!explain;
   const scan = watchEntryScanLine(entry);
   const source = sourceDisplayName((entry.journal ?? entry.source).trim());
@@ -315,24 +326,36 @@ function WatchEntryRow({
   const expandedMeta = [authors, source, when].filter(Boolean).join(" · ");
   return (
     <li className="group rounded-md px-2 py-1.5 hover:bg-hover">
-      <div className="flex min-w-0 items-center gap-2">
-        <button
-          type="button"
-          className={`min-w-0 flex-1 text-left text-sm text-l2 ${
-            expanded ? "whitespace-normal" : "truncate"
-          }`}
-          onClick={() => setExpanded((v) => !v)}
-          title={entry.title}
-        >
-          {entry.title}
-        </button>
+      <button
+        type="button"
+        className={`block w-full text-left text-sm leading-5 text-l2 ${
+          expanded ? "whitespace-normal" : "truncate"
+        }`}
+        onClick={() => setExpanded((v) => !v)}
+        title={entry.title}
+      >
+        {entry.title}
+      </button>
+      <div className="mt-0.5 flex min-w-0 items-center gap-2">
+        {scan && !expanded ? (
+          <button
+            type="button"
+            className="min-w-0 flex-1 truncate text-left text-micro text-l4"
+            onClick={() => setExpanded(true)}
+          >
+            {scan}
+          </button>
+        ) : (
+          <span className="min-w-0 flex-1" />
+        )}
         <RelevancePills entry={entry} />
+        {when && !expanded && (
+          <span className="shrink-0 text-micro text-l4">{when}</span>
+        )}
         <span className="flex shrink-0 items-center">
           <span
             className={`items-center ${
-              open
-                ? "flex"
-                : "hidden group-hover:flex group-focus-within:flex"
+              open ? "flex" : "hidden group-hover:flex group-focus-within:flex"
             }`}
           >
             <button
@@ -344,41 +367,7 @@ function WatchEntryRow({
             >
               ◈
             </button>
-            {fulltext.kind === "pdf" && (
-              <button
-                ref={pdfRef}
-                type="button"
-                className={iconActionClass}
-                disabled={downloading}
-                onMouseEnter={pdfTip.show}
-                onMouseLeave={pdfTip.hide}
-                onClick={onDownload}
-                title={downloading ? "下载中…" : "下载全文"}
-                aria-label={downloading ? "下载中…" : "下载全文"}
-              >
-                <Download size={13} strokeWidth={1.8} />
-              </button>
-            )}
-            {fulltext.kind === "pdf" && (
-              <HoverTip tip={pdfTip.tip} text="开放获取全文，免费直接下载" up />
-            )}
-            {fulltext.kind === "source" && canFetch && (
-              <button
-                type="button"
-                className={iconActionClass}
-                disabled={downloading}
-                title={
-                  downloading
-                    ? "获取中…"
-                    : "获取全文：先查合法开放副本（预印本/仓储），再走机构通道（设置 → 网络 → 学校图书馆）"
-                }
-                aria-label={downloading ? "获取中" : "获取全文"}
-                onClick={onFetch}
-              >
-                <Download size={13} strokeWidth={1.8} />
-              </button>
-            )}
-            {fulltext.kind === "source" && (
+            {entry.url.trim() && (
               <button
                 type="button"
                 className={iconActionClass}
@@ -418,22 +407,6 @@ function WatchEntryRow({
           </button>
         </span>
       </div>
-      {!expanded && (scan || when) && (
-        <button
-          type="button"
-          className="mt-0.5 flex w-full min-w-0 items-center gap-2 text-left"
-          onClick={() => setExpanded(true)}
-        >
-          {scan && (
-            <span className="min-w-0 flex-1 truncate text-micro text-l4">
-              {scan}
-            </span>
-          )}
-          {when && (
-            <span className="ml-auto shrink-0 text-micro text-l4">{when}</span>
-          )}
-        </button>
-      )}
       {expanded && (zh || abs || expandedMeta) && (
         <div className="mt-1 space-y-1">
           {zh && <p className="text-xs leading-5 text-l3">{zh}</p>}
@@ -934,13 +907,14 @@ export default function LitWatchCard({
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
   /** 解读展开态与结果缓存分离：收起不丢缓存，再展开直接复用（不重复调 AI） */
   const [explainOpen, setExplainOpen] = useState<Set<string>>(new Set());
-  const [downloading, setDownloading] = useState<Set<string>>(new Set());
   // 成功 toast（同 GitPanel 口径：CTA 绿底右下角 2.5s 自收）
   const [toast, setToast] = useState<{ text: string; hiding: boolean } | null>(
     null,
   );
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setPage = useAppStore((s) => s.setPage);
+  const setFilePreviewReq = useAppStore((s) => s.setFilePreviewReq);
+  const setProjectSurfaceReq = useAppStore((s) => s.setProjectSurfaceReq);
   const setWorkspaceReviewRequest = useAppStore(
     (s) => s.setWorkspaceReviewRequest,
   );
@@ -950,19 +924,10 @@ export default function LitWatchCard({
   );
   const [hitQuery, setHitQuery] = useState("");
   const [showAllHits, setShowAllHits] = useState(false);
-  // 机构访问通道可用（前缀或会话任一）：决定「来源」态/待办行是否摆「获取全文」
-  const [instActive, setInstActive] = useState(false);
-  // 待办行「获取全文」的就地成功标记（watch-followup.md 是 agent 写的清单，不动文件）
-  const [fetchedFollowups, setFetchedFollowups] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    invoke<{ sessionPresent: boolean; prefixConfigured: boolean }>(
-      "inst_session_status",
-    )
-      .then((s: { sessionPresent: boolean; prefixConfigured: boolean; sessionCredible?: boolean }) =>
-        setInstActive(instActiveFrom(s as never)),
-      )
-      .catch(() => setInstActive(false));
-  }, []);
+  // 待人工下载对照 papers/：文件名 → 已存。和检索步待获取共用 to_fetch_progress。
+  const [followupSaved, setFollowupSaved] = useState<Record<string, string>>({});
+  const [followupBusy, setFollowupBusy] = useState<Record<string, string>>({});
+  const [repairingDates, setRepairingDates] = useState(false);
 
   function showToast(text: string) {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -1095,6 +1060,58 @@ export default function LitWatchCard({
     .map((s) => ({ schedule: s, run: lastOkRun(s) }))
     .filter((x): x is { schedule: ScheduleDto; run: NonNullable<ReturnType<typeof lastOkRun>> } => !!x.run)
     .sort((a, b) => Date.parse(b.run.at) - Date.parse(a.run.at))[0]?.run ?? null;
+  /** 隔离树已有新命中、尚未采纳进主仓：待评审提示是列表区的唯一答案（pendingRow），
+   *  采纳前列表为空是预期——不再另出空态文案，计数微行也不重复「新增 N 条」 */
+  const pendingAdoption =
+    latestRadarRun?.isolationPath &&
+    !latestRadarRun.adopted &&
+    (latestRadarRun.newEntries ?? 0) > 0
+      ? latestRadarRun
+      : null;
+  /** 待采纳提示：正文 + 「去评审」收进内容井列表区（用户视线所在）；无订阅时不渲染
+   *  内容井，但入口不能丢——单独出这一行 */
+  const pendingRow = pendingAdoption ? (
+    <p className="mt-1 mb-2 flex flex-wrap items-center gap-2 px-2 text-xs text-warn-text">
+      <span>
+        隔离树有 {pendingAdoption.newEntries} 条新命中，尚未采纳进主仓
+      </span>
+      <button
+        type="button"
+        className={ghostActionClass}
+        onClick={() => {
+          setWorkspaceReviewRequest({
+            worktreePath: pendingAdoption.isolationPath!,
+            runId: pendingAdoption.runId ?? null,
+            requestId: crypto.randomUUID(),
+          });
+          setPage("terminal");
+        }}
+      >
+        去评审
+      </button>
+    </p>
+  ) : null;
+  async function repairWatchDates() {
+    const days = undatedWatchRuns(radarSchedules).map((run) => run.day);
+    const day = days[days.length - 1];
+    if (!day) return;
+    setRepairingDates(true);
+    setError(null);
+    try {
+      const wrote = await invoke<boolean>("repair_watch_batch_dates", {
+        projectRoot,
+        day,
+      });
+      if (wrote) showToast(`已按 ${day} 补上巡检日期`);
+      else showToast("这些条目已经有巡检日期");
+      await load();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setRepairingDates(false);
+    }
+  }
+
   const lastRunAt = radarSchedules
     .map((s) => lastOkRun(s)?.at ?? null)
     .filter((v): v is string => v !== null)
@@ -1193,60 +1210,6 @@ export default function LitWatchCard({
     }
   }
 
-  /** 下载全文（命中条目 / 精读条目共用）：key 用于行内「下载中」态 */
-  async function download(key: string, url: string, fileNameHint: string) {
-    const pdfUrl = pdfUrlFor(url);
-    if (!pdfUrl) return;
-    setDownloading((cur) => new Set(cur).add(key));
-    try {
-      const res = await invoke<DownloadedPaperDto>("download_paper_pdf", {
-        projectRoot,
-        url: pdfUrl,
-        fileNameHint,
-      });
-      showToast(`已下载：${res.name}`);
-      onConfigChanged();
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setDownloading((cur) => {
-        const next = new Set(cur);
-        next.delete(key);
-        return next;
-      });
-    }
-  }
-
-  /** 逐篇获取全文（「来源」态命中行 / 待办行）：后端阶梯 = 开放直链 → DOI 开放副本
-   *  （Unpaywall/OpenAlex）→ 机构通道（前缀改写 + 会话 + 落地页提取）。人工逐篇触发，
-   *  不做批量（出版商风控会连坐全校访问）。返回是否成功（待办行打就地成功标） */
-  async function fetchFulltext(
-    key: string,
-    url: string,
-    fileNameHint: string,
-  ): Promise<boolean> {
-    setDownloading((cur) => new Set(cur).add(key));
-    try {
-      const res = await invoke<FetchedFulltextDto>("fetch_paper_fulltext", {
-        projectRoot,
-        url,
-        fileNameHint,
-      });
-      showToast(`${fulltextViaLabel(res.via)}${res.name}`);
-      onConfigChanged();
-      return true;
-    } catch (reason) {
-      setError(String(reason));
-      return false;
-    } finally {
-      setDownloading((cur) => {
-        const next = new Set(cur);
-        next.delete(key);
-        return next;
-      });
-    }
-  }
-
   /** 打开来源页：在系统浏览器里打开（真实浏览器会话，出版商不拦截）——浏览器里
    *  点站方下载，落下的 PDF 由 Mesa 收货通道自动收进本项目 papers/（时间窗+标题
    *  归属匹配）；内嵌机构窗保留作回落 */
@@ -1295,6 +1258,58 @@ export default function LitWatchCard({
     };
   }, [browserSpotlight]);
 
+  const followupProbeRef = useRef(followups);
+  followupProbeRef.current = followups;
+  const refreshFollowupSaved = useCallback(() => {
+    const items = followupProbeRef.current;
+    if (!items.length) {
+      setFollowupSaved({});
+      return;
+    }
+    invoke<(string | null)[]>("to_fetch_progress", {
+      projectRoot,
+      items: items.map((it) => ({ title: it.title, url: it.url })),
+    })
+      .then((names) => {
+        const map: Record<string, string> = {};
+        names?.forEach((name, i) => {
+          const it = items[i];
+          if (name && it) map[`${it.title}-${i}`] = name;
+        });
+        setFollowupSaved(map);
+        setBrowserOpenedAt((cur) => {
+          let changed = false;
+          const next = { ...cur };
+          items.forEach((it, i) => {
+            const key = it.url.trim();
+            if (map[`${it.title}-${i}`] && key && next[key]) {
+              delete next[key];
+              changed = true;
+            }
+          });
+          return changed ? next : cur;
+        });
+      })
+      .catch(() => {});
+  }, [projectRoot]);
+  useEffect(() => {
+    if (!followupsOpen) return;
+    refreshFollowupSaved();
+    const timer = window.setInterval(refreshFollowupSaved, 2000);
+    return () => window.clearInterval(timer);
+  }, [followupsOpen, followups, refreshFollowupSaved]);
+
+  function openSavedPdf(fileName: string) {
+    const rel = toFetchPaperRel(fileName);
+    if (!rel) return;
+    setProjectSurfaceReq("files");
+    setFilePreviewReq({
+      projectRoot,
+      path: `${projectRoot.replace(/[\\/]+$/, "")}/${rel}`,
+      token: Date.now(),
+    });
+  }
+
   function openWithSession(rawUrl: string, title?: string) {
     if (!rawUrl.trim()) return;
     invoke("inst_browser_open", {
@@ -1316,12 +1331,12 @@ export default function LitWatchCard({
 
   /** 关联本地 PDF（命中条目 / 精读条目共用 ⋯ 菜单）：文件对话框选 PDF，
    *  后端复制进 papers/ 并按标题登记 project.toml，父级重读后精读行主按钮变「开读」 */
-  async function attachPdf(title: string) {
+  async function attachPdf(title: string): Promise<boolean> {
     const selected = await openFileDialog({
       multiple: false,
       filters: [{ name: "PDF", extensions: ["pdf"] }],
     });
-    if (typeof selected !== "string") return; // 取消或异常形态
+    if (typeof selected !== "string") return false; // 取消或异常形态
     try {
       const res = await invoke<DownloadedPaperDto>("attach_paper_pdf", {
         projectRoot,
@@ -1330,8 +1345,10 @@ export default function LitWatchCard({
       });
       showToast(`已关联：${res.name}`);
       onConfigChanged();
+      return true;
     } catch (reason) {
       setError(String(reason));
+      return false;
     }
   }
 
@@ -1488,44 +1505,36 @@ export default function LitWatchCard({
         </div>
         )}
       </div>
-      {bodyOpen &&
-        latestRadarRun?.isolationPath &&
-        !latestRadarRun.adopted &&
-        (latestRadarRun.newEntries ?? 0) > 0 && (
-        <p className="mb-2 flex flex-wrap items-center gap-2 text-xs text-warn-text">
-          <span>
-            隔离树有 {latestRadarRun.newEntries} 条新命中，尚未采纳进主仓
-          </span>
-          <button
-            type="button"
-            className={ghostActionClass}
-            onClick={() => {
-              setWorkspaceReviewRequest({
-                worktreePath: latestRadarRun.isolationPath!,
-                runId: latestRadarRun.runId ?? null,
-                requestId: crypto.randomUUID(),
-              });
-              setPage("terminal");
-            }}
-          >
-            去评审
-          </button>
-        </p>
-      )}
       {error && <p className="mb-2 text-xs text-err-text">{error}</p>}
 
-      {bodyOpen && (subs !== null && !hasSubs ? null : (
+      {bodyOpen && (subs !== null && !hasSubs ? pendingRow : (
         <div className={projectWellClass}>
             {entries === null ? (
               <LoadingRows compact />
             ) : (
               <>
-                <TrendChart trend={trend} />
-                {latestRadarRun && (
+                <TrendChart
+                  trend={trend}
+                  repairDays={
+                    trend.showChart
+                      ? []
+                      : undatedWatchRuns(radarSchedules).map((run) => run.day)
+                  }
+                  repairing={repairingDates}
+                  onRepair={() => void repairWatchDates()}
+                />
+                {/* 计数只说一遍：待采纳批次的「新增 N 条」由待评审行承担，微行只补未忽略数 */}
+                {latestRadarRun && !pendingAdoption && (
                   <p className="mt-1 px-2 text-micro text-l4">
                     最近一次成功巡检新增 {latestRadarRun.newEntries ?? "未知"} 条 · 未忽略 {undismissed.length} 条
                   </p>
                 )}
+                {pendingAdoption && undismissed.length > 0 && (
+                  <p className="mt-1 px-2 text-micro text-l4">
+                    未忽略 {undismissed.length} 条
+                  </p>
+                )}
+                {pendingRow}
                 {filterOn && metricsStatus && !metricsStatus.available && (
                   /* 表未装时筛选实际不生效（指标未知一律放行）：明说，不让用户以为已生效 */
                   <p className="mt-1 px-2 text-micro text-warn-text">
@@ -1576,7 +1585,7 @@ export default function LitWatchCard({
                     aria-label="搜索新命中"
                   />
                 </div>
-                {searchedHits.length === 0 && (
+                {searchedHits.length === 0 && (qHit || !pendingAdoption) && (
                   <p className="mt-2 text-xs text-l4">
                     {qHit ? "没有匹配" : "暂无新命中"}
                   </p>
@@ -1605,7 +1614,6 @@ export default function LitWatchCard({
                               ? (explains[entry.id] ?? { status: "loading" as const })
                               : null
                           }
-                          downloading={downloading.has(entry.id)}
                           onAddIncluded={() => void addToIncluded(entry)}
                           onExplain={() => {
                             const cur = explains[entry.id];
@@ -1636,13 +1644,6 @@ export default function LitWatchCard({
                             })
                           }
                           onRerun={() => void explain(entry)}
-                          onDownload={() =>
-                            void download(entry.id, entry.url, entry.title)
-                          }
-                          canFetch={canAttemptFulltext(entry.url, instActive)}
-                          onFetch={() =>
-                            void fetchFulltext(entry.id, entry.url, entry.title)
-                          }
                           onOpenSource={() => openWithSession(entry.url, entry.title)}
                           onAttach={() => void attachPdf(entry.title)}
                           onDismiss={() =>
@@ -1676,82 +1677,136 @@ export default function LitWatchCard({
                       待人工下载（{followups.length}）
                     </button>
                     {followupsOpen && (
+                      <>
                       <ul className="mt-1 space-y-0.5 px-0.5 py-px">
                         {followups.map((f, i) => {
                           const fkey = `${f.title}-${i}`;
+                          const savedName = followupSaved[fkey];
+                          const waiting =
+                            !!f.url.trim() &&
+                            !!browserOpenedAt[f.url.trim()] &&
+                            Date.now() - browserOpenedAt[f.url.trim()] < 95000;
+                          const meta = [f.note, followupBusy[fkey]]
+                            .filter(Boolean)
+                            .join(" · ");
                           return (
                           <li
                             key={fkey}
                             data-lit-open-url={f.url.trim()}
-                            className={`flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 ${
+                            className={`flex min-w-0 flex-wrap items-center gap-1 rounded-md px-1 py-0.5 ${
                               browserSpotlight === f.url.trim()
                                 ? "bg-cta/10 ring-1 ring-inset ring-cta-bd"
                                 : "hover:bg-hover"
                             }`}
                           >
-                            <span className="min-w-0 flex-1 truncate text-xs text-l2">
-                              {f.title}
-                            </span>
-                            {f.note && (
-                              <span className="shrink-0 text-micro text-l4">
-                                {f.note}
-                              </span>
-                            )}
-                            {f.url.trim() && canAttemptFulltext(f.url, instActive) && (
-                              <button
-                                type="button"
-                                className={`${ghostActionClass} shrink-0`}
-                                disabled={downloading.has(fkey)}
-                                title="逐篇获取全文：开放副本 → 机构通道（设置 → 网络 → 学校图书馆）"
-                                onClick={() => {
-                                  void fetchFulltext(
-                                    fkey,
-                                    f.url,
-                                    f.title,
-                                  ).then((ok) => {
-                                    // 只在真成功时打勾（2026-09-17 审计：旧 .then(()
-                                    // => add) 忽略布尔返回值，失败也翻「✓ 已获取」，
-                                    // 卡片顶部红错与行内成功勾自相矛盾）
-                                    if (ok) {
-                                      setFetchedFollowups((cur) =>
-                                        new Set(cur).add(fkey),
-                                      );
-                                    }
-                                  });
-                                }}
-                              >
-                                {fetchedFollowups.has(fkey)
-                                  ? "✓ 已获取，可再取"
-                                  : downloading.has(fkey)
-                                    ? "获取中…"
-                                    : "获取全文"}
-                              </button>
-                            )}
-                            {f.url.trim() && (
-                              <button
-                                type="button"
-                                className={`${ghostActionClass} shrink-0`}
-                                title="在系统浏览器里打开（真实浏览器会话）；浏览器里点站方下载，90 秒内落下的 PDF 由 Mesa 自动收进本项目 papers/（没收到的会有提示，旁边「关联本地 PDF」可补）"
-                                onClick={() => openWithSession(f.url, f.title)}
-                              >
-                                {browserOpenedAt[f.url.trim()] &&
-                                Date.now() - browserOpenedAt[f.url.trim()] < 95000
-                                  ? "已打开，等浏览器下载…"
-                                  : "打开来源"}
-                              </button>
-                            )}
                             <button
                               type="button"
-                              className={`${ghostActionClass} shrink-0`}
-                              title="已手动下载全文？选中文件，自动复制进 papers/ 并登记（90 秒窗漏收的补救口，2026-09-17 审计：该入口此前只有命中行有）"
-                              onClick={() => void attachPdf(f.title)}
+                              className={`min-w-0 flex-1 truncate text-left text-xs ${
+                                savedName
+                                  ? "text-l4 line-through hover:text-l2"
+                                  : "text-l2 hover:text-l1"
+                              }`}
+                              title={
+                                savedName
+                                  ? `在文件页打开 papers/${savedName}`
+                                  : f.url
+                                    ? "用右侧「官网」打开这篇的出版商页面"
+                                    : f.title
+                              }
+                              onClick={() => {
+                                if (savedName) openSavedPdf(savedName);
+                              }}
                             >
-                              关联本地 PDF
+                              {f.title}
                             </button>
+                            {meta && (
+                              <span className="max-w-[14rem] shrink-0 truncate text-micro text-l4" title={meta}>
+                                {meta}
+                              </span>
+                            )}
+                            {savedName ? (
+                              <span
+                                className="shrink-0 text-micro text-done"
+                                title={`点标题打开 papers/${savedName}`}
+                              >
+                                ✓ 已存
+                              </span>
+                            ) : (
+                              <span className="flex shrink-0 items-center">
+                                {f.url.trim() && (
+                                  <button
+                                    type="button"
+                                    className={`${inlineActionClass} shrink-0`}
+                                    title="去出版商官网打开这篇；点站方下载，90 秒内落下的 PDF 会收进 papers/。没收到用「关联」"
+                                    onClick={() => openWithSession(f.url, f.title)}
+                                  >
+                                    {waiting ? "等待收货…" : "官网"}
+                                  </button>
+                                )}
+                                {waiting && (
+                                  <button
+                                    type="button"
+                                    className={`${ghostActionClass} shrink-0`}
+                                    title="这篇不下载了。收货等待取消，之后的 PDF 不会挂到这一行。"
+                                    onClick={() => {
+                                      setBrowserOpenedAt((cur) => {
+                                        const next = { ...cur };
+                                        delete next[f.url.trim()];
+                                        return next;
+                                      });
+                                      setBrowserSpotlight((cur) =>
+                                        cur === f.url.trim() ? null : cur,
+                                      );
+                                      void invoke("inst_browser_cancel", {
+                                        projectRoot,
+                                        title: f.title,
+                                        doi: f.url,
+                                      }).catch(() => {});
+                                    }}
+                                  >
+                                    取消
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className={`${ghostActionClass} shrink-0`}
+                                  disabled={followupBusy[fkey] === "关联中…"}
+                                  title="选一个已下载的 PDF，按本行标题复制进 papers/（文件名随意）"
+                                  onClick={() => {
+                                    setFollowupBusy((cur) => ({ ...cur, [fkey]: "关联中…" }));
+                                    void attachPdf(f.title).finally(() => {
+                                      setFollowupBusy((cur) => {
+                                        const next = { ...cur };
+                                        delete next[fkey];
+                                        return next;
+                                      });
+                                      refreshFollowupSaved();
+                                    });
+                                  }}
+                                >
+                                  {followupBusy[fkey] === "关联中…" ? "关联中…" : "关联"}
+                                </button>
+                              </span>
+                            )}
                           </li>
                           );
                         })}
                       </ul>
+                      <div className="mt-1 flex min-w-0 items-center gap-2 px-1">
+                        <button
+                          type="button"
+                          className={`${ghostActionClass} shrink-0`}
+                          title="打开课题的 papers/。PDF 在这里，拖进 Zotero 或 EndNote"
+                          onClick={() => {
+                            void invoke("zotero_open_papers", { projectRoot }).catch((reason) =>
+                              setError(String(reason)),
+                            );
+                          }}
+                        >
+                          打开 papers/
+                        </button>
+                      </div>
+                      </>
                     )}
                   </div>
                 )}

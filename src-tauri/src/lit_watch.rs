@@ -193,6 +193,73 @@ fn parse_batch_marker(line: &str) -> Option<String> {
     }
 }
 
+/// 巡检完成时刻 → 上海日历日。批次标记用这个，不用论文发表日期，也不用 UTC 日。
+pub(crate) fn shanghai_calendar_day(iso: &str) -> Option<String> {
+    let raw = iso.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let east = chrono::FixedOffset::east_opt(8 * 3600)?;
+    let dt = chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%SZ")
+                .ok()
+                .and_then(|n| n.and_utc().fixed_offset().into())
+        })?;
+    let day = dt.with_timezone(&east).format("%Y-%m-%d").to_string();
+    validated_batch_date(&day)
+}
+
+/// 给还没有批次标记的收件箱补一行。已有标记的旧条目不动，避免改掉忽略记录用的 id。
+/// 只插入标记行，其余字节保持原样。返回是否写了盘。
+pub(crate) fn stamp_undated_inbox(root: &Path, day: &str) -> Result<bool, String> {
+    let day = validated_batch_date(day).ok_or_else(|| format!("巡检日期无效: {day}"))?;
+    let Some(text) = read_text_inside(root, "notes/inbox.md")? else {
+        return Ok(false);
+    };
+    let entries = parse_inbox_entries_with_cap(&text, false);
+    if entries.is_empty() || entries.iter().all(|e| e.date.is_some()) {
+        return Ok(false);
+    }
+    let marker = format!("<!-- watch-run: {day} -->\n");
+    let mut out = String::with_capacity(text.len() + marker.len() * 2);
+    let mut line_start = 0usize;
+    let mut covered = false;
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i <= bytes.len() {
+        let at_end = i == bytes.len();
+        let at_nl = !at_end && bytes[i] == b'\n';
+        if at_end || at_nl {
+            let line = &text[line_start..i];
+            let trimmed = line.trim();
+            let is_batch =
+                trimmed.starts_with("<!-- watch-run:") || parse_batch_heading(line).is_some();
+            if is_batch {
+                covered = true;
+            } else if line.starts_with("## ") && !covered {
+                out.push_str(&marker);
+                covered = true;
+            }
+            out.push_str(line);
+            if at_nl {
+                out.push('\n');
+            }
+            line_start = i + 1;
+        }
+        if at_end {
+            break;
+        }
+        i += 1;
+    }
+    if out == text {
+        return Ok(false);
+    }
+    write_text_inside(root, "notes/inbox.md", &out)?;
+    Ok(true)
+}
+
 fn validated_batch_date(day: &str) -> Option<String> {
     if day.len() != 10
         || day.as_bytes().iter().enumerate().any(|(i, b)| {
@@ -876,6 +943,50 @@ fn sanitize_pdf_name(hint: &str) -> String {
     } else {
         format!("{stem}.pdf")
     }
+}
+
+/// 采纳时把隔离树 papers/ 里主仓还没有的 PDF 拷进项目根并登记。
+/// 只收文件头是 %PDF- 的；主仓已有同名文件则跳过，不覆盖人已有的全文。
+pub(crate) fn adopt_watch_pdfs(isolation: &Path, project: &Path) -> Result<Vec<String>, String> {
+    let src_dir = isolation.join("papers");
+    if !src_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let dest_dir = papers_dir(project)?;
+    let mut copied = Vec::new();
+    let entries = fs::read_dir(&src_dir).map_err(|e| format!("读取隔离 papers/ 失败: {e}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.to_ascii_lowercase().ends_with(".pdf") {
+            continue;
+        }
+        if meta.len() == 0 || meta.len() > DOWNLOAD_CAP as u64 {
+            continue;
+        }
+        let dest = dest_dir.join(name);
+        if dest.exists() {
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|e| format!("读取 {name} 失败: {e}"))?;
+        if !looks_like_pdf(&bytes) {
+            continue;
+        }
+        fs::write(&dest, &bytes).map_err(|e| format!("写入 {name} 失败: {e}"))?;
+        let stem = name.trim_end_matches(".pdf").trim_end_matches(".PDF");
+        register_pdf(project, &dest, stem, "")?;
+        copied.push(format!("papers/{name}"));
+    }
+    copied.sort();
+    Ok(copied)
 }
 
 /// 重名避让：x.pdf → x-2.pdf → x-3.pdf …
@@ -1566,10 +1677,79 @@ fn save_explain_at(root: &Path, title: &str, text: &str) -> Result<(), String> {
 
 // ===== Tauri commands =====
 
+/// 已采纳进主仓、但收件箱漏写批次标记时，打开雷达用那次成功巡检的完成日补上。
+/// 只在全部条目都缺日期时写：混有已标记批次时不猜哪几条属于哪一次。
+fn backfill_missing_batch(root: &Path) -> Result<(), String> {
+    let Some(text) = read_text_inside(root, "notes/inbox.md")? else {
+        return Ok(());
+    };
+    let entries = parse_inbox_entries_with_cap(&text, false);
+    if entries.is_empty() || entries.iter().any(|e| e.date.is_some()) {
+        return Ok(());
+    }
+    let Some(day) = latest_adopted_watch_day(root) else {
+        return Ok(());
+    };
+    stamp_undated_inbox(root, &day)?;
+    Ok(())
+}
+
+fn latest_adopted_watch_day(root: &Path) -> Option<String> {
+    let path = dirs::config_dir()?.join("ccode").join("schedules.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let list: Vec<crate::scheduler::Schedule> = serde_json::from_str(&text).ok()?;
+    let root_s = root.to_string_lossy();
+    let mut best: Option<(String, String)> = None;
+    for task in list {
+        if task.skill != "lit-watch" {
+            continue;
+        }
+        if !crate::paths::same_path(&task.project_root, root_s.as_ref()) {
+            continue;
+        }
+        for rec in task.history {
+            if rec.status != "ok" || !rec.adopted || rec.new_entries.unwrap_or(0) == 0 {
+                continue;
+            }
+            let when = rec.finished_at.clone().unwrap_or(rec.at);
+            let Some(day) = shanghai_calendar_day(&when) else {
+                continue;
+            };
+            if best.as_ref().map(|(w, _)| when > *w).unwrap_or(true) {
+                best = Some((when, day));
+            }
+        }
+    }
+    best.map(|(_, day)| day)
+}
+
+/// 人手补记：全部条目都缺巡检日期时，按给出的巡检日写一行批次标记。
+/// 已有任一条带日期则不写，避免把不同批次归到同一天。
+#[tauri::command]
+pub async fn repair_watch_batch_dates(project_root: String, day: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = gated_root(&project_root)?;
+        let Some(text) = read_text_inside(&root, "notes/inbox.md")? else {
+            return Ok(false);
+        };
+        let entries = parse_inbox_entries_with_cap(&text, false);
+        if entries.is_empty() || entries.iter().any(|e| e.date.is_some()) {
+            return Ok(false);
+        }
+        stamp_undated_inbox(&root, &day)
+    })
+    .await
+    .map_err(|e| format!("补巡检日期失败: {e}"))?
+}
+
 #[tauri::command]
 pub async fn list_watch_entries(project_root: String) -> Result<WatchInboxDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = gated_root(&project_root)?;
+        // 漏写批次的已采纳巡检：打开时补一行，趋势才能归周。写失败仍按原文件展示。
+        if let Err(e) = backfill_missing_batch(&root) {
+            crate::logbuf::record("warn", "lit-watch", &format!("补巡检批次日期失败: {e}"));
+        }
         let mut entries = match read_text_inside(&root, "notes/inbox.md")? {
             Some(text) => parse_inbox_entries(&text),
             None => Vec::new(),
@@ -2051,6 +2231,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
     fn papers_dir_strips_verbatim_and_stays_inside() {
         let root = tmpdir("papers-verb");
         let papers = papers_dir(&root).unwrap();
@@ -2129,6 +2310,41 @@ mod tests {
         assert!(legacy.id.starts_with("w-"));
         // 行范围：完整条目从 ## 行（14）起到块内最后一个非空行（24，含坏行/未知字段行）
         assert_eq!(full.raw_line_range, [14, 24]);
+    }
+
+    #[test]
+    fn stamp_undated_inbox_inserts_one_marker_and_leaves_dated_runs_alone() {
+        let dir = tmpdir("stamp");
+        let original = "## 论文 A\n- 来源：期刊 — 2026-10-01 — https://doi.org/10.1/a\n- 相关性：推荐\n\n## 论文 B\n- 相关性：相关\n";
+        write(&dir, "notes/inbox.md", original);
+        assert!(stamp_undated_inbox(&dir, "2026-10-03").unwrap());
+        let stamped = fs::read_to_string(dir.join("notes/inbox.md")).unwrap();
+        assert!(stamped.starts_with("<!-- watch-run: 2026-10-03 -->\n## 论文 A\n"));
+        assert_eq!(stamped.matches("watch-run").count(), 1);
+        let entries = parse_inbox_entries(&stamped);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.date.as_deref() == Some("2026-10-03")));
+        // 再补一次是空操作
+        assert!(!stamp_undated_inbox(&dir, "2026-10-04").unwrap());
+        // 标记会覆盖后面所有条目，直到下一个标记。已全部有日期时不改文件。
+        let dated = "<!-- watch-run: 2026-08-01 -->\n## 旧\n- 相关性：推荐\n\n## 同批\n- 相关性：相关\n";
+        write(&dir, "notes/inbox.md", dated);
+        assert!(!stamp_undated_inbox(&dir, "2026-10-03").unwrap());
+        // 标记前面漏写的条目补一行；标记之后的旧批次保持原日期
+        let leading = "## 漏写\n- 相关性：推荐\n\n<!-- watch-run: 2026-08-01 -->\n## 旧\n- 相关性：相关\n";
+        write(&dir, "notes/inbox.md", leading);
+        assert!(stamp_undated_inbox(&dir, "2026-10-03").unwrap());
+        let text = fs::read_to_string(dir.join("notes/inbox.md")).unwrap();
+        let entries = parse_inbox_entries(&text);
+        assert_eq!(entries[0].date.as_deref(), Some("2026-10-03"));
+        assert_eq!(entries[1].date.as_deref(), Some("2026-08-01"));
+        assert_eq!(
+            shanghai_calendar_day("2026-10-02T16:30:00Z").as_deref(),
+            Some("2026-10-03")
+        );
+        assert_eq!(shanghai_calendar_day("2026-10-03T05:36:19Z").as_deref(), Some("2026-10-03"));
+        assert_eq!(shanghai_calendar_day("not-a-date"), None);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -312,6 +312,21 @@ fn lock_headless_session(agent: &str) -> (Option<String>, Vec<String>) {
     (Some(id.clone()), vec!["--session-id".into(), id])
 }
 
+/// CLI 输出里的已知良性噪音行：不影响结果，混进任务摘要会冒充错误正文。
+/// claude-code ≥2.1.285 对任何非官方模型 id（网关模型如 glm-*）在 -p/SDK 查询前都会
+/// 打一行 `[claude-code:unrecognized_model] {...}`（warn 级遥测，打完请求照发——
+/// 2026-10-03 假端点与真实网关双重实证均正常完成）；Mesa 捕获层整行过滤，防用户误诊。
+fn strip_known_cli_noise(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            !line
+                .trim_start()
+                .starts_with("[claude-code:unrecognized_model]")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn run_capture_for(
     agent: Option<&str>,
     expected_host: Option<&str>,
@@ -323,8 +338,8 @@ fn run_capture_for(
     if captured.cancelled {
         return Err("任务已取消".into());
     }
-    let out = String::from_utf8_lossy(&captured.stdout);
-    let err = String::from_utf8_lossy(&captured.stderr);
+    let out = strip_known_cli_noise(&String::from_utf8_lossy(&captured.stdout));
+    let err = strip_known_cli_noise(&String::from_utf8_lossy(&captured.stderr));
     if let Some(agent) = agent {
         remember_headless_session(agent, &out, &err);
     }
@@ -343,7 +358,13 @@ fn run_capture_for(
         return Ok(text);
     }
     let detail = if err.trim().is_empty() { out } else { err };
-    Err(summarize_headless_error(detail.trim(), expected_host))
+    let detail = detail.trim();
+    if detail.is_empty() {
+        // 噪音过滤后可能两头皆空：如实说没有错误信息，别给一条空摘要
+        let code = captured.status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        return Err(format!("AI 无头调用失败（退出码 {code}），CLI 未输出错误信息"));
+    }
+    Err(summarize_headless_error(detail, expected_host))
 }
 
 pub(crate) fn ai_prompt_impl(
@@ -2055,6 +2076,19 @@ mod tests {
         let only = vec![official];
         let p = resolve_profile_from(only, None, None, None, no_hidden).unwrap();
         assert_eq!(p.id, "off");
+    }
+
+    #[test]
+    fn strip_known_cli_noise_removes_unrecognized_model_warning() {
+        // claude-code ≥2.1.285 对网关模型（glm-* 等）在 -p 查询前打的良性 warn：
+        // 整行过滤，其余行原样保留（含前导空格的变体也滤）
+        let raw = "Warning: something else\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n实际输出文本";
+        let stripped = strip_known_cli_noise(raw);
+        assert!(!stripped.contains("unrecognized_model"), "{stripped}");
+        assert!(stripped.contains("Warning: something else"), "{stripped}");
+        assert!(stripped.contains("实际输出文本"), "{stripped}");
+        assert_eq!(strip_known_cli_noise("  [claude-code:unrecognized_model] x\nok"), "ok");
+        assert_eq!(strip_known_cli_noise("干净输出"), "干净输出");
     }
 
     #[test]

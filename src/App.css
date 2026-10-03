@@ -1485,6 +1485,13 @@ select:focus-visible {
   box-shadow: none !important;
 }
 
+/* 带图标/清除钮的搜索壳（如设置页分区搜索）：焦点反馈由容器 focus-within 底色加深承载；
+   全局 focus 环未入层、会压过 outline-none 工具类，画在内部 input 上是一圈直角方框。 */
+.ccode-search-shell input:focus,
+.ccode-search-shell input:focus-visible {
+  outline: 0 !important;
+}
+
 /* 文件列表用选中底色表示当前预览项；方向键切换时不要再套系统蓝框。 */
 .ccode-file-list,
 .ccode-file-list:focus,

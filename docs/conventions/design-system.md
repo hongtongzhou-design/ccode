@@ -84,7 +84,10 @@
   （TerminalPage 两处，勿落通用 monospace——Windows 会解析成位图字体）。新增等宽/正文场景一律用这两条链，别自造栈。
 - **线条语言（去格子化，v3.35/v3.37 定稿；v3.85 补「去线条化」）**：内联内容容器一律**不加 1px 描边**，靠底色差 + 圆角 + hairline 分层；边框只给
   浮层与控件。strip/inset/raised 三级梯度七套主题必须可分辨；hairline/field 与底色对比度七主题同档。**区间分隔优先留白**
-  （折叠区标题、rail 底部、PageHeader 均不画横线）。搜索框无描边（inset 底 + 聚焦加深），输入框保留 field 边。**全站线宽
+  （折叠区标题、rail 底部、PageHeader 均不画横线）。搜索框无描边（inset 底 + 聚焦加深），输入框保留 field 边。
+  **带图标/清除钮的搜索壳挂 `.ccode-search-shell`**（2026-10-03）：焦点反馈由容器 focus-within 底色加深承载；全局
+  `input:focus-visible` 环在 App.css 未入层、压得过 `outline-none` 工具类，画在内部 input 上是直角方框——同 chat-composer /
+  command-palette 一样走未入层豁免，别只靠工具类。**全站线宽
   0.5px**（App.css 覆写 border/divide；focus outline 不动）。**侧栏只保留全高竖分界 + 底部管理区一根横线**。**共享控件集中
   `PageFrame.tsx`**（primary/secondary/rowAction/ghostAction/field/searchField/hoverReveal + SegTabs + FoldMark），禁各页复制本地类，
   一律用通用语义令牌。编辑器面走 `--color-editor-bg/fg/line`，Monaco 经 MutationObserver 随主题换肤。
@@ -285,8 +288,9 @@
   显眼白补丁，2026-08-26 用户两轮反馈后统一收掉：诊断卡、数据与存储行、导航项目勾选区全部去底）；**成组编辑器例外走
   统一内容卡分组**（2026-08-26 用户拍板：快捷键区「页面快捷键」「全局快捷键」各收一张 `rounded-lg ccode-well p-3` 卡，
   卡内标准列表行 = 功能名在左、控件靠右，宽屏双列 `lg:grid-cols-2`——卡片容器收拢离散视线、消除右侧大片空白）；
-  无说明文字的密集短项（导航项目勾选）用 `grid-cols-[repeat(5,max-content)]` 固定列轨对齐（flex-wrap 第二行会错位，
-  用户点名为「没对齐」），列间固定间隙不摊宽；
+  无说明文字的密集短项（导航项目勾选）用固定五列轨对齐（flex-wrap 第二行会错位，用户点名为「没对齐」）；列轨宽度按宿主取——
+  整宽内容卡里用 `grid-cols-[repeat(5,minmax(0,1fr))]` 等宽填满卡宽（max-content 轨右侧留一块死空间，2026-10-03 用户反馈
+  「右边空一块」），非整宽容器才用 max-content 收拢；
   行内条件出现的低频钮用 `invisible` 占位而非条件渲染，且加 `shrink-0` 防窄容器压缩换行。
   （开关开启态曾试改柔绿 bg-ok-text，2026-08-25 用户拍板改回品牌色 bg-cta 随主题——开关色不再单独约定。）
 - **全站导航按工作流分层**：侧栏顺序固定为工作（工作区/终端/对话）→ 能力（配置/技能/MCP/统计）→ 底部只留设置，首启默认进
