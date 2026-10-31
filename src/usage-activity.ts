@@ -209,14 +209,18 @@ export const HEAT_GAP_PX = 3;
 export const HEAT_CELL_MIN_PX = 9;
 /** 格子边长上限（2026-10-16 单模布局拍板：胶囊全上卡头、主区无左栏，格子吃满卡宽，
  *  16 → 28 两轮上调）。当前用量页 1440 限宽下实际最大 ~21–22px；28 只是放开限宽前的
- *  地砖闸，不得再抬。到顶后主区收成内容宽、卡片保持列宽。 */
+ *  地砖闸，不得再抬。 */
 export const HEAT_CELL_MAX_PX = 28;
 /** 活跃度卡 `p-4` 左右合计。哨兵量的是卡外满宽，算格子前要扣掉。 */
 export const HEAT_WELL_PAD_PX = 32;
 
-/** 格子边长：可用宽度能放下的最大整数 px，夹在 9–28。 */
-export function heatCellPx(avail: number, weeks: number): number {
+/** 格子边长：可用宽度能放下的最大值，夹在 9–28。取整单位是**设备像素**（2026-10-31）：
+ *  整数倍屏（Mac 视网膜 2x）按 1/dpr 步进，每格、每道间距仍落在整设备像素上、列宽一致，
+ *  窗口拉伸时网格每档只跳约 57×0.5px 而不是 57px；非整数缩放（Windows 125%/150%）
+ *  3px 间距本就落不到整设备像素，维持整 CSS px 步进不变。 */
+export function heatCellPx(avail: number, weeks: number, dpr = 1): number {
   const w = Math.max(1, weeks);
-  const raw = Math.floor((avail - HEAT_LABEL_PX) / w) - HEAT_GAP_PX;
+  const k = Number.isInteger(dpr) && dpr >= 1 ? dpr : 1;
+  const raw = Math.floor((((avail - HEAT_LABEL_PX) / w) - HEAT_GAP_PX) * k) / k;
   return Math.max(HEAT_CELL_MIN_PX, Math.min(HEAT_CELL_MAX_PX, raw));
 }

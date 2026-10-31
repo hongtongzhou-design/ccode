@@ -23,7 +23,6 @@ import {
   activityDatePhrase,
   activeMainDays,
   buildRollingGrid,
-  HEAT_CELL_MAX_PX,
   HEAT_WELL_PAD_PX,
   heatCellPx,
   levelOf,
@@ -101,9 +100,9 @@ export default function ActivityHeatmap({
   const seq = useRef(0);
   const agentsSeq = useRef(0);
   const measureRef = useRef<HTMLDivElement>(null);
-  /** 布局只跟页面满宽哨兵走（始终 100%，与主区是否 hug 无关）。单模布局
+  /** 布局只跟页面满宽哨兵走（始终 100%，与主区自身宽度无关）。单模布局
    *  （2026-10-16 拍板）：胶囊全在卡头一行、主区无左栏，格子 9–28px 正方形
-   *  吃满卡宽；28 只是地砖闸，到顶后主区收成内容宽居中、卡片保持列宽对齐兄弟卡。
+   *  吃满卡宽；主区恒收成内容宽在卡内居中（2026-10-31），卡片保持列宽对齐兄弟卡。
    *  容器查询在本环境不稳，ResizeObserver 确定性写入 */
   const [cellPx, setCellPx] = useState(11);
   const weeksRef = useRef(53);
@@ -226,7 +225,7 @@ export default function ActivityHeatmap({
     let cell = 11;
     const sync = (urgent: boolean) => {
       const inner = Math.max(0, track.clientWidth - HEAT_WELL_PAD_PX);
-      const nextCell = heatCellPx(inner, weeksRef.current);
+      const nextCell = heatCellPx(inner, weeksRef.current, window.devicePixelRatio);
       if (nextCell === cell) return;
       // 格子边长变了，开着的浮层锚定坐标全部作废，一并关掉
       cell = nextCell;
@@ -241,7 +240,22 @@ export default function ActivityHeatmap({
     sync(false);
     const ro = new ResizeObserver(() => sync(true));
     ro.observe(track);
-    return () => ro.disconnect();
+    // 窗口拖到另一块屏（视网膜↔普通）只变像素比、宽度不变，观察器不响；按当前比值挂一次性查询，变了重算再换挂
+    let mq: MediaQueryList | null = null;
+    const onDpr = () => {
+      sync(true);
+      watchDpr();
+    };
+    const watchDpr = () => {
+      mq?.removeEventListener("change", onDpr);
+      mq = window.matchMedia?.(`(resolution: ${window.devicePixelRatio}dppx)`) ?? null;
+      mq?.addEventListener("change", onDpr);
+    };
+    watchDpr();
+    return () => {
+      ro.disconnect();
+      mq?.removeEventListener("change", onDpr);
+    };
     // dto 为 null 的首帧不渲染主区（早退骨架），数据到了哨兵出现时才挂观察器；
     // dto 重拉（今天跨周）会让周列数变化，哨兵宽度可能不变、观察器不响，也要重算
   }, [dto]);
@@ -593,8 +607,6 @@ export default function ActivityHeatmap({
   );
 
 
-  const hug = cellPx >= HEAT_CELL_MAX_PX;
-
   return (
     // 用量页一律卡片（2026-10-29 参考 Claude 客户端用量页）：卡头标题 + Agent 筛选分段 + 起止月份
     <div className="mb-4">
@@ -604,7 +616,7 @@ export default function ActivityHeatmap({
       aria-hidden="true"
     />
     <section
-      className={`ccode-well ccode-card p-4${hug ? " ccode-heat-hug" : ""}`}
+      className="ccode-well ccode-card p-4"
       aria-label="活跃度"
     >
       <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-2">

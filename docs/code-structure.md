@@ -323,7 +323,7 @@ components/ProjectRulesPanel.tsx  # 项目设置抽屉「规则」面板（Proje
   components/ActivityHeatmap.tsx  # 用量页「活跃度」热力图区块（2026-10-12）：真 table role=grid + CSS 格子（几何全在
                              #   App.css .ccode-heat*，档位色 --heat-1..4 令牌）；去年同月 1 日到今天、与 range 解耦；
                              #   单模布局（2026-10-16）：胶囊全在卡头一行（标题后、窗口范围前），网格吃满卡宽；
-                             #   格子边长 11–28 整数、28 封顶后卡片 hug 内容宽；统计行+少多色阶常驻网格下方；
+                             #   格子边长 9–28 按设备像素分档、观察器回调 flushSync 与卡片同帧到位，主区恒收成内容宽居中；统计行+少多色阶常驻网格下方；
                              #   布局观察满宽哨兵（禁止观察 hug 主区，防抖动）
                              #   挂在 StatsPage empty 三元之外（页面空态是 range 口径）；共享单例 tooltip
                              #   （pointerover 委托 + 键盘焦点同款触发）+ roving tabindex 方向键漫游；
@@ -833,7 +833,7 @@ stats-trend.ts             # 用量页「每日用量」折线的自适应日期
   usage-activity.ts          # 活跃度热力图纯逻辑：周一开头滚动网格（去年同月 1 日到今天，不翻年；整年网格
                              #   buildYearGrid/yearBounds/future 标记随 2026-10-15 时间窗改口移除）/ 月份标签避让 /
                              #   非零天四分位分档（GitHub 同构）/ streaks（今天宽限，跨年不断档）/ yearStats / 中文日期短语 /
-                             #   布局：heatCellPx 11–28 夹紧（2026-10-16 单模，rail/wide 三档判定已撤销）；
+                             #   布局：heatCellPx 9–28 夹紧、整数倍屏按 1/dpr 分档（2026-10-16 单模，rail/wide 三档判定已撤销）；
                              #   口径铁律：着色、活跃、streak 恒只算非 internal（official 计入），着色量=四类合计（tests/usage-activity.test.ts）
   gateway-balance.ts         # 网关余额卡纯逻辑：主机命中 / 站点币种金额 / 已用百分比 /
                              #   大数字拆币种符号 splitBalanceAmount（整串 2xl 头重脚轻、tokens 更长）/

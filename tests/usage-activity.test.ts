@@ -160,8 +160,26 @@ test("heatCellPx：9–28 夹紧，28 以上不再抬", () => {
   // 2026-10-31 窄卡实测：卡内约 773、57 周——旧下限 11 要 820 出滚动条，现在 10px 放得下
   assert.equal(heatCellPx(773, 57), 10);
   // 算出的边长放回表格宽度公式（22 + (cell+3)×周数）不得超出可用宽度
-  for (const avail of [700, 773, 918, 1360]) {
-    const cell = heatCellPx(avail, 57);
-    if (cell > HEAT_CELL_MIN_PX) assert.ok(22 + (cell + 3) * 57 <= avail, `avail ${avail}`);
+  for (const dpr of [1, 1.25, 2, 3]) {
+    for (const avail of [700, 773, 918, 1360]) {
+      const cell = heatCellPx(avail, 57, dpr);
+      if (cell > HEAT_CELL_MIN_PX) assert.ok(22 + (cell + 3) * 57 <= avail, `avail ${avail} dpr ${dpr}`);
+    }
   }
+});
+
+test("heatCellPx：整数倍屏按设备像素分档，非整数缩放仍按整 px", () => {
+  // 2x：(918-22)/53-3 = 13.9 → 13.5（整 px 只能停在 13，窗口多拉半档就该长）
+  assert.equal(heatCellPx(918, 53, 2), 13.5);
+  assert.equal(heatCellPx(918, 53, 3), 13 + 2 / 3);
+  // 每格边长 × dpr 必须是整设备像素，列与列宽窄才一致
+  for (const avail of [773, 918, 1111, 1360]) {
+    for (const dpr of [2, 3]) {
+      const v = heatCellPx(avail, 57, dpr) * dpr;
+      assert.ok(Math.abs(v - Math.round(v)) < 1e-9, `avail ${avail} dpr ${dpr}`);
+    }
+  }
+  // 125% / 150%：3px 间距本就落不到整设备像素，维持整 CSS px，与 dpr=1 同值
+  assert.equal(heatCellPx(918, 53, 1.25), 13);
+  assert.equal(heatCellPx(918, 53, 1.5), 13);
 });
