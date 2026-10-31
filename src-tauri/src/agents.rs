@@ -549,18 +549,26 @@ fn claude_token_shadowed() -> bool {
     }
 }
 
-/// 在看不到令牌的环境里跑 claude 子命令：令牌类变量置空；macOS 凭证在钥匙串（与 HOME 无关），
-/// 再把 HOME 指到空临时目录，磁盘 settings.json 的 env 就读不到。CLAUDE_CONFIG_DIR 自定义时钥匙串项名随目录变，不动 HOME
+/// 在看不到令牌的环境里跑 claude 子命令：令牌类变量置空；再把 HOME 指到空临时目录，磁盘 settings.json 的 env 就读不到。
+/// 钥匙串搜索列表按 HOME 找 ~/Library/Keychains，临时目录里必须链回真 Library，否则官方登录永远读成「未登录」
+/// （2026-10-31 实证：订阅卡读得到余量、连接页却说没登录）。CLAUDE_CONFIG_DIR 自定义时钥匙串项名随目录变，不动 HOME
 fn cli_output_neutral_claude(path: &std::path::Path, args: &[&str], timeout: std::time::Duration) -> Option<String> {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut envs: Vec<(String, String)> = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
         .iter()
         .map(|k| ((*k).to_string(), String::new()))
         .collect();
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut tmp: Option<PathBuf> = None;
-    if cfg!(target_os = "macos") && std::env::var_os("CLAUDE_CONFIG_DIR").is_none_or(|v| v.is_empty()) {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_none_or(|v| v.is_empty()) {
         let dir = std::env::temp_dir().join(format!("mesa-claude-probe-{}", uuid::Uuid::new_v4().simple()));
         if std::fs::create_dir_all(&dir).is_ok() {
-            envs.push(("HOME".into(), dir.to_string_lossy().into_owned()));
+            let linked = crate::dirs::home_dir()
+                .is_some_and(|h| std::os::unix::fs::symlink(h.join("Library"), dir.join("Library")).is_ok());
+            if linked {
+                envs.push(("HOME".into(), dir.to_string_lossy().into_owned()));
+            }
             tmp = Some(dir);
         }
     }
