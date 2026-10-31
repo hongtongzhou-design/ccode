@@ -245,11 +245,7 @@ export default function ImageGenPanel({
       : skill === null
         ? { text: "技能 image-gen 还没进技能库，重启 Mesa 后自动加入", cls: "text-l3" }
         : enabledAgents.length > 0
-          ? {
-              text: `已给 ${enabledAgents.length} 家 Agent 打开技能，说「画一张…」就会用它`,
-              tip: enabledAgents.map(labelOf).join("、"),
-              cls: "text-l3",
-            }
+          ? null // 正常态不写说明（2026-10-31 用户删去「已给 N 家…」），开了哪几家看「技能开关」
           : { text: "还没给 Agent 打开技能 image-gen", cls: "text-warn-text" };
   const currentRun = currentKey ? runs[currentKey] : undefined;
 
@@ -305,12 +301,11 @@ export default function ImageGenPanel({
                 {model || <span className="font-sans text-xs text-l3">还没选</span>}
               </span>
             </span>
-            <span
-              className={`col-start-2 row-start-3 mt-0.5 block break-words text-micro @min-[60rem]/rows:row-start-2 ${caption.cls}`}
-              title={"tip" in caption ? caption.tip : undefined}
-            >
-              {caption.text}
-            </span>
+            {caption && (
+              <span className={`col-start-2 row-start-3 mt-0.5 block break-words text-micro @min-[60rem]/rows:row-start-2 ${caption.cls}`}>
+                {caption.text}
+              </span>
+            )}
             <span className="col-start-3 row-span-3 row-start-1 flex min-w-0 items-center self-center text-xs @min-[60rem]/rows:col-start-4">
               {currentRun?.status === "done" && (
                 <span className="flex min-w-0 items-center gap-1 text-l2" title={`${currentRun.protocol} · ${secs(currentRun.ms)}`}>
