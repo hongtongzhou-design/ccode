@@ -8,7 +8,7 @@
 export const CHAT_FONT_SIZES = ["small", "normal", "large", "xlarge"] as const;
 export type ChatFontSize = (typeof CHAT_FONT_SIZES)[number];
 
-export const CHAT_FONT_FAMILIES = ["system", "serif", "mono"] as const;
+export const CHAT_FONT_FAMILIES = ["system", "serif", "kai", "mono"] as const;
 export type ChatFontFamily = (typeof CHAT_FONT_FAMILIES)[number];
 
 export const CHAT_ACCENTS = ["off", "warm", "amber", "teal", "violet"] as const;
@@ -54,12 +54,18 @@ export function chatFontSizePx(v: unknown): number | null {
 }
 
 /** 字体 → font-family 栈。系统档返回 null = 继承全局栈。
-   衬线栈把中文衬线（宋体系）排在西文衬线前面：混排时汉字不会掉回黑体；
+   中文字体不随包（一套几十 MB）：按「装了就用、没装落下一个」排，每条链最后都有系统预装的那一个。
+   衬线：思源宋体 → 宋体-简 / 宋体，西文跟着中文字体走。中文衬线排在 Georgia 前面：混排时汉字不会掉回黑体。
+   不用 ui-serif 取 New York：WKWebView 里它会把汉字整段换成苹方、后面的宋体全失效；按名字或 @font-face local()
+   也取不到 New York（2026-11-01 真 WKWebView 实测）。
+   楷体：霞鹜文楷（屏幕版在前）→ Mac 楷体-简（随系统预装）→ Windows 楷体；文楷自带西文，没装时西文跟楷体走。
    等宽栈直接复用 App.css 的 --font-mono（JetBrains Mono + CJK 兜底）。 */
 export function chatFontFamilyStack(v: unknown): string | null {
   switch (normalizeChatFontFamily(v)) {
     case "serif":
-      return `"Songti SC", "Noto Serif SC", "Source Han Serif SC", "SimSun", Georgia, "Times New Roman", serif`;
+      return `"Source Han Serif SC", "Source Han Serif SC VF", "Noto Serif SC", "Noto Serif CJK SC", "Songti SC", "SimSun", Georgia, "Times New Roman", serif`;
+    case "kai":
+      return `"LXGW WenKai Screen", "LXGW WenKai", "Kaiti SC", "STKaiti", "KaiTi", "楷体", serif`;
     case "mono":
       return "var(--font-mono)";
     default:
@@ -89,6 +95,7 @@ export const CHAT_FONT_SIZE_LABEL: Record<ChatFontSize, string> = {
 export const CHAT_FONT_FAMILY_LABEL: Record<ChatFontFamily, string> = {
   system: "系统",
   serif: "衬线",
+  kai: "楷体",
   mono: "等宽",
 };
 export const CHAT_ACCENT_LABEL: Record<ChatAccent, string> = {

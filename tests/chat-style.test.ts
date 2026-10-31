@@ -57,7 +57,11 @@ test("字号档递增，衬线栈中文衬线在前", () => {
   assert.equal(px[1], null);
   assert.ok(px[0]! < 13.5 && px[2]! > 14 && px[3]! > px[2]!);
   const serif = chatFontFamilyStack("serif")!;
+  assert.ok(serif.indexOf("Source Han Serif SC") < serif.indexOf("Songti SC"));
   assert.ok(serif.indexOf("Songti SC") < serif.indexOf("Georgia"));
+  const kai = chatFontFamilyStack("kai")!;
+  assert.ok(kai.indexOf("LXGW WenKai") < kai.indexOf("Kaiti SC"));
+  assert.ok(kai.includes("KaiTi"), "Windows 要有系统楷体兜底");
   assert.deepEqual(chatStyleVars({ chatFontSize: "large", chatFontFamily: "mono" }), {
     "--ccode-chat-fs": "15.5px",
     "--ccode-chat-ff": "var(--font-mono)",

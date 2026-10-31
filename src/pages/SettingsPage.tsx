@@ -2901,7 +2901,7 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
         <Row
           label="聊天字体"
           hint="系统 = 跟随界面字体"
-          labelTitle="衬线用宋体系（macOS 宋体-简、Windows 宋体 / 思源宋体），适合长文阅读；等宽用 JetBrains Mono，中文回退系统字体。代码块一直是等宽，不受影响"
+          labelTitle="衬线：中文优先思源宋体，没装用宋体（Mac 宋体-简、Windows 宋体），适合长文阅读；楷体：优先霞鹜文楷，没装用系统楷体；等宽用 JetBrains Mono，中文回退系统字体。代码块一直是等宽，不受影响"
         >
           <SegTabs
             variant="boxed"
