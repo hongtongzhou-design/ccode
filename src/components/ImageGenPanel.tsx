@@ -7,7 +7,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
 import { ImageIcon, X } from "lucide-react";
-import { FoldMark, ghostActionClass, primaryActionClass, settingsPillClass } from "./PageFrame";
+import AgentIcon from "./AgentIcon";
+import { FoldMark, ghostActionClass, primaryActionClass, settingsPillClass, Toggle } from "./PageFrame";
 import ImageModelPicker from "./ImageModelPicker";
 import { Modal } from "./Modal";
 import VendorIcon from "./VendorIcon";
@@ -370,39 +371,26 @@ export default function ImageGenPanel({
             </li>
           </ul>
           {agentsOpen && skill && (
-            <div className="border-b border-hairline px-4 py-3">
-              <p className="mb-2 text-micro text-l3">点一家开或关；关掉只撤这家的技能副本，出图模型和其他家不受影响</p>
-              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 xl:grid-cols-5">
-                {AGENTS.filter((a) => a.id in skill.apps).map((a) => {
-                  const on = !!skill.apps[a.id];
-                  // 本机没装的降权（已开着的照常显示，便于关掉）；与技能页同口径
-                  const notInstalled = agents.length > 0 && !installed.has(a.id);
-                  return (
-                    <button
-                      key={a.id}
-                      type="button"
-                      onClick={() => void toggleAgent(a.id)}
-                      disabled={toggling !== null || enabling}
-                      title={on ? `点击从 ${a.label} 移除出图技能` : notInstalled ? `本机没装 ${a.label}，打开后也没人读；仍可预先分发` : `给 ${a.label} 打开出图技能`}
-                      className={`flex h-9 items-center gap-2 rounded-md border px-2 text-sm transition-colors disabled:opacity-50 ${
-                        on
-                          ? "border-cta-bd bg-inset text-l1"
-                          : notInstalled
-                            ? "border-hairline bg-canvas text-l4 hover:bg-inset hover:text-l3"
-                            : "border-hairline bg-canvas text-l3 hover:bg-inset hover:text-l1"
-                      }`}
-                    >
-                      <span className={`size-2 shrink-0 rounded-full ${on ? "bg-ok-text" : "bg-l4"}`} />
-                      <span className="min-w-0 flex-1 truncate text-left">{a.label}</span>
-                      {toggling === a.id ? (
-                        <span className="shrink-0 text-micro text-l4">…</span>
-                      ) : (
-                        <span className="shrink-0 text-micro text-l4">{on ? "已开" : notInstalled ? "未安装" : "未开"}</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+            // 逐家开关：不套格子框，图标 + 名字 + 开关，与连接页行的线条语言一致（2026-10-31 用户：格子版「有点乱」）
+            <div className="grid grid-cols-1 gap-x-8 border-b border-hairline px-4 py-1.5 sm:grid-cols-2 xl:grid-cols-3">
+              {AGENTS.filter((a) => a.id in skill.apps).map((a) => {
+                const on = !!skill.apps[a.id];
+                // 本机没装的降权（已开着的照常显示，便于关掉）；与技能页同口径
+                const notInstalled = agents.length > 0 && !installed.has(a.id);
+                return (
+                  <div
+                    key={a.id}
+                    className="flex h-9 items-center gap-2.5"
+                    title={on ? `关掉只撤 ${a.label} 的技能副本，出图模型和其他家不受影响` : notInstalled ? `本机没装 ${a.label}，打开后也没人读` : undefined}
+                  >
+                    <AgentIcon agent={a.id} label={a.label} className={notInstalled ? "opacity-50" : ""} />
+                    <span className={`min-w-0 flex-1 truncate text-sm ${notInstalled ? "text-l4" : "text-l2"}`}>{a.label}</span>
+                    {notInstalled && <span className="shrink-0 text-micro text-l4">未安装</span>}
+                    {toggling === a.id && <span className="shrink-0 text-micro text-l4">…</span>}
+                    <Toggle checked={on} label={`${a.label} 出图技能`} onChange={() => void toggleAgent(a.id)} />
+                  </div>
+                );
+              })}
             </div>
           )}
           {groups !== null && items.length === 0 && (
