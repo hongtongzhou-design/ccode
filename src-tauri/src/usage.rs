@@ -28,7 +28,9 @@ const LIST_CAP: usize = 20;
 // v9（2026-10-22）：Codex / Gemini / Qwen 的输入数含缓存读（Codex 的输出还含推理），原先原样入库——缓存在费用里
 // 按全价再加一折、合计里算两遍，Codex 推理算两遍。改为入库时拆成没命中的输入（uncached_input）；
 // 只清这三家能从会话文件重抽的行（有 seen 标记）和它们的 seen 标记，其余 agent 与重抽不回来的行不动。
-const USAGE_SCHEMA_VERSION: &str = "9";
+// v10（2026-10-31）：Claude Code 同一次回复拆成几行、每行带整份 usage，原先逐行相加，用量约翻倍；改为按 message.id 合一。
+// 只清 Claude Code 能从会话文件重抽的行和它的 seen 标记；文件已被 CLI 清掉的旧行重抽不回来，保持原数。
+const USAGE_SCHEMA_VERSION: &str = "10";
 const SOURCE_CLI: &str = "cli";
 const SOURCE_CCODE_AI: &str = "ccode-ai";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -85,13 +87,16 @@ fn day_of_ms(ms: i64) -> String {
 }
 
 /// `own`：本文件自己的会话 id。Claude 接续文件开头复制了上游全部历史（行里 sessionId 是上游的），
-/// 那些用量已经记在上游文件名下，再算一遍就翻倍
+/// 那些用量已经记在上游文件名下，再算一遍就翻倍。
+/// 同一次回复按内容块（思考 / 文字 / 工具调用）拆成几行，每行都带这次回复的整份 usage（2026-10-31 实测
+/// 本机近三天约 4,900 组几乎全部逐字相同，偶有一行全 0 占位）：按 message.id 合成一次、逐项取大，否则拆几行算几遍
 fn claude_events<I, S>(lines: I, own: Option<&str>) -> Vec<UsageEvent>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut out = Vec::new();
+    let mut out: Vec<UsageEvent> = Vec::new();
+    let mut by_msg: HashMap<String, usize> = HashMap::new();
     for line in lines {
         let Ok(v) = serde_json::from_str::<Value>(line.as_ref()) else {
             continue;
@@ -113,7 +118,7 @@ where
             continue;
         };
         let num = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        out.push(UsageEvent {
+        let ev = UsageEvent {
             day: get_str(&v, "timestamp").map(day_of_iso).unwrap_or_default(),
             model: get_str(msg, "model").unwrap_or("").to_string(),
             input: num("input_tokens"),
@@ -123,7 +128,20 @@ where
             source: SOURCE_CLI.into(),
             internal: false,
             official: false,
-        });
+        };
+        let id = get_str(msg, "id").filter(|id| !id.is_empty());
+        if let Some(&at) = id.and_then(|id| by_msg.get(id)) {
+            let prev = &mut out[at];
+            prev.input = prev.input.max(ev.input);
+            prev.output = prev.output.max(ev.output);
+            prev.cache_read = prev.cache_read.max(ev.cache_read);
+            prev.cache_write = prev.cache_write.max(ev.cache_write);
+            continue;
+        }
+        if let Some(id) = id {
+            by_msg.insert(id.to_string(), out.len());
+        }
+        out.push(ev);
     }
     out
 }
@@ -910,12 +928,13 @@ fn ensure_usage_schema(conn: &Connection) -> Result<(), String> {
         .ok();
     if current.as_deref() != Some(USAGE_SCHEMA_VERSION) {
         // 旧索引没有可靠来源，清空后由会话源重新生成，避免把历史猜测伪装成权威分类。
-        // v7→v8 只是 Grok 提取口径变了，v8→v9 只是 Codex / Gemini / Qwen 拆缓存：只清这几家能从会话文件重抽的行
+        // v7→v8 只是 Grok 提取口径变了，v8→v9 只是 Codex / Gemini / Qwen 拆缓存，v9→v10 只是 Claude Code 按回复去重：只清这几家能从会话文件重抽的行
         // （有 seen 标记）和它们的 seen 标记，其它 agent 已建好的日行留着，避免整库重解析；文件已不在的行重抽不回来，
         // 留着（用量历史永久保留）
         let partial: Option<&[&str]> = match current.as_deref() {
-            Some("8") => Some(&["codex", "gemini", "qwen"]),
-            Some("7") => Some(&["grok", "codex", "gemini", "qwen"]),
+            Some("9") => Some(&["claude-code"]),
+            Some("8") => Some(&["claude-code", "codex", "gemini", "qwen"]),
+            Some("7") => Some(&["claude-code", "grok", "codex", "gemini", "qwen"]),
             _ => None,
         };
         let reset_sql = match partial {
@@ -3454,11 +3473,8 @@ mod tests {
             Some(USAGE_SCHEMA_VERSION)
         );
         assert!(meta_get(&conn, "initialized").is_none());
-        // v7 直升 v9：Grok（v8）与 Codex（v9）都重抽，Claude 不动
-        assert_eq!(
-            meta_get(&conn, "seen:claude-code:s-claude:live").as_deref(),
-            Some("old")
-        );
+        // v7 直升 v10：Grok（v8）、Codex（v9）、Claude（v10）都重抽
+        assert!(meta_get(&conn, "seen:claude-code:s-claude:live").is_none());
         assert!(meta_get(&conn, "seen:codex:s-codex:live").is_none());
         assert!(meta_get(&conn, "seen:grok:s-grok:live").is_none());
         let agents: Vec<String> = conn
@@ -3468,7 +3484,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(agents, vec!["claude-code".to_string()]);
+        assert!(agents.is_empty());
     }
 
     #[test]
@@ -3508,7 +3524,7 @@ mod tests {
         assert!(meta_get(&conn, "initialized").is_none());
         assert!(meta_get(&conn, "seen:codex:s-codex:live").is_none());
         assert!(meta_get(&conn, "seen:qwen:s-qwen").is_none());
-        assert_eq!(meta_get(&conn, "seen:claude-code:s-claude:live").as_deref(), Some("old"));
+        assert!(meta_get(&conn, "seen:claude-code:s-claude:live").is_none(), "v8 直升 v10 连 Claude 一起重抽");
         assert_eq!(meta_get(&conn, "seen:grok:s-grok:live").as_deref(), Some("old"));
         let left: Vec<String> = conn
             .prepare("SELECT agent || ':' || session_id FROM usage_daily ORDER BY 1")
@@ -3517,8 +3533,76 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        // 能重抽的三家行清掉；文件已不在（无 seen）的 Codex 行重抽不回来，留着
-        assert_eq!(left, vec!["claude-code:s-claude", "codex:s-gone", "grok:s-grok"]);
+        // 能重抽的几家行清掉；文件已不在（无 seen）的 Codex 行重抽不回来，留着
+        assert_eq!(left, vec!["codex:s-gone", "grok:s-grok"]);
+    }
+
+    #[test]
+    fn usage_schema_v10_reindexes_claude_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_daily(
+               day TEXT, agent TEXT, model TEXT, project_path TEXT, session_id TEXT,
+               input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER,
+               source TEXT, internal INTEGER, workspace TEXT, official INTEGER,
+               PRIMARY KEY(day, agent, model, project_path, session_id));
+             CREATE TABLE usage_meta(key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE usage_provenance(
+               agent TEXT NOT NULL, project_path TEXT NOT NULL,
+               session_id TEXT NOT NULL DEFAULT '',
+               source TEXT NOT NULL, internal INTEGER NOT NULL DEFAULT 0,
+               official INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL,
+               PRIMARY KEY(agent, project_path, session_id));
+             INSERT INTO usage_daily VALUES
+               ('2026-10-30','claude-code','opus','/repo','s-claude',10,2,0,0,'cli',0,'',0),
+               ('2026-09-01','claude-code','opus','/repo','s-old',10,2,0,0,'cli',0,'',0),
+               ('2026-10-30','claude-code','opus','/repo','ephemeral-x',10,2,0,0,'ccode-ai',1,'',0),
+               ('2026-10-30','codex','gpt-5','/repo','s-codex',10,2,4,0,'cli',0,'',0);
+             INSERT INTO usage_meta VALUES
+               ('schema_version','9'),
+               ('initialized','old'),
+               ('seen:claude-code:s-claude:live','old'),
+               ('seen:codex:s-codex:live','old');",
+        )
+        .unwrap();
+        ensure_usage_schema(&conn).unwrap();
+        assert_eq!(meta_get(&conn, "schema_version").as_deref(), Some(USAGE_SCHEMA_VERSION));
+        assert!(meta_get(&conn, "seen:claude-code:s-claude:live").is_none());
+        assert_eq!(meta_get(&conn, "seen:codex:s-codex:live").as_deref(), Some("old"));
+        let left: Vec<String> = conn
+            .prepare("SELECT agent || ':' || session_id FROM usage_daily ORDER BY 1")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // 文件已被清掉的旧行、不落盘的一次性调用行重抽不回来，留着；别家不动
+        assert_eq!(left, vec!["claude-code:ephemeral-x", "claude-code:s-old", "codex:s-codex"]);
+    }
+
+    #[test]
+    fn claude_reply_split_into_blocks_counts_once() {
+        let line = |id: &str, block: &str, u: &str| {
+            format!(
+                r#"{{"type":"assistant","sessionId":"me","timestamp":"2026-10-30T01:00:00Z","message":{{"id":"{id}","model":"m","content":[{{"type":"{block}"}}],"usage":{u}}}}}"#
+            )
+        };
+        let full = r#"{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":300,"cache_creation_input_tokens":20}"#;
+        let zero = r#"{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}"#;
+        let lines = vec![
+            line("msg_a", "thinking", full),
+            line("msg_a", "text", full),
+            line("msg_a", "tool_use", full),
+            // 偶见：头一行全 0 占位，后一行才是真数
+            line("msg_b", "thinking", zero),
+            line("msg_b", "text", full),
+        ];
+        let evs = claude_events(&lines, Some("me"));
+        assert_eq!(evs.len(), 2, "一次回复只算一次");
+        for ev in &evs {
+            assert_eq!((ev.input, ev.output, ev.cache_read, ev.cache_write), (10, 5, 300, 20));
+        }
     }
 
     #[test]
@@ -5498,3 +5582,4 @@ mod gateway_usage_tests {
         assert!(!dto.days.iter().any(|d| d.day == "2026-01-07"), "未来日不进矩阵");
     }
 }
+
