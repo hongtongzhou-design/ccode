@@ -3522,7 +3522,11 @@ fn restore_from(backups_dir: &Path, home: &Path, agent: &str) -> Result<Vec<Stri
 
 fn display_path(home: &Path, path: &Path) -> String {
     match path.strip_prefix(home) {
-        Ok(rel) => format!("~/{}", rel.to_string_lossy()),
+        // 家目录下一律写成 `~/a/b`：Windows 上 join 出来的是反斜杠，拼出 `~/.claude\settings.json` 两种分隔符混着
+        Ok(rel) => {
+            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            format!("~/{}", parts.join("/"))
+        }
         Err(_) => path.to_string_lossy().into_owned(),
     }
 }
