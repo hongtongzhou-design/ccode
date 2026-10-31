@@ -81,6 +81,8 @@ export default function ImageGenPanel({
   const [helperReady, setHelperReady] = useState<boolean | null>(null);
   const [skill, setSkill] = useState<SkillDto | null | undefined>(undefined);
   const [enabling, setEnabling] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [toggling, setToggling] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(() => readJson<boolean>(LS_COLLAPSED, false));
   const [lab, setLab] = useState(false);
   const [prompt, setPrompt] = useState(() => readJson<string>(LS_PROMPT, ""));
@@ -220,6 +222,22 @@ export default function ImageGenPanel({
     }
   }
 
+  // 逐家开关（2026-10-31 用户：「给 9 家打开，怎么单独移除」）：与技能页预览的应用开关同一调用，关掉即撤掉该家的技能副本
+  async function toggleAgent(agent: string) {
+    if (!skill || toggling || enabling) return;
+    const next = !skill.apps[agent];
+    setToggling(agent);
+    try {
+      await invoke("apply_skill", { id: skill.id, agent, enabled: next });
+      toast(next ? `已给 ${labelOf(agent)} 打开出图技能` : `已从 ${labelOf(agent)} 移除出图技能`);
+    } catch (e) {
+      toast(`${next ? "打开" : "移除"}失败：${String(e)}`);
+    } finally {
+      await loadSkill();
+      setToggling(null);
+    }
+  }
+
   const caption =
     helperReady === false
       ? { text: "这版 Mesa 没找到随包的出图工具，Agent 暂时调不了", cls: "text-warn-text" }
@@ -286,12 +304,24 @@ export default function ImageGenPanel({
                 {model || <span className="font-sans text-xs text-l3">还没选</span>}
               </span>
             </span>
-            <span
-              className={`col-start-2 row-start-3 mt-0.5 block break-words text-micro @min-[60rem]/rows:row-start-2 ${caption.cls}`}
-              title={"tip" in caption ? caption.tip : undefined}
-            >
-              {caption.text}
-            </span>
+            {skill ? (
+              // 点说明行展开逐家开关：哪家开着、单独关掉某一家
+              <button
+                type="button"
+                onClick={() => setAgentsOpen((v) => !v)}
+                aria-expanded={agentsOpen}
+                title={"tip" in caption ? `${caption.tip}；点开逐家管理` : "点开逐家管理"}
+                className={`col-start-2 row-start-3 mt-0.5 flex min-w-0 items-center gap-1 text-left text-micro hover:text-l1 @min-[60rem]/rows:row-start-2 ${caption.cls}`}
+              >
+                <span className="min-w-0 break-words">{caption.text}</span>
+                <span className="shrink-0 text-l4">· 逐家管理</span>
+                <FoldMark open={agentsOpen} />
+              </button>
+            ) : (
+              <span className={`col-start-2 row-start-3 mt-0.5 block break-words text-micro @min-[60rem]/rows:row-start-2 ${caption.cls}`}>
+                {caption.text}
+              </span>
+            )}
             <span className="col-start-3 row-span-3 row-start-1 flex min-w-0 items-center self-center text-xs @min-[60rem]/rows:col-start-4">
               {currentRun?.status === "done" && (
                 <span className="flex min-w-0 items-center gap-1 text-l2" title={`${currentRun.protocol} · ${secs(currentRun.ms)}`}>
@@ -339,6 +369,42 @@ export default function ImageGenPanel({
             </span>
             </li>
           </ul>
+          {agentsOpen && skill && (
+            <div className="border-b border-hairline px-4 py-3">
+              <p className="mb-2 text-micro text-l3">点一家开或关；关掉只撤这家的技能副本，出图模型和其他家不受影响</p>
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 xl:grid-cols-5">
+                {AGENTS.filter((a) => a.id in skill.apps).map((a) => {
+                  const on = !!skill.apps[a.id];
+                  // 本机没装的降权（已开着的照常显示，便于关掉）；与技能页同口径
+                  const notInstalled = agents.length > 0 && !installed.has(a.id);
+                  return (
+                    <button
+                      key={a.id}
+                      type="button"
+                      onClick={() => void toggleAgent(a.id)}
+                      disabled={toggling !== null || enabling}
+                      title={on ? `点击从 ${a.label} 移除出图技能` : notInstalled ? `本机没装 ${a.label}，打开后也没人读；仍可预先分发` : `给 ${a.label} 打开出图技能`}
+                      className={`flex h-9 items-center gap-2 rounded-md border px-2 text-sm transition-colors disabled:opacity-50 ${
+                        on
+                          ? "border-cta-bd bg-inset text-l1"
+                          : notInstalled
+                            ? "border-hairline bg-canvas text-l4 hover:bg-inset hover:text-l3"
+                            : "border-hairline bg-canvas text-l3 hover:bg-inset hover:text-l1"
+                      }`}
+                    >
+                      <span className={`size-2 shrink-0 rounded-full ${on ? "bg-ok-text" : "bg-l4"}`} />
+                      <span className="min-w-0 flex-1 truncate text-left">{a.label}</span>
+                      {toggling === a.id ? (
+                        <span className="shrink-0 text-micro text-l4">…</span>
+                      ) : (
+                        <span className="shrink-0 text-micro text-l4">{on ? "已开" : notInstalled ? "未安装" : "未开"}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {groups !== null && items.length === 0 && (
             <p className="border-b border-hairline px-4 py-2.5 text-micro leading-4 text-l3">
               网关目录里还没有出图模型：到「网关库」给网关点一次「获取模型」，或换一个开通了出图模型的网关。
