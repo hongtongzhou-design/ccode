@@ -1234,6 +1234,21 @@ fn add_skill_from_dir(
     Ok(())
 }
 
+/// 覆盖失败时把库目录备份放回原位；放不回就把备份在哪写进错误，别让人以为技能丢了
+fn restore_library_backup(backup: Option<&Path>, dst: &Path, err: String) -> String {
+    let _ = fs::remove_dir_all(dst);
+    let Some(backup) = backup else {
+        return err;
+    };
+    match fs::rename(backup, dst) {
+        Ok(()) => err,
+        Err(e) => format!(
+            "{err}；恢复原版本也失败（{e}），原版本在 {}",
+            backup.display()
+        ),
+    }
+}
+
 fn overwrite_skill_from_dir(
     store: &SkillStore,
     skills: &mut Vec<SkillDto>,
@@ -1247,11 +1262,7 @@ fn overwrite_skill_from_dir(
     let backup = backup_library_dir(store, name)?;
     let dst = store.skill_dir(name);
     if let Err(e) = copy_dir_recursive(src_dir, &dst) {
-        let _ = fs::remove_dir_all(&dst);
-        if let Some(backup) = &backup {
-            let _ = fs::rename(backup, &dst);
-        }
-        return Err(e);
+        return Err(restore_library_backup(backup.as_deref(), &dst, e));
     }
     let description = parse_skill_md(&dst.join("SKILL.md")).description;
     match existing_pos {
@@ -1264,10 +1275,7 @@ fn overwrite_skill_from_dir(
         None => skills.push(new_skill(name.to_string(), description, source, repo)),
     }
     if let Err(e) = store.write(skills) {
-        let _ = fs::remove_dir_all(&dst);
-        if let Some(backup) = &backup {
-            let _ = fs::rename(backup, &dst);
-        }
+        let e = restore_library_backup(backup.as_deref(), &dst, e);
         match (existing_pos, previous) {
             (Some(pos), Some(previous)) => skills[pos] = previous,
             (None, _) => {
@@ -1338,14 +1346,14 @@ fn try_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// 目标位置是否由我们管理：symlink 指向库目录，或带 .ccode-copy 标记的副本
 fn is_ours(target: &Path, lib: &Path) -> bool {
     if let Ok(link) = fs::read_link(target) {
-        return link.starts_with(lib);
+        return crate::paths::path_within_path(&link, lib);
     }
     target.join(MARKER_FILE).exists()
 }
 
 fn remove_ours(target: &Path, lib: &Path) -> Result<(), String> {
     if let Ok(link) = fs::read_link(target) {
-        if link.starts_with(lib) {
+        if crate::paths::path_within_path(&link, lib) {
             // 符号链接按文件删；Windows 目录符号链接需要 remove_dir
             fs::remove_file(target)
                 .or_else(|_| fs::remove_dir(target))
@@ -1808,7 +1816,16 @@ fn stale_agents(
     dirs: &HashMap<String, PathBuf>,
     skill: &SkillDto,
 ) -> Vec<String> {
-    let Some(lib_hash) = dir_manifest_hash(&store.skill_dir(&skill.name)) else {
+    stale_agents_against(dirs, skill, dir_manifest_hash(&store.skill_dir(&skill.name)).as_deref())
+}
+
+/// 库目录摘要已算好时直接比（list 时与 content_digest 共用一次哈希）
+fn stale_agents_against(
+    dirs: &HashMap<String, PathBuf>,
+    skill: &SkillDto,
+    lib_hash: Option<&str>,
+) -> Vec<String> {
+    let Some(lib_hash) = lib_hash else {
         return Vec::new();
     };
     let mut stale = Vec::new();
@@ -1823,7 +1840,7 @@ fn stale_agents(
         if !target.join(MARKER_FILE).exists() {
             continue; // symlink 或用户自有目录不在漂移检测范围
         }
-        if dir_manifest_hash(&target).as_deref() != Some(lib_hash.as_str()) {
+        if dir_manifest_hash(&target).as_deref() != Some(lib_hash) {
             stale.push(agent.clone());
         }
     }
@@ -2063,14 +2080,23 @@ fn snapshot_named_skills_at(
 }
 
 /// SKILL.md 是否提到 MCP（「推荐 MCP」段也靠这个子串命中；读不到视为未提及）
+fn mentions_mcp_text(text: Option<&str>) -> bool {
+    text.is_some_and(|t| t.contains("MCP"))
+}
+
+#[cfg(test)]
 fn mentions_mcp(md_path: &Path) -> bool {
-    fs::read_to_string(md_path)
-        .map(|t| t.contains("MCP"))
-        .unwrap_or(false)
+    mentions_mcp_text(fs::read_to_string(md_path).ok().as_deref())
 }
 
 #[tauri::command]
 pub async fn list_skills() -> Vec<SkillDto> {
+    tauri::async_runtime::spawn_blocking(move || list_skills_sync())
+        .await
+        .unwrap_or_default()
+}
+
+fn list_skills_sync() -> Vec<SkillDto> {
     let Ok(store) = SkillStore::default_paths() else {
         return Vec::new();
     };
@@ -2092,22 +2118,25 @@ fn list_skills_impl(store: &SkillStore, dirs: &HashMap<String, PathBuf>) -> Vec<
         for spec in crate::agent_specs::all_agent_specs() {
             s.apps.entry(spec.id.to_string()).or_insert(false);
         }
-        s.stale_copies = stale_agents(store, dirs, s);
-        s.app_modes = app_modes(dirs, s);
-        s.mentions_mcp = mentions_mcp(&store.skill_dir(&s.name).join("SKILL.md"));
-        // 版本摘要：执行快照与项目上下文按它记录技能版本（与漂移检测同一哈希口径）
+        // 版本摘要：执行快照与项目上下文按它记录技能版本（与漂移检测同一哈希口径，只算一次）
         s.content_digest = dir_manifest_hash(&store.skill_dir(&s.name));
+        s.stale_copies = stale_agents_against(dirs, s, s.content_digest.as_deref());
+        s.app_modes = app_modes(dirs, s);
+        // SKILL.md 只读一次：MCP 提及、frontmatter、正文推断共用
+        let text = fs::read(store.skill_dir(&s.name).join("SKILL.md"))
+            .ok()
+            .map(|raw| String::from_utf8_lossy(&raw).into_owned());
+        s.mentions_mcp = mentions_mcp_text(text.as_deref());
         // 接口口径（outputs/inputs）：frontmatter 声明优先；外部技能未声明时从正文推断兜底
         // （interface_inferred = true 供前端标注「推断」，不回写 SKILL.md）
-        let md = store.skill_dir(&s.name).join("SKILL.md");
-        let parsed = parse_skill_md(&md);
+        let parsed = text.as_deref().map(parse_skill_md_text).unwrap_or_default();
         s.outputs = parsed.outputs;
         s.inputs = parsed.inputs;
         s.provides = parsed.provides;
         s.interface_inferred = false;
         if s.outputs.is_empty() && s.inputs.is_empty() {
-            if let Ok(text) = fs::read_to_string(&md) {
-                let (inputs, outputs) = infer_interface_from_body(skill_md_body(&text));
+            if let Some(text) = text.as_deref() {
+                let (inputs, outputs) = infer_interface_from_body(skill_md_body(text));
                 s.interface_inferred = !inputs.is_empty() || !outputs.is_empty();
                 s.inputs = inputs;
                 s.outputs = outputs;
@@ -2128,6 +2157,12 @@ pub(crate) fn skill_declared_outputs(name: &str) -> Vec<String> {
 
 #[tauri::command]
 pub async fn resync_skill_copies(id: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || resync_skill_copies_sync(id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn resync_skill_copies_sync(id: String) -> Result<Vec<String>, String> {
     let store = SkillStore::default_paths()?;
     resync_impl(&store, &agent_dirs(), &id)
 }
@@ -2147,6 +2182,12 @@ fn allow_symlink_for(agent: &str) -> bool {
 
 #[tauri::command]
 pub async fn apply_skill(id: String, agent: String, enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || apply_skill_sync(id, agent, enabled))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn apply_skill_sync(id: String, agent: String, enabled: bool) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
     apply_impl(
         &store,
@@ -2280,12 +2321,27 @@ fn create_skill_from_full_md_at(
 
 #[tauri::command]
 pub async fn delete_skill(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_skill_sync(id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn delete_skill_sync(id: String) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
     delete_impl(&store, &agent_dirs(), &backups_root()?, &id)
 }
 
 #[tauri::command]
 pub async fn import_skills_from_dir(
+    path: String,
+    resolutions: Option<HashMap<String, String>>,
+) -> Result<SkillImportResultDto, String> {
+    tauri::async_runtime::spawn_blocking(move || import_skills_from_dir_sync(path, resolutions))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn import_skills_from_dir_sync(
     path: String,
     resolutions: Option<HashMap<String, String>>,
 ) -> Result<SkillImportResultDto, String> {
@@ -2317,6 +2373,15 @@ pub async fn import_skills_from_dir(
 
 #[tauri::command]
 pub async fn import_skills_from_zip(
+    path: String,
+    resolutions: Option<HashMap<String, String>>,
+) -> Result<SkillImportResultDto, String> {
+    tauri::async_runtime::spawn_blocking(move || import_skills_from_zip_sync(path, resolutions))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn import_skills_from_zip_sync(
     path: String,
     resolutions: Option<HashMap<String, String>>,
 ) -> Result<SkillImportResultDto, String> {
@@ -2508,6 +2573,12 @@ pub async fn apply_skill_update(id: String) -> Result<SkillImportResultDto, Stri
 /// 内置技能新版检测（best-effort，失败静默）：库副本与内嵌种子不一致的内置技能名列表
 #[tauri::command]
 pub async fn check_builtin_skill_updates() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || check_builtin_skill_updates_sync())
+        .await
+        .unwrap_or_default()
+}
+
+fn check_builtin_skill_updates_sync() -> Vec<String> {
     let Ok(store) = SkillStore::default_paths() else {
         return Vec::new();
     };
@@ -2667,6 +2738,12 @@ pub async fn check_skill_updates() -> Result<Vec<SkillUpdateDto>, String> {
 
 #[tauri::command]
 pub async fn discover_unmanaged() -> Vec<DiscoveredDto> {
+    tauri::async_runtime::spawn_blocking(move || discover_unmanaged_sync())
+        .await
+        .unwrap_or_default()
+}
+
+fn discover_unmanaged_sync() -> Vec<DiscoveredDto> {
     let Ok(store) = SkillStore::default_paths() else {
         return Vec::new();
     };
@@ -2702,6 +2779,12 @@ pub async fn discover_unmanaged() -> Vec<DiscoveredDto> {
 
 #[tauri::command]
 pub async fn import_discovered(paths: Vec<String>) -> Result<SkillImportResultDto, String> {
+    tauri::async_runtime::spawn_blocking(move || import_discovered_sync(paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn import_discovered_sync(paths: Vec<String>) -> Result<SkillImportResultDto, String> {
     let store = SkillStore::default_paths()?;
     let _lock = store.lock()?;
     let mut skills = store.read();
@@ -2728,6 +2811,12 @@ pub async fn import_discovered(paths: Vec<String>) -> Result<SkillImportResultDt
 
 #[tauri::command]
 pub async fn export_skills(ids: Vec<String>, dest_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || export_skills_sync(ids, dest_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn export_skills_sync(ids: Vec<String>, dest_path: String) -> Result<String, String> {
     let store = SkillStore::default_paths()?;
     export_impl(&store, &ids, &dest_path)
 }
@@ -2850,6 +2939,16 @@ pub async fn create_skill(
     description: String,
     content: String,
 ) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || create_skill_sync(name, description, content))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn create_skill_sync(
+    name: String,
+    description: String,
+    content: String,
+) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
     let _lock = store.lock()?;
     let mut skills = store.read();
@@ -2858,6 +2957,16 @@ pub async fn create_skill(
 
 #[tauri::command]
 pub async fn update_skill_content(
+    name: String,
+    content: String,
+    description: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || update_skill_content_sync(name, content, description))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn update_skill_content_sync(
     name: String,
     content: String,
     description: Option<String>,
@@ -3081,6 +3190,12 @@ pub async fn adapt_skill_to_pipeline(
 /// 正文取 frontmatter 之后的部分；写路径复用 update_content_impl（备份/回滚同口径）
 #[tauri::command]
 pub async fn write_skill_md(name: String, full_text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_skill_md_sync(name, full_text))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn write_skill_md_sync(name: String, full_text: String) -> Result<(), String> {
     let store = SkillStore::default_paths()?;
     let _lock = store.lock()?;
     let mut skills = store.read();
@@ -4819,6 +4934,17 @@ mod tests {
         resync_names(&fx.store, &fx.agents, &["pdf".to_string()]);
         let copied = fs::read_to_string(fx.agents["codex"].join("pdf").join("SKILL.md")).unwrap();
         assert!(copied.contains("body v2"), "编辑后复制件跟上库");
+    }
+
+    #[test]
+    fn failed_restore_names_backup_location() {
+        let fx = Fx::new();
+        let dst = fx.store.skill_dir("pdf");
+        let gone = fx.dir.join("no-such-backup");
+        let err = restore_library_backup(Some(&gone), &dst, "复制失败".into());
+        assert!(err.starts_with("复制失败；恢复原版本也失败"), "{err}");
+        assert!(err.contains(&gone.display().to_string()));
+        assert_eq!(restore_library_backup(None, &dst, "复制失败".into()), "复制失败");
     }
 
     #[test]
