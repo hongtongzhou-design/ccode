@@ -17,6 +17,7 @@ import {
   estimateSeconds,
   itemKey,
   progressAt,
+  imageGenCaption,
   pushRecent,
   recordDuration,
   type ImageModelItem,
@@ -65,6 +66,9 @@ export async function setImageGenModel(gatewayId: string, model: string) {
   writeJson(LS_RECENT, pushRecent(readJson<string[]>(LS_RECENT, []), itemKey({ gatewayId, model })));
 }
 
+/** 上次读到的 image-gen 技能（undefined = 本次启动还没读过）；挂载时先用它，后台再刷新 */
+let skillCache: SkillDto | null | undefined;
+
 const secs = (ms: number) => `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} 秒`;
 
 export default function ImageGenPanel({
@@ -80,7 +84,8 @@ export default function ImageGenPanel({
   const gateways = useAppStore((s) => s.gateways ?? NO_GATEWAYS);
   const [groups, setGroups] = useState<ImageGenGateway[] | null>(null);
   const [helperReady, setHelperReady] = useState<boolean | null>(null);
-  const [skill, setSkill] = useState<SkillDto | null | undefined>(undefined);
+  // undefined = 还没读回来；上次读到的先拿来用，切回这一节不再从「没读」起步
+  const [skill, setSkill] = useState<SkillDto | null | undefined>(skillCache);
   const [enabling, setEnabling] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [toggling, setToggling] = useState<string | null>(null);
@@ -99,7 +104,8 @@ export default function ImageGenPanel({
 
   async function loadSkill() {
     const lib = await invoke<SkillDto[]>("list_skills").catch(() => null);
-    setSkill(Array.isArray(lib) ? (lib.find((s) => s.name === "image-gen") ?? null) : null);
+    skillCache = Array.isArray(lib) ? (lib.find((s) => s.name === "image-gen") ?? null) : null;
+    setSkill(skillCache);
   }
   useEffect(() => {
     void invoke<ImageGenGateway[]>("image_gen_candidates").then(
@@ -239,14 +245,7 @@ export default function ImageGenPanel({
     }
   }
 
-  const caption =
-    helperReady === false
-      ? { text: "这版 Mesa 没找到随包的出图工具，Agent 暂时调不了", cls: "text-warn-text" }
-      : skill === null
-        ? { text: "技能 image-gen 还没进技能库，重启 Mesa 后自动加入", cls: "text-l3" }
-        : enabledAgents.length > 0
-          ? null // 正常态不写说明（2026-10-31 用户删去「已给 N 家…」），开了哪几家看「技能开关」
-          : { text: "还没给 Agent 打开技能 image-gen", cls: "text-warn-text" };
+  const caption = imageGenCaption(helperReady, skill, enabledAgents.length);
   const currentRun = currentKey ? runs[currentKey] : undefined;
 
   return (

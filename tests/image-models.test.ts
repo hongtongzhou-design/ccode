@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   compareImageModels,
+  imageGenCaption,
   estimateSeconds,
   familyOf,
   groupImageModels,
@@ -68,4 +69,13 @@ test("估计耗时：有记录取中位数，没有用家族默认；进度不�
   for (let i = 1; i <= 7; i++) d = recordDuration(d, "m", i);
   assert.deepEqual(d.m, [3, 4, 5, 6, 7]);
   assert.deepEqual(pushRecent(["a", "b", "c"], "b"), ["b", "a", "c"]);
+});
+
+test("出图说明行：技能还没读回来时不报「还没打开」，读到了才按实情说", () => {
+  assert.equal(imageGenCaption(null, undefined, 0), null, "切到这一节的头一帧不闪黄字");
+  assert.equal(imageGenCaption(true, undefined, 0), null);
+  assert.match(imageGenCaption(true, {}, 0)?.text ?? "", /还没给 Agent 打开/);
+  assert.equal(imageGenCaption(true, {}, 2), null);
+  assert.match(imageGenCaption(true, null, 0)?.text ?? "", /还没进技能库/);
+  assert.match(imageGenCaption(false, undefined, 0)?.text ?? "", /没找到随包的出图工具/);
 });

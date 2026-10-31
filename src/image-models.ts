@@ -141,3 +141,18 @@ export function recordDuration(
 export function pushRecent(list: readonly string[], key: string): string[] {
   return [key, ...list.filter((k) => k !== key)].slice(0, 6);
 }
+
+/**
+ * 出图模型行的说明行：正常态不写（2026-10-31 用户删去「已给 N 家…」，开了哪几家看「技能开关」），只在异常时提示。
+ * helperReady / skill 还没读回来（null / undefined）时不下结论——否则每次切到这一节都先闪一下「还没给 Agent 打开」。
+ */
+export function imageGenCaption(
+  helperReady: boolean | null,
+  skill: object | null | undefined,
+  enabledCount: number,
+): { text: string; cls: string } | null {
+  if (helperReady === false) return { text: "这版 Mesa 没找到随包的出图工具，Agent 暂时调不了", cls: "text-warn-text" };
+  if (skill === undefined) return null;
+  if (skill === null) return { text: "技能 image-gen 还没进技能库，重启 Mesa 后自动加入", cls: "text-l3" };
+  return enabledCount > 0 ? null : { text: "还没给 Agent 打开技能 image-gen", cls: "text-warn-text" };
+}
