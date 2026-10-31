@@ -1226,3 +1226,30 @@ test("其他打开的分节：能收起并恢复，非法偏好不影响打开",
     assert.equal(reopened.host.querySelectorAll("[data-open-tab]").length, 1);
   } finally { await reopened.close(); }
 });
+
+test("分叉的对话挂在原对话下面、前面一道接线；原对话的箭头收起分叉并记在本机（2026-10-31）", async () => {
+  const view = await renderTree({
+    sessions: [
+      ...reviewChats,
+      // r5 之后从 r3 分出两段：一段 Mesa 分叉（同家接力），一段 CLI 真分叉
+      session({ sessionId: "f1", handoffFromAgent: "claude-code", handoffFromSession: "r3", customTitle: "1031|研究|第3篇分叉甲", updatedAt: "2026-10-30T00:00:00Z" }),
+      session({ sessionId: "f2", forkedFrom: "r3", customTitle: "1031|研究|第3篇分叉乙", updatedAt: "2026-10-29T00:00:00Z" }),
+    ],
+  });
+  try {
+    const titles = () =>
+      Array.from(view.chatGroup("综述流程测试")!.querySelectorAll("[data-chat-key]")).map((b) => b.textContent?.trim());
+    // 一家子排在最近动过的那段（f1）的位置，分叉紧跟原对话
+    assert.deepEqual(titles().slice(0, 4), ["镁硫电池第3篇精读", "第3篇分叉甲", "第3篇分叉乙", "镁硫电池第5篇精读"]);
+    assert.ok(view.button("第3篇分叉甲").querySelector("[data-fork-link]"), "分叉前面有接线");
+    assert.equal(view.button("镁硫电池第3篇精读").querySelector("[data-fork-link]"), null);
+    await view.act(async () => view.button("收起「镁硫电池第3篇精读」的 2 段分叉").click());
+    assert.ok(!titles().includes("第3篇分叉甲"), "收起后分叉不列");
+    assert.ok(titles().includes("镁硫电池第3篇精读"), "原对话照列");
+    assert.match(localStorage.getItem("ccode.sidebarForkFolds") ?? "", /r3/);
+    await view.act(async () => view.button("展开「镁硫电池第3篇精读」的 2 段分叉").click());
+    assert.ok(titles().includes("第3篇分叉乙"));
+  } finally {
+    await view.close();
+  }
+});

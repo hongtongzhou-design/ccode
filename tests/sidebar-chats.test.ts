@@ -8,6 +8,9 @@ import {
   currentFolderKey,
   folderDot,
   folderOpen,
+  foldForks,
+  forkParentKey,
+  nestForks,
   openTabRows,
   paletteOpenChats,
   parseChatPins,
@@ -405,4 +408,65 @@ test("多选提醒贴哪：刚处理那段的下一段，没有就上一段（20
   assert.equal(nudgeAnchor(["a", "b", "c"], "c"), "b");
   assert.equal(nudgeAnchor(["a"], "a"), null);
   assert.equal(nudgeAnchor(["a"], "x"), null);
+});
+
+test("forkParentKey：CLI 真分叉与 Mesa 同家接力算分叉，跨家接力不算", () => {
+  assert.equal(forkParentKey(session({ sessionId: "b", forkedFrom: "a" })), "claude-code\na");
+  assert.equal(
+    forkParentKey(session({ sessionId: "b", handoffFromAgent: "claude-code", handoffFromSession: "a" })),
+    "claude-code\na",
+  );
+  assert.equal(forkParentKey(session({ sessionId: "b", handoffFromAgent: "codex", handoffFromSession: "a" })), null);
+  assert.equal(forkParentKey(session({ sessionId: "b" })), null);
+});
+
+test("nestForks：分叉紧跟原对话，一家子排在最近动过的那段的位置", () => {
+  // 输入按最近活动倒序：分叉 b 最新，原对话 a 在最后
+  const chats = [
+    session({ sessionId: "b", forkedFrom: "a" }),
+    session({ sessionId: "x" }),
+    session({ sessionId: "c", handoffFromAgent: "claude-code", handoffFromSession: "a" }),
+    session({ sessionId: "d", forkedFrom: "b" }),
+    session({ sessionId: "a" }),
+  ];
+  const rows = nestForks(chats);
+  assert.deepEqual(
+    rows.map((r) => [r.s.sessionId, r.depth, r.forks]),
+    [
+      ["a", 0, 3],
+      ["b", 1, 1],
+      ["d", 2, 0],
+      ["c", 1, 0],
+      ["x", 0, 0],
+    ],
+  );
+});
+
+test("nestForks：原对话不在这份列表里、或绕成环的照常顶格", () => {
+  const rows = nestForks([
+    session({ sessionId: "b", forkedFrom: "gone" }),
+    session({ sessionId: "p", forkedFrom: "q" }),
+    session({ sessionId: "q", forkedFrom: "p" }),
+  ]);
+  assert.deepEqual(
+    rows.map((r) => [r.s.sessionId, r.depth]),
+    [
+      ["b", 0],
+      ["p", 0],
+      ["q", 0],
+    ],
+  );
+});
+
+test("foldForks：收起只藏分叉，正看着的那段照样列", () => {
+  const rows = nestForks([
+    session({ sessionId: "b", forkedFrom: "a" }),
+    session({ sessionId: "c", forkedFrom: "a" }),
+    session({ sessionId: "a" }),
+    session({ sessionId: "x" }),
+  ]);
+  const folded = new Set(["claude-code\na"]);
+  assert.deepEqual(foldForks(rows, folded).map((r) => r.s.sessionId), ["a", "x"]);
+  assert.deepEqual(foldForks(rows, folded, "claude-code\nc").map((r) => r.s.sessionId), ["a", "c", "x"]);
+  assert.deepEqual(foldForks(rows, new Set()).map((r) => r.s.sessionId), ["a", "b", "c", "x"]);
 });
