@@ -55,6 +55,7 @@ import {
   type OnboardingState,
 } from "./onboarding";
 import type { ProjectSurfaceTab } from "./project-surface";
+import { quietStoppedSessions } from "./run-caret";
 import type {
   BindingInput,
   DetectResult,
@@ -973,8 +974,13 @@ export const useAppStore = create<AppState>((set, get) => {
   const sessionKey = (s: SessionMetaDto) => `${s.agent}\n${s.sessionId}`;
   const withoutDeleting = (list: SessionMetaDto[]) =>
     deleting.size ? list.filter((s) => !deleting.has(sessionKey(s))) : list;
+  // Mesa 里停下的会话（关标签 / Agent 退出 / 换会话）：停下的时刻，列表里的 live 按它熄（run-caret quietStoppedSessions）
+  const stopped = new Map<string, number>();
   const sessionRefresh = createSessionRefreshCoordinator(
-    () => invoke<SessionMetaDto[]>("list_sessions").then(withoutDeleting),
+    () =>
+      invoke<SessionMetaDto[]>("list_sessions").then((list) =>
+        quietStoppedSessions(withoutDeleting(list), stopped),
+      ),
     () => get().sessions,
     (sessions) => set({ sessions }),
   );
@@ -1178,7 +1184,12 @@ export const useAppStore = create<AppState>((set, get) => {
       const key = sessionRuntimeKey(agent, sessionId);
       if (tabId) next[key] = tabId;
       else delete next[key];
-      return { liveSessions: next };
+      if (tabId) {
+        stopped.delete(key);
+        return { liveSessions: next };
+      }
+      stopped.set(key, Date.now());
+      return { liveSessions: next, sessions: quietStoppedSessions(s.sessions, stopped) };
     }),
   focusTabId: null,
   focusTab: (tabId) => set({ focusTabId: tabId }),

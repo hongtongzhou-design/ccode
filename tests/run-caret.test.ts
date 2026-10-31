@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { caretOfAttention, closeAsksFirst, strongestCaret, withUnread } from "../src/run-caret.ts";
+import { caretOfAttention, closeAsksFirst, quietStoppedSessions, strongestCaret, withUnread } from "../src/run-caret.ts";
 
 test("一个开着的 Agent：等确认 / 干活照注意力，做完了或还不知道按闲着", () => {
   assert.equal(caretOfAttention("confirm"), "confirm");
@@ -37,4 +37,15 @@ test("做完了没看：闲着或进程已收掉换成蓝光标，又在干活 /
 test("几个合成一个时没看的排在干活前面、等确认后面", () => {
   assert.equal(strongestCaret(["working", "unread", "idle"]), "unread");
   assert.equal(strongestCaret(["unread", "confirm"]), "confirm");
+});
+
+test("quietStoppedSessions：Mesa 停下之后没再写过的熄掉，之后又写过的照亮，没变化原样返回（2026-10-31）", () => {
+  const at = Date.parse("2026-10-31T14:27:40Z");
+  const s = (sessionId: string, updatedAt: string, live = true) => ({ agent: "claude-code", sessionId, live, updatedAt });
+  const stopped = new Map([["claude-code\na", at], ["claude-code\nb", at]]);
+  const list = [s("a", "2026-10-31T14:27:34Z"), s("b", "2026-10-31T14:28:30Z"), s("c", "2026-10-31T14:27:34Z")];
+  const out = quietStoppedSessions(list, stopped);
+  assert.deepEqual(out.map((x) => x.live), [false, true, true]);
+  const calm = [s("c", "2026-10-31T14:27:34Z"), s("a", "2026-10-31T14:27:34Z", false)];
+  assert.equal(quietStoppedSessions(calm, stopped), calm);
 });
