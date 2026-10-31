@@ -80,6 +80,8 @@ import {
 } from "./hotkeys";
 import { NAV_ICONS } from "./navigation-icons";
 import { NAV_GROUPS, NAV_BOTTOM } from "./navigation";
+import { moveRailBarItem, parseRailBarOrder, RAIL_BAR_ORDER_KEY, RAIL_BAR_VISIBLE } from "./rail-bar-order";
+import { clampTabDragDx, rubberbandTabDx, tabDragSettleDx, tabDragShift, tabDragTarget, type TabSlot } from "./tab-drag";
 import { isLightTheme } from "./themes";
 import ProjectTree, { TitlebarProjectChip } from "./components/ProjectTree";
 import ContextMenu from "./components/ContextMenu";
@@ -140,9 +142,6 @@ function PageLoading() {
     </div>
   );
 }
-
-/** 展开侧栏底部平时收着、鼠标移上去才展开的页（平时只留连接、设置两个图标） */
-const RAIL_MORE_PAGES: readonly string[] = ["skills", "mcp", "stats"];
 
 
 /** 侧栏收起态的应用内 tooltip：展开态已有文字，不再重复弹提示。 */
@@ -702,6 +701,84 @@ function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   // 展开侧栏底部那一排：鼠标在上面（或键盘焦点在里面）时把技能 / MCP / 用量也摆出来
   const [railBarOpen, setRailBarOpen] = useState(false);
+  // 这一排五个图标的顺序（拖动自定义，rail-bar-order.ts）：前两个常显，其余进抽屉；图标态竖排同序
+  const [railBarOrder, setRailBarOrder] = useState(() =>
+    parseRailBarOrder(localStorage.getItem(RAIL_BAR_ORDER_KEY)),
+  );
+  // 拖动排序中：源跟手，夹在原位与目标之间的让位（与项目树同一套 tab-drag 逻辑；图标态竖排按纵轴量）
+  const [railBarDrag, setRailBarDrag] = useState<{
+    id: string;
+    from: number;
+    target: number;
+    d: number;
+    slots: TabSlot[];
+    vertical: boolean;
+    settling: boolean;
+  } | null>(null);
+  // 拖完松手的那次 click 吞掉（拖排序不该顺手切页）
+  const railBarSuppressClickRef = useRef(false);
+  function onRailBarPointerDown(e: React.PointerEvent, id: string, vertical: boolean) {
+    if (e.button !== 0) return;
+    const bar = (e.currentTarget as HTMLElement).closest<HTMLElement>("[data-rail-bar]");
+    if (!bar) return;
+    const start = vertical ? e.clientY : e.clientX;
+    let active = false;
+    let slots: TabSlot[] = [];
+    let from = 0;
+    let lastTarget = 0;
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+    const finish = () => {
+      cleanup();
+      if (!active) return;
+      railBarSuppressClickRef.current = true;
+      window.setTimeout(() => {
+        railBarSuppressClickRef.current = false;
+      }, 0);
+      const target = lastTarget;
+      if (target === from) {
+        setRailBarDrag(null);
+        return;
+      }
+      setRailBarDrag((cur) => (cur ? { ...cur, d: tabDragSettleDx(cur.slots, from, target), settling: true } : null));
+      window.setTimeout(() => {
+        setRailBarOrder((prev) => {
+          const next = moveRailBarItem(prev, from, target);
+          localStorage.setItem(RAIL_BAR_ORDER_KEY, JSON.stringify(next));
+          return next;
+        });
+        setRailBarDrag(null);
+      }, 170);
+    };
+    const onMove = (ev: PointerEvent) => {
+      const raw = (vertical ? ev.clientY : ev.clientX) - start;
+      if (!active) {
+        if (Math.abs(raw) <= 4) return;
+        active = true;
+        // 进入拖拽态才量（此刻布局未变）；querySelectorAll 顺序 = 显示顺序
+        const els = Array.from(bar.querySelectorAll<HTMLElement>("[data-rail-bar-item]"));
+        slots = els.map((el) => {
+          const r = el.getBoundingClientRect();
+          return vertical ? { left: r.top, width: r.height } : { left: r.left, width: r.width };
+        });
+        from = Math.max(0, els.findIndex((el) => el.getAttribute("data-rail-bar-item") === id));
+        lastTarget = from;
+        document.body.style.userSelect = "none";
+        document.body.style.cursor = "grabbing";
+      }
+      const target = tabDragTarget(slots, from, clampTabDragDx(slots, from, raw));
+      lastTarget = target;
+      setRailBarDrag({ id, from, target, d: rubberbandTabDx(slots, from, raw), slots, vertical, settling: false });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  }
   // 帮助菜单/关于页共用的反馈表单弹层（FeedbackModal，通道见 feedback.ts）
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   // 诊断弹窗「附到反馈」带进反馈表单的诊断包路径（表单关闭即清）
@@ -2098,49 +2175,88 @@ function App() {
                     鼠标移到这一排上（或键盘 Tab 进来）技能 / MCP / 用量从 › 的位置向右滑出、一个接一个淡入，移开收回
                     （同日用户：点 ⋯ 再选太麻烦；⋯ 读作「更多菜单」，换成往右指的 ›，说明是往这边展开；动画别直接出现）。
                     连接、设置位置不动，展开时光标底下的图标不跳；正在这三页之一时一直展开，选中的那个看得见。
-                    悬停出名字。图标态侧栏照旧竖排五个 */}
+                    悬停出名字。图标态侧栏照旧竖排五个。
+                    2026-10-31 用户：五个图标可拖动自定义排序——一份顺序（railBarOrder）两种侧栏共用，
+                    展开态前两个常显、其余进抽屉；拖动中抽屉保持展开、不裁切，源跟手、其余让位 */}
                 {(() => {
                   const all = [...NAV_GROUPS.find((g) => g.label === "资源")!.items, ...NAV_BOTTOM];
-                  const barOpen = railBarOpen || RAIL_MORE_PAGES.includes(page);
-                  const railIcon = (n: (typeof all)[number], extra?: { index: number }) => (
-                    <RailTooltip key={n.id} label={n.label} collapsed={collapsed} up={!collapsed}>
-                      <button
-                        type="button"
-                        onClick={() => setPage(n.id)}
-                        aria-current={page === n.id ? "page" : undefined}
-                        aria-label={n.label}
-                        // 收着时滑出来的三个不进键盘顺序（Tab 到「连接」时整排已经展开）
-                        tabIndex={extra && !barOpen ? -1 : undefined}
-                        style={extra ? { transitionDelay: barOpen ? `${40 + extra.index * 35}ms` : "0ms" } : undefined}
-                        className={`relative flex h-8 shrink-0 items-center justify-center rounded-md ${
-                          extra
-                            ? `ccode-rail-drawer-item transition-[opacity,translate,background-color,color] duration-200 ${
-                                barOpen ? "translate-x-0 opacity-100" : "-translate-x-1.5 opacity-0"
-                              }`
-                            : "transition-colors"
-                        } ${collapsed ? "mb-0.5 w-11" : "w-9"} ${
-                          page === n.id
-                            ? `${collapsed ? "ccode-rail-active" : "ccode-rail-active-under"} bg-rail-sel text-l1`
-                            : "text-l3 hover:bg-hover hover:text-l2"
-                        }`}
-                      >
-                        <n.Icon
-                          size={16}
-                          strokeWidth={1.8}
-                          className={page === n.id ? "text-nav-accent" : ""}
-                          aria-hidden="true"
-                        />
-                      </button>
-                    </RailTooltip>
-                  );
+                  const byId = new Map<string, (typeof all)[number]>();
+                  for (const n of all) byId.set(n.id, n);
+                  const ordered = railBarOrder.flatMap((id) => {
+                    const n = byId.get(id);
+                    return n ? [n] : [];
+                  });
+                  const morePages: string[] = ordered.slice(RAIL_BAR_VISIBLE).map((n) => n.id);
+                  const dragging = railBarDrag !== null;
+                  const barOpen = railBarOpen || dragging || morePages.includes(page);
+                  const railIcon = (n: (typeof all)[number], index: number, extra?: { index: number }) => {
+                    const isSource = railBarDrag?.id === n.id;
+                    const shift =
+                      railBarDrag && !isSource
+                        ? tabDragShift(railBarDrag.slots, railBarDrag.from, railBarDrag.target, index)
+                        : 0;
+                    const offset = isSource ? railBarDrag!.d : shift;
+                    const dragStyle: React.CSSProperties | undefined = railBarDrag
+                      ? {
+                          transform: railBarDrag.vertical ? `translateY(${offset}px)` : `translateX(${offset}px)`,
+                          transition: !isSource || railBarDrag.settling ? "transform 150ms ease" : "none",
+                          transitionDelay: "0ms",
+                        }
+                      : undefined;
+                    return (
+                      <RailTooltip key={n.id} label={n.label} collapsed={collapsed} up={!collapsed}>
+                        <button
+                          type="button"
+                          data-rail-bar-item={n.id}
+                          onPointerDown={(e) => onRailBarPointerDown(e, n.id, collapsed)}
+                          onClick={() => {
+                            if (railBarSuppressClickRef.current) return;
+                            setPage(n.id);
+                          }}
+                          aria-current={page === n.id ? "page" : undefined}
+                          aria-label={n.label}
+                          // 收着时滑出来的那几个不进键盘顺序（Tab 到第一个时整排已经展开）
+                          tabIndex={extra && !barOpen ? -1 : undefined}
+                          style={
+                            dragStyle ??
+                            (extra ? { transitionDelay: barOpen ? `${40 + extra.index * 35}ms` : "0ms" } : undefined)
+                          }
+                          className={`relative flex h-8 shrink-0 items-center justify-center rounded-md ${
+                            extra
+                              ? `ccode-rail-drawer-item transition-[opacity,translate,background-color,color] duration-200 ${
+                                  barOpen ? "translate-x-0 opacity-100" : "-translate-x-1.5 opacity-0"
+                                }`
+                              : "transition-colors"
+                          } ${collapsed ? "mb-0.5 w-11" : "w-9"} ${isSource ? "z-10" : ""} ${
+                            page === n.id
+                              ? `${collapsed ? "ccode-rail-active" : "ccode-rail-active-under"} bg-rail-sel text-l1`
+                              : isSource
+                                ? "bg-raised text-l1"
+                                : "text-l3 hover:bg-hover hover:text-l2"
+                          }`}
+                        >
+                          <n.Icon
+                            size={16}
+                            strokeWidth={1.8}
+                            className={page === n.id ? "text-nav-accent" : ""}
+                            aria-hidden="true"
+                          />
+                        </button>
+                      </RailTooltip>
+                    );
+                  };
                   if (collapsed) {
                     return (
-                      <div className="shrink-0 border-t border-white/5 px-1.5 py-2">{all.map((n) => railIcon(n))}</div>
+                      <div data-rail-bar className="shrink-0 border-t border-white/5 px-1.5 py-2">
+                        {ordered.map((n, i) => railIcon(n, i))}
+                      </div>
                     );
                   }
-                  const extras = all.filter((n) => RAIL_MORE_PAGES.includes(n.id));
+                  const shown = ordered.slice(0, RAIL_BAR_VISIBLE);
+                  const extras = ordered.slice(RAIL_BAR_VISIBLE);
                   return (
                     <div
+                      data-rail-bar
                       onMouseEnter={() => setRailBarOpen(true)}
                       onMouseLeave={() => setRailBarOpen(false)}
                       onFocus={() => setRailBarOpen(true)}
@@ -2149,12 +2265,12 @@ function App() {
                       }}
                       className="flex shrink-0 items-center gap-0.5 border-t border-white/5 px-1.5 py-2"
                     >
-                      {all.filter((n) => !RAIL_MORE_PAGES.includes(n.id)).map((n) => railIcon(n))}
-                      {/* 抽屉：› 与三个图标叠在同一处，宽度从一个 › 的宽度滑到三个图标的宽度 */}
+                      {shown.map((n, i) => railIcon(n, i))}
+                      {/* 抽屉：› 与其余图标叠在同一处，宽度从一个 › 的宽度滑到全部图标的宽度；拖动中不裁切，图标能拖进拖出 */}
                       <div
-                        className={`ccode-rail-drawer relative flex items-center gap-0.5 overflow-hidden transition-[max-width] duration-200 ${
-                          barOpen ? "max-w-[7rem]" : "max-w-9"
-                        }`}
+                        className={`ccode-rail-drawer relative flex items-center gap-0.5 transition-[max-width] duration-200 ${
+                          dragging ? "overflow-visible" : "overflow-hidden"
+                        } ${barOpen ? "max-w-[7rem]" : "max-w-9"}`}
                       >
                         <span
                           aria-hidden="true"
@@ -2164,7 +2280,7 @@ function App() {
                         >
                           <ChevronRight size={15} strokeWidth={1.8} />
                         </span>
-                        {extras.map((n, index) => railIcon(n, { index }))}
+                        {extras.map((n, index) => railIcon(n, RAIL_BAR_VISIBLE + index, { index }))}
                       </div>
                     </div>
                   );

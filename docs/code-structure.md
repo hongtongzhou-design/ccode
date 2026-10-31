@@ -93,7 +93,7 @@ pages/SettingsPage.tsx     # 设置页：左导航＋分区内容，SETTING_NAV 
   App.tsx                    # 应用壳：标题栏（收件箱/帮助/命令面板）、三段式侧栏（快速入口/项目树/系统段）、主区 page 驱动挂载、
                              #   全局快捷键、启动过渡、跨实例同步、通知、确认框宿主。侧栏顶部（2026-10-27 用户拍板）：无品牌行，收展钮与「搜索对话和项目」放大镜在标题栏左组（红绿灯右边，openRailSearch 置 store 的 railSearchReq，
                              #   收着时先拉探出层）；侧栏最上是快速入口（新对话 ⌘N / 新项目 ⇧⌘N（三项菜单 project-add.ts）/ 工作台 ⌘1 / 对话管理），中段项目树（ProjectTree，课题下挂对话），
-                             #   底部资源段（连接/技能/MCP/用量/设置：展开态平时连接、设置 + › 记号，悬停这一排抽屉滑出技能 / MCP / 用量（RAIL_MORE_PAGES，`.ccode-rail-drawer`，2026-10-25）、图标态竖排五个）；收起态=图标条（项目树不可用，展开后才有）。
+                             #   底部资源段（连接/技能/MCP/用量/设置：展开态平时连接、设置 + › 记号，悬停这一排抽屉滑出其余三个（`.ccode-rail-drawer`，2026-10-25）、图标态竖排五个；五个可拖动排序，顺序 rail-bar-order.ts，前两个常显，2026-10-31）；收起态=图标条（项目树不可用，展开后才有）。
                              #   主区：page==="workbench" 显示工作台概览、page==="workspaces" 显示选中课题详情（选中经 selectProjectReq
                              #   一次性请求由项目页消费——与收件箱/对话页/统计页跳转同一条链，禁再拿它当持久选中态渲染）。
                              #   壳与标题栏/侧栏/缝透明，桌面磨砂从窗口底透上来；
@@ -792,6 +792,7 @@ model-vendors.ts           # 获取模型下拉按厂商分组折叠（大网关
                              # 该不该出的计数纯函数：noteSingleAct（多选 B）、noteChatOpen（来回点两段 → ⌃Tab）、noteRepeat（鼠标关对话 → ⌘W、>_ 来回切 → 聊天 / 终端切换键）（tests/coach-tips.test.ts）
   chat-unread.ts             # 跑完了没看的对话（2026-10-24）：注意力 working → done 那一刻没在看就记，看到即消；会话键优先、标签键认出会话后挪
                              # （nextUnread；App 维护 store.unreadChats，ProjectTree 在那一行行尾挂蓝色光标（2026-10-28 起标题不再变亮）；tests/chat-unread.test.ts）
+  rail-bar-order.ts          # 侧栏底部资源段五个图标的顺序（2026-10-31）：localStorage ccode.railBarOrder，读回去重补缺、挪位；前 RAIL_BAR_VISIBLE=2 个展开态常显（tests/rail-bar-order.test.ts）
   rail-width.ts              # 应用侧栏宽度（2026-10-24）：14–26rem、默认 18rem、窗口小时上限收到窗宽 40%，localStorage 记偏好（tests/rail-width.test.ts）
   start-page.ts              # 「启动时进入」四种去处（2026-10-24）：工作台 / 上次的对话 / 上次的项目 / 新对话，旧存值当工作台；与 settings.rs KNOWN_START_PAGES 同步；上次的项目 = 最后看的那段对话所在的项目（projectOfCwd 取最深的项目根），App 在运行页正看着时写 localStorage ccode.lastProject（tests/start-page.test.ts）
   run-layout.ts              # 运行页两块宽度（2026-10-24，文件树并进右栏后由三块变两块）：对话 ≥ 360、右栏默认 460 / ≥ 360，偏好与实际分开，不够时只压右栏
