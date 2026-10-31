@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
 import type {
   CSSProperties,
   FocusEvent as ReactFocusEvent,
@@ -217,22 +217,29 @@ export default function ActivityHeatmap({
   const hasChips =
     agentsMatrix?.year === endYear && (agentsMatrix?.agents.length ?? 0) >= 2;
 
-  useEffect(() => {
+  // 卡片随窗口即时变宽，格子边长必须在同一帧到位：布局副作用里首算（免首帧先画 11px 再跳），
+  // 观察器回调（在绘制前）里 flushSync 同步重渲。走普通调度会晚一帧——缩窗那一帧旧网格撑出卡外、
+  // 闪横向滚动条带着卡高跳，放大那一帧格子还是小的（2026-10-31 用户反馈「变化不自然」）。
+  useLayoutEffect(() => {
     const track = measureRef.current;
     if (!track || typeof ResizeObserver === "undefined") return;
     let cell = 11;
-    const sync = () => {
+    const sync = (urgent: boolean) => {
       const inner = Math.max(0, track.clientWidth - HEAT_WELL_PAD_PX);
       const nextCell = heatCellPx(inner, weeksRef.current);
       if (nextCell === cell) return;
       // 格子边长变了，开着的浮层锚定坐标全部作废，一并关掉
       cell = nextCell;
-      setCellPx(nextCell);
-      setTip(null);
-      setPop(null);
+      const apply = () => {
+        setCellPx(nextCell);
+        setTip(null);
+        setPop(null);
+      };
+      if (urgent) flushSync(apply);
+      else apply();
     };
-    sync();
-    const ro = new ResizeObserver(sync);
+    sync(false);
+    const ro = new ResizeObserver(() => sync(true));
     ro.observe(track);
     return () => ro.disconnect();
     // dto 为 null 的首帧不渲染主区（早退骨架），数据到了哨兵出现时才挂观察器；
