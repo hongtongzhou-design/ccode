@@ -168,7 +168,7 @@ export interface AppSettings {
   appIconStyle?: "system" | "dark" | "light";
   /** 聊天层阅读体验（设置 → 外观，表见 chat-style.ts，Rust 侧 KNOWN_CHAT_* 白名单） */
   chatFontSize?: "small" | "normal" | "large" | "xlarge";
-  chatFontFamily?: "system" | "serif" | "kai" | "mono";
+  chatFontFamily?: "system" | "serif" | "kai" | "mono" | "sans";
   chatAccent?: "off" | "warm" | "amber" | "teal" | "violet";
   chatScrollbar?: "auto" | "always";
   /** 主题跟随系统深浅（缺省关）：开着时系统外观变化即把 theme 换成同名 twin 写回（theme-follow.ts）；
@@ -241,7 +241,8 @@ function syncWindowsMica(light: boolean) {
     .setEffects({
       effects: [(light ? "micaLight" : "micaDark") as Effect],
     })
-    // 挂不上（Windows 10 等）：App.css 的 data-material=none 回到实心底，不让桌面透出来
+    // 挂不上（Windows 10 等）：App.css 的 data-material=none 回到实心底，不让桌面透出来。
+    // 权限被拒也走到这里：capabilities 里少了 core:window:allow-set-effects 时 Windows 11 也整块变实心（2026-10-31 实证）
     .catch(() => {
       document.documentElement.dataset.material = "none";
     });

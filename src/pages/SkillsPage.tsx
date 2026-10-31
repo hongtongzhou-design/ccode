@@ -1521,6 +1521,45 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
     }
   }
 
+  /** 全部更新：逐个现取 revision 再采用（同单个更新，覆盖前各自备份）；失败的留在提示条里并就地报错 */
+  async function onApplyAllBuiltinUpdates() {
+    if (builtinApplying || builtinUpdates.length === 0) return;
+    if (
+      !(await confirmDialog(
+        `将把 ${builtinUpdates.length} 个内置技能更新为官方最新版。每个技能先备份本机文件（SKILL.md.bak）再覆盖，自改内容不会自动合并。确认全部更新？`,
+        { confirmText: "备份并全部更新" },
+      ))
+    ) return;
+    setBuiltinApplying("*");
+    const done: string[] = [];
+    const failed: Record<string, string> = {};
+    const synced = new Set<string>();
+    for (const name of builtinUpdates) {
+      try {
+        const { revision } = await invoke<{ revision: string }>("preview_builtin_skill_update", { name });
+        const agents = await invoke<string[]>("apply_builtin_skill_update", { name, expectedRevision: revision });
+        agents.forEach((id) => synced.add(id));
+        done.push(name);
+      } catch (e) {
+        failed[name] = String(e);
+      }
+    }
+    setBuiltinUpdates((prev) => prev.filter((n) => !done.includes(n)));
+    setBuiltinErrors((prev) => ({ ...prev, ...failed }));
+    const labels = [...synced].map((id) => AGENTS.find((a) => a.id === id)?.label ?? id);
+    const failedCount = Object.keys(failed).length;
+    if (done.length) {
+      setNotice(
+        `已更新 ${done.length} 个内置技能（原文件已备份）` +
+          (labels.length ? `，并同步给 ${labels.join("、")}` : "") +
+          (failedCount ? `；${failedCount} 个未更新，原因见提示条` : ""),
+      );
+    }
+    if (failedCount && !done.length) setError(`${failedCount} 个内置技能更新失败，原因见提示条`);
+    setBuiltinApplying(null);
+    if (done.length) await refresh();
+  }
+
   // 选段「✦ 沉淀为技能」交来的 AI 草稿：打开新建 modal 预填（同 focusTabReq 一次性消费模式）
   const skillDraftReq = useAppStore((s) => s.skillDraftReq);
   const setSkillDraftReq = useAppStore((s) => s.setSkillDraftReq);
@@ -1983,12 +2022,22 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
           )}
           {builtinUpdates.length > 0 && (
             <div className="mb-3 rounded-lg bg-chat-bubble px-3.5 py-2.5 text-xs text-l3">
-              <p>
-                内置技能有新版：{builtinUpdates.join("、")}（共{" "}
-                {builtinUpdates.length}{" "}
-                个）——更新会用官方最新版覆盖库内副本，原文件自动备份为
-                SKILL.md.bak
-              </p>
+              <div className="flex items-start justify-between gap-3">
+                <p>
+                  内置技能有新版：{builtinUpdates.join("、")}（共{" "}
+                  {builtinUpdates.length}{" "}
+                  个）——更新会用官方最新版覆盖库内副本，原文件自动备份为
+                  SKILL.md.bak
+                </p>
+                <button
+                  type="button"
+                  disabled={builtinApplying !== null}
+                  onClick={() => void onApplyAllBuiltinUpdates()}
+                  className={`${secondaryActionClass} shrink-0`}
+                >
+                  {builtinApplying === "*" ? "更新中…" : "全部更新"}
+                </button>
+              </div>
               <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
                 {builtinUpdates.map((name) => (
                   <span key={name} className="inline-flex items-center gap-1.5">

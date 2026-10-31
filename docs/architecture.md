@@ -464,6 +464,35 @@ MCP 页（⌘6，第六个页面入口；曾按旧页序称「第八页」）：
 副标题并列编程与科研两条线；README（中英）、关于页、说明书 §1、NOTICE、仓库简介同步。商标声明里的旧称呼照留（仍受保护），
 内部身份 `ccode` 不动。
 
+### 2026-10-31 · Windows 根字号回到 14px，与 Mac 同一套尺寸
+
+用户截设置页说 Windows 字号不对，要求看 Windows 全站、Mac 已调好不动。查明 2026-08-28 起 Windows 把 `html` 根字号抬到 16px
+（为了 text-xs / sm 不在 14px 根下缩小），此后各页都在 Mac 上调，Windows 上所有 rem 尺寸（字号、间距、控件高、侧栏宽）一律大 1/7：
+设置页行标题 text-base 成了 16px、说明 text-sm 14px，和小节标题一般大。定下：**Windows 根字号同 Mac 为 14px，尺寸以 Mac 为准**；
+只在 `:root[data-platform="windows"]` 把字号令牌钉成不低于 Mac 的最近整数（xs 12、sm 13、base 14、lg 16、xl 18、2xl 21），
+保住 08-28 要防的半像素发糊和 xs / sm 撞档。聊天正文本就按 px（`--chat-base` 14px），不受影响。取代 08-28「Windows 根 16px」。
+细则 design-system「字号阶梯令牌化」。
+
+### 2026-10-31 · Windows 启动：建窗即无标题栏，Windows 11 启动即磨砂
+
+用户要求把 Windows 的启动过渡对齐已完善的 Mac。最小 Tauri 探针（同 tauri 2.11.5 / wry 0.55.1、同窗口配置）与 Mesa Dev
+重启逐帧录屏查明三段：① 配置建窗时窗口带原生标题栏先亮，lib.rs 到 setup 末尾才 `set_decorations(false)`，开发版实测
+白底 + 标题栏约 0.7s、带标题栏的 Mica 再挂约 2.8s；② 页面出来后 index.html 的主题色实心底盖住已露出的 Mica，0.4s 后
+再淡回，与 10-30 Mac 的「玻璃→深蓝→玻璃」同病；③ WebView2 首次出画面前窗口是白的（release 约 0.15–0.9s，随机器负载）。
+定下：**主窗口改由 setup 一开头自己建**（各份 tauri*.conf.json `create: false`，`main_window.rs` 按同一份配置
+`from_config`），Windows 建窗即去标题栏；**Windows 11 启动页同 macOS 首帧透明**——Rust 读注册表 build ≥ 22000 时注入
+`__MESA_BOOT_GLASS__`，index.html 据此打 `data-boot-glass`（UA 分不出 10 / 11）；Windows 10 / Linux 仍走实心底淡出。
+WebView2 从第一次出画面起就是透明底，实测无白帧。`win_snap::is_windows_11` 改读注册表 API，不在建窗路径上起 `reg` 子进程。
+③ 用户拍板：**Windows 窗口建好先隐身（DWM cloak），启动字标首帧画好再露出，最多等 1 秒**——窗口晚零点几秒、一出来就是
+完整画面，好过先白一下；**这一条在 Windows 上取代 10-16「窗口创建即见」**，macOS 不变（本就没有白屏段）。index.html 两次 rAF 后调
+`boot_window_painted`（另有 0.5s 定时器补调），Rust 1 秒到点兜底露出并记日志。探针交替对比三轮：毛玻璃出现时刻与不隐身时相当
+（约 1.0–1.6s，随机器忙闲），白屏段消失。否掉：给窗口设背景色（Mica 失效，透出后面的窗口）。
+Mesa Dev 实测又定两条：**setup 不得长时间占主线程**——隐身期间 WebView2 要靠主线程消息才上屏，setup 里同步建托盘
+（逐个连接 dry-run 比对磁盘，开发版 2.5s）时窗口先隐身 4s，改成 1s 兜底后露出一块白到 3s；**Windows 上托盘改在后台线程建**
+（tauri 自己转主线程建图标与菜单项，`tray::rebuild` 加锁防与前端刷新各建一个），macOS 不动。兜底线程用建窗时在主线程存下的
+HWND 直调 DWM，不经 `window.hwnd()`（它要经事件循环取，主线程忙时会一直等）。改后 Mesa Dev：露出即毛玻璃（约 0.3s），无标题栏、无白、无深蓝。开发配置改了 `create` 要重启 `npm run tauri:dev` 才生效
+（CLI 启动时读一次 `--config`）。
+
 ### 2026-10-31 · 侧栏开着的对话行悬停加回 ×（改同日「行上不放 ×」）
 
 用户实测：分叉标签认出新会话、变成对话行后鼠标移上去 × 没了，「不放 × 用户怎么关？快捷键不是人人都用」。拍板：悬停时 ⋯ 原地换掉光标，

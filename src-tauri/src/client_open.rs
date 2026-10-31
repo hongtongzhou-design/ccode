@@ -1007,7 +1007,7 @@ fn windows_restart_script(package: &str) -> String {
         r#"$ErrorActionPreference = 'Stop'
 $pkg = Get-AppxPackage -Name '{package}' | Sort-Object Version -Descending | Select-Object -First 1
 if (-not $pkg) {{ 'not-installed'; exit }}
-$loc = $pkg.InstallLocation.TrimEnd('') + ''
+$loc = $pkg.InstallLocation.TrimEnd('\') + '\'
 function Get-Mine {{ @(Get-Process | Where-Object {{ $_.Path -and $_.Path.StartsWith($loc, [StringComparison]::OrdinalIgnoreCase) }}) }}
 $procs = Get-Mine
 'found: ' + (($procs | ForEach-Object {{ '{{0}}#{{1}}#{{2}}' -f $_.ProcessName, $_.Id, ($_.MainWindowHandle -ne 0) }}) -join ',')
@@ -1035,7 +1035,7 @@ if ($procs.Count) {{
 }}
 try {{
   $app = (Get-AppxPackageManifest $pkg).Package.Applications.Application | Select-Object -First 1
-  Start-Process ('shell:AppsFolder' + $pkg.PackageFamilyName + '!' + $app.Id)
+  Start-Process ('shell:AppsFolder\' + $pkg.PackageFamilyName + '!' + $app.Id)
   'launched'
 }} catch {{
   'error: ' + $_
@@ -1156,7 +1156,9 @@ mod tests {
     fn windows_restart_script_targets_package_and_reports_outcome() {
         let script = windows_restart_script("OpenAI.Codex");
         assert!(script.contains("Get-AppxPackage -Name 'OpenAI.Codex'"));
-        assert!(script.contains("shell:AppsFolder"));
+        // 少了反斜杠 Start-Process 报「找不到文件」，客户端关了却打不开（2026-10-31 Windows 实测）
+        assert!(script.contains(r"'shell:AppsFolder\' + $pkg.PackageFamilyName"));
+        assert!(script.contains(r"InstallLocation.TrimEnd('\') + '\'"));
         // format! 转义后不能残留双花括号（PowerShell 会当成字面量）
         assert!(!script.contains("{{") && !script.contains("}}"));
         assert_eq!(restart_outcome("found: Codex#1#True\nlaunched\n", "X"), Ok(()));

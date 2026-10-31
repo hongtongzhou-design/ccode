@@ -68,6 +68,25 @@ test("字号档递增，衬线栈中文衬线在前", () => {
   });
 });
 
+test("Windows：字号取整数像素、衬线不落宋体、现代黑体装了就用；Mac 照旧", () => {
+  for (const k of ["small", "large", "xlarge"] as const) {
+    const px = chatFontSizePx(k, true)!;
+    assert.equal(px, Math.round(px), `${k} 在 Windows 上是半像素`);
+  }
+  assert.equal(chatFontSizePx("small"), 12.5);
+  const winSerif = chatFontFamilyStack("serif", true)!;
+  assert.ok(!winSerif.includes("SimSun"), "Windows 衬线又落到宋体");
+  assert.ok(winSerif.indexOf("Georgia") < winSerif.indexOf("Microsoft YaHei UI"));
+  const sans = chatFontFamilyStack("sans", true)!;
+  assert.ok(sans.indexOf("HarmonyOS Sans SC") < sans.indexOf("Segoe UI"));
+  assert.ok(sans.indexOf("Segoe UI") < sans.indexOf("Microsoft YaHei UI"));
+  assert.equal(chatFontFamilyStack("sans"), null, "Mac 没有现代黑体档，落回系统");
+  assert.deepEqual(chatStyleVars({ chatFontSize: "small", chatFontFamily: "sans" }, true), {
+    "--ccode-chat-fs": "13px",
+    "--ccode-chat-ff": sans,
+  });
+});
+
 test("CSS：每个强调色深浅各一套，且气泡与正文都读同一组变量", () => {
   for (const a of CHAT_ACCENTS.filter((x) => x !== "off")) {
     assert.ok(css.includes(`--chat-code-dark-${a}`), `缺深色 ${a}`);

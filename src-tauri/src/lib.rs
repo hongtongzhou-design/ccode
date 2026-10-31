@@ -94,6 +94,7 @@ mod inst_access;
 mod journal_metrics;
 mod lit_watch;
 mod logbuf;
+mod main_window;
 #[cfg(target_os = "macos")]
 mod mac_fullscreen;
 mod mcp;
@@ -213,6 +214,8 @@ pub fn run() {
         .manage(pty::PtyManager::default())
         // 内置技能种子：启动时把库里没有的内置技能补进去（幂等，不覆盖用户已有同名技能）
         .setup(|app| {
+            // 主窗口最先建（配置里 create:false）：Windows 建窗即无标题栏，见 main_window.rs
+            main_window::create(app)?;
             // 聊天层旁路：清上次崩溃留下的旁路目录；改为每次启动注入的几家，收回以前写进全局配置的 hooks
             chat_channel::prune_on_startup();
             hooks::migrate_launch_injected();
@@ -242,11 +245,24 @@ pub fn run() {
             // 扩展「存到 Mesa」的回执监听：helper 是独立进程不发 Tauri 事件，
             // 这里把收货回执变成 inst-papers-changed 广播给清单/雷达
             browser_bridge::spawn_receipts_watch(app.handle().clone());
-            if let Err(e) = tray::setup(app.handle()) {
-                logbuf::record("warn", "tray", &format!("托盘初始化失败: {e}"));
+            // 托盘菜单要逐个连接比对磁盘配置（开发版实测 2.5 秒）。Windows 上放后台线程建：setup 占着主线程时
+            // WebView2 出不了画面，启动窗口要么一直隐身、要么到点露出一块白（main_window.rs）。
+            // 托盘与菜单项 tauri 会自己转到主线程建，托盘页「刷新」也是从后台线程调同一个 rebuild。
+            // macOS 照旧在 setup 里同步建（那边启动画面不受这段影响，不动）
+            let build_tray = |app: &tauri::AppHandle| {
+                if let Err(e) = tray::setup(app) {
+                    logbuf::record("warn", "tray", &format!("托盘初始化失败: {e}"));
+                }
+                // 托盘建好后再挂：应用图标外观要连托盘一起换
+                app_icon::apply_saved(app);
+            };
+            #[cfg(windows)]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || build_tray(&handle));
             }
-            // 托盘建好后再挂：应用图标外观要连托盘一起换
-            app_icon::apply_saved(app.handle());
+            #[cfg(not(windows))]
+            build_tray(app.handle());
             // Windows 老用户：已开的精确注意力钩子若还是旧版内联写法（从不生效），后台换成新写法；
             // 之后（三平台）给开着的 Gemini 钩子补上名字（hooks::refresh_gemini_hook_name）
             #[cfg(windows)]
@@ -423,8 +439,7 @@ pub fn run() {
                 // 界面缩放与最小窗口尺寸（ui_zoom.rs）：开机先套存下的缩放，首帧就是对的大小
                 ui_zoom::apply(&window, settings::current_ui_zoom());
                 // Windows：去掉原生标题栏，前端自绘拖拽区与窗口按钮（与 macOS Overlay 同构）。
-                // 不能放进 tauri.conf：titleBarStyle 只在 macOS 生效，dev 配置覆盖时
-                // windows 数组整体替换，平台配置会丢。
+                // 建窗时 main_window.rs 已去掉；这里兜住配置漏写 create:false、由 tauri 建窗的情况。
                 #[cfg(target_os = "windows")]
                 if let Err(e) = window.set_decorations(false) {
                     logbuf::record("warn", "window", &format!("原生标题栏未去掉: {e}"));
@@ -668,6 +683,7 @@ pub fn run() {
             pty::terminal_shell_options,
             pty::pty_cd,
             win_snap::window_show_snap_layouts,
+            main_window::boot_window_painted,
             pty::pty_has_running_process,
             pty::pty_shell_busy,
             sessions::list_sessions,

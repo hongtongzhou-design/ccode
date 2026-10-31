@@ -46,7 +46,7 @@
   --color-field: #464542; /* 输入框 / 弹层边线（保持亮于 hairline） */
 
   /* 微信息字号令牌（badge/时间戳/副注释统一口径）：替代散落的 text-[10px]/text-[11px]，
-     阶梯为 micro 11 → xs 12 → sm 14 → base 16（Linear 式小阶梯，11px 为下限保证可读） */
+     阶梯 Mac 为 micro 11 → xs 11.5 → sm 12.25 → base 14，Windows 为 11 → 12 → 13 → 14（见根字号那段；11px 为下限保证可读） */
   --text-micro: 11px;
   --text-micro--line-height: 15px;
 
@@ -607,15 +607,25 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* Windows 下保持 rem 的标准 16px 根基，避免 text-xs/text-sm 被 14px 根字号整体缩小。
-   body 仍保持 14px 的默认正文视觉字号；macOS/Linux 不走此覆盖。 */
-[data-platform="windows"] {
-  font-size: 16px;
+/* 根字号三平台都是 14px（html, body 那条）：间距、控件高、图标、栏宽都按 Mac 调好的走。
+   2026-10-31 起 Windows 不再把根抬到 16px——原先 rem 全站放大 1/7，设置页行标题（text-base）16px、
+   说明（text-sm）14px，和小节标题一般大，整页像放大过（用户截图）。
+   Windows 只把字号令牌钉成整数像素：Mac 的 11.5 / 12.25 / 15.75 这类半像素在 DirectWrite 下发糊，
+   且 xs、sm 照 Mac 四舍五入会撞成同一档，所以各取不低于 Mac 的最近整数，阶梯
+   micro 11 → xs 12 → sm 13 → base 14 → lg 16 → xl 18 → 2xl 21；text-micro 两边本就固定 11px。
+   行高 Tailwind 按比例给，跟着走。 */
+:root[data-platform="windows"] {
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 21px;
 }
 
 /* macOS/Linux 根字号 14px 让 text-xs（0.75rem）只剩 10.5px：比固定 11px 的 text-micro 还小，
    全站用得最多的一档字号低于自定的 11px 下限，阶梯倒挂（2026-10-22 审查）。只把 xs 钉到 11.5px，
-   阶梯变成 micro 11 → xs 11.5 → sm 12.25，其余档与间距不动，Windows（根 16px，xs 本就 12px）不走这里。 */
+   阶梯变成 micro 11 → xs 11.5 → sm 12.25，其余档与间距不动。Windows 另有整数像素一套（上一段），不走这里。 */
 :root:not([data-platform="windows"]) {
   --text-xs: 11.5px;
 }

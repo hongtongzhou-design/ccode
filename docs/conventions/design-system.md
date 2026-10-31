@@ -253,9 +253,12 @@
   **禁再铺彩色底块或写 PDF / W / M↓ 字母标签**（一列每行一块底色太抢眼，与文件夹线条不是一套）。行内槽宽 14px，同层文件名与文件夹名对齐；
   大号占位只换 size、底色保持中性。识别色经 `--file-glyph` 传入，浅色主题 `.ccode-file-glyph` 同色相压暗 25%（细线条在米白上要到 3:1）。
 - **符号语言统一**：导航与图标用单色几何符号（⚙⛁⌨◔✦◫⛭⇄），◈=AI 功能、⚑=pin/保留；**禁用彩色 emoji**。分区/组头折叠用 `FoldMark`（28px 模块），不要用 ▸/▾ 小字冒充按钮。
-- **字号阶梯令牌化**：正文阶梯 `text-micro`(11/15) → `text-xs`(12) → `text-sm`(14) → `text-base`(16)，**禁 `text-[Npx]` 任意值**；
-  以上是 Windows（根 16px）的值。**macOS/Linux 根字号 14px**，rem 档按 0.875 缩：sm 12.25、base 14；`text-xs` 若照缩只剩 10.5px、比 micro 还小，
+- **字号阶梯令牌化**：正文阶梯 `text-micro` → `text-xs` → `text-sm` → `text-base`，**禁 `text-[Npx]` 任意值**。
+  **三平台根字号都是 14px**（2026-10-31 起 Windows 不再抬到 16px，间距 / 控件高 / 栏宽与 Mac 同一套；**以 Mac 调好的为准，改字号先在 Mac 上定**）。
+  rem 档按 14 算：sm 12.25、base 14；`text-xs` 若照缩只剩 10.5px、比 micro 还小，
   所以在 `:root:not([data-platform="windows"])` 钉 `--text-xs: 11.5px`（2026-10-22），Mac 阶梯 = micro 11 → xs 11.5 → sm 12.25 → base 14；
+  Windows 在 `:root[data-platform="windows"]` 把令牌钉成不低于 Mac 的最近整数（半像素在 DirectWrite 下发糊、xs / sm 四舍五入会撞档）：
+  micro 11 → xs 12 → sm 13 → base 14 → lg 16 → xl 18 → 2xl 21；
   语义分工：micro = badge/时间戳/副注释（11px 是可读下限，不再用 10px），xs = 次级说明，sm = 正文/列表行，base = 页面标题。
   终端工作台整体提高一档（`.terminal-workbench` 覆写 micro→12、xs→13）；~~工作台首页与任务 / 审批详情局部覆写 sm→13、xs→12~~（2026-10-27 撤销：用户问「和全站字体一致吗」，工作台改回全站令牌——名称 sm、状态与几个数 xs、时间 micro，三块区块标题同 SectionHeading 的 base semibold）。侧栏 xs 提到 12.5px（`.ccode-app-rail .text-xs`，2026-10-23，
   节头 / 「项目」标签 / 「全部 N 条」，两个平台同值），对话行跟 body 14px。同类信息必须用同一档，禁止同页相邻出现两档灰字。
@@ -264,11 +267,11 @@
   例外仅限尺寸 ≤ 14px 的纯装饰/图标元素与不可点数据格（热力图格子圆角为百分比 22%、几何全收在
   App.css `.ccode-heat*`，组件不写死值），
   可交互控件一律走令牌。改动前先确认元素实际尺寸。
-  Windows 额外保持 `html` 根字号 16px、`body` 默认字号 14px，正文优先 `Segoe UI Variable`（中文回退雅黑）。
+  Windows `body` 默认字号 14px（同 Mac），正文优先 `Segoe UI Variable`（中文回退雅黑）。
   **顶部上下文栏与导航胶囊不用 Variable**：WebView2 对可变字体不走 GDI hinting，小字发糊；
   `.ccode-titlebar` / `.ccode-top-nav-capsule` / Markdown 阅读（`.md-body`，含对话回放 `.md-chat`、
   笔记与产物预览）改静态 Segoe UI；字重不动。`.md-body` 在 Windows 把 13.5px 对齐到 14px（半像素发糊），
-  `.md-chat` 不吃这条：Windows 上按聊天字号阶梯（`--chat-base` 14px）与「聊天字体」设置走（2026-10-21 修：原先 Segoe 写死，Windows 上聊天字体选了没反应）。聊天 Markdown 比笔记更瘦：行内 `code` 去描边只留浅底，`blockquote` 只留左线不铺 inset 底（警告/摘录才不会占半屏）。胶囊的 backdrop-filter 放到 `::before`。macOS/Linux 不走此块。
+  `.md-chat` 不吃这条：Windows 上按聊天字号阶梯（`--chat-base` 14px）与「聊天字体」设置走（2026-10-21 修：原先 Segoe 写死，Windows 上聊天字体选了没反应）。**Windows 聊天字体口径（2026-10-31）**：系统档 Segoe UI + 微软雅黑 UI 不变；多一档「现代黑体」（`sans`，只在 Windows 列出），HarmonyOS Sans → MiSans → 思源黑体 → 等线「装了就用」、都没装落回系统档，不随包带字体；衬线档不落宋体（SimSun 屏幕正文发虚），没装思源宋体时汉字回落雅黑、西文 Georgia；聊天字号非标准档取整数像素（小 13 / 大 16 / 特大 18），Mac 照旧 12.5 / 15.5 / 17.5。栈与字号在 `chat-style.ts`，`isWindows` 显式传参。聊天 Markdown 比笔记更瘦：行内 `code` 去描边只留浅底，`blockquote` 只留左线不铺 inset 底（警告/摘录才不会占半屏）。胶囊的 backdrop-filter 放到 `::before`。macOS/Linux 不走此块。
   浅色主题文字梯队按平台压深 l3/l4 两档（标题 l1 保持主题原值；Windows 正文 l2 另见下文 2026-10-26 条）：Windows 压最多（补偿 DirectWrite 小字号灰化），
   macOS 取原值→Windows 值 65% 的中间档（CoreText 字干较重，但原始 l3/l4 在 canvas 上仅 4.0/2.2:1 不过 WCAG AA；
   中间档 l3 ≥ 4.7、l4 ≥ 3.1，数值由 tests/theme-contrast.test.ts 锁定），Linux 保持主题原值。
@@ -373,7 +376,7 @@
   页面名、胶囊、快捷键、命令面板仍叫「对话」。
   六，展开态宽度 224→**208px**（`w-52`）：底部改一排图标后，课题名都短、右侧大片空白，224 显得宽（用户同批点名）。
   **2026-10-23 放宽到 `w-64`，同日再放到 `w-72`**（Mac 根 14px 下 252px、Windows 288px；用户：「侧栏太窄了，字也有点小」，
-  再：「再宽一点，每个会话后面还要放更多操作」）：对话挂进项目树后侧栏要放对话主题和行尾 ⋯，不再只是短课题名。注：上面 224 / 208 是按 16px 根算的，Mac 上实际是 196 / 182。
+  再：「再宽一点，每个会话后面还要放更多操作」）：对话挂进项目树后侧栏要放对话主题和行尾 ⋯，不再只是短课题名。注：上面 224 / 208 是按 16px 根算的，三平台实际都是 196 / 182（2026-10-31 起 Windows 根字号同为 14px）。
   七，**组内拖动排序**（同日用户「按你推荐的做」）：只在同一段里拖（置顶段 / 某个工作方式组；2026-10-23 起不分组，段＝置顶 / 课题 / 未添加），不跨组——分组由工作方式决定；搜索时不拖。
   手感照运行页标签条（pointer 事件自实现、竖移超 6px 起拖、源行 `bg-raised` 浮起跟手、其余行 150ms 让位、松手先吸附再落定、吞紧随的 click，
   槽位判定复用 `tab-drag.ts`，left/width 换成 top/height）；⋯ 上按下不起拖。顺序记本机 `ccode.projectTreeOrder`（一张全局路径表，只比同组
@@ -505,6 +508,8 @@
 - **侧栏桌面磨砂（2026-09-24）**：透的是窗口背后的桌面，不是页头那种网页内 `backdrop-filter`。
   窗口 `transparent` + macOS 菜单材质 `menu`（`macOSPrivateApi`，不上 Mac App Store）/
   Windows 11 Mica（深浅跟 Mesa 主题，不跟系统外观）；Linux 没有同等材质，侧栏保持实心 rail。
+  Windows 跟主题切 micaDark / micaLight 走前端 `setEffects`，**capabilities 必须带 `core:window:allow-set-effects`**——
+  少了它调用被拒，`syncWindowsMica` 当成 Windows 10 打上 `data-material=none`，侧栏顶栏整块实心（2026-10-31 实证，此前 Windows 11 一直如此）。
   macOS 材质 2026-10-23 由 `underWindowBackground` 改为 `menu`（对照 Codex 客户端，它的主窗也是 `vibrancy: 'menu'`、侧栏不铺色）：
   前者只模糊不压色，彩色壁纸的色相直接透上来；菜单材质更实、饱和度低，壁纸只剩偏灰的明暗。改材质要同步 lib.rs 与各份 `tauri*.conf.json`（测试对账）。
   **macOS 全屏壳铺实心 `--color-rail`**（`data-fullscreen`，同日）：全屏空间里窗口背后只剩桌面壁纸，材质透上来的是整面壁纸色；
