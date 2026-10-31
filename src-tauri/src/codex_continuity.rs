@@ -63,10 +63,16 @@ pub(crate) fn stable_helper() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    // 漂移比对（托盘重建菜单）也会走到写计划，每次都试跑 helper 太重：一个进程只找一次、拷一次
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
-    CACHE.get_or_init(locate_and_copy_helper).clone()
+    // 漂移比对（托盘重建菜单）也会走到写计划，每次都试跑 helper 太重：一个进程只找到一次、拷一次。
+    // 没找到不记：开发版启动时托盘就会走到这里，那时 helper 常还没 `cargo build --bin mesa_helper`，
+    // 记下 None 就一直退回明文直到重启（2026-10-31 Windows 实测）
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<PathBuf>> = Mutex::new(None);
+    let mut cached = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if cached.is_none() {
+        *cached = locate_and_copy_helper();
+    }
+    cached.clone()
 }
 
 fn locate_and_copy_helper() -> Option<PathBuf> {
