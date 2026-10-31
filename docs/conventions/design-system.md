@@ -253,9 +253,12 @@
   **禁再铺彩色底块或写 PDF / W / M↓ 字母标签**（一列每行一块底色太抢眼，与文件夹线条不是一套）。行内槽宽 14px，同层文件名与文件夹名对齐；
   大号占位只换 size、底色保持中性。识别色经 `--file-glyph` 传入，浅色主题 `.ccode-file-glyph` 同色相压暗 25%（细线条在米白上要到 3:1）。
 - **符号语言统一**：导航与图标用单色几何符号（⚙⛁⌨◔✦◫⛭⇄），◈=AI 功能、⚑=pin/保留；**禁用彩色 emoji**。分区/组头折叠用 `FoldMark`（28px 模块），不要用 ▸/▾ 小字冒充按钮。
-- **字号阶梯令牌化**：正文阶梯 `text-micro`(11/15) → `text-xs`(12) → `text-sm`(14) → `text-base`(16)，**禁 `text-[Npx]` 任意值**；
-  以上是 Windows（根 16px）的值。**macOS/Linux 根字号 14px**，rem 档按 0.875 缩：sm 12.25、base 14；`text-xs` 若照缩只剩 10.5px、比 micro 还小，
+- **字号阶梯令牌化**：正文阶梯 `text-micro` → `text-xs` → `text-sm` → `text-base`，**禁 `text-[Npx]` 任意值**。
+  **三平台根字号都是 14px**（2026-10-31 起 Windows 不再抬到 16px，间距 / 控件高 / 栏宽与 Mac 同一套；**以 Mac 调好的为准，改字号先在 Mac 上定**）。
+  rem 档按 14 算：sm 12.25、base 14；`text-xs` 若照缩只剩 10.5px、比 micro 还小，
   所以在 `:root:not([data-platform="windows"])` 钉 `--text-xs: 11.5px`（2026-10-22），Mac 阶梯 = micro 11 → xs 11.5 → sm 12.25 → base 14；
+  Windows 在 `:root[data-platform="windows"]` 把令牌钉成不低于 Mac 的最近整数（半像素在 DirectWrite 下发糊、xs / sm 四舍五入会撞档）：
+  micro 11 → xs 12 → sm 13 → base 14 → lg 16 → xl 18 → 2xl 21；
   语义分工：micro = badge/时间戳/副注释（11px 是可读下限，不再用 10px），xs = 次级说明，sm = 正文/列表行，base = 页面标题。
   终端工作台整体提高一档（`.terminal-workbench` 覆写 micro→12、xs→13）；~~工作台首页与任务 / 审批详情局部覆写 sm→13、xs→12~~（2026-10-27 撤销：用户问「和全站字体一致吗」，工作台改回全站令牌——名称 sm、状态与几个数 xs、时间 micro，三块区块标题同 SectionHeading 的 base semibold）。侧栏 xs 提到 12.5px（`.ccode-app-rail .text-xs`，2026-10-23，
   节头 / 「项目」标签 / 「全部 N 条」，两个平台同值），对话行跟 body 14px。同类信息必须用同一档，禁止同页相邻出现两档灰字。
@@ -264,7 +267,7 @@
   例外仅限尺寸 ≤ 14px 的纯装饰/图标元素与不可点数据格（热力图格子圆角为百分比 22%、几何全收在
   App.css `.ccode-heat*`，组件不写死值），
   可交互控件一律走令牌。改动前先确认元素实际尺寸。
-  Windows 额外保持 `html` 根字号 16px、`body` 默认字号 14px，正文优先 `Segoe UI Variable`（中文回退雅黑）。
+  Windows `body` 默认字号 14px（同 Mac），正文优先 `Segoe UI Variable`（中文回退雅黑）。
   **顶部上下文栏与导航胶囊不用 Variable**：WebView2 对可变字体不走 GDI hinting，小字发糊；
   `.ccode-titlebar` / `.ccode-top-nav-capsule` / Markdown 阅读（`.md-body`，含对话回放 `.md-chat`、
   笔记与产物预览）改静态 Segoe UI；字重不动。`.md-body` 在 Windows 把 13.5px 对齐到 14px（半像素发糊），
@@ -373,7 +376,7 @@
   页面名、胶囊、快捷键、命令面板仍叫「对话」。
   六，展开态宽度 224→**208px**（`w-52`）：底部改一排图标后，课题名都短、右侧大片空白，224 显得宽（用户同批点名）。
   **2026-10-23 放宽到 `w-64`，同日再放到 `w-72`**（Mac 根 14px 下 252px、Windows 288px；用户：「侧栏太窄了，字也有点小」，
-  再：「再宽一点，每个会话后面还要放更多操作」）：对话挂进项目树后侧栏要放对话主题和行尾 ⋯，不再只是短课题名。注：上面 224 / 208 是按 16px 根算的，Mac 上实际是 196 / 182。
+  再：「再宽一点，每个会话后面还要放更多操作」）：对话挂进项目树后侧栏要放对话主题和行尾 ⋯，不再只是短课题名。注：上面 224 / 208 是按 16px 根算的，三平台实际都是 196 / 182（2026-10-31 起 Windows 根字号同为 14px）。
   七，**组内拖动排序**（同日用户「按你推荐的做」）：只在同一段里拖（置顶段 / 某个工作方式组；2026-10-23 起不分组，段＝置顶 / 课题 / 未添加），不跨组——分组由工作方式决定；搜索时不拖。
   手感照运行页标签条（pointer 事件自实现、竖移超 6px 起拖、源行 `bg-raised` 浮起跟手、其余行 150ms 让位、松手先吸附再落定、吞紧随的 click，
   槽位判定复用 `tab-drag.ts`，left/width 换成 top/height）；⋯ 上按下不起拖。顺序记本机 `ccode.projectTreeOrder`（一张全局路径表，只比同组

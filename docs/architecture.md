@@ -458,6 +458,15 @@ MCP 页（⌘6，第六个页面入口；曾按旧页序称「第八页」）：
 
 ## 10. 决策记录
 
+### 2026-10-31 · Windows 根字号回到 14px，与 Mac 同一套尺寸
+
+用户截设置页说 Windows 字号不对，要求看 Windows 全站、Mac 已调好不动。查明 2026-08-28 起 Windows 把 `html` 根字号抬到 16px
+（为了 text-xs / sm 不在 14px 根下缩小），此后各页都在 Mac 上调，Windows 上所有 rem 尺寸（字号、间距、控件高、侧栏宽）一律大 1/7：
+设置页行标题 text-base 成了 16px、说明 text-sm 14px，和小节标题一般大。定下：**Windows 根字号同 Mac 为 14px，尺寸以 Mac 为准**；
+只在 `:root[data-platform="windows"]` 把字号令牌钉成不低于 Mac 的最近整数（xs 12、sm 13、base 14、lg 16、xl 18、2xl 21），
+保住 08-28 要防的半像素发糊和 xs / sm 撞档。聊天正文本就按 px（`--chat-base` 14px），不受影响。取代 08-28「Windows 根 16px」。
+细则 design-system「字号阶梯令牌化」。
+
 ### 2026-10-31 · Windows 启动：建窗即无标题栏，Windows 11 启动即磨砂
 
 用户要求把 Windows 的启动过渡对齐已完善的 Mac。最小 Tauri 探针（同 tauri 2.11.5 / wry 0.55.1、同窗口配置）与 Mesa Dev
