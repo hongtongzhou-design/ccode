@@ -1309,7 +1309,8 @@ scan_persist.rs            # 扫描缓存落盘层（2026-10-16，app.db scan_me
                              # ◈ 适配到流水线（adapt_skill_to_pipeline 出稿 FN_DISTILL + build_adapt_prompt 规范路径表
                              #   单一出处 → write_skill_md 确认落盘，name 强制沿用库中条目；update_content_impl
                              #   interface=None 时保留已声明 inputs/outputs 不静默丢弃）；
-                             # 技能内容红线（2026-08-20 社区对标批量升级后确立）：单文件轻量规范（~100 行内，禁脚本/JSON 中间件/lint 体系）、
+                             # 技能内容红线（2026-08-20 确立，2026-10-31 放宽）：SKILL.md 约 150 行内；确定性的活（题录、渲染、格式桥接等）
+                             #   用随包 scripts/ 固定脚本，SKILL.md 只写何时调用、怎么读结果；仍禁 JSON 中间件/lint 体系、
                              #   产出文件名与流水线接口（TASK.md 内联口径）不动、升级后同步 cp 进技能库（种子改完库不追平，见种子更新机制）；
                              # 删除保护（2026-09-03）：来源口径 = source 字段单一出处（builtin/ccode/local/zip/github/discovered，
                              #   ccode 为 create_skill 后加，旧自建记 local 无法区分、前端 fail-safe 按非自建提示）；

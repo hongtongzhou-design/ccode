@@ -10,10 +10,7 @@ Mesa 启动你时在环境变量 `MESA_IMAGE_TOOL` 里放了出图工具的路�
 
 ## 先确认能用
 
-- macOS / Linux：`"$MESA_IMAGE_TOOL" image --list`
-- Windows PowerShell：`& $env:MESA_IMAGE_TOOL image --list`
-
-输出第一行是默认出图模型，后面是各网关目录里能出图的模型。`MESA_IMAGE_TOOL` 为空：说明不是在 Mesa 里启动的，或这版 Mesa 还没带出图工具——停下告诉用户，不要改用别的方式绕过。第一行说「还没配置出图模型」：请用户到 Mesa 连接页最下方「出图模型」里选一个，或者用户指定了模型时加 `--model`。
+macOS / Linux 跑 `"$MESA_IMAGE_TOOL" image --list`，Windows PowerShell 跑 `& $env:MESA_IMAGE_TOOL image --list`。输出第一行是默认出图模型，后面是各网关目录里能出图的模型。`MESA_IMAGE_TOOL` 为空：说明不是在 Mesa 里启动的，或这版 Mesa 还没带出图工具——停下告诉用户，不要改用别的方式绕过。第一行说「还没配置出图模型」：请用户到 Mesa 连接页最下方「出图模型」里选一个，或者用户指定了模型时加 `--model`。
 
 ## 动笔前先定三件事
 
@@ -81,16 +78,9 @@ Windows PowerShell：`& $env:MESA_IMAGE_TOOL image --prompt "…" --out figures/
 
 ### 输出怎么读
 
-成功时每张图输出两行：
+成功时每张图输出 `saved: 绝对路径`（**以这一行为准**：扩展名按实际格式改，模型回 JPEG 就存成 .jpg；同名文件已存在时自动加 `-2`，不覆盖）和 `size: 宽x高`（实际出了多大）。
 
-- `saved: 绝对路径`——**以这一行为准**：扩展名会按实际格式改（模型回 JPEG 就存成 .jpg），同名文件已存在时自动加 `-2`，不覆盖；
-- `size: 宽x高`——实际出了多大。
-
-可能还有一行 `note:`，**必须读，并转告用户**。网关收下参数不等于模型照做，所以工具出完图会按实际的图核对：
-
-- 不支持的选项（比如给 Gemini 加 `--transparent`）说明没生效；
-- 网关拒收某个选项时，去掉它自动重出一次，并说明去掉了什么；
-- 画幅和 `--size` 对不上、分辨率没到 `--resolution` 那档、要了透明底但图里没有透明像素，都会写明。
+可能还有一行 `note:`，**必须读，并转告用户**。网关收下参数不等于模型照做，工具出完图会按实际的图核对：不支持的选项（比如给 Gemini 加 `--transparent`）说明没生效；网关拒收某个选项时去掉它自动重出一次并说明去掉了什么；画幅和 `--size` 对不上、分辨率没到 `--resolution` 那档、要了透明底但没有透明像素，都会写明。
 
 `note:` 说没达到要求，这张图就不能当成按要求交付的成品：要么换模型重出（用户同意后加 `--model`），要么交给用户时讲清差在哪。
 
@@ -107,14 +97,9 @@ Windows PowerShell：`& $env:MESA_IMAGE_TOOL image --prompt "…" --out figures/
 | 豆包 doubao-seedream-4-0 | 按 | 4K | 不支持 | 不支持 |
 | 通义 wan2.5 / wan2.6-t2i、qwen-image-2.0-pro | 按 | 未测大图 | 不支持 | 不支持 |
 
-所以：
+所以：要横版、竖版别用 gpt-image-2 / 2.5，换 gpt-image-1.5、Gemini 或豆包；要 2K / 4K 换 gemini-3-pro-image 或豆包 seedream-4；要透明底用 gpt-image 系。默认模型做不到时，告诉用户换哪个、为什么，用户同意了再加 `--model`。
 
-- 要横版、竖版：别用 gpt-image-2 / 2.5，换 gpt-image-1.5、Gemini 或豆包。
-- 要 2K / 4K：换 gemini-3-pro-image 或豆包 seedream-4。
-- 要透明底：用 gpt-image 系。
-- 默认模型做不到时，告诉用户换哪个、为什么，用户同意了再加 `--model`。
-- `wan2.6-image` 这类只能改图，文生图要用 `wan2.6-t2i`。
-- 豆包默认会在右下角打「AI生成」水印，工具已经替你关了。
+- `wan2.6-image` 这类只能改图，文生图要用 `wan2.6-t2i`；豆包默认的右下角「AI生成」水印工具已经替你关了。
 - Grok 的图要从 x.ai 下载，国内直连常下不动，工具会报「连不上 imgen.x.ai」，请用户到 Mesa 设置 → 网络填出网代理。
 
 ## 画完自检

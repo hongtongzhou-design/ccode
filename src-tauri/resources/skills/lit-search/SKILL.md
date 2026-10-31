@@ -79,32 +79,10 @@ Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索
 3. 去重口径：DOI 精确匹配优先，标题模糊匹配（忽略大小写与标点）兜底；
 4. 每条记录保留来源标注（如「来源：Elicit 导出」），便于回溯检索渠道。
 
-#### 带 key 的 API 检索
+#### 带 key 的库与可选 MCP
 
-需要订阅密钥的库，key 一律走环境变量引用（`$VAR`），**禁止写进任何文件**（skills 文档、配置、脚本都不行）：
-
-- **Web of Science**：Clarivate 官方 REST API（需机构订阅 key），用 `$WOS_API_KEY` 引用，如
-  `curl -H "X-ApiKey: $WOS_API_KEY" "https://api.clarivate.com/apis/wos-starter/v1/documents?q=TS=(topic)"`；
-- **Consensus**：官方 API / hosted MCP（端点 `https://mcp.consensus.app/mcp`，HTTP 传输，401 需鉴权；以官方文档为准），key 用 `$CONSENSUS_API_KEY` 引用；
-- **Google Scholar 无官方 API**：标准档用 OpenAlex。确需 Scholar 走 SerpAPI（`$SERPAPI_KEY` 引用），如
-  `curl "https://serpapi.com/search.json?engine=google_scholar&q=<检索词>&api_key=$SERPAPI_KEY"`。
-
-#### 推荐 MCP（可选，去 MCP 页粘贴导入）
-
-以下 MCP server 与文献工作流相关；配置片段为标准 `mcpServers` 条目，到 Mesa 的 MCP 页用「粘贴导入」添加（粘贴导入会列出完整命令清单，确认来源可信再导入）：
-
-- **Consensus**（官方 hosted MCP；key 用 `$CONSENSUS_API_KEY` 环境变量引用，不落明文）：
-
-```json
-"consensus": { "type": "http", "url": "https://mcp.consensus.app/mcp", "headers": { "Authorization": "Bearer $CONSENSUS_API_KEY" } }
-```
-
-- **Playwright**（stdio；浏览器操作重型备胎——检索站反爬/需登录导出时兜底，平时不必挂载）：
-
-```json
-"playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] }
-```
-
+- 需要订阅密钥的库，key 一律走环境变量引用（`$VAR`），**禁止写进任何文件**（skills 文档、配置、脚本都不行）。Web of Science 用 Clarivate 官方 REST API（机构订阅），如 `curl -H "X-ApiKey: $WOS_API_KEY" "https://api.clarivate.com/apis/wos-starter/v1/documents?q=TS=(topic)"`；Google Scholar 无官方 API，标准档用 OpenAlex，确需 Scholar 走 SerpAPI（`$SERPAPI_KEY`）。
+- Consensus / Undermind 由人在 Mesa 的 MCP 页用预设添加（检索步面板「配置学术检索 MCP」那一项），Consensus 的 key 用 `$CONSENSUS_API_KEY` 引用、不落明文。检索站反爬或要登录导出时，可挂 Playwright MCP（`npx @playwright/mcp@latest`）兜底，平时不挂。
 - Semantic Scholar 无权威社区 MCP。标准档不把它当发现库；人明确要求引文扩展时再用其被引/参考文献接口，429 记缺口后停止，不重试。
 
 ### 4. 逐条筛选
@@ -139,11 +117,7 @@ Elicit / Undermind / X-MOL / Google Scholar 等闭源站点无法程序化检索
 
 ### 6. 定稿纳入清单
 
-纳入的文献写进 `papers/included.json`，`papers/included.md` 由脚本 write 生成，一行一篇，格式：
-
-```
-标题 — 作者, 年份 — 来源 — 链接/DOI
-```
+纳入的文献写进 `papers/included.json`；`papers/included.md` 由脚本 write 生成（一行一篇 `标题 — 作者, 年份 — 来源 — 链接/DOI`），不手写。
 
 ### 7. 综述类型与证据集合
 
