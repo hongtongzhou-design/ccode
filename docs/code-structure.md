@@ -999,7 +999,8 @@ src-tauri/
                              #   所有链接产物（含 lib 测试 exe，否则 cargo test 报 0xc0000139），别退回 tauri_build::build()
   windows-app-manifest.xml   # Windows 应用 manifest（Common-Controls 6.0，与 tauri-build 默认相同），build.rs 交给链接器
 src-tauri/src/
-  agent_specs.rs             # agent_config_root_with：各家用户级配置目录唯一解析（搬迁变量；GEMINI_CLI_HOME 顶替家目录），设为全局 / MCP / 技能同源；
+  agent_specs.rs             # 各家原生分叉参数 fork（ForkSpec，2026-10-31，matrix「原生分叉」表；pty_spawn 的 forkSessionId 用）；
+                             # agent_config_root_with：各家用户级配置目录唯一解析（搬迁变量；GEMINI_CLI_HOME 顶替家目录），设为全局 / MCP / 技能同源；
                              # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/permission_args 原生权限档（聊天权限徽标，agents::permission_launch_args）/
                              #   model_switch 运行中切模型（claude/gemini/kimi/grok 带参直切；codex/opencode 唤选择器——两家 CLI 无带参直切：
                              #   codex /model 无内联参数（源码 supports_inline_args 不含 Model）、opencode /models run 无参，2026-09-15 实证；
@@ -1260,6 +1261,8 @@ scan_persist.rs            # 扫描缓存落盘层（2026-10-16，app.db scan_me
                              # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）、
                              # Claude 接续链（merge_claude_chains，2026-10-21）：id 取文件名，直线接续并成链尾一条、
                              #   真分叉单列 forked_from；被并掉的成员进 ScanResult.hidden_members 供用量逐文件算、
+                             # Mesa 发起的分叉登记（session_forks 表、record_session_fork，2026-10-31）：扫描时登记的新会话去掉上游指针
+                             #   不按接续并进原对话（Claude / Codex / Grok 三套链），apply_session_forks 把 forked_from 指回原对话那一行、
                              # Claude 斜杠命令 / ! 命令及本地输出拆成 command / command_output 块（claude_command_block，
                              #   剥 ANSI；本地输出行在尾态里算 settled，2026-10-17）、
                              # codex rollout 元信息 model_provider 记进 SessionMetaDto.provider（恢复按它挑兼容 profile，

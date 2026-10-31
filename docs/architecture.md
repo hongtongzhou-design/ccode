@@ -458,6 +458,16 @@ MCP 页（⌘6，第六个页面入口；曾按旧页序称「第八页」）：
 
 ## 10. 决策记录
 
+### 2026-10-31 · 分叉成新对话改走各家 CLI 原生分叉
+
+用户对照 Claude 客户端的 fork 指出 Mesa 的分叉是「写简报 + 只读新对话」，新对话没有上下文、要先读简报。用户拍板改成原生分叉：
+整段分叉（`/fork`、侧栏 ⋯、对话页右键）在有原生分叉的家走 CLI 自己的 fork（`agent_specs` 的 `fork`：Claude / CodeBuddy / Qwen / Grok
+`-r <id> --fork-session`、Codex `codex fork <id>`、OpenCode `--session <id> --fork`），权限照常、不注入首条消息；能和 `--session-id`
+同用的（Claude / CodeBuddy / Grok）当场锁定新会话 id，其余按标签认领。Kimi（`kimi fork` 未实测交互形态）、Cursor（没有）、Gemini（本机未装）
+退回写简报；「从这里分叉」截到某条回复，原生分叉做不到，仍写简报。CLI 写的上游指针分不清分叉和「接着聊另存」，Mesa 发起的分叉在标签认出
+新会话时登记进 app.db `session_forks`，扫描时这些会话不按接续并进原对话、`forked_from` 指回原对话。2026-10-31 六家经假网关端到端核实
+（`E2E_FORK=1`）；Codex 0.163 的分叉 rollout 只存 `forked_from_id` 不抄历史，Mesa 回放只看得到分叉后的内容（已写进说明书）。
+
 ### 2026-10-31 · CodeBuddy 设为全局：models.json 直接写密钥，收窄「能引用不写明文」
 
 Windows 复核九条写入规则时，金丝雀全局层查出 CodeBuddy `models.json` 的 `${CODEBUDDY_API_KEY}` 常原样发出（本机 2.176 七次六次）。

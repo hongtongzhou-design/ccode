@@ -3131,6 +3131,16 @@ pub(crate) fn resume_args(agent_id: &str, session_id: &str) -> (bool, Vec<String
     }
 }
 
+/// 原生分叉参数：(是否放最前, 参数, 能否同时用 --session-id 定新会话 ID)；这家没有原生分叉返回 None
+pub(crate) fn fork_args(agent_id: &str, session_id: &str) -> Option<(bool, Vec<String>, bool)> {
+    let fork = agent_spec(agent_id)?.fork.as_ref()?;
+    Some((
+        fork.prepend,
+        fork.args.iter().map(|a| a.replace("{session}", session_id)).collect(),
+        fork.session_id,
+    ))
+}
+
 /// 中转 Codex 盖掉磁盘/ChatGPT 登录带进本进程的官方能力（不写 config.toml）。
 /// `web_search` 默认开，catalog 的 `supports_search_tool` 挡不住请求（cc-switch 同结论）；
 /// DeepSeek 等会拒服务端搜索（有的中转转成 Anthropic `web_search_20250305`）。

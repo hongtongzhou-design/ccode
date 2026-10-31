@@ -558,7 +558,7 @@ export default function ProjectTree({
       {
         label: "分叉成新对话",
         icon: GitFork,
-        title: "带着这段对话的简报另开一段，挂在它下面；先出方案、不改文件，原对话不动",
+        title: "把这段对话整段复制成新的一段接着聊，挂在它下面，原对话不动（Kimi、Cursor、Gemini 没有原生分叉，改为带着简报另开一段、先出方案）",
         onSelect: () => {
           const st = useAppStore.getState();
           st.requestForkSession(s);

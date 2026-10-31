@@ -828,6 +828,7 @@ const TerminalView = memo(function TerminalView({
   initialProfileId,
   initialModel,
   resumeSessionId,
+  forkSessionId,
   resumeProvider,
   autoStart,
   resumeKick,
@@ -895,6 +896,8 @@ const TerminalView = memo(function TerminalView({
   initialModel?: string;
   /** 会话恢复：pty_spawn 的 resumeSessionId */
   resumeSessionId?: string;
+  /** 原生分叉（pty_spawn 的 forkSessionId）：第一次启动把这段会话整段复制成新会话；之后接新会话 */
+  forkSessionId?: string;
   /** 会话恢复：rollout 记下的 provider */
   resumeProvider?: string;
   /** 首次可见时自动启动（会话恢复；有 profile 才启动，否则只预填） */
@@ -1951,7 +1954,7 @@ const TerminalView = memo(function TerminalView({
   }, [agentId]);
   // 开聊前选择给聊天层的那一份：恢复占位 / 自定义运行时 / 已在跑的标签不可改
   const launchPickEditable =
-    !running && !shellActive && !restored && !customRuntimeId && !resumeSessionId;
+    !running && !shellActive && !restored && !customRuntimeId && !resumeSessionId && !forkSessionId;
   const launchPick = useMemo<LaunchPickState>(
     () => ({
       editable: launchPickEditable,
@@ -5503,6 +5506,8 @@ const TerminalView = memo(function TerminalView({
     const sessionMoved = identityChange === "agent" || identityChange === "cwd";
     const leftTaskDir = identityChange === "cwd";
     const resumeFrom = sessionMoved ? undefined : (resumeId ?? resumeSessionId);
+    // 原生分叉只在第一次启动用（launch 成功即从标签清掉）；换了目录 / Agent 分不了原会话
+    const forkFrom = resumeFrom || sessionMoved ? undefined : forkSessionId;
     const isResume = Boolean(resumeFrom);
     const chrome = launchChromeBeforeMeasure({
       resume: isResume,
@@ -5624,6 +5629,7 @@ const TerminalView = memo(function TerminalView({
         extraEnv: initialExtraEnv ?? null,
         // 会话恢复（无则全新会话）；换了目录 / Agent 不再接原会话
         resumeSessionId: resumeFrom ?? null,
+        forkSessionId: forkFrom ?? null,
         resumeProvider: sessionMoved ? null : (resumeProvider ?? null),
         // 一键开步的首条指令（恢复会话由后端忽略注入）
         initialPrompt: (options?.prompt ?? promptText).trim() || null,
@@ -5764,7 +5770,7 @@ const TerminalView = memo(function TerminalView({
       }
       if (restored) onRestoreComplete?.(tabId);
       // 本次启动已接管会话：清掉标签级 resumeSessionId，之后「启动」不会再接回旧会话
-      if (resumeSessionId) onConsumeResume?.(tabId);
+      if (resumeSessionId || forkSessionId) onConsumeResume?.(tabId);
       return { ptyId: res.ptyId, promptDropped: res.promptDropped };
     } catch (e) {
       if (resizeLatchRef.current.kind !== "measured" && resizeLatchRef.current.kind !== "frozen") {
@@ -6479,7 +6485,7 @@ const TerminalView = memo(function TerminalView({
             ? [
                 {
                   icon: GitFork,
-                  label: "新建分叉聊天",
+                  label: "分叉成新对话",
                   onSelect: () => onForkChat?.(tabId),
                 },
               ]
@@ -7753,6 +7759,8 @@ interface Tab {
   initialModel?: string;
   /** 会话恢复：pty_spawn 的 resumeSessionId */
   resumeSessionId?: string;
+  /** 原生分叉的原会话（pty_spawn 的 forkSessionId）：第一次启动把它整段复制成新会话，launch 成功即清掉，不进持久化白名单 */
+  forkSessionId?: string;
   /** 会话恢复：rollout 记下的 provider */
   resumeProvider?: string;
   /** 首次可见自动启动（会话恢复） */
@@ -8203,7 +8211,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       list.push({
         cmd: "/fork",
         label: "分叉成新对话",
-        hint: "带着这段对话的摘要另开一段对话（先出方案，不改文件）",
+        hint: "把这段对话整段复制成新的一段接着聊，原对话不动",
         run: () => void forkChat(tabId),
       });
       list.push({
@@ -8276,7 +8284,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const patchTabLaunch = useCallback((tabId: string, patch: TabLaunchPatch) => {
     setTabs((prev) => prev.map((x) => (x.id === tabId ? { ...x, ...patch } : x)));
   }, []);
-  // 终端 ⋯ 里的「对话操作」：斜杠面板 Mesa 组去掉终端层用不着的（分叉已有「新建分叉聊天」、「打开终端」），补「切到聊天」
+  // 终端 ⋯ 里的「对话操作」：斜杠面板 Mesa 组去掉终端层用不着的（分叉已有「分叉成新对话」、「打开终端」），补「切到聊天」
   const mesaCommandsRef = useRef(mesaCommandsFor);
   mesaCommandsRef.current = mesaCommandsFor;
   const getConversationActions = useCallback(
@@ -8600,8 +8608,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const clearResumeSession = useCallback((id: string) => {
     setTabs((current) =>
       current.map((tab) =>
-        tab.id === id && tab.resumeSessionId
-          ? { ...tab, resumeSessionId: undefined }
+        tab.id === id && (tab.resumeSessionId || tab.forkSessionId)
+          ? { ...tab, resumeSessionId: undefined, forkSessionId: undefined }
           : tab,
       ),
     );
@@ -8937,6 +8945,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       discussOnly?: boolean;
       effort?: string | null;
       forkSource?: { agent: string; sessionId: string };
+      forkSessionId?: string;
       /** 复用键（pendingTerminal.reuseKey 透传）：重复入口切标签而不是新开 */
       reuseKey?: string;
       /** 步骤认领（pendingTerminal.stepName 透传）：launch 时登记会话归步骤 */
@@ -8966,6 +8975,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         discussOnly: init?.discussOnly,
         effort: init?.effort,
         forkSource: init?.forkSource,
+        forkSessionId: init?.forkSessionId,
         reuseKey: init?.reuseKey,
         stepName: init?.stepName,
         runId: init?.runId,
@@ -9044,7 +9054,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   }
 
   /** 分叉的本体：只要会话记录就能分（侧栏 / 对话页 ⋯ 不必先把它开成标签，2026-10-31）。
-   *  带着到 untilText 为止（不给 = 全部）的简报另开一段同家对话，先出方案；接力链登记让侧栏把它挂在原对话下面 */
+   *  整段分叉、这家 CLI 有原生分叉（handoff_targets.nativeFork）：用 CLI 自己的 fork 把整段对话复制成新会话，
+   *  带全部上下文、权限照常，开出来就接着聊（2026-10-31 用户：照 Claude 客户端的 fork）。
+   *  「从这里分叉」（untilText，截到某条回复）或这家没有原生分叉：写到那里为止的简报另开一段同家对话，先出方案。
+   *  两种都在标签认出新会话后登记分叉（record_session_fork），侧栏把它挂在原对话下面 */
   async function forkSession(
     source: {
       agentId: string;
@@ -9072,6 +9085,24 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       if (!profileId) {
         throw new Error(`找不到 ${agentLabel(source.agentId)} 的连接配置，请先在连接页创建或恢复配置`);
       }
+      const target = await invoke<HandoffTargetDto[]>("handoff_targets")
+        .then((targets) => targets.find((t) => t.id === source.agentId))
+        .catch(() => undefined);
+      if (untilText == null && target?.nativeFork) {
+        const forkTabId = addTab({
+          cwd: source.cwd,
+          // 同 Claude 客户端：分出来的那段先沿用原标题，侧栏挂在原对话下面
+          title: source.title || "分叉的对话",
+          agentId: source.agentId,
+          profileId,
+          model: source.model ?? undefined,
+          forkSessionId: source.sessionId,
+          forkSource: { agent: source.agentId, sessionId: source.sessionId },
+          autoStart: true,
+        });
+        setSurfaceModeByTab((prev) => ({ ...prev, [forkTabId]: "chat" }));
+        return forkTabId;
+      }
       const brief = await invoke<{ filePath: string; summary: string }>(
         "build_handoff_brief",
         {
@@ -9091,9 +9122,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         fromSessionId: source.sessionId,
       });
       const prompt = `读 ${relativeBriefPath(brief.filePath, source.cwd)} 分叉简报，在此基础上继续完成任务`;
-      const promptSupported = await invoke<HandoffTargetDto[]>("handoff_targets")
-        .then((targets) => targets.find((target) => target.id === source.agentId)?.promptSupported)
-        .catch(() => source.agentId !== "kimi");
+      const promptSupported = target ? target.promptSupported : source.agentId !== "kimi";
       const forkTabId = addTab({
         cwd: source.cwd,
         title: `分叉 · ${source.title || "当前对话"}`,
@@ -9114,12 +9143,28 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       }));
       return forkTabId;
     } catch (e) {
-      void alertDialog(`新建分叉聊天失败：${String(e)}`);
+      void alertDialog(`分叉失败：${String(e)}`);
       return null;
     } finally {
       setChatBusy(false);
     }
   }
+
+  // 分叉标签认出自己的新会话（第一次认出的那个；之后 /clear 换的不算）就登记分叉：
+  // CLI 自己写的上游指针会让列表把分叉当成「接着聊」并进原对话，登记了才单列、挂在原对话下面
+  const recordedForkTabsRef = useRef(new Set<string>());
+  useEffect(() => {
+    for (const t of tabs) {
+      const src = t.forkSource;
+      if (!src || recordedForkTabsRef.current.has(t.id)) continue;
+      const link = sessionByTab[t.id];
+      if (!link?.sessionId || link.agentId !== src.agent || link.sessionId === src.sessionId) continue;
+      recordedForkTabsRef.current.add(t.id);
+      invoke("record_session_fork", { agent: src.agent, childId: link.sessionId, parentId: src.sessionId })
+        .then(() => useAppStore.getState().loadSessions(true))
+        .catch(() => recordedForkTabsRef.current.delete(t.id));
+    }
+  }, [tabs, sessionByTab]);
 
   // 侧栏 / 对话页 ⋯「分叉成新对话」：发请求的那边已切到运行页，这里按会话记录分
   const forkSessionReq = useAppStore((s) => s.forkSessionReq);
@@ -10791,6 +10836,7 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                 initialProfileId={t.initialProfileId}
                 initialModel={t.initialModel}
                 resumeSessionId={t.resumeSessionId}
+                forkSessionId={t.forkSessionId}
                 resumeProvider={t.resumeProvider}
                 autoStart={t.autoStart}
                 resumeKick={t.resumeKick}

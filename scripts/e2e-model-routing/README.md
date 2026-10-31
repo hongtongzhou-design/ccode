@@ -153,7 +153,7 @@ cd src-tauri && E2E_BASE=http://127.0.0.1:18950 E2E_OUT=/tmp/e2e-plans.json carg
 # E2E_AGENT 取 claude-code / codebuddy / qwen / opencode / codex / grok（grok 走程序状态 OSC 7501，打印每条 [7501] 报告）；
 # 生成计划后马上跑（Claude 的 --settings 文件 60 秒后会被清）
 MESA_E2E_REAL_CLI=1 E2E_PLANS=/tmp/e2e-plans.json E2E_AGENT=codex cargo test --lib e2e_channel -- --ignored --nocapture
-# 可加：E2E_CLEAR=1（走完再发 /clear，看会话跟随）、E2E_RESUME=1（停掉后按 Mesa 的恢复参数接回再跑一轮）、
+# 可加：E2E_CLEAR=1（走完再发 /clear，看会话跟随）、E2E_RESUME=1（停掉后按 Mesa 的恢复参数接回再跑一轮）、E2E_FORK=1（停掉后按 Mesa 的原生分叉参数分出新会话再跑一轮，核对新 id、带着原记录；Codex 只核 forked_from_id）、
 #       E2E_TIER=auto|full（换权限档）、MESA_CHANNEL_DEBUG=1（打印 Codex app-server 收到的每条消息）、
 #       E2E_DROP_SETTINGS=1（去掉网关的 --settings，模拟官方账号启动；同时去掉拷来的 settings.json 里的 env，只打假网关）、
 #       E2E_ARG_PROMPT=1（Claude / CodeBuddy：首条消息带换行、引号、|、%变量% 放进启动参数，核对原样进会话）、
