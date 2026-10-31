@@ -469,6 +469,31 @@ pub fn official_outbound_env() -> Vec<(String, String)> {
     official_outbound_env_from(&read_current())
 }
 
+/// 官方账号启动要注入的出网代理指向本机、但端口没在监听（代理软件没开）：返回 `主机:端口` 供前端提示。
+/// 只探本机地址（连不上立刻被拒，不拖慢启动）；远端代理不探。注入照旧——用户可能另有 TUN 之类的出路，
+/// 这里只把「连不上多半是代理没开」说出来，不替用户改走直连
+pub fn official_proxy_down_from(s: &AppSettingsDto, alive: impl Fn(&str) -> bool) -> Option<String> {
+    let proxy = official_outbound_env_from(s).into_iter().find(|(k, _)| k == "HTTPS_PROXY")?.1;
+    let url = reqwest::Url::parse(&proxy).ok()?;
+    let host = url.host_str()?.trim_matches(|c| c == '[' || c == ']').to_string();
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !loopback || alive(&proxy) {
+        return None;
+    }
+    Some(match url.port_or_known_default() {
+        Some(port) => format!("{}:{port}", url.host_str().unwrap_or(&host)),
+        None => host,
+    })
+}
+
+pub fn official_proxy_down() -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    official_proxy_down_from(&read_current(), proxy_url_alive)
+}
+
 /// 下载侧（agent 安装/更新、依赖安装、字体、更新检查）注入的代理 env：与官方账号
 /// 启动同源 outbound_proxy，但大小写都写（curl 的 http_proxy 只认小写，npm 两者都认）；
 /// extra_no_proxy（国内镜像主机）并入 NO_PROXY 直连——镜像走代理绕道境外反而慢。
@@ -1619,6 +1644,18 @@ pub async fn detect_outbound_proxy() -> Result<Vec<OutboundProxyCandidateDto>, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_proxy_down_only_for_loopback_proxy_not_listening() {
+        let with = |p: &str| AppSettingsDto { outbound_proxy: Some(p.into()), ..Default::default() };
+        let dead = |_: &str| false;
+        assert_eq!(official_proxy_down_from(&with("http://127.0.0.1:10808"), dead).as_deref(), Some("127.0.0.1:10808"));
+        assert_eq!(official_proxy_down_from(&with("socks5://localhost:1080"), dead).as_deref(), Some("localhost:1080"));
+        assert_eq!(official_proxy_down_from(&with("http://u:p@[::1]:7890"), dead).as_deref(), Some("[::1]:7890"), "不带出账号密码");
+        assert!(official_proxy_down_from(&with("http://127.0.0.1:10808"), |_| true).is_none());
+        assert!(official_proxy_down_from(&with("http://proxy.corp.example:8080"), dead).is_none(), "远端代理不探");
+        assert!(official_proxy_down_from(&AppSettingsDto::default(), dead).is_none());
+    }
 
     fn tmp() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ccode-settings-{}", uuid::Uuid::new_v4()));

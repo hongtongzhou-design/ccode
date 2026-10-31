@@ -5606,6 +5606,7 @@ const TerminalView = memo(function TerminalView({
         runId: string | null;
         adopted?: boolean;
         resumeUnwritten?: boolean;
+        proxyDown?: string | null;
       }>("pty_spawn", {
         agentId,
         profileId,
@@ -5655,6 +5656,10 @@ const TerminalView = memo(function TerminalView({
       // 免得用户以为接上了上次的上下文
       if (res.resumeUnwritten) {
         toast("上次那段对话没有留下记录（Agent 没来得及保存就退出了），已在原目录开了新会话", "info");
+      }
+      // 官方账号走设置里的出网代理，本机代理端口没在监听：多半是代理软件没开，接下来的网络错误先往这上头想
+      if (res.proxyDown) {
+        toast(`出网代理 ${res.proxyDown} 没有在运行：官方账号可能连不上，先打开代理软件，或到设置 → 网络改掉`, "warning");
       }
       // 后端兜底模型回传（前端留空 = profile 首个模型）：同步进标签状态，
       // 否则状态栏/对话头部在兜底路径下没有模型可显示；lastLaunch/模型历史也记生效值

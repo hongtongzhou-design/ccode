@@ -630,6 +630,8 @@ pub struct SpawnResult {
     pub adopted: bool,
     /// 要恢复的会话从没落盘（上次启动没聊就退出），改开了新会话；前端据此提示一句
     pub resume_unwritten: bool,
+    /// 官方账号启动注入的本机出网代理没在监听（`主机:端口`）：前端提示「代理没开」，CLI 报网络错误时不至于摸不着头脑
+    pub proxy_down: Option<String>,
 }
 
 /// 支持 --session-id <uuid> 的 agent（AgentSpec.fixed_session_id；matrix：claude-code、qwen、codebuddy），
@@ -1146,6 +1148,7 @@ fn pty_spawn_sync(
                 run_id: opened_id,
                 adopted: true,
                 resume_unwritten: unwritten_session.is_some(),
+                proxy_down: None,
             });
         }
         crate::runs::claim_interactive_start(id, false)?;
@@ -1247,6 +1250,9 @@ fn pty_spawn_sync(
     // 官方账号（订阅制）启动：按会话级登记 usage provenance，统计页费用栏据此显示「订阅」。
     // 尽力而为：登记失败不阻断启动（与 touch_last_used 同语义）；
     // session_hint 为空（无固定会话 id 的 agent 新开）时不落行，重建索引按会话档案的 profile 兜底
+    let proxy_down = (profile.account_type == profiles::AccountType::Official)
+        .then(crate::settings::official_proxy_down)
+        .flatten();
     if profile.account_type == profiles::AccountType::Official {
         let _ = crate::usage::register_official_launch(
             &agent_id,
@@ -1264,6 +1270,7 @@ fn pty_spawn_sync(
         run_id: opened_id,
         adopted: false,
         resume_unwritten: unwritten_session.is_some(),
+        proxy_down,
     })
 }
 
@@ -1486,6 +1493,7 @@ fn pty_spawn_custom_sync(
         run_id: Some(run_id),
         adopted: false,
         resume_unwritten: false,
+        proxy_down: None,
     })
 }
 
