@@ -96,3 +96,21 @@ test("工作区标签的复用键 ws: 跨重启保留（去终端回答 / 继续
   assert.equal(back.tabs[0].reuseKey, "ws:C:\Users\me\ccode\workspaces\HER\lit-notes");
   assert.equal(back.tabs[1].reuseKey, undefined);
 });
+
+test("分叉标签记下原会话；没落盘的分叉记 forkPending，没有原会话时不认 forkPending（2026-10-31）", () => {
+  const base = { label: "x", cwd: "/w", agentId: "claude-code", profileId: "p", model: "", sessionId: "new", runId: null };
+  const raw = serializeRecoverableTerminalState({
+    tabs: [
+      { ...base, forkOf: "parent", forkPending: true },
+      { ...base, forkOf: "parent" },
+      { ...base, forkPending: true },
+    ],
+    activeIndex: 0,
+  });
+  const back = parseRecoverableTerminalState(raw).tabs;
+  assert.equal(back[0].forkOf, "parent");
+  assert.equal(back[0].forkPending, true);
+  assert.equal(back[1].forkPending, undefined);
+  assert.equal(back[2].forkOf, undefined);
+  assert.equal(back[2].forkPending, undefined);
+});

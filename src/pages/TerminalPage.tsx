@@ -5772,7 +5772,7 @@ const TerminalView = memo(function TerminalView({
       }
       if (restored) onRestoreComplete?.(tabId);
       // 本次启动已接管会话：清掉标签级 resumeSessionId，之后「启动」不会再接回旧会话
-      if (resumeSessionId || forkSessionId) onConsumeResume?.(tabId);
+      if (resumeSessionId) onConsumeResume?.(tabId);
       return { ptyId: res.ptyId, promptDropped: res.promptDropped };
     } catch (e) {
       if (resizeLatchRef.current.kind !== "measured" && resizeLatchRef.current.kind !== "frozen") {
@@ -7829,7 +7829,10 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       initialModel: tab.model,
       initialAgentId: tab.customRuntimeId ? "custom" : tab.agentId,
       customRuntimeId: tab.customRuntimeId ?? undefined,
-      resumeSessionId: tab.customRuntimeId ? undefined : tab.sessionId ?? undefined,
+      // 原生分叉一句没发就关了 / 重启了：新会话还不存在，重启后再分一次（接它只会退回开一段没上下文的新对话）
+      resumeSessionId: tab.customRuntimeId || tab.forkPending ? undefined : tab.sessionId ?? undefined,
+      forkSessionId: tab.forkPending && tab.forkOf ? tab.forkOf : undefined,
+      forkSource: tab.forkOf ? { agent: tab.agentId, sessionId: tab.forkOf } : undefined,
       runId: tab.runId ?? undefined,
       taskId: tab.taskId ?? undefined,
       reuseKey: tab.reuseKey ?? undefined,
@@ -8610,8 +8613,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const clearResumeSession = useCallback((id: string) => {
     setTabs((current) =>
       current.map((tab) =>
-        tab.id === id && (tab.resumeSessionId || tab.forkSessionId)
-          ? { ...tab, resumeSessionId: undefined, forkSessionId: undefined }
+        tab.id === id && tab.resumeSessionId
+          ? { ...tab, resumeSessionId: undefined }
           : tab,
       ),
     );
@@ -8646,6 +8649,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
             runId: status?.runId ?? tab.runId ?? null,
             taskId: tab.taskId ?? null,
             reuseKey: tab.reuseKey ?? null,
+            forkOf: tab.forkSource?.sessionId ?? null,
+            forkPending: Boolean(tab.forkSessionId),
           },
         },
       ];
@@ -9167,6 +9172,16 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const recordedForkTabsRef = useRef(new Set<string>());
   /** 原生分叉标签的「原对话」那一页：新会话记录出来之前聊天层先画它（Codex 的分叉记录不抄历史，一直垫在前面） */
   const [forkPreview, setForkPreview] = useState<Record<string, ChatMessageDto[]>>({});
+  // 原生分叉的新会话有了记录文件：分叉这件事算做完了，从标签清掉（之前一直留着：一句没发就重启 Mesa / 重启 Agent 时再分一次，
+  // 不去接那个还不存在的新会话——接不到会退回开一段没上下文的新对话）
+  useEffect(() => {
+    const done = tabs.filter((t) => t.forkSessionId && sessionByTab[t.id]?.file).map((t) => t.id);
+    if (done.length === 0) return;
+    setTabs((current) =>
+      current.map((t) => (done.includes(t.id) ? { ...t, forkSessionId: undefined } : t)),
+    );
+  }, [tabs, sessionByTab]);
+
   // 新会话的记录读到原对话的内容了（抄了全部历史的家）：丢掉 preview，之后只画新会话
   useEffect(() => {
     const done = Object.keys(forkPreview).filter((id) => {
