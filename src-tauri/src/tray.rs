@@ -48,6 +48,9 @@ pub async fn rebuild_and_wait(app: AppHandle) -> Result<(), String> {
 }
 
 pub fn rebuild(app: &AppHandle) -> Result<(), String> {
+    // Windows 启动时托盘在后台线程建（lib.rs），与前端触发的刷新可能同时跑：排队，免得两边都看到「还没有托盘」各建一个
+    static REBUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = REBUILD.lock().unwrap_or_else(|e| e.into_inner());
     let menu = build_menu(app)?;
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;

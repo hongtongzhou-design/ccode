@@ -5,11 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mesa</title>
     <style>
-      /* 首帧底色：macOS 一开始就透明，窗口一出来就是毛玻璃（data-boot-glass，见下）。
+      /* 首帧底色：macOS 与 Windows 11 一开始就透明，窗口一出来就是毛玻璃（data-boot-glass，见下）。
          2026-10-30 实测（tauri 2.11 / wry 0.55，录屏逐帧）：wry 在 WKWebView 创建前就关了
          drawsBackground，加载期间（拖慢到 1.7s 也一样）始终透出窗口材质，没有白底层；原先这层
          实心底反而是在已经出现的毛玻璃上盖一块深蓝 / 浅灰，约 0.4s 后才淡回玻璃。
-         其他平台仍走主题色实心底：跟随应用主题（localStorage.ccodeBootTheme，App 持久化；
+         2026-10-31 Windows 11 同样实测：WebView2 从第一次出画面起就是透明底，直接透出 Mica；
+         是否 Windows 11 由 Rust 建窗时注入 __MESA_BOOT_GLASS__（main_window.rs），UA 分不出 10 / 11。
+         其他平台（Windows 10、Linux）仍走主题色实心底：跟随应用主题（localStorage.ccodeBootTheme，App 持久化；
          没存过值回落系统外观），400ms 后淡出成磨砂，减弱动态效果时不淡出（宁实不白）。
          ready-to-show 隐藏亮窗方案试过被用户退回：无窗静默期读起来像卡死。 */
       html,
@@ -138,8 +140,9 @@
     </style>
     <script>
       // 首帧前同步定启动底色（浅/深）。localStorage 不可用（隐私模式等）回落系统外观。
-      // macOS 不铺实心底，窗口材质直接透出（见上方样式注释）；字标颜色仍按 data-boot 分深浅。
-      if (/Macintosh/.test(navigator.userAgent)) document.documentElement.dataset.bootGlass = "";
+      // macOS 与 Windows 11 不铺实心底，窗口材质直接透出（见上方样式注释）；字标颜色仍按 data-boot 分深浅。
+      if (/Macintosh/.test(navigator.userAgent) || window.__MESA_BOOT_GLASS__)
+        document.documentElement.dataset.bootGlass = "";
       try {
         var boot = localStorage.getItem("ccodeBootTheme");
         if (boot !== "light" && boot !== "dark") {
@@ -160,6 +163,26 @@
       <!-- 启动时还没有顶栏：整块字标当拖拽区（deep：点到字上也算），否则 Mac / Windows 无标题栏、拖不动窗口 -->
       <div class="boot-splash" data-tauri-drag-region="deep"><span>Mesa<i class="boot-caret"></i></span></div>
     </div>
+    <script>
+      // Windows：窗口建好先隐身，等启动画面第一帧画完再请 Rust 露出来，不先白一下（main_window.rs，
+      // 那边 1 秒兜底）。两次 rAF = 第一帧已经提交；万一 rAF 在隐身时被节流，0.5s 定时器补一次
+      if (window.__MESA_BOOT_CLOAK__) {
+        var bootShown = false;
+        var showBootWindow = function () {
+          if (bootShown) return;
+          bootShown = true;
+          try {
+            window.__TAURI_INTERNALS__.invoke("boot_window_painted").catch(function () {});
+          } catch (e) {
+            /* 调不到就等 Rust 到点露出 */
+          }
+        };
+        requestAnimationFrame(function () {
+          requestAnimationFrame(showBootWindow);
+        });
+        setTimeout(showBootWindow, 500);
+      }
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

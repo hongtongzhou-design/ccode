@@ -1742,7 +1742,8 @@ scan_persist.rs            # 扫描缓存落盘层（2026-10-16，app.db scan_me
                              #   地址，curl 下载后 osascript「with administrator privileges」跑 installer，Mesa 碰不到密码）；
                              #   TeX 两平台都可由 Quarto 装 TinyTeX（install_tex_via_quarto，Windows 写 PATH、macOS 不写）
   window_close.rs            # 关窗与退出：主窗口关窗默认藏到后台（Mac 程序坞叫回、Windows 收托盘 + 首次通知），退出唯一入口 request_quit（前端确认、1.5 秒无回执原生兜底）；禁用预置 quit()
-  win_snap.rs                # Windows 11 贴靠布局：自绘最大化按钮悬停够久，替用户按一次 Win+Z（只在 Win11、Mesa 在前台时）
+  win_snap.rs                # Windows 11 贴靠布局：自绘最大化按钮悬停够久，替用户按一次 Win+Z（只在 Win11、Mesa 在前台时）；is_windows_11 直接读注册表（建窗也用，不起子进程）
+  main_window.rs             # 主窗口创建：配置里 create:false，setup 一开头按同一份配置建；Windows 建窗即去标题栏，Win11 注入 __MESA_BOOT_GLASS__ 让启动页首帧透出 Mica；Windows 建好先 DWM 隐身，index.html 首帧画好调 boot_window_painted 露出，1 秒兜底
   logbuf.rs                  # 诊断日志环形缓冲
   mac_fullscreen.rs          # macOS 订阅 NSWindow 将进 / 将出全屏通知，emit window:fullscreen-will-change（只报不改；前端壳底色借此跟系统动画淡变）
   diagnostics.rs             # 诊断包：系统/WebView/GPU/输入法、功能开关、日志、进程生命周期采集与 ZIP 导出；bundle_dir/BUNDLE_FILE_PREFIX 是反馈附件闸门的同一出处

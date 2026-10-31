@@ -458,6 +458,26 @@ MCP 页（⌘6，第六个页面入口；曾按旧页序称「第八页」）：
 
 ## 10. 决策记录
 
+### 2026-10-31 · Windows 启动：建窗即无标题栏，Windows 11 启动即磨砂
+
+用户要求把 Windows 的启动过渡对齐已完善的 Mac。最小 Tauri 探针（同 tauri 2.11.5 / wry 0.55.1、同窗口配置）与 Mesa Dev
+重启逐帧录屏查明三段：① 配置建窗时窗口带原生标题栏先亮，lib.rs 到 setup 末尾才 `set_decorations(false)`，开发版实测
+白底 + 标题栏约 0.7s、带标题栏的 Mica 再挂约 2.8s；② 页面出来后 index.html 的主题色实心底盖住已露出的 Mica，0.4s 后
+再淡回，与 10-30 Mac 的「玻璃→深蓝→玻璃」同病；③ WebView2 首次出画面前窗口是白的（release 约 0.15–0.9s，随机器负载）。
+定下：**主窗口改由 setup 一开头自己建**（各份 tauri*.conf.json `create: false`，`main_window.rs` 按同一份配置
+`from_config`），Windows 建窗即去标题栏；**Windows 11 启动页同 macOS 首帧透明**——Rust 读注册表 build ≥ 22000 时注入
+`__MESA_BOOT_GLASS__`，index.html 据此打 `data-boot-glass`（UA 分不出 10 / 11）；Windows 10 / Linux 仍走实心底淡出。
+WebView2 从第一次出画面起就是透明底，实测无白帧。`win_snap::is_windows_11` 改读注册表 API，不在建窗路径上起 `reg` 子进程。
+③ 用户拍板：**Windows 窗口建好先隐身（DWM cloak），启动字标首帧画好再露出，最多等 1 秒**——窗口晚零点几秒、一出来就是
+完整画面，好过先白一下；**这一条在 Windows 上取代 10-16「窗口创建即见」**，macOS 不变（本就没有白屏段）。index.html 两次 rAF 后调
+`boot_window_painted`（另有 0.5s 定时器补调），Rust 1 秒到点兜底露出并记日志。探针交替对比三轮：毛玻璃出现时刻与不隐身时相当
+（约 1.0–1.6s，随机器忙闲），白屏段消失。否掉：给窗口设背景色（Mica 失效，透出后面的窗口）。
+Mesa Dev 实测又定两条：**setup 不得长时间占主线程**——隐身期间 WebView2 要靠主线程消息才上屏，setup 里同步建托盘
+（逐个连接 dry-run 比对磁盘，开发版 2.5s）时窗口先隐身 4s，改成 1s 兜底后露出一块白到 3s；**Windows 上托盘改在后台线程建**
+（tauri 自己转主线程建图标与菜单项，`tray::rebuild` 加锁防与前端刷新各建一个），macOS 不动。兜底线程用建窗时在主线程存下的
+HWND 直调 DWM，不经 `window.hwnd()`（它要经事件循环取，主线程忙时会一直等）。改后 Mesa Dev：露出即毛玻璃（约 0.3s），无标题栏、无白、无深蓝。开发配置改了 `create` 要重启 `npm run tauri:dev` 才生效
+（CLI 启动时读一次 `--config`）。
+
 ### 2026-10-31 · CodeBuddy 设为全局：models.json 直接写密钥，收窄「能引用不写明文」
 
 Windows 复核九条写入规则时，金丝雀全局层查出 CodeBuddy `models.json` 的 `${CODEBUDDY_API_KEY}` 常原样发出（本机 2.176 七次六次）。

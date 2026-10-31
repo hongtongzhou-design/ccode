@@ -11,6 +11,7 @@
     "windows": [
       {
         "title": "Mesa Dev - 新用户沙盒 :17577",
+        "create": false,
         "width": 1100,
         "height": 720,
         "titleBarStyle": "Overlay",

@@ -19,33 +19,40 @@ pub fn window_show_snap_layouts(window: tauri::WebviewWindow) -> bool {
     }
 }
 
-/// 布局菜单是 Windows 11（build 22000 起）的功能；Windows 10 的 Win+Z 不是这个意思，不能按
+/// 布局菜单是 Windows 11（build 22000 起）的功能；Windows 10 的 Win+Z 不是这个意思，不能按。
+/// 启动建窗也用它判 Mica 有没有（main_window.rs），所以直接读注册表、不起 `reg` 子进程：
+/// 建窗前多等一个子进程，窗口就晚一拍出来。读不到按 Windows 10 算（启动页回落实心底，不会透出桌面）
 #[cfg(windows)]
-fn is_windows_11() -> bool {
+pub(crate) fn is_windows_11() -> bool {
     use std::sync::OnceLock;
     static BUILD: OnceLock<u32> = OnceLock::new();
-    *BUILD.get_or_init(|| {
-        crate::process::background_command("reg")
-            .args([
-                "query",
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
-                "/v",
-                "CurrentBuildNumber",
-            ])
-            .output()
-            .ok()
-            .and_then(|o| parse_build_number(&String::from_utf8_lossy(&o.stdout)))
-            .unwrap_or(0)
-    }) >= 22000
+    *BUILD.get_or_init(read_build_number) >= 22000
 }
 
-/// `reg query` 输出里取 CurrentBuildNumber 的值（REG_SZ）；按列取，不认本地化文案
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
-fn parse_build_number(out: &str) -> Option<u32> {
-    out.lines()
-        .find(|l| l.trim_start().starts_with("CurrentBuildNumber"))
-        .and_then(|l| l.split_whitespace().last())
-        .and_then(|v| v.parse().ok())
+#[cfg(windows)]
+fn read_build_number() -> u32 {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let key = wide(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+    let name = wide("CurrentBuildNumber");
+    let mut buf = [0u16; 32];
+    let mut size = std::mem::size_of_val(&buf) as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if rc != 0 {
+        return 0;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len]).trim().parse().unwrap_or(0)
 }
 
 #[cfg(windows)]
@@ -77,14 +84,13 @@ fn send_win_z() -> bool {
     sent == inputs.len() as u32
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
     #[test]
-    fn build_number_from_reg_output() {
-        let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\r\n    CurrentBuildNumber    REG_SZ    26200\r\n\r\n";
-        assert_eq!(parse_build_number(out), Some(26200));
-        assert_eq!(parse_build_number("错误: 找不到"), None);
+    fn build_number_reads_from_registry() {
+        // CI 的 Windows runner 与本机都是 Windows 10 起的版本，build 号五位数：只验读得到
+        assert!(read_build_number() > 10_000);
     }
 }
