@@ -60,7 +60,8 @@ export function chatFontSizePx(v: unknown, isWindows = false): number | null {
    衬线：思源宋体 → 宋体-简 / 宋体，西文跟着中文字体走。中文衬线排在 Georgia 前面：混排时汉字不会掉回黑体。
    不用 ui-serif 取 New York：WKWebView 里它会把汉字整段换成苹方、后面的宋体全失效；按名字或 @font-face local()
    也取不到 New York（2026-11-01 真 WKWebView 实测）。
-   楷体：霞鹜文楷（屏幕版在前）→ Mac 楷体-简（随系统预装）→ Windows 楷体；文楷自带西文，没装时西文跟楷体走。
+   楷体：霞鹜文楷（屏幕版在前）→ Mac 楷体-简（随系统预装）→ Windows 楷体。文楷自带配套西文；没装时西文改用 Charter
+   （Mac）/ Palatino Linotype（Windows），排在系统楷体前面——楷体-简自带的西文是老式衬线、字面偏小（2026-11-01 用户嫌难看）。
    等宽栈直接复用 App.css 的 --font-mono（JetBrains Mono + CJK 兜底）。
    Windows 两处不同（2026-10-31）：衬线不落宋体（SimSun 在屏幕正文字号下又细又虚），没装思源宋体时
    汉字回落微软雅黑、西文仍是 Georgia；现代黑体按「装了就用」排 HarmonyOS Sans → MiSans → 思源黑体 → 等线，
@@ -72,7 +73,7 @@ export function chatFontFamilyStack(v: unknown, isWindows = false): string | nul
         ? `"Source Han Serif SC", "Noto Serif SC", "思源宋体", Georgia, "Times New Roman", "Microsoft YaHei UI", "Microsoft YaHei", serif`
         : `"Source Han Serif SC", "Source Han Serif SC VF", "Noto Serif SC", "Noto Serif CJK SC", "Songti SC", "SimSun", Georgia, "Times New Roman", serif`;
     case "kai":
-      return `"LXGW WenKai Screen", "LXGW WenKai", "Kaiti SC", "STKaiti", "KaiTi", "楷体", serif`;
+      return `"LXGW WenKai Screen", "LXGW WenKai", Charter, "Palatino Linotype", "Kaiti SC", "STKaiti", "KaiTi", "楷体", serif`;
     case "mono":
       return "var(--font-mono)";
     case "sans":

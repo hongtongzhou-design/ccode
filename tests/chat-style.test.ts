@@ -62,6 +62,9 @@ test("字号档递增，衬线栈中文衬线在前", () => {
   const kai = chatFontFamilyStack("kai")!;
   assert.ok(kai.indexOf("LXGW WenKai") < kai.indexOf("Kaiti SC"));
   assert.ok(kai.includes("KaiTi"), "Windows 要有系统楷体兜底");
+  // 没装文楷时西文不用系统楷体自带的老式衬线：西文字体排在文楷之后、系统楷体之前
+  assert.ok(kai.indexOf("LXGW WenKai") < kai.indexOf("Charter") && kai.indexOf("Charter") < kai.indexOf("Kaiti SC"));
+  assert.ok(kai.indexOf("Palatino Linotype") < kai.indexOf("KaiTi"));
   assert.deepEqual(chatStyleVars({ chatFontSize: "large", chatFontFamily: "mono" }), {
     "--ccode-chat-fs": "15.5px",
     "--ccode-chat-ff": "var(--font-mono)",
