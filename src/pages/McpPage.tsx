@@ -509,6 +509,13 @@ export default function McpPage({ visible }: { visible: boolean }) {
   const pendingMcpPreset = useAppStore((s) => s.pendingMcpPreset);
   // 本机检测结果：分发格里未安装的 CLI 降权（写进去也没人读）；检测未就位时不降权
   const detectedAgents = useAppStore((s) => s.agents);
+  const installedAgentIds = detectedAgents.filter((a) => a.binaryPath).map((a) => a.id);
+  const presetTargets = writableMcpAgentIds(
+    AGENTS.map((a) => a.id),
+    caps,
+    installedAgentIds,
+  );
+  const agentLabel = (id: string) => AGENTS.find((a) => a.id === id)?.label ?? id;
   const setPendingMcpPreset = useAppStore((s) => s.setPendingMcpPreset);
   useEffect(() => {
     if (!visible || !pendingMcpPreset) return;
@@ -592,11 +599,8 @@ export default function McpPage({ visible }: { visible: boolean }) {
       const isNewPreset = !modal.id && modal.fromPreset;
       const saved = list.find((s) => s.name === server.name);
       if (isNewPreset && saved) {
-        const targets = writableMcpAgentIds(
-          AGENTS.map((a) => a.id),
-          caps,
-        );
-        const failedIds: string[] = [];
+        const targets = presetTargets;
+        const failed: { id: string; reason: string }[] = [];
         for (const agent of targets) {
           try {
             list = await invoke<McpServerDto[]>("set_mcp_server_app", {
@@ -605,8 +609,8 @@ export default function McpPage({ visible }: { visible: boolean }) {
               enabled: true,
               force: false,
             });
-          } catch {
-            failedIds.push(agent);
+          } catch (e) {
+            failed.push({ id: agent, reason: String(e) });
           }
         }
         setDistStatus((prev) => {
@@ -614,14 +618,14 @@ export default function McpPage({ visible }: { visible: boolean }) {
           delete next[saved.id];
           return next;
         });
-        const nameOf = (id: string) =>
-          AGENTS.find((a) => a.id === id)?.label ?? id;
         toast(
           targets.length === 0
             ? "已保存。到列表里打开要用的 Agent 开关。"
-            : failedIds.length === 0
-              ? `已添加并启用到 ${targets.map(nameOf).join("、")}。新开的对话即可用。`
-              : `已添加；未写入：${failedIds.map(nameOf).join("、")}。其余已启用。`,
+            : failed.length === 0
+              ? `已添加并启用到 ${targets.map(agentLabel).join("、")}。新开的对话即可用。`
+              : `已添加；未写入：${failed
+                  .map((f) => `${agentLabel(f.id)}（${f.reason}）`)
+                  .join("；")}。其余已启用。`,
         );
       } else {
         toast("已保存");
@@ -1820,7 +1824,14 @@ export default function McpPage({ visible }: { visible: boolean }) {
                 hints={secretHints}
                 onChange={(secretDrafts) => setModal({ ...modal, secretDrafts })}
               />
-              <div className="flex justify-end gap-2 pt-1">
+              <div className="flex items-center justify-end gap-2 pt-1">
+                {modal.fromPreset && !modal.id && (
+                  <p className="mr-auto min-w-0 text-micro text-l4">
+                    {presetTargets.length > 0
+                      ? `将启用到${installedAgentIds.length > 0 ? "本机已装的" : ""}：${presetTargets.map(agentLabel).join("、")}`
+                      : "本机没有检测到可写入的 Agent，只保存不启用"}
+                  </p>
+                )}
                 <button
                   className={ghostActionClass}
                   onClick={() => setModal(null)}

@@ -166,12 +166,20 @@ export function applyBlenderMcpProbe(
   return { ...setup, steps, progress };
 }
 
-/** 从预设新建时自动启用的 agent：只含 MCP 分发可写的家。caps 未到则空（不强开）。 */
+/**
+ * 从预设新建时自动启用的 agent：只含 MCP 分发可写、且本机装了的家。caps 未到则空（不强开）。
+ * installedIds 传本机检测到的 agent；没传或为空 = 检测未就位，不按安装过滤。
+ * 没装的不写：写了会替人建出 ~/.cursor 这类目录，Cursor 的配置还和它的编辑器共用。
+ */
 export function writableMcpAgentIds(
   agentIds: string[],
   caps: Record<string, { mcpWrite: { supported: boolean } } | undefined>,
+  installedIds?: string[],
 ): string[] {
-  return agentIds.filter((id) => caps[id]?.mcpWrite.supported === true);
+  const installed = installedIds && installedIds.length > 0 ? new Set(installedIds) : null;
+  return agentIds.filter(
+    (id) => caps[id]?.mcpWrite.supported === true && (!installed || installed.has(id)),
+  );
 }
 
 /** 预设 → 添加表单字段（`{home}` 已展开；键值对已克隆）。 */

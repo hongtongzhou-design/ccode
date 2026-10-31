@@ -117,6 +117,15 @@ test("从预设启用只开 MCP 可写的 agent", () => {
   assert.deepEqual(ids, ["claude"]);
 });
 
+test("从预设启用跳过本机没装的 agent；检测未就位时不过滤", () => {
+  const caps = {
+    claude: { mcpWrite: { supported: true } },
+    cursor: { mcpWrite: { supported: true } },
+  };
+  assert.deepEqual(writableMcpAgentIds(["claude", "cursor"], caps, ["claude"]), ["claude"]);
+  assert.deepEqual(writableMcpAgentIds(["claude", "cursor"], caps, []), ["claude", "cursor"]);
+});
+
 test("remote 预设不依赖家目录、不带 stdio 命令", () => {
   const applied = applyMcpPreset(preset("consensus"), "", false);
   assert.equal(applied.kind, "remote");
