@@ -1036,6 +1036,8 @@ export default function ProjectTree({
       );
     }
     const menuOpen = chatMenu != null && chatKey(chatMenu.s) === key;
+    // 在 Mesa 里开着这段的标签（行尾 × 关它）
+    const holder = terminalRunInputs.find((r) => r.agentId === s.agent && r.sessionId === s.sessionId);
     const depth = fork?.depth ?? 0;
     const forks = fork?.forks ?? 0;
     const forkFolded = forks > 0 && forkFoldSet.has(key);
@@ -1151,8 +1153,26 @@ export default function ProjectTree({
           {/* 运行状态光标（2026-10-24 用户：绿点换成 Mesa 的光标）。有光标才占一格、标题在它前面淡出；
               没光标的行标题写到行尾（2026-10-26 用户：右边这一列要干净，同 Claude 客户端侧栏；空格位让标题早早淡掉、右边空一截）；Mesa 外在跑的悬停时不让位，⋯ 出现在它右边。
               干活时的呼吸在悬停时停下、常亮（App.css .ccode-run-caret） */}
-          {/* 行尾只占一格（2026-10-31 用户拍板，取代 10-26「× 顶替光标、⋯ 另加一格」）：平时是光标，悬停 / 聚焦 / 菜单开着时
-              同一格换成 ⋯，标题宽度不变；行上不放 ×，关掉走 ⋯ 菜单「关掉这段对话」或 ⌘W */}
+          {/* 行尾（2026-10-31 用户拍板二改）：平时只有光标一格；悬停 / 聚焦 / 菜单开着时 ⋯ 原地换掉光标。
+              Mesa 里开着的那段 ⋯ 左边再出一个 ×（用户：快捷键不是人人都用，⋯ 菜单里的「关掉这段对话」也藏得深），
+              没开着的没东西可关，只出 ⋯ */}
+          {holder?.running && !holder.shell && (
+            <button
+              type="button"
+              aria-label={`关掉「${short}」`}
+              title="关掉：停下这段对话的 Agent、收起它；记录还在，再点开发一句就接回（在干活的会先问你）"
+              onClick={(e) => {
+                noteMouseCloseChat(e.currentTarget.parentElement!.getBoundingClientRect(), "right", listRef.current);
+                useAppStore.getState().requestCloseTab(holder.tabId);
+              }}
+              className={`h-6 w-6 shrink-0 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1 ${
+                menuOpen ? "flex" : "hidden group-hover/chat:flex group-focus-within/chat:flex"
+              }`}
+              data-chat-close
+            >
+              <X size={13} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+          )}
           {dot && (
             <span
               className={`h-6 w-6 items-center justify-center ${

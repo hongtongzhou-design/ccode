@@ -477,16 +477,21 @@ test("开着、列表里还没有的挂在文件夹最上面（新对话 / 终�
   }
 });
 
-test("对话 ⋯ 里能在右侧分屏打开；开着的从 ⋯ 关掉，行上不放 ×，光标那一格悬停时换成 ⋯（2026-10-31）", async () => {
+test("对话 ⋯ 里能在右侧分屏打开；开着的悬停出 ×（在 ⋯ 左边）也能从 ⋯ 关掉，没开着的没有 ×；光标那一格悬停时换成 ⋯（2026-10-31 二改）", async () => {
   const closed: string[] = [];
   const view = await renderTree({ requestCloseTab: (id: string) => closed.push(id) });
   try {
-    assert.equal(view.host.querySelector('[aria-label="关掉「镁硫电池第5篇精读」"]'), null, "行上不放 ×");
+    const close = view.button("关掉「镁硫电池第5篇精读」");
+    assert.match(close.className, /hidden group-hover\/chat:flex/, "× 平时藏着，悬停才出");
+    assert.equal(close.nextElementSibling?.hasAttribute("data-run-slot"), true, "× 在光标 / ⋯ 那一格左边");
+    assert.equal(view.host.querySelector('[aria-label="关掉「镁硫电池第2篇精读」"]'), null, "没开着的没有 ×");
     const slot = view.button("镁硫电池第5篇精读").parentElement!.querySelector("[data-run-slot]")!;
     assert.match(slot.className, /group-hover\/chat:hidden/, "悬停时光标让出那一格");
+    await view.act(async () => close.click());
+    assert.deepEqual(closed, ["t1"]);
     await view.act(async () => view.button("「镁硫电池第5篇精读」的更多操作").click());
     await view.act(async () => view.button("关掉这段对话").click());
-    assert.deepEqual(closed, ["t1"]);
+    assert.deepEqual(closed, ["t1", "t1"]);
     await view.act(async () => view.button("「镁硫电池第2篇精读」的更多操作").click());
     assert.ok(
       !Array.from(view.host.ownerDocument.querySelectorAll("button")).some((b) => b.textContent?.trim() === "关掉这段对话"),
