@@ -149,6 +149,8 @@ pub(crate) struct Inputs {
     /// ChatGPT 账号能用的模型（登录着才有）：`models_cache.json` 里 visibility = list 的原样条目
     pub official: Vec<Value>,
     pub catalog_path: PathBuf,
+    /// 按网关 id 取已保存的密钥：共用渠道 custom 的地址对上几条连接时，靠块里的明文密钥认是哪条
+    pub key_of: fn(&str) -> Option<String>,
 }
 
 impl Inputs {
@@ -159,6 +161,7 @@ impl Inputs {
             helper: stable_helper(),
             official: official_entries(codex_dir),
             catalog_path: crate::agents::codex_global_catalog_path().ok_or("无法确定平台配置目录")?,
+            key_of: |gid| crate::profiles::read_key_file_only(gid).ok().flatten(),
         })
     }
 
@@ -461,14 +464,25 @@ fn build_catalog(head: &Head, doc: &toml_edit::DocumentMut, inp: &Inputs) -> Opt
     Some(out)
 }
 
-/// 共用渠道 custom 现在指着哪条连接（按地址认；认不出就只用渠道名）
+/// 共用渠道 custom 现在指着哪条连接：已是 auth.command 的直接认参数里的网关 id；否则按地址认，
+/// 地址对上几条连接（同一中转站开了几个密钥）时再比块里的明文密钥，比不出就当认不出——
+/// 按地址取第一条会把 A 连接的块改成现取 B 的密钥（2026-10-31 实证：Test 被认成同地址的 Zeta）
 fn shared_gateway<'a>(doc: &toml_edit::DocumentMut, inp: &'a Inputs) -> Option<&'a GwLite> {
-    let url = doc
-        .get("model_providers")?
-        .get(crate::global_config::CODEX_GLOBAL_PROVIDER)?
-        .get("base_url")?
-        .as_str()?;
-    inp.gateways.iter().find(|g| g.base_url.trim_end_matches('/') == url.trim_end_matches('/'))
+    let blk = doc.get("model_providers")?.get(crate::global_config::CODEX_GLOBAL_PROVIDER)?;
+    let args = blk.get("auth").and_then(|a| a.get("args")).and_then(|a| a.as_array());
+    if let Some(args) = args {
+        if args.get(0).and_then(|v| v.as_str()) == Some(TOKEN_SUBCOMMAND) {
+            let gid = args.get(1).and_then(|v| v.as_str())?;
+            return inp.gateways.iter().find(|g| g.gateway_id == gid);
+        }
+    }
+    let url = blk.get("base_url")?.as_str()?.trim_end_matches('/');
+    let same_url: Vec<&GwLite> = inp.gateways.iter().filter(|g| g.base_url.trim_end_matches('/') == url).collect();
+    if same_url.len() <= 1 {
+        return same_url.into_iter().next();
+    }
+    let bearer = blk.get("experimental_bearer_token").and_then(|v| v.as_str())?;
+    same_url.into_iter().find(|g| (inp.key_of)(&g.gateway_id).as_deref() == Some(bearer))
 }
 
 /// 路径是不是 Mesa 写的模型目录（每条连接一份的旧口径 `codex-<id>.json`，或全局专用 `codex-global.json`）
@@ -698,6 +712,7 @@ mod tests {
             helper: Some(PathBuf::from("/cfg/ccode/bin/mesa_helper")),
             official: vec![official("gpt-6-luna"), official("gpt-5.6-terra")],
             catalog_path: PathBuf::from("/cfg/ccode/catalogs/codex-global.json"),
+            key_of: |_| None,
         }
     }
 
@@ -809,6 +824,26 @@ mod tests {
     }
 
     #[test]
+    fn shared_block_on_url_used_by_several_connections_is_told_apart_by_key() {
+        let disk = "model_provider = \"custom\"\n[model_providers.custom]\nname = \"Mesa\"\nbase_url = \"https://relay.example.com/v1\"\nexperimental_bearer_token = \"sk-second\"\n";
+        let mut inp = inputs(vec![]);
+        for g in &mut inp.gateways {
+            g.base_url = "https://relay.example.com/v1".into();
+        }
+        inp.key_of = |gid| Some(if gid == "bbbbbbbb-0000" { "sk-second" } else { "sk-first" }.to_string());
+        let out = layer(disk, &Head::Relay(vec![head_entry("ds")]), &inp).unwrap();
+        let doc: toml_edit::DocumentMut = out.config.parse().unwrap();
+        let args: Vec<_> = doc["model_providers"]["custom"]["auth"]["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(args, ["codex-token", "bbbbbbbb-0000"], "同地址不能按排在前面的认");
+        // 认好之后再算一遍，按 auth 参数认，不再回落地址
+        assert_eq!(shared_gateway(&doc, &inp).map(|g| g.gateway_id.as_str()), Some("bbbbbbbb-0000"));
+        // 密钥哪条都对不上：认不出，明文原样留着，体检也不算可修
+        inp.key_of = |_| None;
+        assert!(layer(disk, &Head::Relay(vec![head_entry("ds")]), &inp).unwrap().config.contains("sk-second"));
+        assert_eq!(check(disk, &Head::Relay(vec![head_entry("ds")]), &inp).unwrap().plaintext_blocks, 0);
+    }
+
+    #[test]
     fn foreign_default_only_gets_provider_blocks() {
         let disk = "model_provider = \"custom\"\nmodel_catalog_json = \"/x/cc-switch-model-catalog.json\"\n[model_providers.custom]\nname = \"cc-switch\"\n";
         let inp = inputs(vec![r("ccode-a1b2c3d4", "glm", 1)]);
@@ -871,6 +906,7 @@ mod tests {
             helper: Some(PathBuf::from(std::env::var("MESA_E2E_HELPER").expect("MESA_E2E_HELPER"))),
             official: official_entries(&dir),
             catalog_path: dir.join("ccode/catalogs/codex-global.json"),
+            key_of: |gid| crate::profiles::read_key_file_only(gid).ok().flatten(),
         };
         let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
         let doc = crate::global_config::parse_toml_doc(Some(&text)).unwrap();
