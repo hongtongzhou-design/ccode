@@ -1253,3 +1253,16 @@ test("分叉的对话挂在原对话下面、前面一道接线；原对话的�
     await view.close();
   }
 });
+
+test("对话 ⋯「分叉成新对话」：把这段交给运行页按会话记录分叉，并切到运行页（不必先开成标签）", async () => {
+  const forks: SessionMetaDto[] = [];
+  const view = await renderTree({ requestForkSession: (s: SessionMetaDto) => forks.push(s) });
+  try {
+    await view.act(async () => view.button("「镁硫电池第3篇精读」的更多操作").click());
+    await view.act(async () => view.button("分叉成新对话").click());
+    assert.deepEqual(forks.map((s) => s.sessionId), ["r3"]);
+    assert.ok(view.pages.includes("terminal"));
+  } finally {
+    await view.close();
+  }
+});

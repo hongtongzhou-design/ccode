@@ -163,7 +163,7 @@ import {
 } from "../project-agents";
 import type { DirPick } from "../components/ChatProjectPicker";
 import { defaultCommitMessage } from "../git-commit-message";
-import { skipDisconnectedOfficial } from "../resume-profile";
+import { pickResumeProfile, skipDisconnectedOfficial } from "../resume-profile";
 import {
   findResumeHolderTab,
   fittedPtySize,
@@ -8991,7 +8991,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
       : target;
   }
 
-  /** untilText：聊天层「从这里分叉」——简报只取到这条助手回复为止（后端按正文认） */
   /** 「聊天和终端对不上」（chat-mismatch.ts）：收齐这个标签两边当时的内容，后端脱敏截断后交给 App 打开反馈表单 */
   async function reportChatMismatch(
     tabId: string,
@@ -9025,45 +9024,82 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     const report: MismatchReport = { title: mismatchTitle(label, from), detail: MISMATCH_TEMPLATE, snapshot };
     window.dispatchEvent(new CustomEvent(MISMATCH_EVENT, { detail: report }));
   }
+  /** untilText：聊天层「从这里分叉」——简报只取到这条助手回复为止（后端按正文认） */
   async function forkChat(fromTabId = focusedId, untilText?: string) {
     const source = sessionByTab[fromTabId];
     const status = statuses[fromTabId];
     if (!source?.file || !source.sessionId || !source.agentId || !status) return;
+    await forkSession(
+      {
+        agentId: source.agentId,
+        sessionId: source.sessionId,
+        file: source.file,
+        title: source.title,
+        cwd: status.cwd,
+        profileId: status.profileId,
+        model: status.model,
+      },
+      untilText,
+    );
+  }
+
+  /** 分叉的本体：只要会话记录就能分（侧栏 / 对话页 ⋯ 不必先把它开成标签，2026-10-31）。
+   *  带着到 untilText 为止（不给 = 全部）的简报另开一段同家对话，先出方案；接力链登记让侧栏把它挂在原对话下面 */
+  async function forkSession(
+    source: {
+      agentId: string;
+      sessionId: string;
+      file: string;
+      title?: string | null;
+      cwd: string;
+      profileId?: string | null;
+      model?: string | null;
+      provider?: string | null;
+    },
+    untilText?: string,
+  ) {
     setChatBusy(true);
     try {
+      // 先挑连接再写简报：没连接时别在项目里留一份没人读的简报
+      const hidden = useAppStore.getState().settings?.hiddenProfiles ?? [];
+      const own = source.profileId
+        ? profiles.find((p) => p.id === source.profileId && p.agent === source.agentId && !hidden.includes(p.id))
+        : undefined;
+      const profileId =
+        own?.id ??
+        pickResumeProfile(profiles, source.agentId, source.provider, null, hidden)?.id ??
+        profiles.find((p) => p.agent === source.agentId)?.id;
+      if (!profileId) {
+        throw new Error(`找不到 ${agentLabel(source.agentId)} 的连接配置，请先在连接页创建或恢复配置`);
+      }
       const brief = await invoke<{ filePath: string; summary: string }>(
         "build_handoff_brief",
         {
           agent: source.agentId,
           sessionId: source.sessionId,
           filePath: source.file,
-          cwd: status.cwd,
-          title: source.title,
+          cwd: source.cwd,
+          title: source.title ?? null,
           targetPath: null,
           untilText: untilText ?? null,
         },
       );
       await invoke("mark_handoff", {
         targetAgent: source.agentId,
-        targetCwd: status.cwd,
+        targetCwd: source.cwd,
         fromAgent: source.agentId,
         fromSessionId: source.sessionId,
       });
-      const profileId =
-        status.profileId || profiles.find((p) => p.agent === source.agentId)?.id;
-      if (!profileId) {
-        throw new Error(`找不到 ${agentLabel(source.agentId)} 的连接配置，请先在连接页创建或恢复配置`);
-      }
-      const prompt = `读 ${relativeBriefPath(brief.filePath, status.cwd)} 分叉简报，在此基础上继续完成任务`;
+      const prompt = `读 ${relativeBriefPath(brief.filePath, source.cwd)} 分叉简报，在此基础上继续完成任务`;
       const promptSupported = await invoke<HandoffTargetDto[]>("handoff_targets")
         .then((targets) => targets.find((target) => target.id === source.agentId)?.promptSupported)
         .catch(() => source.agentId !== "kimi");
       const forkTabId = addTab({
-        cwd: status.cwd,
+        cwd: source.cwd,
         title: `分叉 · ${source.title || "当前对话"}`,
         agentId: source.agentId,
         profileId,
-        model: status.model,
+        model: source.model ?? undefined,
         initialPrompt: prompt,
         readonly: true,
         permission: "discuss",
@@ -9076,12 +9112,34 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
         ...prev,
         [forkTabId]: promptSupported === false ? "terminal" : "chat",
       }));
+      return forkTabId;
     } catch (e) {
       void alertDialog(`新建分叉聊天失败：${String(e)}`);
+      return null;
     } finally {
       setChatBusy(false);
     }
   }
+
+  // 侧栏 / 对话页 ⋯「分叉成新对话」：发请求的那边已切到运行页，这里按会话记录分
+  const forkSessionReq = useAppStore((s) => s.forkSessionReq);
+  useEffect(() => {
+    if (!forkSessionReq) return;
+    useAppStore.getState().requestForkSession(null);
+    const s = forkSessionReq.session;
+    void forkSession({
+      agentId: s.agent,
+      sessionId: s.sessionId,
+      file: s.filePath,
+      title: tidySessionTitle(s).title,
+      cwd: s.cwd || s.projectPath,
+      profileId: s.profileId,
+      provider: s.provider,
+    }).then((tabId) => {
+      if (tabId) useAppStore.getState().focusTab(tabId);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forkSessionReq]);
 
   /** 工作树「在此打开新终端」：新建标签并预填 cwd，用户选 agent/profile 后启动 */
   // 「在此打开新终端」：开一个纯终端（shell），侧栏所属文件夹下多一行「终端」；不是一段新对话

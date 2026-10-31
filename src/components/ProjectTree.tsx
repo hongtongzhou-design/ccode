@@ -10,6 +10,7 @@ import {
   Eraser,
   Folder,
   FolderMinus,
+  GitFork,
   FolderOpen,
   FolderPlus,
   MessageCircle,
@@ -553,6 +554,16 @@ export default function ProjectTree({
         icon: Columns2,
         title: "正看着的那段留在左边，这段放右边对照",
         onSelect: () => openChat(s, project, true),
+      },
+      {
+        label: "分叉成新对话",
+        icon: GitFork,
+        title: "带着这段对话的简报另开一段，挂在它下面；先出方案、不改文件，原对话不动",
+        onSelect: () => {
+          const st = useAppStore.getState();
+          st.requestForkSession(s);
+          st.setPage("terminal");
+        },
       },
       // 只在 AI 开着时给：退出了的 Mesa 自己收，没东西可关。行上不放 ×，鼠标关对话就走这里
       ...(holder?.running && !holder.shell

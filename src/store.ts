@@ -808,6 +808,9 @@ interface AppState {
       运行页标签条 2026-10-24 撤掉后，开着的东西在侧栏列着，关也从侧栏发 */
   closeTabReq: { tabId: string; token: number } | null;
   requestCloseTab: (tabId: string | null) => void;
+  /** 侧栏 / 对话页 ⋯「分叉成新对话」→ 运行页按会话记录分叉（不必先把原对话开成标签；运行页消费并清空） */
+  forkSessionReq: { session: SessionMetaDto; token: number } | null;
+  requestForkSession: (session: SessionMetaDto | null) => void;
   /** 工作区页 → 对话页的搜索词交接（对话页消费并清空） */
   sessionsQuery: string | null;
   /** 侧栏项目树随手聊「全部 N 条」→ 对话页只列随手聊（消费并清空） */
@@ -1181,6 +1184,8 @@ export const useAppStore = create<AppState>((set, get) => {
   focusTab: (tabId) => set({ focusTabId: tabId }),
   closeTabReq: null,
   requestCloseTab: (tabId) => set({ closeTabReq: tabId ? { tabId, token: Date.now() } : null }),
+  forkSessionReq: null,
+  requestForkSession: (session) => set({ forkSessionReq: session ? { session, token: Date.now() } : null }),
   sessionsQuery: null,
   sessionsScratchReq: false,
   openSessionReq: null,
