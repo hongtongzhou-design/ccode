@@ -1623,7 +1623,7 @@ function App() {
               "--ccode-chrome-scale": chromeOpacityScale(
                 settings?.chromeOpacity,
               ),
-              ...chatStyleVars(settings ?? {}),
+              ...chatStyleVars(settings ?? {}, IS_WINDOWS),
             } as React.CSSProperties
           }
         >

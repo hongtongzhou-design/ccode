@@ -167,7 +167,7 @@ export interface AppSettings {
   appIconStyle?: "system" | "dark" | "light";
   /** 聊天层阅读体验（设置 → 外观，表见 chat-style.ts，Rust 侧 KNOWN_CHAT_* 白名单） */
   chatFontSize?: "small" | "normal" | "large" | "xlarge";
-  chatFontFamily?: "system" | "serif" | "mono";
+  chatFontFamily?: "system" | "serif" | "mono" | "sans";
   chatAccent?: "off" | "warm" | "amber" | "teal" | "violet";
   chatScrollbar?: "auto" | "always";
   /** 主题跟随系统深浅（缺省关）：开着时系统外观变化即把 theme 换成同名 twin 写回（theme-follow.ts）；

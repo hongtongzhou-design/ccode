@@ -271,7 +271,7 @@
   **顶部上下文栏与导航胶囊不用 Variable**：WebView2 对可变字体不走 GDI hinting，小字发糊；
   `.ccode-titlebar` / `.ccode-top-nav-capsule` / Markdown 阅读（`.md-body`，含对话回放 `.md-chat`、
   笔记与产物预览）改静态 Segoe UI；字重不动。`.md-body` 在 Windows 把 13.5px 对齐到 14px（半像素发糊），
-  `.md-chat` 不吃这条：Windows 上按聊天字号阶梯（`--chat-base` 14px）与「聊天字体」设置走（2026-10-21 修：原先 Segoe 写死，Windows 上聊天字体选了没反应）。聊天 Markdown 比笔记更瘦：行内 `code` 去描边只留浅底，`blockquote` 只留左线不铺 inset 底（警告/摘录才不会占半屏）。胶囊的 backdrop-filter 放到 `::before`。macOS/Linux 不走此块。
+  `.md-chat` 不吃这条：Windows 上按聊天字号阶梯（`--chat-base` 14px）与「聊天字体」设置走（2026-10-21 修：原先 Segoe 写死，Windows 上聊天字体选了没反应）。**Windows 聊天字体口径（2026-10-31）**：系统档 Segoe UI + 微软雅黑 UI 不变；多一档「现代黑体」（`sans`，只在 Windows 列出），HarmonyOS Sans → MiSans → 思源黑体 → 等线「装了就用」、都没装落回系统档，不随包带字体；衬线档不落宋体（SimSun 屏幕正文发虚），没装思源宋体时汉字回落雅黑、西文 Georgia；聊天字号非标准档取整数像素（小 13 / 大 16 / 特大 18），Mac 照旧 12.5 / 15.5 / 17.5。栈与字号在 `chat-style.ts`，`isWindows` 显式传参。聊天 Markdown 比笔记更瘦：行内 `code` 去描边只留浅底，`blockquote` 只留左线不铺 inset 底（警告/摘录才不会占半屏）。胶囊的 backdrop-filter 放到 `::before`。macOS/Linux 不走此块。
   浅色主题文字梯队按平台压深 l3/l4 两档（标题 l1 保持主题原值；Windows 正文 l2 另见下文 2026-10-26 条）：Windows 压最多（补偿 DirectWrite 小字号灰化），
   macOS 取原值→Windows 值 65% 的中间档（CoreText 字干较重，但原始 l3/l4 在 canvas 上仅 4.0/2.2:1 不过 WCAG AA；
   中间档 l3 ≥ 4.7、l4 ≥ 3.1，数值由 tests/theme-contrast.test.ts 锁定），Linux 保持主题原值。

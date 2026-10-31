@@ -2900,12 +2900,20 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
 
         <Row
           label="聊天字体"
-          hint="系统 = 跟随界面字体"
-          labelTitle="衬线用宋体系（macOS 宋体-简、Windows 宋体 / 思源宋体），适合长文阅读；等宽用 JetBrains Mono，中文回退系统字体。代码块一直是等宽，不受影响"
+          hint={
+            IS_WINDOWS
+              ? "系统 = 微软雅黑；现代黑体没装时也是它"
+              : "系统 = 跟随界面字体"
+          }
+          labelTitle={
+            IS_WINDOWS
+              ? "现代黑体：装了 HarmonyOS Sans、MiSans、思源黑体或等线就用（按这个顺序找），字形更接近 Mac 的苹方；都没装时和「系统」一样是微软雅黑。衬线：装了思源宋体就用，没装时汉字用微软雅黑、英文用 Georgia（不用宋体，屏幕上太细）。等宽用 JetBrains Mono。代码块一直是等宽，不受影响"
+              : "衬线用宋体系（macOS 宋体-简、Windows 宋体 / 思源宋体），适合长文阅读；等宽用 JetBrains Mono，中文回退系统字体。代码块一直是等宽，不受影响"
+          }
         >
           <SegTabs
             variant="boxed"
-            items={CHAT_FONT_FAMILIES.map((id) => ({
+            items={CHAT_FONT_FAMILIES.filter((id) => id !== "sans" || IS_WINDOWS).map((id) => ({
               id,
               label: CHAT_FONT_FAMILY_LABEL[id],
             }))}

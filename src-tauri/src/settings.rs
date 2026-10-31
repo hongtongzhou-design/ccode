@@ -116,7 +116,7 @@ const DEFAULT_APP_ICON_STYLE: &str = "system";
 /// 聊天层阅读体验（设置 → 外观）：字号档、字体、行内代码强调色、滚动条。与前端 chat-style.ts 的表一致；
 /// 不在表里的存量值落回默认，前端加选项而这里没跟上会「选了没反应」。
 const KNOWN_CHAT_FONT_SIZES: [&str; 4] = ["small", "normal", "large", "xlarge"];
-const KNOWN_CHAT_FONT_FAMILIES: [&str; 3] = ["system", "serif", "mono"];
+const KNOWN_CHAT_FONT_FAMILIES: [&str; 4] = ["system", "serif", "mono", "sans"];
 const KNOWN_CHAT_ACCENTS: [&str; 5] = ["off", "warm", "amber", "teal", "violet"];
 const KNOWN_CHAT_SCROLLBARS: [&str; 2] = ["auto", "always"];
 /// 顶部岛可配入口（与前端 nav-capsule.ts NAV_CAPSULE_ITEM_IDS 同步）；「运行」2026-10-24 起不上岛，存过的读出来丢掉
