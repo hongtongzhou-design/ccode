@@ -17,9 +17,11 @@ export type ToastNotice = {
   sticky?: boolean;
   /** 同 key 的新提示替换旧的（上手引导的「下一步」只留最新一条） */
   key?: string;
+  /** 事情还在办：标题前转圈，常驻到同 key 的结果提示顶替它 */
+  busy?: boolean;
 };
 
-export type ToastOptions = Pick<ToastNotice, "actions" | "sticky" | "key">;
+export type ToastOptions = Pick<ToastNotice, "actions" | "sticky" | "key" | "busy">;
 
 type ToastListener = (notice: ToastNotice) => void;
 type DismissListener = (key: string) => void;
@@ -29,7 +31,7 @@ const listeners = new Set<ToastListener>();
 const dismissListeners = new Set<DismissListener>();
 
 export function toast(message: string, tone: ToastTone = "info", options?: ToastOptions) {
-  const notice = { id: nextId++, message, tone, ...options };
+  const notice = { id: nextId++, message, tone, ...options, sticky: options?.sticky || options?.busy };
   listeners.forEach((listener) => listener(notice));
 }
 

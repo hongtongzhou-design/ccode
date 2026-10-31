@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { LoaderCircle } from "lucide-react";
 import { subscribeToastDismiss, subscribeToasts, type ToastNotice } from "../toast";
 import { noticeDurationMs, splitNoticeText } from "../notice-text";
 import { compactPrimaryActionClass, rowActionClass } from "./PageFrame";
@@ -52,6 +53,14 @@ export default function ToastHost() {
             return (
               <div className="ccode-toast-body">
                 <span className={parts.details.length ? "ccode-toast-headline" : undefined}>
+                  {item.busy && (
+                    <LoaderCircle
+                      size={13}
+                      strokeWidth={2}
+                      aria-hidden="true"
+                      className="mr-1.5 inline-block animate-spin align-[-2px] text-l3"
+                    />
+                  )}
                   {parts.headline}
                 </span>
                 {parts.details.map((line, i) => (

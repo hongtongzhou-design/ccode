@@ -94,6 +94,7 @@ import {
 } from "../tab-drag";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
+import { IS_MAC } from "../hotkeys";
 import { Modal } from "../components/Modal";
 import { collapseCarriageReturns } from "../stream-text";
 import { diagnose, installToolHelp, type AgentCmdResult } from "../agent-install";
@@ -3370,9 +3371,9 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       setDriftTick((t) => t + 1);
       setError(null);
       const name = p.accountType === "official" ? "官方账号" : `「${p.name}」`;
-      // Codex 客户端要重启才读新的模型目录：装了客户端就在提示里给「重启客户端」
+      // Codex 客户端要重启才读新的模型目录：装了客户端就在提示里给「重启客户端」（只有 Mac 能替人重启）
       const codexClient =
-        agent === "codex"
+        agent === "codex" && IS_MAC
           ? await invoke<{ clientId: string; installed: boolean }[]>("client_open_list")
               .then((l) => l.find((c) => c.clientId === "codex-desktop" && c.installed))
               .catch(() => undefined)
@@ -3386,11 +3387,14 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
                 onClick: () =>
                   // 点按钮即确认；走正常退出，客户端有任务在跑时由它自己弹退出确认，这里不再加一层
                   void (async () => {
+                    // 退出最多等 20 秒，期间转圈，结果提示按同一个 key 顶替它
+                    const key = "codex-client-restart";
+                    toast("正在重启 Codex 客户端…", "info", { key, busy: true });
                     try {
                       await invoke("client_restart", { clientId: "codex-desktop" });
-                      toast("Codex 客户端已重新打开，新建的对话走新连接", "success");
+                      toast("Codex 客户端已重新打开，新建的对话走新连接", "success", { key });
                     } catch (e) {
-                      toast(String(e), "warning");
+                      toast(String(e), "warning", { key });
                     }
                   })(),
               },
