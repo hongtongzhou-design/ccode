@@ -41,7 +41,7 @@
 
 ## 项目简介
 
-Mesa 是一个「AI Agent 工作台」桌面应用（2026-11-01 用户拍板：对外定位不再限定科研）（Tauri v2 + React/TS）——底层是九个 Agent CLI 的统一控制台（启动器 + 配置中心 +
+Mesa 是一个「AI Agent（科研）工作台」桌面应用（2026-11-01 用户拍板的对外称呼）（Tauri v2 + React/TS）——底层是九个 Agent CLI 的统一控制台（启动器 + 配置中心 +
 会话监控台），表面是科研流水线（读文献→整数据→做图→写论文）：AI 负责干活，Mesa 负责管活，人负责拍板。
 展示名 **Mesa**；内部身份仍是 `ccode`（bundle ID `com.ccode.dev`、项目 `.ccode/`、`~/ccode/`、Codex provider `ccode`/`ccode-<短id>`）。禁止把内部路径/安装身份跟着展示名一起改。
 为 Claude Code、Codex、Gemini CLI、Qwen Code、OpenCode、Kimi Code、CodeBuddy Code、Cursor CLI、Grok Build 管理多套 API 配置

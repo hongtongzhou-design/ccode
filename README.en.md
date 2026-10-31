@@ -4,9 +4,9 @@
 
 # Mesa
 
-**An open-source AI agent workbench. The AI does the work, Mesa manages the environment and the review gates, you make the calls.**
+**An open-source AI agent workbench for research. The AI does the work, Mesa manages the environment and the review gates, you make the calls.**
 
-One desktop app for the connections, chats and terminals of nine coding agents — with worktrees and a PR loop for coding, and reviewed pipelines for research: reading papers → cleaning data → making figures → writing the manuscript.
+One desktop app for the connections, chats and terminals of nine coding agents, plus reviewed pipelines for reading papers → cleaning data → making figures → writing the manuscript.
 
 <p>
   <a href="https://github.com/Zeta-Techs/mesa/actions/workflows/build.yml"><img src="https://github.com/Zeta-Techs/mesa/actions/workflows/build.yml/badge.svg" alt="Build" /></a>

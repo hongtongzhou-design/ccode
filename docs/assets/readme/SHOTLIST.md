@@ -22,7 +22,7 @@ README.md / README.en.md 里注释掉的图位按这里的文件名取图。素�
 | `research.png` | 小图 3 | 示例课题的科研任务页：步进器走到第 2～3 步，当前步骤卡，最好带一条待验收 |
 | `reader.png` | 小图 4 | 沉浸阅读三栏：左笔记、中 PDF（有一处高亮）、右终端 |
 
-可选（有余力再拍）：`sessions.png` 对话管理页回放、`usage.png` 用量页卡片、`social-preview.png` 社交预览图（1280×640，图标 + 「Mesa · AI Agent 工作台」+ 一张界面图，交组织管理员在仓库 Settings → Social preview 上传）。
+可选（有余力再拍）：`sessions.png` 对话管理页回放、`usage.png` 用量页卡片、`social-preview.png` 社交预览图（1280×640，图标 + 「Mesa · AI Agent（科研）工作台」+ 一张界面图，交组织管理员在仓库 Settings → Social preview 上传）。
 
 ## 视频
 

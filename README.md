@@ -4,9 +4,9 @@
 
 # Mesa
 
-**开源 AI Agent 工作台：AI 负责干活，Mesa 负责管环境和验收，人负责拍板。**
+**开源 AI Agent（科研）工作台：AI 负责干活，Mesa 负责管环境和验收，人负责拍板。**
 
-一个桌面应用管好九家编码 Agent 的连接、对话和终端；编程有工作树和 PR 环，科研有读文献 → 整数据 → 做图 → 写论文这类带验收门的流程。
+一个桌面应用管好九家编码 Agent 的连接、对话和终端，再把读文献 → 整数据 → 做图 → 写论文串成有验收门的流程。
 
 <p>
   <a href="https://github.com/Zeta-Techs/mesa/actions/workflows/build.yml"><img src="https://github.com/Zeta-Techs/mesa/actions/workflows/build.yml/badge.svg" alt="Build" /></a>
