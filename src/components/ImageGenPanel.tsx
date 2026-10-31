@@ -305,24 +305,12 @@ export default function ImageGenPanel({
                 {model || <span className="font-sans text-xs text-l3">还没选</span>}
               </span>
             </span>
-            {skill ? (
-              // 点说明行展开逐家开关：哪家开着、单独关掉某一家
-              <button
-                type="button"
-                onClick={() => setAgentsOpen((v) => !v)}
-                aria-expanded={agentsOpen}
-                title={"tip" in caption ? `${caption.tip}；点开逐家管理` : "点开逐家管理"}
-                className={`col-start-2 row-start-3 mt-0.5 flex min-w-0 items-center gap-1 text-left text-micro hover:text-l1 @min-[60rem]/rows:row-start-2 ${caption.cls}`}
-              >
-                <span className="min-w-0 break-words">{caption.text}</span>
-                <span className="shrink-0 text-l4">· 逐家管理</span>
-                <FoldMark open={agentsOpen} />
-              </button>
-            ) : (
-              <span className={`col-start-2 row-start-3 mt-0.5 block break-words text-micro @min-[60rem]/rows:row-start-2 ${caption.cls}`}>
-                {caption.text}
-              </span>
-            )}
+            <span
+              className={`col-start-2 row-start-3 mt-0.5 block break-words text-micro @min-[60rem]/rows:row-start-2 ${caption.cls}`}
+              title={"tip" in caption ? caption.tip : undefined}
+            >
+              {caption.text}
+            </span>
             <span className="col-start-3 row-span-3 row-start-1 flex min-w-0 items-center self-center text-xs @min-[60rem]/rows:col-start-4">
               {currentRun?.status === "done" && (
                 <span className="flex min-w-0 items-center gap-1 text-l2" title={`${currentRun.protocol} · ${secs(currentRun.ms)}`}>
@@ -356,6 +344,18 @@ export default function ImageGenPanel({
                   onClick={() => void clearImageGenModel()}
                 >
                   移除
+                </button>
+              )}
+              {skill && (
+                // 展开逐家开关（2026-10-31 用户：做成按钮放右侧）
+                <button
+                  type="button"
+                  className={agentsOpen ? `${ghostActionClass} bg-hover text-l1` : ghostActionClass}
+                  aria-expanded={agentsOpen}
+                  title="逐家打开或关掉技能 image-gen"
+                  onClick={() => setAgentsOpen((v) => !v)}
+                >
+                  技能开关
                 </button>
               )}
               <button
