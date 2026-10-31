@@ -917,9 +917,10 @@ pub async fn client_open_list() -> Vec<ClientInfoDto> {
     .unwrap_or_default()
 }
 
-/// 重启客户端（2026-10-28：Codex「设为全局」后客户端要重启才读新的模型目录）。用户点了才调，前端先确认过。
-/// macOS：按 bundle id 让它正常退出（会走它自己的退出确认，不强杀），等它退干净再按 bundle id 打开；
-/// 没在运行就只打开。Windows：怎么正常退出客户端（进程名、包名）还没在真机核实，如实报错让人手动重开，不猜进程名强杀
+/// 重启客户端（2026-10-28：Codex「设为全局」后客户端要重启才读新的模型目录）。用户点了按钮就调，不另弹确认：
+/// 退出一律走客户端自己的正常退出，有任务在跑时由它自己问。
+/// macOS：按 bundle id 让它正常退出，等它退干净再按 bundle id 打开；没在运行就只打开。
+/// Windows：按应用包找进程，不猜进程名（细则见 `windows_restart_script`）
 #[tauri::command]
 pub async fn client_restart(client_id: String) -> Result<(), String> {
     let (_, spec) = find_client(&client_id).ok_or("未知的客户端")?;
@@ -967,9 +968,95 @@ fn restart_client(spec: &ClientSpec) -> Result<(), String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn restart_client(spec: &ClientSpec) -> Result<(), String> {
+    let Some(name) = spec.win_package_names.first() else {
+        return Err(format!("不知道怎么重启 {}", spec.display));
+    };
+    let out = crate::process::background_command("powershell")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"])
+        .arg(windows_restart_script(name))
+        .output()
+        .map_err(|e| format!("没能运行 PowerShell：{e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // 真机核对用：记下按包找到了哪些进程、怎么收的、PowerShell 有没有报错
+    crate::logbuf::record(
+        if out.status.success() { "info" } else { "warn" },
+        "client-restart",
+        &format!("{name}: {} {}", stdout.trim(), stderr.trim()),
+    );
+    restart_outcome(&stdout, &spec.display)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn restart_client(spec: &ClientSpec) -> Result<(), String> {
     Err(format!("这个系统上还不能替你重启 {}，请手动关掉它再打开", spec.display))
+}
+
+/// Windows 重启脚本。两家客户端都是 MSIX 应用包（matrix §13）：
+/// - 进程按「可执行文件在该包安装目录下」认，不猜进程名；
+/// - 先对有窗口的进程 CloseMainWindow（等同点窗口的 ×，客户端要问「确定退出」时窗口还在，等满 20 秒交给人）；
+/// - 窗口都没了还剩进程 = 缩进托盘或正在收尾，再等 5 秒仍在就收掉（人点了重启、客户端也没拦）；
+/// - 按包的开始菜单入口 `shell:AppsFolder\<包族名>!<应用 Id>` 重新打开。
+///
+/// 每行输出一条记录，最后一行是结果：launched / not-installed / still-running / launch-failed
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn windows_restart_script(package: &str) -> String {
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+$pkg = Get-AppxPackage -Name '{package}' | Sort-Object Version -Descending | Select-Object -First 1
+if (-not $pkg) {{ 'not-installed'; exit }}
+$loc = $pkg.InstallLocation.TrimEnd('') + ''
+function Get-Mine {{ @(Get-Process | Where-Object {{ $_.Path -and $_.Path.StartsWith($loc, [StringComparison]::OrdinalIgnoreCase) }}) }}
+$procs = Get-Mine
+'found: ' + (($procs | ForEach-Object {{ '{{0}}#{{1}}#{{2}}' -f $_.ProcessName, $_.Id, ($_.MainWindowHandle -ne 0) }}) -join ',')
+if ($procs.Count) {{
+  $procs | Where-Object {{ $_.MainWindowHandle -ne 0 }} | ForEach-Object {{ [void]$_.CloseMainWindow() }}
+  $deadline = (Get-Date).AddSeconds(20)
+  $windowless = $null
+  while ($true) {{
+    Start-Sleep -Milliseconds 300
+    $left = Get-Mine
+    if (-not $left.Count) {{ break }}
+    if ($left | Where-Object {{ $_.MainWindowHandle -ne 0 }}) {{
+      $windowless = $null
+      if ((Get-Date) -gt $deadline) {{ 'still-running'; exit }}
+      continue
+    }}
+    if (-not $windowless) {{ $windowless = Get-Date }}
+    if (((Get-Date) - $windowless).TotalSeconds -ge 5) {{
+      'stopped: ' + (($left | ForEach-Object {{ '{{0}}#{{1}}' -f $_.ProcessName, $_.Id }}) -join ',')
+      $left | Stop-Process -Force -ErrorAction SilentlyContinue
+      Start-Sleep -Milliseconds 500
+      break
+    }}
+  }}
+}}
+try {{
+  $app = (Get-AppxPackageManifest $pkg).Package.Applications.Application | Select-Object -First 1
+  Start-Process ('shell:AppsFolder' + $pkg.PackageFamilyName + '!' + $app.Id)
+  'launched'
+}} catch {{
+  'error: ' + $_
+  'launch-failed'
+}}
+"#
+    )
+}
+
+/// 把脚本最后一行结果翻成给人看的话
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn restart_outcome(stdout: &str, display: &str) -> Result<(), String> {
+    match stdout.lines().map(str::trim).filter(|l| !l.is_empty()).last() {
+        Some("launched") => Ok(()),
+        Some("not-installed") => Err(format!("没有找到 {display} 的应用包，请手动关掉它再打开")),
+        Some("still-running") => Err(format!(
+            "{display} 没有退出，可能正在问你是否确认退出。处理完后手动重新打开它"
+        )),
+        Some("launch-failed") => Err(format!("{display} 已退出，但没能重新打开，请手动打开")),
+        _ => Err(format!("没能重启 {display}，请手动关掉它再打开（详情见诊断日志）")),
+    }
 }
 
 /// 只读预检：能不能打开、要不要先修、有哪些要让用户知道的事
@@ -1064,6 +1151,19 @@ pub async fn client_open_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_restart_script_targets_package_and_reports_outcome() {
+        let script = windows_restart_script("OpenAI.Codex");
+        assert!(script.contains("Get-AppxPackage -Name 'OpenAI.Codex'"));
+        assert!(script.contains("shell:AppsFolder"));
+        // format! 转义后不能残留双花括号（PowerShell 会当成字面量）
+        assert!(!script.contains("{{") && !script.contains("}}"));
+        assert_eq!(restart_outcome("found: Codex#1#True\nlaunched\n", "X"), Ok(()));
+        assert!(restart_outcome("found: \nstill-running", "X").unwrap_err().contains("确认退出"));
+        assert!(restart_outcome("", "X").is_err());
+        assert!(restart_outcome("error: boom\nlaunch-failed", "X").unwrap_err().contains("没能重新打开"));
+    }
 
     fn codex() -> &'static ClientSpec {
         find_client("codex-desktop").unwrap().1

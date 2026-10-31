@@ -94,7 +94,7 @@ import {
 } from "../tab-drag";
 import { HoverTip, useHoverTip } from "../components/HoverTip";
 import { alertDialog, confirmDialog } from "../components/ConfirmDialog";
-import { IS_MAC } from "../hotkeys";
+import { IS_MAC, IS_WINDOWS } from "../hotkeys";
 import { Modal } from "../components/Modal";
 import { collapseCarriageReturns } from "../stream-text";
 import { diagnose, installToolHelp, type AgentCmdResult } from "../agent-install";
@@ -3371,9 +3371,9 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
       setDriftTick((t) => t + 1);
       setError(null);
       const name = p.accountType === "official" ? "官方账号" : `「${p.name}」`;
-      // Codex 客户端要重启才读新的模型目录：装了客户端就在提示里给「重启客户端」（只有 Mac 能替人重启）
+      // Codex 客户端要重启才读新的模型目录：装了客户端就在提示里给「重启客户端」（Mac / Windows）
       const codexClient =
-        agent === "codex" && IS_MAC
+        agent === "codex" && (IS_MAC || IS_WINDOWS)
           ? await invoke<{ clientId: string; installed: boolean }[]>("client_open_list")
               .then((l) => l.find((c) => c.clientId === "codex-desktop" && c.installed))
               .catch(() => undefined)
