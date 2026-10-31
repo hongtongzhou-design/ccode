@@ -54,6 +54,7 @@ import ProjectIdentityHeader, {
 import ProjectUserTasksView from "../components/ProjectUserTasksView";
 import TemplatePickModal from "../components/TemplatePickModal";
 import { Modal } from "../components/Modal";
+import { cloudSyncHint, loadNewProjectParent, saveNewProjectParent } from "../new-project-parent";
 import { filterWorkspacesByFocus } from "../workspace-visibility";
 import { buildWorkspaceTerminalRequest, resolveStepLaunchByWorkspace } from "../pipeline-start";
 import {
@@ -179,16 +180,27 @@ function AddProjectModal({
   const depCheck = useAppStore((s) => s.depCheck);
   const creating = pickedPath === null;
   const [name, setName] = useState(pickedPath ? pathBaseName(pickedPath) : "");
-  // 新建：父目录（默认系统「文档」）；建好文件夹后 createdPath 生效，注册失败重试不再重复建
+  // 新建：父目录（上次新建用的，没有或不在了回落系统「文档」）；建好文件夹后 createdPath 生效，注册失败重试不再重复建
   const [parent, setParent] = useState("");
+  const [syncProvider, setSyncProvider] = useState<string | null>(null);
   const [createdPath, setCreatedPath] = useState<string | null>(null);
   const path = pickedPath ?? createdPath ?? "";
   useEffect(() => {
     if (!creating) return;
-    invoke<string>("default_project_parent")
+    invoke<string>("default_project_parent", { remembered: loadNewProjectParent() })
       .then((dir) => setParent((cur) => cur || dir))
       .catch(() => {});
   }, [creating]);
+  useEffect(() => {
+    if (!creating || !parent) return;
+    let cancelled = false;
+    invoke<string | null>("cloud_sync_provider", { path: parent })
+      .then((p) => !cancelled && setSyncProvider(p))
+      .catch(() => !cancelled && setSyncProvider(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [creating, parent]);
   const [mode, setMode] = useState<WorkMode>(existingMode ?? "research");
   const [modeLocked, setModeLocked] = useState(existingMode != null);
   const [error, setError] = useState<string | null>(null);
@@ -231,6 +243,7 @@ function AddProjectModal({
       try {
         path = await invoke<string>("fs_create_dir", { root: parent, name: name.trim() });
         setCreatedPath(path);
+        saveNewProjectParent(parent);
       } catch (reason) {
         setError(String(reason));
         setBusy(false);
@@ -357,7 +370,8 @@ function AddProjectModal({
       <form onSubmit={submit}>
         <h2 className="sr-only">{creating ? "新建项目" : "添加项目"}</h2>
         {creating ? (
-          <div className="mb-3 flex items-center gap-2 text-xs text-l3">
+          <>
+          <div className={`${syncProvider && !createdPath ? "mb-1" : "mb-3"} flex items-center gap-2 text-xs text-l3`}>
             <span className="shrink-0">建在</span>
             <span className="min-w-0 flex-1 truncate font-mono" title={parent}>
               {createdPath ?? (parent ? `${parent.replace(/[\\/]+$/, "")}/${name.trim() || "…"}` : "…")}
@@ -376,6 +390,10 @@ function AddProjectModal({
               </button>
             )}
           </div>
+          {!createdPath && cloudSyncHint(syncProvider) && (
+            <p className="mb-3 text-micro text-warn-text">{cloudSyncHint(syncProvider)}</p>
+          )}
+          </>
         ) : (
           <p
             className="mb-3 truncate font-mono text-xs text-l3"

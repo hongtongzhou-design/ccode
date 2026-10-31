@@ -2499,13 +2499,108 @@ pub fn home_dir() -> String {
         .unwrap_or_default()
 }
 
-/// 新建项目的默认父目录：系统「文档」，取不到退回家目录（与示例课题同一落点）
+/// 新建项目的默认父目录：上次新建用过、且现在还在的文件夹优先（前端记本机），
+/// 否则系统「文档」，再取不到退回家目录。示例课题固定建在「文档」，不跟这里走。
+/// 移动硬盘 / 网络盘没挂上时 is_dir 可能卡住，放后台线程
 #[tauri::command]
-pub fn default_project_parent() -> String {
-    crate::dirs::document_dir()
-        .or_else(crate::dirs::home_dir)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
+pub async fn default_project_parent(remembered: Option<String>) -> String {
+    tauri::async_runtime::spawn_blocking(move || {
+        remembered
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && p.is_dir())
+            .or_else(crate::dirs::document_dir)
+            .or_else(crate::dirs::home_dir)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// 判定网盘同步要用的本机事实（拆出来，测试不读本机设置）
+struct CloudSyncFacts {
+    home: Option<PathBuf>,
+    /// macOS「桌面与文稿」存到 iCloud：Finder 偏好 FXICloudDriveDocuments / FXICloudDriveDesktop
+    icloud_documents: bool,
+    icloud_desktop: bool,
+    /// Windows OneDrive 根目录（%OneDrive% / %OneDriveConsumer% / %OneDriveCommercial%）
+    onedrive_roots: Vec<PathBuf>,
+}
+
+/// 这个位置落在哪家网盘的同步范围里；只按路径判断，不读文件
+fn cloud_sync_provider_for(path: &std::path::Path, facts: &CloudSyncFacts) -> Option<String> {
+    use crate::paths::path_within_path as within;
+    for root in &facts.onedrive_roots {
+        if within(path, root) {
+            return Some("OneDrive".into());
+        }
+    }
+    let home = facts.home.as_deref()?;
+    if within(path, &home.join("Library/Mobile Documents"))
+        || (facts.icloud_documents && within(path, &home.join("Documents")))
+        || (facts.icloud_desktop && within(path, &home.join("Desktop")))
+    {
+        return Some("iCloud".into());
+    }
+    // macOS 新版 Dropbox / Google Drive / OneDrive 都挂在 ~/Library/CloudStorage/<家名>-<账号>
+    let storage = home.join("Library/CloudStorage");
+    if within(path, &storage) {
+        let rel = path.strip_prefix(&storage).ok()?;
+        let dir = rel.components().next()?.as_os_str().to_string_lossy().into_owned();
+        let brand = dir.split('-').next().unwrap_or(&dir);
+        return Some(match brand {
+            "GoogleDrive" => "Google Drive".into(),
+            other => other.into(),
+        });
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn finder_pref_on(key: &str) -> bool {
+    crate::process::background_command("/usr/bin/defaults")
+        .args(["read", "com.apple.finder", key])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "1")
+        .unwrap_or(false)
+}
+
+/// 新建项目弹窗用：所选位置会被哪家网盘同步（None = 不会）。项目里有 .git 和大数据，
+/// 放在同步盘里容易冲突、被挪到云端只留占位，弹窗据此提醒一句，不拦
+#[tauri::command]
+pub async fn cloud_sync_provider(path: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        let (icloud_documents, icloud_desktop) =
+            (finder_pref_on("FXICloudDriveDocuments"), finder_pref_on("FXICloudDriveDesktop"));
+        #[cfg(not(target_os = "macos"))]
+        let (icloud_documents, icloud_desktop) = (false, false);
+        let onedrive_roots = if cfg!(windows) {
+            ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+                .iter()
+                .filter_map(|k| std::env::var_os(k))
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let facts = CloudSyncFacts {
+            home: crate::dirs::home_dir(),
+            icloud_documents,
+            icloud_desktop,
+            onedrive_roots,
+        };
+        // 「文档」被重定向 / 链到同步盘时按真实位置再认一遍
+        let raw = PathBuf::from(&path);
+        cloud_sync_provider_for(&raw, &facts).or_else(|| {
+            let real = crate::paths::canonicalize_plain(&raw).ok()?;
+            cloud_sync_provider_for(&real, &facts)
+        })
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tauri::command]
@@ -2518,6 +2613,42 @@ pub async fn fs_delete_path(path: String, root: String) -> Result<(), String> {
 #[cfg(test)]
 mod fsops_tests {
     use super::*;
+
+    #[test]
+    fn cloud_sync_provider_by_path() {
+        let home = PathBuf::from("/Users/me");
+        let mut facts = CloudSyncFacts {
+            home: Some(home.clone()),
+            icloud_documents: false,
+            icloud_desktop: false,
+            onedrive_roots: vec![PathBuf::from("/od/OneDrive")],
+        };
+        let docs = home.join("Documents");
+        assert_eq!(cloud_sync_provider_for(&docs, &facts), None);
+        // 「桌面与文稿」开了 iCloud：文档里外都算，Desktop 跟着自己的开关
+        facts.icloud_documents = true;
+        assert_eq!(cloud_sync_provider_for(&docs.join("课题"), &facts).as_deref(), Some("iCloud"));
+        assert_eq!(cloud_sync_provider_for(&home.join("Desktop"), &facts), None);
+        assert_eq!(cloud_sync_provider_for(&home.join("Research"), &facts), None);
+        // 按分量判：Documents2 不是 Documents
+        assert_eq!(cloud_sync_provider_for(&home.join("Documents2"), &facts), None);
+        let drive = home.join("Library/Mobile Documents/com~apple~CloudDocs/x");
+        assert_eq!(cloud_sync_provider_for(&drive, &facts).as_deref(), Some("iCloud"));
+        let cs = home.join("Library/CloudStorage");
+        assert_eq!(
+            cloud_sync_provider_for(&cs.join("GoogleDrive-a@b.com/My Drive"), &facts).as_deref(),
+            Some("Google Drive")
+        );
+        assert_eq!(cloud_sync_provider_for(&cs.join("Dropbox/p"), &facts).as_deref(), Some("Dropbox"));
+        assert_eq!(
+            cloud_sync_provider_for(&cs.join("OneDrive-Personal"), &facts).as_deref(),
+            Some("OneDrive")
+        );
+        assert_eq!(
+            cloud_sync_provider_for(std::path::Path::new("/od/OneDrive/Documents"), &facts).as_deref(),
+            Some("OneDrive")
+        );
+    }
 
     #[test]
     fn gbk_and_utf16_files_read_as_text_and_save_back_in_same_encoding() {

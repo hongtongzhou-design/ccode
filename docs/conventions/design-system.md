@@ -747,7 +747,7 @@ aria-live）。上下文圆环说明改自绘浮层（portal + 外层定位 / �
   字标，不放带圆角底板的应用图标**）（`chatGreeting`），**只是问候**——不重复「问一个问题…」、不写 Agent 身份；问候、输入框（`ChatComposer narrow`）、
   下方一组同宽 `max-w-[45rem]` 居中，开聊后输入框回到 `max-w-4xl`。五轮（用户：「将在 ~ 开始」应是选项目；输入框下面的噪声不要）：
   输入框底栏「将在 … 开始」改为**目录芯片**（`cwdChipLabel`：项目名 / 随手聊 / 主目录 / 文件夹名 + ▾），点开终端空态卡同一张目录菜单
-  （`openDirMenu`，菜单尾部「选择文件夹…」「新建项目…」→ 项目页**新建弹窗**：`newProjectOpenReq` 与 `addProjectOpenReq` 分开——前者起名 + 位置（`default_project_parent` 默认系统「文档」）+ 工作方式、提交时 `fs_create_dir` 建文件夹再走同一套注册，不弹系统选目录窗；后者才是选已有文件夹。侧栏「＋」同步拆成「新建项目… / 添加已有文件夹…」。从标签发起的新建带 `returnTabId`：注册完成即 `tabCwdReq` 回到该标签并把目录换成新项目，跳过建后模板弹窗（科研项目之后在项目页选模板），用户：「新建完成之后要回到原来的聊天框」），开聊后不显示；下方**只留一排起手提示**（按目录类型，点击经
+  （`openDirMenu`，菜单尾部「选择文件夹…」「新建项目…」→ 项目页**新建弹窗**：`newProjectOpenReq` 与 `addProjectOpenReq` 分开——前者起名 + 位置（`default_project_parent`：上次新建用的上级文件夹优先、本机 localStorage `ccode.newProjectParent` 记，不在了回落系统「文档」；所选位置在 iCloud「桌面与文稿」/ `~/Library/CloudStorage` 网盘 / Windows OneDrive 里时 `cloud_sync_provider` 认出，弹窗下方提醒一句、不拦；示例课题仍固定「文档」，见 `new-project-parent.ts`）+ 工作方式、提交时 `fs_create_dir` 建文件夹再走同一套注册，不弹系统选目录窗；后者才是选已有文件夹。侧栏「＋」同步拆成「新建项目… / 添加已有文件夹…」。从标签发起的新建带 `returnTabId`：注册完成即 `tabCwdReq` 回到该标签并把目录换成新项目，跳过建后模板弹窗（科研项目之后在项目页选模板），用户：「新建完成之后要回到原来的聊天框」），开聊后不显示；下方**只留一排起手提示**（按目录类型，点击经
   seedInsert 填输入框、不替发送），「N 段对话 · 接着上一段」拿掉——找旧对话归工作台 / 对话页；恢复占位标签额外一行「上次的对话还没
   接回 · 接着聊 · 看离开时的画面」（这是本标签自己的状态，不是导航）。不铺点阵、不写身份。纯逻辑与提示词表在
   `src/chat-empty-start.ts`（tests/chat-empty-start.test.ts），改提示词只动那张表。

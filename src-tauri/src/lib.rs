@@ -796,6 +796,7 @@ pub fn run() {
             fs_tree::fs_delete_path,
             fs_tree::home_dir,
             fs_tree::default_project_parent,
+            fs_tree::cloud_sync_provider,
             pdf::read_pdf_bytes,
             pdf::read_docx_bytes,
             pdf::file_stamp,

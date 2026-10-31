@@ -793,6 +793,7 @@ model-vendors.ts           # 获取模型下拉按厂商分组折叠（大网关
   chat-unread.ts             # 跑完了没看的对话（2026-10-24）：注意力 working → done 那一刻没在看就记，看到即消；会话键优先、标签键认出会话后挪
                              # （nextUnread；App 维护 store.unreadChats，ProjectTree 在那一行行尾挂蓝色光标（2026-10-28 起标题不再变亮）；tests/chat-unread.test.ts）
   rail-bar-order.ts          # 侧栏底部资源段五个图标的顺序（2026-10-31）：localStorage ccode.railBarOrder，读回去重补缺、挪位；前 RAIL_BAR_VISIBLE=2 个展开态常显（tests/rail-bar-order.test.ts）
+  new-project-parent.ts      # 新建项目建在哪（2026-10-31）：记上次的上级文件夹（localStorage）、同步盘提醒文案；回落与网盘判定在 fs_tree.rs default_project_parent / cloud_sync_provider（tests/new-project-parent.test.ts）
   rail-width.ts              # 应用侧栏宽度（2026-10-24）：14–26rem、默认 18rem、窗口小时上限收到窗宽 40%，localStorage 记偏好（tests/rail-width.test.ts）
   start-page.ts              # 「启动时进入」四种去处（2026-10-24）：工作台 / 上次的对话 / 上次的项目 / 新对话，旧存值当工作台；与 settings.rs KNOWN_START_PAGES 同步；上次的项目 = 最后看的那段对话所在的项目（projectOfCwd 取最深的项目根），App 在运行页正看着时写 localStorage ccode.lastProject（tests/start-page.test.ts）
   run-layout.ts              # 运行页两块宽度（2026-10-24，文件树并进右栏后由三块变两块）：对话 ≥ 360、右栏默认 460 / ≥ 360，偏好与实际分开，不够时只压右栏
