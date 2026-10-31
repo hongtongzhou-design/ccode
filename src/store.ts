@@ -240,7 +240,8 @@ function syncWindowsMica(light: boolean) {
     .setEffects({
       effects: [(light ? "micaLight" : "micaDark") as Effect],
     })
-    // 挂不上（Windows 10 等）：App.css 的 data-material=none 回到实心底，不让桌面透出来
+    // 挂不上（Windows 10 等）：App.css 的 data-material=none 回到实心底，不让桌面透出来。
+    // 权限被拒也走到这里：capabilities 里少了 core:window:allow-set-effects 时 Windows 11 也整块变实心（2026-10-31 实证）
     .catch(() => {
       document.documentElement.dataset.material = "none";
     });

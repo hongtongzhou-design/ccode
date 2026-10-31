@@ -504,6 +504,8 @@
 - **侧栏桌面磨砂（2026-09-24）**：透的是窗口背后的桌面，不是页头那种网页内 `backdrop-filter`。
   窗口 `transparent` + macOS 菜单材质 `menu`（`macOSPrivateApi`，不上 Mac App Store）/
   Windows 11 Mica（深浅跟 Mesa 主题，不跟系统外观）；Linux 没有同等材质，侧栏保持实心 rail。
+  Windows 跟主题切 micaDark / micaLight 走前端 `setEffects`，**capabilities 必须带 `core:window:allow-set-effects`**——
+  少了它调用被拒，`syncWindowsMica` 当成 Windows 10 打上 `data-material=none`，侧栏顶栏整块实心（2026-10-31 实证，此前 Windows 11 一直如此）。
   macOS 材质 2026-10-23 由 `underWindowBackground` 改为 `menu`（对照 Codex 客户端，它的主窗也是 `vibrancy: 'menu'`、侧栏不铺色）：
   前者只模糊不压色，彩色壁纸的色相直接透上来；菜单材质更实、饱和度低，壁纸只剩偏灰的明暗。改材质要同步 lib.rs 与各份 `tauri*.conf.json`（测试对账）。
   **macOS 全屏壳铺实心 `--color-rail`**（`data-fullscreen`，同日）：全屏空间里窗口背后只剩桌面壁纸，材质透上来的是整面壁纸色；
