@@ -363,14 +363,14 @@ export default function ConversationView({
           }}
         >
           {copiedKey === mk ? (
-            <Check size={14} strokeWidth={2} aria-hidden="true" />
+            <Check size={13} strokeWidth={2} aria-hidden="true" />
           ) : (
-            <Copy size={14} strokeWidth={1.8} aria-hidden="true" />
+            <Copy size={13} strokeWidth={1.8} aria-hidden="true" />
           )}
         </button>
         {align === "right" && onEditResend && (
           <button type="button" className={btn} onClick={() => onEditResend(text)} aria-label="编辑后重发" title="编辑后重发：把这句放回输入框，改完再发">
-            <PencilLine size={14} strokeWidth={1.8} aria-hidden="true" />
+            <PencilLine size={13} strokeWidth={1.8} aria-hidden="true" />
           </button>
         )}
         {align === "left" && onForkHere && (
@@ -381,7 +381,7 @@ export default function ConversationView({
             aria-label="从这里分叉"
             title="从这里分叉：另开一段对话，带着到这条回复为止的内容接着聊（原对话不动）"
           >
-            <GitFork size={14} strokeWidth={1.8} aria-hidden="true" />
+            <GitFork size={13} strokeWidth={1.8} aria-hidden="true" />
           </button>
         )}
         {align === "left" && onQuote && (
@@ -392,7 +392,7 @@ export default function ConversationView({
               const content = event.currentTarget.closest("[data-chat-message]")?.querySelector("[data-chat-answer]");
               const selected = selection && selection.rangeCount > 0 && content?.contains(selection.anchorNode) && content.contains(selection.focusNode) ? rangePlainText(selection.getRangeAt(0)) : "";
               onQuote(makeChatQuote(sources, text, selected));
-            }}><Quote size={14} strokeWidth={1.8} aria-hidden="true" /></button>
+            }}><Quote size={13} strokeWidth={1.8} aria-hidden="true" /></button>
         )}
         {align === "left" && latest && onReportMismatch && (
           <button
@@ -402,7 +402,7 @@ export default function ConversationView({
             aria-label="和终端对不上"
             title="和终端对不上：聊天里显示的和终端里的不一样？把两边当时的内容（已去掉密钥）附上去反馈"
           >
-            <MessageSquareWarning size={14} strokeWidth={1.8} aria-hidden="true" />
+            <MessageSquareWarning size={13} strokeWidth={1.8} aria-hidden="true" />
           </button>
         )}
       </div>
