@@ -1,4 +1,5 @@
 import {
+  CheckCheck,
   Download,
   Eye,
   FileDown,
@@ -94,7 +95,8 @@ function skillRepoUrl(skill: SkillDto): string | null {
   return `${base}/tree/${skill.repoRef ?? "HEAD"}/${skill.repoSubdir}`;
 }
 
-/** 应用列单元格：未用 = 浅灰「未用」；已用 = 绿点 + 数量，agent 名收进 tooltip；点击进右侧详情 */
+/** 应用列单元格：「N 个 Agent」/「未用」，agent 名收进 tooltip，点击进右侧详情。
+ *  部分应用不画点（2026-10-31 用户：琥珀点像出了问题），由行尾「应用到全部」图标钮表达 */
 function AppliedCell({
   skill,
   installedIds,
@@ -108,12 +110,7 @@ function AppliedCell({
   const appliedNames = Object.entries(skill.apps)
     .filter(([, on]) => on)
     .map(([id]) => AGENTS.find((a) => a.id === id)?.label ?? id);
-  // 装了却没分发到的 Agent：只有这种「部分应用」值得点一下，全装上不画点（每行一样的绿点等于没说）
-  const missingNames = installedIds
-    ? Object.entries(skill.apps)
-        .filter(([id, on]) => !on && installedIds.has(id))
-        .map(([id]) => AGENTS.find((a) => a.id === id)?.label ?? id)
-    : [];
+  const missingNames = skillMissingAgentNames(skill, installedIds);
   const anchorRef = useRef<HTMLButtonElement>(null);
   const { tip, show, hide } = useHoverTip(anchorRef);
   const has = appliedNames.length > 0;
@@ -129,10 +126,6 @@ function AppliedCell({
       onMouseLeave={hide}
       className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-left text-xs hover:bg-hover"
     >
-      {/* 写「N 个 Agent」不写「N 处」；只有部分应用画琥珀点，全装上 / 未用都不画（2026-10-23 审查） */}
-      {has && missingNames.length > 0 && (
-        <span className="size-1.5 shrink-0 rounded-full bg-warn-text" />
-      )}
       <span className="text-l3 hover:text-l1">
         {has ? `${appliedNames.length} 个 Agent` : "未用"}
       </span>
@@ -146,6 +139,18 @@ function AppliedCell({
       )}
     </button>
   );
+}
+
+/** 本机装了却还没分发到的 Agent 名（检测还没回来时为空：不判「漏装」） */
+function skillMissingAgentNames(
+  skill: SkillDto,
+  installedIds: ReadonlySet<string> | null,
+): string[] {
+  return installedIds
+    ? Object.entries(skill.apps)
+        .filter(([id, on]) => !on && installedIds.has(id))
+        .map(([id]) => AGENTS.find((a) => a.id === id)?.label ?? id)
+    : [];
 }
 
 /** 行内徽标悬浮底座：纯展示锚点 + 共享 HoverTip（原生 title 在 WKWebView 渲染白块且不稳定，
@@ -2246,6 +2251,22 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     不套胶囊容器——实体栏压在列表行上层级脱节；tooltip 挂按钮上方（RowAction） */}
                                 <div className="flex items-center justify-end">
                                   <div className={`flex items-center ${hoverRevealClass} focus-within:opacity-100`}>
+                                    {(() => {
+                                      // 与抽屉「一键应用」同一函数：只分发给本机装了的
+                                      const missing = skillMissingAgentNames(skill, installedAgentIds);
+                                      if (missing.length === 0) return null;
+                                      return (
+                                        <RowAction
+                                          icon={<CheckCheck size={14} strokeWidth={1.8} aria-hidden="true" />}
+                                          tip={`应用到全部：${missing.join("、")}`}
+                                          label={`把 ${skill.name} 应用到全部已装 Agent`}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            void applyAllAgents(skill);
+                                          }}
+                                        />
+                                      );
+                                    })()}
                                     <RowAction
                                       icon={<Pencil size={14} strokeWidth={1.8} aria-hidden="true" />}
                                       tip="编辑内容"
