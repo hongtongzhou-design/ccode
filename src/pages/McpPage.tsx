@@ -1183,7 +1183,9 @@ export default function McpPage({ visible }: { visible: boolean }) {
           {servers.map((s) => {
             const onCount = Object.values(s.apps).filter(Boolean).length;
             const open = expanded === s.id;
-            const shownHealth = shownHealthOf(s);
+            // 停用的不报旧检测结果（2026-10-31 用户：已停用还亮绿点、写「需登录」对不上）；
+            // 停用时手动点「测试连通」测出的这一次照常显示，启用前可以先试
+            const shownHealth = s.enabled ? shownHealthOf(s) : health[s.id];
             const oauthRows = oauth[s.id];
             const oauthAgents = Array.isArray(oauthRows) ? oauthRows : undefined;
             const oauthSum = mcpOauthSummary(oauthAgents);
@@ -1268,10 +1270,10 @@ export default function McpPage({ visible }: { visible: boolean }) {
                     onClick={toggleOpen}
                     title={
                       onCount > 0
-                        ? `已分发到：${AGENTS.filter((a) => s.apps[a.id]).map((a) => a.label).join("、")}\n点击展开分发管理`
+                        ? `${s.enabled ? "已分发到" : "已停用，启用后会写入"}：${AGENTS.filter((a) => s.apps[a.id]).map((a) => a.label).join("、")}\n点击展开分发管理`
                         : "还没分发给任何 Agent；点击展开分发管理"
                     }
-                    className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-xs text-l3 hover:bg-hover hover:text-l1"
+                    className={`flex h-7 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-xs ${s.enabled ? "text-l3" : "text-l4"} hover:bg-hover hover:text-l1`}
                   >
                     {issues.length > 0 && (
                       <span className="size-1.5 shrink-0 rounded-full bg-warn-text" />
