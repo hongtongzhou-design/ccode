@@ -319,7 +319,9 @@
   （同一套读-改-写 + 备份 + 原子写 + 读回校验；旧名条目权属归 Mesa 清单，不另做 EXTMOD 预检；任一步失败不落库）。
   codex 的 stdio env 引用只支持同名转发（env_vars 白名单），改名引用（`TARGET=${SOURCE}`）明确拒写并引导改键名；
   预期产物构建不出的条目（如历史改名引用）在外部修改检测里按「被改过」保护，移除需确认。
-  移除/删除前比对 agent 侧条目与当前映射产物，被外部改过报 `EXTMOD:` 确认后才强删（保护手调版本）；
+  移除/删除前比对 agent 侧条目与当前映射产物（2026-10-31 起按统一模型比：盘上条目反向映射后与清单比命令（两边都深解析）/
+  参数/env/cwd（该家写 cwd 才比）/url/headers（名不分大小写），空集合、Mesa 不建模的键、启动超时不比——逐字节比会让收编条目
+  刚收编就报改过），被外部改过报 `EXTMOD:` 确认后才强删（保护手调版本）；
   粘贴导入两阶段（`parse_mcp_json` 预览命令清单 → 确认才落库，stdio 命令=任意执行须明示）。
   **stdio 命令名落盘前深度解析**（`resolve_command_deep`）：裸名经 `resolve_binary` 落绝对路径（GUI 短 PATH）；
   node 系 shim（shebang `#!/usr/bin/env node` 的脚本/symlink，如 npx）再换成 node 绝对路径 + shim 真实路径首参——
@@ -338,7 +340,7 @@
   返回（不走渐进事件）；结果沉淀进清单 `last_check` 字段（读-改-写只动该字段，编辑整结构替换保留旧值，落盘失败静默不拖垮
   检测）；stdio 每次尝试的等待上限 = `startup_timeout_ms` 按 clamp(8s, 30s) 生效（未声明 8s、remote 恒 8s），声明了仍超时的
   报错点明「已按此等待」。`startup_timeout_ms` 分发只写进 codex 的 `startup_timeout_sec`（同一 clamp，stdio / remote 都写，
-  2026-10-31 起；此前 stdio 不写，比对「外部改过」时盘上缺该键不算改过）；来源 = 收编 codex/grok 的 `startup_timeout_sec`
+  2026-10-31 起；「外部改过」比对不看启动超时）；来源 = 收编 codex/grok 的 `startup_timeout_sec`
   （matrix §10.2 别家无实证等价字段不读）或编辑表单手调。**体检结果带 status 细分闭集**（McpHealthDto.status：
   handshake = initialize 握手成功 / reachable = 地址可达但握手未确认（remote 3xx·其他 4xx）/ auth = 认证失败
   （401/403）/ not_found = 路径错误（404）/ error = 其余失败——401/403/404 按「连通正常」报是假阳性，必须判失败）。

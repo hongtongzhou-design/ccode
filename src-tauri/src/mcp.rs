@@ -1697,24 +1697,56 @@ fn entry_modified_externally(agent: &str, server: &McpServerDto) -> Result<bool,
         return Ok(false); // 已不在 = 没什么可保护的
     };
     let expected = if agent == "codex" {
-        entry_toml(server).map(|t| {
-            let mut e = toml_to_json(&toml_edit::Item::Table(t));
-            // 2026-10-31 前 stdio 条目不写 startup_timeout_sec：盘上缺这一键是 Mesa 旧版写的，不算外部改过
-            if current.get("startup_timeout_sec").is_none() {
-                if let Some(obj) = e.as_object_mut() {
-                    obj.remove("startup_timeout_sec");
-                }
-            }
-            e
-        })
+        entry_toml(server).map(|t| toml_to_json(&toml_edit::Item::Table(t)))
     } else {
         entry_json(server, agent)
     };
     match expected {
-        Ok(e) => Ok(current != e),
+        // 按统一模型比，不按序列化产物逐字节比：收编条目盘上是裸 `npx`、空 `args: []` / `env: {}`、
+        // Mesa 不建模的键（tool_timeout_sec、显式 type 等），逐字节比会刚收编就报「外部改过」
+        Ok(e) => {
+            // 这家不写 cwd（cursor / codebuddy 等）时两边都不比 cwd
+            let with_cwd = e.get("cwd").is_some();
+            let disk = reverse_entry(agent, &server.name, &current);
+            Ok(comparable(server, with_cwd) != comparable(&disk, with_cwd))
+        }
         // 清单内容按当前口径已构建不出分发产物（如历史遗留的 codex 改名引用、
         // kimi 不支持的 env 引用）：按「被改过」保护处理——移除需 force 确认，不静默删
         Err(_) => Ok(true),
+    }
+}
+
+/// 「外部改过」比对口径：只比 Mesa 建模且会分发的字段。命令两边都深解析（裸名 / shim → 实际路径），
+/// 键值对去空、按键排序（header 名不分大小写），启动超时不比（写进去会 clamp，且只影响等多久）
+fn comparable(s: &McpServerDto, with_cwd: bool) -> serde_json::Value {
+    let pairs = |list: &[McpEnvPair], fold: bool| {
+        let mut v: Vec<(String, String)> = list
+            .iter()
+            .filter(|p| !p.key.trim().is_empty())
+            .map(|p| {
+                let key = p.key.trim();
+                let key = if fold { key.to_ascii_lowercase() } else { key.to_string() };
+                (key, p.value.trim().to_string())
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    if s.kind == "stdio" {
+        let (command, args) = resolve_command_deep(s.command.trim(), &s.args);
+        serde_json::json!({
+            "kind": "stdio",
+            "command": command,
+            "args": args,
+            "cwd": if with_cwd { s.cwd.trim() } else { "" },
+            "env": pairs(&s.env, false),
+        })
+    } else {
+        serde_json::json!({
+            "kind": s.kind,
+            "url": s.url.trim(),
+            "headers": pairs(&s.headers, true),
+        })
     }
 }
 
@@ -3579,6 +3611,29 @@ done
         }];
         let t = entry_toml(&r).unwrap();
         assert_eq!(t["env_http_headers"]["X-Key"].as_str(), Some("MY_KEY"));
+    }
+
+    #[test]
+    fn adopted_entry_not_flagged_modified() {
+        if std::env::var_os("CODEX_HOME").is_some() {
+            return;
+        }
+        let fx = Fixture::new();
+        // 收编来源的写法：裸命令、空 args / env、Mesa 不建模的 tool_timeout_sec
+        let codex_path = fx.dir.join(".codex").join("config.toml");
+        std::fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &codex_path,
+            "[mcp_servers.fs]\ncommand = \"ccode-test-nonexistent-bin\"\nargs = []\nenv = {}\ntool_timeout_sec = 60\nstartup_timeout_sec = 15\n",
+        )
+        .unwrap();
+        let entries = agent_entries("codex").unwrap();
+        let (_, v) = entries.iter().find(|(n, _)| n == "fs").unwrap();
+        let s = reverse_entry("codex", "fs", v);
+        assert!(!entry_modified_externally("codex", &s).unwrap(), "刚收编不算外部改过");
+        // 真改了命令仍要报
+        std::fs::write(&codex_path, "[mcp_servers.fs]\ncommand = \"other-bin\"\n").unwrap();
+        assert!(entry_modified_externally("codex", &s).unwrap());
     }
 
     #[test]
