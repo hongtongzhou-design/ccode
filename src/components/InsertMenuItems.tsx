@@ -1,4 +1,5 @@
 import type { McpServerDto, SkillDto } from "../types";
+import { shortenCommand } from "../mcp-display";
 
 /**
  * 「插入技能 / MCP」菜单的条目：运行页收缩行「插入」、标签栏 ✦、聊天输入框 ＋ 三处共用
@@ -59,7 +60,7 @@ export default function InsertMenuItems({
           >
             <span className="text-xs text-l1">{mcp.name}</span>
             <span className="truncate font-mono text-micro text-l4">
-              {mcp.kind === "stdio" ? `${mcp.command} ${mcp.args.join(" ")}` : mcp.url}
+              {mcp.kind === "stdio" ? shortenCommand(mcp.command, mcp.args) : mcp.url}
             </span>
           </button>
         </li>

@@ -239,7 +239,7 @@ export const MCP_PRESETS: McpPreset[] = [
   // 官方端点实测 401 + WWW-Authenticate（RFC 9728），支持它的客户端会自动拉起浏览器授权
   {
     label: "Undermind（文献语义搜索）",
-    note: "Undermind 官方 hosted MCP。认证走 OAuth（没有 API key）：保存分发后，在对应 CLI 登录一次（Codex：codex mcp login undermind；Claude：claude mcp login undermind），浏览器授权即可。Mesa 连通检测对 OAuth 会显示未登录，不代表条目坏了。登录成功后必须新开会话。",
+    note: "Undermind 官方 hosted MCP。认证走 OAuth（没有 API key）：保存分发后，在用到它的 CLI 里登录一次、浏览器授权即可（Codex：codex mcp login undermind；Claude Code：claude mcp login undermind；OpenCode：opencode mcp auth undermind；Cursor：cursor-agent mcp login undermind；Gemini / Qwen 在对话里输入 /mcp auth undermind）。Mesa 连通检测对 OAuth 会显示未登录，不代表条目坏了。登录成功后必须新开会话。",
     name: "undermind",
     kind: "remote",
     url: "https://mcp.undermind.ai/mcp",

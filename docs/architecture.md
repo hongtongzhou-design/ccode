@@ -370,7 +370,7 @@ run 脚本在终端页以按钮呈现（在工作区上下文时），run_mode=n
 
 同名导入返回结构化 `added/updated/skipped/conflicts`；用户可选择跳过、备份后覆盖或另存为。覆盖先备份旧库，ZIP 先完整解压到 staging，元数据保存失败回滚库目录。GitHub 来源额外持久化 repo/ref/subdir/revision，`check_skill_updates` 提示 revision 变化；`apply_skill_update` 一键应用更新——按记录的 repo/ref/subdir 重下 zipball，`import_zip_impl` 加 `only` 过滤只覆盖同名技能（其余不新增不覆盖，走同一覆盖+备份路径），成功后刷新 revision 基线；上游改名/移动时明确报错并引导手动重新导入（仍走冲突确认）。
 
-**内置技能种子（v3.124）**：18 个内置技能内容单一出处在 `src-tauri/resources/skills/<name>/SKILL.md`，经 `include_str!` 编进二进制（dev 与打包行为一致，不配 bundle resources）；启动时 `seed_builtin_skills` 幂等播种——只补库里没有的同名项，**永不覆盖用户已有/改过的技能**；库目录下 `.builtin-seed-version` marker 记录已播种版本，集合有新增时 `BUILTIN_SEED_VERSION` +1 触发补播，用户删掉的内置技能不会被复活。元数据 `source = "builtin"`，更新检测只对 github 来源生效、天然不碰内置技能。新增 `research-writing` 专用于实证科研论文 IMRaD 写作，避免把综述写作规范误套到实证论文。
+**内置技能种子（v3.124）**：内置技能（2026-10-31 为 21 个，以 `BUILTIN_SKILLS` 为准）内容单一出处在 `src-tauri/resources/skills/<name>/SKILL.md`，经 `include_str!` 编进二进制（dev 与打包行为一致，不配 bundle resources）；启动时 `seed_builtin_skills` 幂等播种——只补库里没有的同名项，**永不覆盖用户已有/改过的技能**；库目录下 `.builtin-seed-version` marker 记录已播种版本，集合有新增时 `BUILTIN_SEED_VERSION` +1 触发补播，用户删掉的内置技能不会被复活。元数据 `source = "builtin"`，更新检测只对 github 来源生效、天然不碰内置技能。新增 `research-writing` 专用于实证科研论文 IMRaD 写作，避免把综述写作规范误套到实证论文。
 
 **导出**：单个/多个技能打包为 ZIP（系统保存对话框）。
 
@@ -4266,7 +4266,7 @@ Claude Code 用量无法恢复。
   批改（选段「◈ 讨论/改写此段」）；界面白话双层 + 工作区页/列表精简
 - **P5 通用层打磨（部分 ✅）**：逐 hunk 验收 ✅、跨标签聚合视图 ✅、成本按工作区归因 ✅、历史时间线视图 ✅（first-parent
   主线 + 白话翻译：✓ 保存进项目/⚙ 自动保存/◔ 保存）、**hooks 精确注意力标记 ✅**（设置页按 agent 显式开关，
-  hooks.rs 七家桥接；v3.32 Claude 首发，v3.99 推广到七家，见架构 v3.32/v3.99）、**内置技能种子 ✅**（当前 18 个内置技能，include_str! 播种、不覆盖不复活，
+  hooks.rs 七家桥接；v3.32 Claude 首发，v3.99 推广到七家，见架构 v3.32/v3.99）、**内置技能种子 ✅**（当前 21 个内置技能，include_str! 播种、不覆盖不复活，
   六套流水线模板按步骤挂载）、**定时雷达 ✅**（v3.75：scheduler.rs 每日/每周无头巡检 + lit-watch 多源精选升级，
   约定见 conventions/pipeline.md「定时雷达」）、**模板重设计与接壤 ✅**（v3.78：六套模板内容重设计（种子对准拍板点/技能挂载核对/
   学术 MCP 人工事项）+ 产物路径接壤（投稿与返修接综述/科研论文成稿）+ 编辑器「＋ 从模板追加」）；批量验收、云端会话双源调研留 backlog
