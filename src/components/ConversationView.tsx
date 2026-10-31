@@ -340,8 +340,9 @@ export default function ConversationView({
       .trim();
     if (!text) return null;
     if (align === "left") quoteSources.current.set(mk, { sources, text });
+    // 只放图标（2026-10-31 用户：去掉文字），说明在悬停提示和 aria-label 里
     const btn =
-      "inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-xs text-l3 hover:bg-hover hover:text-l1 focus-visible:outline-2 focus-visible:outline-cta";
+      "inline-flex h-7 w-7 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1 focus-visible:outline-2 focus-visible:outline-cta";
     return (
       <div
         data-copy-skip=""
@@ -352,6 +353,7 @@ export default function ConversationView({
         <button
           type="button"
           className={btn}
+          aria-label={copiedKey === mk ? "已复制" : "复制"}
           title="复制这条的 Markdown 原文；只要文字就先选中，在浮出的小条里点「复制」"
           onClick={() => {
             void navigator.clipboard.writeText(text).then(() => {
@@ -361,16 +363,14 @@ export default function ConversationView({
           }}
         >
           {copiedKey === mk ? (
-            <Check size={12} strokeWidth={2} aria-hidden="true" />
+            <Check size={13} strokeWidth={2} aria-hidden="true" />
           ) : (
-            <Copy size={12} strokeWidth={1.8} aria-hidden="true" />
+            <Copy size={13} strokeWidth={1.8} aria-hidden="true" />
           )}
-          {copiedKey === mk ? "已复制" : "复制"}
         </button>
         {align === "right" && onEditResend && (
-          <button type="button" className={btn} onClick={() => onEditResend(text)} title="把这句放回输入框，改完再发">
-            <PencilLine size={12} strokeWidth={1.8} aria-hidden="true" />
-            编辑后重发
+          <button type="button" className={btn} onClick={() => onEditResend(text)} aria-label="编辑后重发" title="编辑后重发：把这句放回输入框，改完再发">
+            <PencilLine size={13} strokeWidth={1.8} aria-hidden="true" />
           </button>
         )}
         {align === "left" && onForkHere && (
@@ -378,31 +378,31 @@ export default function ConversationView({
             type="button"
             className={btn}
             onClick={() => onForkHere(text)}
-            title="另开一段对话，带着到这条回复为止的内容接着聊（原对话不动）"
+            aria-label="从这里分叉"
+            title="从这里分叉：另开一段对话，带着到这条回复为止的内容接着聊（原对话不动）"
           >
-            <GitFork size={12} strokeWidth={1.8} aria-hidden="true" />
-            从这里分叉
+            <GitFork size={13} strokeWidth={1.8} aria-hidden="true" />
           </button>
         )}
         {align === "left" && onQuote && (
-          <button type="button" className={btn} title="引用选中文字，未选择时引用整条回复；不会自动发送"
+          <button type="button" className={btn} aria-label="引用追问" title="引用追问：引用选中文字，未选择时引用整条回复；不会自动发送"
             onMouseDown={(event) => event.preventDefault()}
             onClick={(event) => {
               const selection = window.getSelection();
               const content = event.currentTarget.closest("[data-chat-message]")?.querySelector("[data-chat-answer]");
               const selected = selection && selection.rangeCount > 0 && content?.contains(selection.anchorNode) && content.contains(selection.focusNode) ? rangePlainText(selection.getRangeAt(0)) : "";
               onQuote(makeChatQuote(sources, text, selected));
-            }}><Quote size={13} aria-hidden="true" />引用追问</button>
+            }}><Quote size={13} strokeWidth={1.8} aria-hidden="true" /></button>
         )}
         {align === "left" && latest && onReportMismatch && (
           <button
             type="button"
             className={btn}
             onClick={onReportMismatch}
-            title="聊天里显示的和终端里的不一样？把两边当时的内容（已去掉密钥）附上去反馈"
+            aria-label="和终端对不上"
+            title="和终端对不上：聊天里显示的和终端里的不一样？把两边当时的内容（已去掉密钥）附上去反馈"
           >
-            <MessageSquareWarning size={12} strokeWidth={1.8} aria-hidden="true" />
-            和终端对不上
+            <MessageSquareWarning size={13} strokeWidth={1.8} aria-hidden="true" />
           </button>
         )}
       </div>

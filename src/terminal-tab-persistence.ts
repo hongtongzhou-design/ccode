@@ -17,6 +17,10 @@ export interface RecoverableTerminalTab {
   /** 只留工作区标签的复用键（ws:<工作树>）：重启后「去终端看看 / 回答」「继续」仍回到这个标签，
    *  不另开一个（2026-10-22 实证：重启后点收件箱「去终端回答」新开了终端）。快速开聊等别的键不留 */
   reuseKey?: string | null;
+  /** 分叉标签的原会话 id（2026-10-31）：重启后侧栏照样挂在原对话下面 */
+  forkOf?: string | null;
+  /** 原生分叉还没落盘（一句没发）：重启后再分一次，不去接那个还不存在的新会话 */
+  forkPending?: boolean;
 }
 
 export interface RecoverableTerminalState {
@@ -55,6 +59,8 @@ function parseTab(value: unknown): RecoverableTerminalTab | null {
       ? { taskId: textField(tab.taskId, 64) }
       : {}),
     ...(workspaceReuseKey(tab.reuseKey) ? { reuseKey: workspaceReuseKey(tab.reuseKey) } : {}),
+    ...(textField(tab.forkOf, 256) ? { forkOf: textField(tab.forkOf, 256) } : {}),
+    ...(tab.forkPending === true && textField(tab.forkOf, 256) ? { forkPending: true } : {}),
   };
 }
 
@@ -102,6 +108,8 @@ export function serializeRecoverableTerminalState(
     runId: tab.runId?.slice(0, 64) ?? null,
     ...(tab.taskId ? { taskId: tab.taskId.slice(0, 64) } : {}),
     ...(workspaceReuseKey(tab.reuseKey) ? { reuseKey: workspaceReuseKey(tab.reuseKey) } : {}),
+    ...(tab.forkOf ? { forkOf: tab.forkOf.slice(0, 256) } : {}),
+    ...(tab.forkOf && tab.forkPending ? { forkPending: true } : {}),
   }));
   const activeIndex = tabs.length > 0
     ? Math.min(Math.max(Math.trunc(state.activeIndex), 0), tabs.length - 1)

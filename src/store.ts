@@ -55,6 +55,7 @@ import {
   type OnboardingState,
 } from "./onboarding";
 import type { ProjectSurfaceTab } from "./project-surface";
+import { quietStoppedSessions } from "./run-caret";
 import type {
   BindingInput,
   DetectResult,
@@ -809,6 +810,9 @@ interface AppState {
       运行页标签条 2026-10-24 撤掉后，开着的东西在侧栏列着，关也从侧栏发 */
   closeTabReq: { tabId: string; token: number } | null;
   requestCloseTab: (tabId: string | null) => void;
+  /** 侧栏 / 对话页 ⋯「分叉成新对话」→ 运行页按会话记录分叉（不必先把原对话开成标签；运行页消费并清空） */
+  forkSessionReq: { session: SessionMetaDto; token: number } | null;
+  requestForkSession: (session: SessionMetaDto | null) => void;
   /** 工作区页 → 对话页的搜索词交接（对话页消费并清空） */
   sessionsQuery: string | null;
   /** 侧栏项目树随手聊「全部 N 条」→ 对话页只列随手聊（消费并清空） */
@@ -971,8 +975,13 @@ export const useAppStore = create<AppState>((set, get) => {
   const sessionKey = (s: SessionMetaDto) => `${s.agent}\n${s.sessionId}`;
   const withoutDeleting = (list: SessionMetaDto[]) =>
     deleting.size ? list.filter((s) => !deleting.has(sessionKey(s))) : list;
+  // Mesa 里停下的会话（关标签 / Agent 退出 / 换会话）：停下的时刻，列表里的 live 按它熄（run-caret quietStoppedSessions）
+  const stopped = new Map<string, number>();
   const sessionRefresh = createSessionRefreshCoordinator(
-    () => invoke<SessionMetaDto[]>("list_sessions").then(withoutDeleting),
+    () =>
+      invoke<SessionMetaDto[]>("list_sessions").then((list) =>
+        quietStoppedSessions(withoutDeleting(list), stopped),
+      ),
     () => get().sessions,
     (sessions) => set({ sessions }),
   );
@@ -1176,12 +1185,19 @@ export const useAppStore = create<AppState>((set, get) => {
       const key = sessionRuntimeKey(agent, sessionId);
       if (tabId) next[key] = tabId;
       else delete next[key];
-      return { liveSessions: next };
+      if (tabId) {
+        stopped.delete(key);
+        return { liveSessions: next };
+      }
+      stopped.set(key, Date.now());
+      return { liveSessions: next, sessions: quietStoppedSessions(s.sessions, stopped) };
     }),
   focusTabId: null,
   focusTab: (tabId) => set({ focusTabId: tabId }),
   closeTabReq: null,
   requestCloseTab: (tabId) => set({ closeTabReq: tabId ? { tabId, token: Date.now() } : null }),
+  forkSessionReq: null,
+  requestForkSession: (session) => set({ forkSessionReq: session ? { session, token: Date.now() } : null }),
   sessionsQuery: null,
   sessionsScratchReq: false,
   openSessionReq: null,

@@ -754,7 +754,7 @@ tab-keys.ts                # 标签栏/分段控件键盘导航三件（tabNavDe
   polling.ts                 # 定时刷新统一口径（usePolling / pollEvery：窗口隐藏时停、回前台补一次、上一次没回来不叠；createPoller 纯逻辑可测）
 session-refresh.ts         # 会话列表刷新协调器 createSessionRefreshCoordinator（store.ts 唯一挂载）：普通刷新复用在途请求不叠轮；强制刷新开新代次，旧请求晚回不覆盖新列表（成功与失败两路同口径，旧请求的失败也不暴露给新调用者，等最新请求返回当前列表）（tests/session-refresh.test.ts）
   progressive-rows.ts        # 长列表分段渲染（useProgressiveRows：先画 150 行，离底三屏接下一段，换筛选回第一段；选中项在后面画到它）；对话页列表在用
-  run-caret.ts               # 运行状态光标三态（working 灰色呼吸 / idle 淡灰 / confirm 琥珀）：注意力 → 光标、几个合成取最要紧；
+  run-caret.ts               # 运行状态光标三态（working 灰色呼吸 / idle 淡灰 / confirm 琥珀）：注意力 → 光标、几个合成取最要紧；Mesa 停下的会话熄掉列表里的旧 live（quietStoppedSessions，store setLiveSession 记停下时刻，2026-10-31）；
                              # 凡说「这段对话的 Agent 现在怎样」都用它，不再画绿点 / 黄点（组件 components/RunCaret.tsx）
   reading-anchor.ts          # 阅读位置自己锚（useReadingAnchor：对话页 / 聊天层；滚动时记眼睛看着的那块，内容变尺寸就挪回；
                              # 红线：滚动容器 [overflow-anchor:none]，不按 scrollHeight 差值补，不交回浏览器自带锚定）
@@ -786,7 +786,7 @@ model-vendors.ts           # 获取模型下拉按厂商分组折叠（大网关
                              # 正在看的标签归哪个文件夹（currentFolderKey，工作树归主仓）、展开默认（folderOpen）、短标题去「MMDD|类型|」、挂在课题下再去开头重复的课题名
                              # （sidebarChatTitle）、各文件夹列几段（chatQuotas / chatSlots：至少 5 段、按侧栏空位补满；expandedExtra：
                              # 「显示更多」在眼下段数上多 10 段）、开着但列表里还没有的标签挂到哪（openTabRows，10-24）、
-                             # 置顶对话（CHAT_PINS_KEY / parseChatPins / toggleChatPin / pinnedChats，10-24，localStorage，与「保留」快照无关；多选一起钉 pinPicked，10-27）、多选（nextPicked：⌘ 点加减、⇧ 点从起点整段换上，10-27）、
+                             # 置顶对话（CHAT_PINS_KEY / parseChatPins / toggleChatPin / pinnedChats，10-24，localStorage，与「保留」快照无关；多选一起钉 pinPicked，10-27）、分叉挂在原对话下面（forkParentKey 认 forkedFrom 与同家接力 handoffFrom*、nestForks 一家子按最近那段排、foldForks 收起不列但留正看着的，FORK_FOLDS_KEY，10-31）、多选（nextPicked：⌘ 点加减、⇧ 点从起点整段换上，10-27）、
                              # 侧栏键盘走（railNavIndex，10-24）、多选提醒贴哪（nudgeAnchor，10-27；何时出在 coach-tips.ts）
                              # （tests/sidebar-chats.test.ts；界面 ProjectTree，tests/project-tree-chats-ui.test.ts）
   coach-tips.ts              # 一次性提醒气泡的登记与规矩（2026-10-27）：各条出过记 localStorage、一次打开 Mesa 最多主动出一条（followUp 不占）；
@@ -999,7 +999,8 @@ src-tauri/
                              #   所有链接产物（含 lib 测试 exe，否则 cargo test 报 0xc0000139），别退回 tauri_build::build()
   windows-app-manifest.xml   # Windows 应用 manifest（Common-Controls 6.0，与 tauri-build 默认相同），build.rs 交给链接器
 src-tauri/src/
-  agent_specs.rs             # agent_config_root_with：各家用户级配置目录唯一解析（搬迁变量；GEMINI_CLI_HOME 顶替家目录），设为全局 / MCP / 技能同源；
+  agent_specs.rs             # 各家原生分叉参数 fork（ForkSpec，2026-10-31，matrix「原生分叉」表；pty_spawn 的 forkSessionId 用）；
+                             # agent_config_root_with：各家用户级配置目录唯一解析（搬迁变量；GEMINI_CLI_HOME 顶替家目录），设为全局 / MCP / 技能同源；
                              # AgentSpec 中央注册表：一个 CLI 一张规格（detect/launch_plan/env/技能分发/安装更新/官方账号 login/readonly_args 只读模式参数/permission_args 原生权限档（聊天权限徽标，agents::permission_launch_args）/
                              #   model_switch 运行中切模型（claude/gemini/kimi/grok 带参直切；codex/opencode 唤选择器——两家 CLI 无带参直切：
                              #   codex /model 无内联参数（源码 supports_inline_args 不含 Model）、opencode /models run 无参，2026-09-15 实证；
@@ -1260,6 +1261,8 @@ scan_persist.rs            # 扫描缓存落盘层（2026-10-16，app.db scan_me
                              # 会话删除、注意力分类（session_tail_state）、步骤名映射（RX3a）、
                              # Claude 接续链（merge_claude_chains，2026-10-21）：id 取文件名，直线接续并成链尾一条、
                              #   真分叉单列 forked_from；被并掉的成员进 ScanResult.hidden_members 供用量逐文件算、
+                             # Mesa 发起的分叉登记（session_forks 表、record_session_fork，2026-10-31）：扫描时登记的新会话去掉上游指针
+                             #   不按接续并进原对话（Claude / Codex / Grok 三套链），apply_session_forks 把 forked_from 指回原对话那一行、
                              # Claude 斜杠命令 / ! 命令及本地输出拆成 command / command_output 块（claude_command_block，
                              #   剥 ANSI；本地输出行在尾态里算 settled，2026-10-17）、
                              # codex rollout 元信息 model_provider 记进 SessionMetaDto.provider（恢复按它挑兼容 profile，

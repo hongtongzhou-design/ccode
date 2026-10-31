@@ -903,6 +903,7 @@ pub async fn pty_spawn(
     task_id: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    fork_session_id: Option<String>,
 ) -> Result<SpawnResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _turn = spawn_turn();
@@ -928,6 +929,7 @@ pub async fn pty_spawn(
             task_id,
             cols,
             rows,
+            fork_session_id,
         )
     })
     .await
@@ -970,8 +972,22 @@ fn pty_spawn_sync(
     // 当前 xterm 格子。恢复会话按这个宽度重放；缺省保持 24×80。
     cols: Option<u16>,
     rows: Option<u16>,
+    // 原生分叉（2026-10-31）：把这段会话整段复制成新会话接着聊（各家 CLI 自己的 fork），与恢复互斥；
+    // 新会话的认领同全新会话（能定 ID 的当场锁定，其余按标签认领），不注入初始 prompt
+    fork_session_id: Option<String>,
 ) -> Result<SpawnResult, String> {
     let selected = model.filter(|m| !m.trim().is_empty());
+    let fork_session_id = fork_session_id.filter(|s| !s.trim().is_empty());
+    if fork_session_id.is_some() && resume_session_id.is_some() {
+        return Err("分叉和接回不能同时进行".into());
+    }
+    let fork = match &fork_session_id {
+        Some(sid) => Some(
+            agents::fork_args(&agent_id, sid)
+                .ok_or("这家 Agent 没有原生分叉，请用「写简报另开」的分叉")?,
+        ),
+        None => None,
+    };
     let mut profile = store.get_with_model(&profile_id, selected.as_deref())?;
     if let Some(effort) = effort_override
         .as_deref()
@@ -997,10 +1013,10 @@ fn pty_spawn_sync(
     let model = selected.or_else(|| profile.models.first().cloned());
     crate::combo::apply_to_profile(&mut profile, model.as_deref());
     agents::validate_launch_compatibility(&profile, model.as_deref())?;
-    // 恢复会话不注入初始 prompt（那是既有会话的延续，不是开步）
-    let prompt = match &resume_session_id {
-        Some(_) => None,
-        None => initial_prompt.as_deref(),
+    // 恢复会话不注入初始 prompt（那是既有会话的延续，不是开步）；分叉同理
+    let prompt = match (&resume_session_id, &fork) {
+        (None, None) => initial_prompt.as_deref(),
+        _ => None,
     };
     // Gemini 在终端里第一次起：没选过认证方式时先问认证、再要存钥匙串——拦下来，聊天层出「设成 API Key 并启动」卡
     if let Some(msg) = agents::gemini_interactive_blocker(&profile, key.is_some()) {
@@ -1032,10 +1048,19 @@ fn pty_spawn_sync(
             unwritten_session = Some(sid);
         }
     }
-    // 恢复模式：hint = 被恢复的会话；普通模式：claude/qwen 生成新 id 固定文件名
-    let session_hint = match &resume_session_id {
-        Some(sid) => Some(sid.clone()),
-        None => session_id_for(&agent_id),
+    // 分叉的原会话没落盘（预分配 id、一句没说就退了）：没有东西可分
+    if let Some(sid) = fork_session_id.as_deref() {
+        if crate::sessions::fixed_id_session_exists(&agent_id, sid, &plan.env) == Some(false) {
+            return Err("原对话还没有记录（一句话都没说过），没有可分叉的内容".into());
+        }
+    }
+    // 恢复模式：hint = 被恢复的会话；普通模式：claude/qwen 生成新 id 固定文件名；
+    // 分叉：能和 --session-id 一起用的家同样当场定下新会话 id
+    let session_hint = match (&resume_session_id, &fork) {
+        (Some(sid), _) => Some(sid.clone()),
+        (None, Some((_, _, true))) => Some(uuid::Uuid::new_v4().to_string()),
+        (None, Some((_, _, false))) => None,
+        (None, None) => session_id_for(&agent_id),
     };
     if let (Some(old), Some(rid), Some(new)) = (
         unwritten_session.as_deref(),
@@ -1098,6 +1123,19 @@ fn pty_spawn_sync(
         command_args.extend(extra_args.iter().cloned());
         if !prepend {
             command_args.extend(args.iter().cloned());
+        }
+    } else if let Some((prepend, args, _)) = &fork {
+        if *prepend {
+            command_args.extend(args.iter().cloned());
+        }
+        command_args.extend(plan_args.iter().cloned());
+        command_args.extend(extra_args.iter().cloned());
+        if !*prepend {
+            command_args.extend(args.iter().cloned());
+        }
+        if let Some(sid) = &session_hint {
+            command_args.push("--session-id".into());
+            command_args.push(sid.clone());
         }
     } else {
         command_args.extend(plan_args.iter().cloned());

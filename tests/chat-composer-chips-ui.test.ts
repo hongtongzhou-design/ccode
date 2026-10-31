@@ -152,7 +152,9 @@ async function mount() {
   const root = createRoot(el);
   const render = (node: unknown) => act(async () => root.render(node));
   const button = (text: string) => {
-    const found = Array.from(el.querySelectorAll("button")).find((b) => b.textContent?.includes(text));
+    // 先按文字找；只有图标的按钮（消息悬停操作）按 aria-label 找
+    const all = Array.from(el.querySelectorAll("button"));
+    const found = all.find((b) => b.textContent?.includes(text)) ?? all.find((b) => b.getAttribute("aria-label") === text);
     assert.ok(found, `缺少按钮：${text}`);
     return found as HTMLButtonElement;
   };
@@ -956,7 +958,7 @@ test("消息悬停操作：用户消息「编辑后重发」，助手消息「�
         onForkHere: (t: string) => forks.push(t),
       }),
     );
-    const editButtons = Array.from(ui.el.querySelectorAll("button")).filter((b) => b.textContent?.includes("编辑后重发"));
+    const editButtons = Array.from(ui.el.querySelectorAll("button")).filter((b) => b.getAttribute("aria-label") === "编辑后重发");
     assert.equal(editButtons.length, 1, "排队中的那条不给编辑");
     await ui.click("编辑后重发");
     await ui.click("从这里分叉");
@@ -967,6 +969,7 @@ test("消息悬停操作：用户消息「编辑后重发」，助手消息「�
     // 回放页不传回调 = 只有复制
     await ui.render(ui.h(ui.Conversation, { messages: [text("user", "a"), text("assistant", "b")] }));
     assert.doesNotMatch(ui.el.textContent ?? "", /编辑后重发|从这里分叉/);
+    assert.equal(ui.el.querySelectorAll('button[aria-label="编辑后重发"], button[aria-label="从这里分叉"]').length, 0);
   } finally {
     await ui.close();
   }

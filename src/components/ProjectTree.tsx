@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AppWindow,
   Archive,
@@ -10,6 +10,7 @@ import {
   Eraser,
   Folder,
   FolderMinus,
+  GitFork,
   FolderOpen,
   FolderPlus,
   MessageCircle,
@@ -90,7 +91,11 @@ import {
   chatSlots,
   expandedExtra,
   openTabRows,
+  nestForks,
+  foldForks,
+  FORK_FOLDS_KEY,
   type ChatDot,
+  type ForkRow,
   type OpenTabRow,
 } from "../sidebar-chats";
 import {
@@ -359,6 +364,26 @@ export default function ProjectTree({
       return next;
     });
   }
+  // 收起了分叉的对话（FORK_FOLDS_KEY）：默认展开，人手收起的记本机
+  const [forkFolds, setForkFolds] = useState<string[]>(() => {
+    try {
+      return parseChatPins(localStorage.getItem(FORK_FOLDS_KEY));
+    } catch {
+      return [];
+    }
+  });
+  const forkFoldSet = useMemo(() => new Set(forkFolds), [forkFolds]);
+  function toggleForkFold(key: string) {
+    setForkFolds((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      try {
+        localStorage.setItem(FORK_FOLDS_KEY, JSON.stringify(next));
+      } catch {
+        /* 存不下只影响下次启动 */
+      }
+      return next;
+    });
+  }
   /** 多选里几段一起置顶 / 取消置顶 */
   function pinPickedFor(keys: string[]) {
     setChatPins((prev) => {
@@ -444,6 +469,8 @@ export default function ProjectTree({
   /** 随手聊节头 ⋯ 的菜单（随手聊不是项目，没有项目那一份菜单） */
   const [scratchMenu, setScratchMenu] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState<{ key: string; value: string } | null>(null);
+  /** 双击标题进改名时，第一下点开对话后终端会晚一点抢焦点：输入框出现后这段时间里被抢走就收回来 */
+  const renameShownAt = useRef(0);
   const composingRef = useRef(false);
   /** 刚点下去、还没切过去的那段（2026-10-26 实测：高亮要等切换那一帧画完，晚 100–200ms） */
   const [pressedChatKey, setPressedChatKey] = useState<string | null>(null);
@@ -529,6 +556,16 @@ export default function ProjectTree({
         icon: Columns2,
         title: "正看着的那段留在左边，这段放右边对照",
         onSelect: () => openChat(s, project, true),
+      },
+      {
+        label: "分叉成新对话",
+        icon: GitFork,
+        title: "把这段对话整段复制成新的一段接着聊，挂在它下面，原对话不动（Kimi、Cursor、Gemini 没有原生分叉，改为带着简报另开一段、先出方案）",
+        onSelect: () => {
+          const st = useAppStore.getState();
+          st.requestForkSession(s);
+          st.setPage("terminal");
+        },
       },
       // 只在 AI 开着时给：退出了的 Mesa 自己收，没东西可关。行上不放 ×，鼠标关对话就走这里
       ...(holder?.running && !holder.shell
@@ -757,6 +794,13 @@ export default function ProjectTree({
     () => scratchChats(unpinnedSessions, projectPaths, IS_WINDOWS),
     [unpinnedSessions, projectPaths],
   );
+  // 每个文件夹实际列出的行：分叉挂在原对话下面，收起的不列（列几段、「显示更多」都按这份算）
+  const chatRowsOf = useMemo(() => {
+    const m = new Map<string, ForkRow[]>();
+    m.set(SCRATCH_FOLDER_KEY, foldForks(nestForks(scratchList), forkFoldSet, selectedChatKey));
+    for (const [k, list] of chatsByRoot) m.set(k, foldForks(nestForks(list), forkFoldSet, selectedChatKey));
+    return m;
+  }, [scratchList, chatsByRoot, forkFoldSet, selectedChatKey]);
   // 运行页开着、但列表里还没有的（新对话、纯终端、刚起来还没认出会话的…）：挂在所属文件夹最上面，
   // 不在任何项目里的放「其他打开的」（标签条撤掉后开着的东西都在这里能找到，2026-10-24 第二期）
   const openByFolder = useMemo(() => {
@@ -893,11 +937,11 @@ export default function ProjectTree({
     const sections = [...grouped.pinned, ...grouped.projects, ...grouped.unregistered];
     const open: { key: string; count: number }[] = [];
     if (folderOpen(SCRATCH_FOLDER_KEY, chatOpenPrefs, currentKey)) {
-      open.push({ key: SCRATCH_FOLDER_KEY, count: scratchList.length });
+      open.push({ key: SCRATCH_FOLDER_KEY, count: chatRowsOf.get(SCRATCH_FOLDER_KEY)?.length ?? 0 });
     }
     for (const r of sections) {
       const k = pathKey(r.repoPath, IS_WINDOWS);
-      if (folderOpen(k, chatOpenPrefs, currentKey)) open.push({ key: k, count: chatsByRoot.get(k)?.length ?? 0 });
+      if (folderOpen(k, chatOpenPrefs, currentKey)) open.push({ key: k, count: chatRowsOf.get(k)?.length ?? 0 });
     }
     // 行高按 rem 折算（Mac 根 14px、Windows 16px）。2026-10-28 用户嫌挤、照 Claude 客户端放松：对话行 h-8 + 3px 行距；
     // 节头 h-8，收着的之间隔 3px，展开的上下各留 pt-3；展开的文件夹头下垫 3px，再留一行「显示更多」（h-6）与底边距 pb-1；
@@ -918,7 +962,7 @@ export default function ProjectTree({
       slots,
     });
     return new Map(open.map((o, i) => [o.key, shown[i]]));
-  }, [grouped, chatOpenPrefs, currentKey, scratchList, chatsByRoot, listHeight, chatExtra, pinnedList.length, collapsedSections, openByFolder]);
+  }, [grouped, chatOpenPrefs, currentKey, chatRowsOf, listHeight, chatExtra, pinnedList.length, collapsedSections, openByFolder]);
 
   /** 一段对话（2026-10-23 照 Claude 客户端侧栏）：与所属文件夹的名字左对齐、不再缩进，只写主题（去掉「MMDD|类型|」，
    *  完整标题放悬停），状态点放行尾；右键改名 / 归档 / 去对话页 */
@@ -930,6 +974,8 @@ export default function ProjectTree({
     folderName?: string,
     origin?: string | null,
     originTag = true,
+    /** 课题 / 随手聊下面才给：分叉挂在原对话下面（depth），原对话带开合箭头（forks） */
+    fork?: ForkRow,
   ) {
     const key = chatKey(s);
     const full = tidySessionTitle(s).title;
@@ -975,20 +1021,33 @@ export default function ProjectTree({
               e.preventDefault();
               commitRename(s);
             }}
-            onBlur={() => commitRename(s)}
-            className="min-w-0 flex-1 bg-transparent text-l1 outline-none"
+            onBlur={(e) => {
+              if (performance.now() - renameShownAt.current < 500) {
+                const el = e.currentTarget;
+                requestAnimationFrame(() => el.isConnected && el.focus());
+                return;
+              }
+              commitRename(s);
+            }}
+            // 字号同不在改名时的标题（.ccode-rail-text 13px），进出编辑不跳
+            className="ccode-rail-text min-w-0 flex-1 bg-transparent text-l1 outline-none"
           />
         </div>
       );
     }
     const menuOpen = chatMenu != null && chatKey(chatMenu.s) === key;
+    // 在 Mesa 里开着这段的标签（行尾 × 关它）
+    const holder = terminalRunInputs.find((r) => r.agentId === s.agent && r.sessionId === s.sessionId);
+    const depth = fork?.depth ?? 0;
+    const forks = fork?.forks ?? 0;
+    const forkFolded = forks > 0 && forkFoldSet.has(key);
     const isPicked = picked.has(key);
     // 选了好几段时，在其中一段上右键 / 点 ⋯ 出的是对这几段的菜单
     const forPicked = isPicked && picked.size > 1;
     return (
       <div
         key={key}
-        className={`group/chat relative grid h-8 grid-cols-[1fr_auto] items-center rounded-md transition-colors ${
+        className={`group/chat relative grid h-8 ${forks > 0 ? "grid-cols-[1fr_auto_auto]" : "grid-cols-[1fr_auto]"} items-center rounded-md transition-colors ${
           isPicked
             ? `ccode-rail-picked${selected ? " ccode-rail-active" : ""}`
             : selected
@@ -1027,20 +1086,58 @@ export default function ProjectTree({
           data-chat-key={key}
           data-picked={isPicked ? "1" : undefined}
           aria-description={picked.size > 0 ? (isPicked ? "已选中，可批量置顶或归档" : "未选中") : undefined}
+          // 双击标题 = 改名（同右键「重命名」）；第一下照旧点开这段
+          onDoubleClick={(e) => {
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            renameShownAt.current = performance.now();
+            setRenaming({ key, value: full });
+          }}
           onPointerEnter={() => prefetchConversation(s)}
           onFocus={() => prefetchConversation(s)}
           aria-current={selected ? "true" : undefined}
-          title={`${full}\n${origin ? `${origin} · ` : ""}${agent} · ${relTime(s.updatedAt)}${dot ? ` · ${dotTitle(dot)}` : ""}\n点一下接着聊`}
+          title={`${full}\n${depth > 0 ? "分叉出来的对话 · " : ""}${origin ? `${origin} · ` : ""}${agent} · ${relTime(s.updatedAt)}${dot ? ` · ${dotTitle(dot)}` : ""}\n点一下接着聊，双击改名`}
           className={`flex h-8 min-w-0 items-center gap-2 rounded-md pl-2 pr-1 ${
             "text-l1"
           }`}
+          // 分叉往里缩一格，再深的每层再缩一点（最多三层，侧栏窄）
+          style={depth > 0 ? { paddingLeft: `${0.5 + (Math.min(depth, 3) - 1) * 0.875}rem` } : undefined}
         >
+          {/* 分叉前面一道「└」接到原对话下面（2026-10-31 照 Claude 客户端侧栏），线色同 hairline 一档但看得出 */}
+          {depth > 0 && (
+            <span aria-hidden="true" className="relative h-8 w-2.5 shrink-0" data-fork-link>
+              <span className="absolute left-0.5 top-1 h-3 w-2 rounded-bl-[3px] border-b border-l border-l4" />
+            </span>
+          )}
           {/* 字号 13px（.ccode-rail-text，2026-10-24 用户：比「工作台 / 对话管理」的 14px 再小一点点）。写在内层 span 上：
               按钮上写字号会被全站 button { font: inherit } 吞掉。
               字色一律 l1（2026-10-28 用户照 Claude 客户端，推翻 10-24「标题不用全亮着」）：正看着的靠底色，未读靠行尾蓝色光标，不靠变亮 */}
           <span className="ccode-rail-text ccode-rail-fade min-w-0 flex-1 text-left">{short}</span>
           {isPicked && <Check size={13} strokeWidth={2} aria-hidden="true" data-pick-mark className="shrink-0 text-l2" />}
         </button>
+        {/* 有分叉的原对话：标题后面一个开合箭头，收起只藏分叉、不动原对话。展开着的箭头只在悬停 / 正看着时出（右边这一列要干净），
+            收起的常显并写藏了几段，不然看不出底下还有 */}
+        {forks > 0 && (
+          <button
+            type="button"
+            aria-expanded={!forkFolded}
+            aria-label={forkFolded ? `展开「${short}」的 ${forks} 段分叉` : `收起「${short}」的 ${forks} 段分叉`}
+            title={forkFolded ? `展开 ${forks} 段分叉` : `收起 ${forks} 段分叉`}
+            onClick={() => toggleForkFold(key)}
+            className={`h-6 shrink-0 items-center gap-0.5 rounded-md px-1 text-l4 hover:bg-hover hover:text-l1 ${
+              forkFolded || selected ? "flex" : "hidden group-hover/chat:flex group-focus-within/chat:flex"
+            }`}
+            data-fork-toggle
+          >
+            {forkFolded ? (
+              <>
+                <ChevronRight size={13} strokeWidth={1.8} aria-hidden="true" />
+                <span className="text-micro">{forks}</span>
+              </>
+            ) : (
+              <ChevronDown size={13} strokeWidth={1.8} aria-hidden="true" />
+            )}
+          </button>
+        )}
         <div className="flex shrink-0 items-center gap-0.5 pr-0.5">
           {/* 置顶一节跨课题：行尾小字写它属于哪个课题（2026-10-26 用户：置顶的看不出是谁的）。
               悬停 / 聚焦时让位给 ⋯，标题宽度大致不变；课题名长了自己截断，不挤标题。
@@ -1056,8 +1153,26 @@ export default function ProjectTree({
           {/* 运行状态光标（2026-10-24 用户：绿点换成 Mesa 的光标）。有光标才占一格、标题在它前面淡出；
               没光标的行标题写到行尾（2026-10-26 用户：右边这一列要干净，同 Claude 客户端侧栏；空格位让标题早早淡掉、右边空一截）；Mesa 外在跑的悬停时不让位，⋯ 出现在它右边。
               干活时的呼吸在悬停时停下、常亮（App.css .ccode-run-caret） */}
-          {/* 行尾只占一格（2026-10-31 用户拍板，取代 10-26「× 顶替光标、⋯ 另加一格」）：平时是光标，悬停 / 聚焦 / 菜单开着时
-              同一格换成 ⋯，标题宽度不变；行上不放 ×，关掉走 ⋯ 菜单「关掉这段对话」或 ⌘W */}
+          {/* 行尾（2026-10-31 用户拍板二改）：平时只有光标一格；悬停 / 聚焦 / 菜单开着时 ⋯ 原地换掉光标。
+              Mesa 里开着的那段 ⋯ 左边再出一个 ×（用户：快捷键不是人人都用，⋯ 菜单里的「关掉这段对话」也藏得深），
+              没开着的没东西可关，只出 ⋯ */}
+          {holder?.running && !holder.shell && (
+            <button
+              type="button"
+              aria-label={`关掉「${short}」`}
+              title="关掉：停下这段对话的 Agent、收起它；记录还在，再点开发一句就接回（在干活的会先问你）"
+              onClick={(e) => {
+                noteMouseCloseChat(e.currentTarget.parentElement!.getBoundingClientRect(), "right", listRef.current);
+                useAppStore.getState().requestCloseTab(holder.tabId);
+              }}
+              className={`h-6 w-6 shrink-0 items-center justify-center rounded-md text-l3 hover:bg-hover hover:text-l1 ${
+                menuOpen ? "flex" : "hidden group-hover/chat:flex group-focus-within/chat:flex"
+              }`}
+              data-chat-close
+            >
+              <X size={13} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+          )}
           {dot && (
             <span
               className={`h-6 w-6 items-center justify-center ${
@@ -1092,7 +1207,7 @@ export default function ProjectTree({
 
   /** 开着、但列表里还没有的一行（openTabRows）：点了切过去，行尾 × 关掉（在跑的会先问）。
    *  新对话 / 纯终端前面带个小图标，和对话行区分开；不缩进同 renderChat */
-  function renderOpenRow(r: OpenTabRow) {
+  function renderOpenRow(r: OpenTabRow, depth = 0, folderName?: string) {
     const selected = page === "terminal" && r.tabId === terminalActiveTabId;
     const run = terminalRunInputs.find((x) => x.tabId === r.tabId);
     const unread = !selected && run != null && unreadSet.has(unreadKeyOf(run));
@@ -1126,9 +1241,18 @@ export default function ProjectTree({
           className={`flex h-8 min-w-0 items-center gap-2 rounded-md pl-2 pr-1 ${
             "text-l1"
           }`}
+          style={depth > 0 ? { paddingLeft: `${0.5 + (Math.min(depth, 3) - 1) * 0.875}rem` } : undefined}
         >
           {Icon && <Icon size={13} strokeWidth={1.8} aria-hidden="true" className="shrink-0 text-l4" />}
-          <span className="ccode-rail-text ccode-rail-fade min-w-0 flex-1 text-left">{r.label}</span>
+          {depth > 0 && (
+            <span aria-hidden="true" className="relative h-8 w-2.5 shrink-0" data-fork-link>
+              <span className="absolute left-0.5 top-1 h-3 w-2 rounded-bl-[3px] border-b border-l border-l4" />
+            </span>
+          )}
+          {/* 对话标签同对话行：去掉「MMDD|类型|」与开头重复的课题名，完整标题在悬停里 */}
+          <span className="ccode-rail-text ccode-rail-fade min-w-0 flex-1 text-left">
+            {r.kind === "chat" ? sidebarChatTitle(r.label, folderName) : r.label}
+          </span>
         </button>
         {/* 状态列同对话行：有光标才占一格，标题不进来；悬停时 × 原地顶替光标（这种行没有 ⋯） */}
         <div className="flex shrink-0 items-center gap-0.5 pr-0.5">
@@ -1156,16 +1280,26 @@ export default function ProjectTree({
 
   /** 文件夹展开后的那一串：列几段由 chatQuotas 按侧栏空位算（至少 5 段），没列完的点「展开更多」在原地多列 10 段；
    *  点过展开更多的给「收起」回到按空位列。要看全部、搜、整理，去对话页（节头 ⋯ 里有入口） */
-  function renderChats(chats: SessionMetaDto[], project: ProjectDto | null, name: string, folderKey: string) {
+  function renderChats(chats: ForkRow[], project: ProjectDto | null, name: string, folderKey: string) {
     const shown = quotaOf.get(folderKey) ?? Math.min(chats.length, SIDEBAR_CHAT_LIMIT);
     const folded = (chatExtra[folderKey] ?? 0) > 0;
     // 「显示更多 / 收起」是动作不是对话：比对话行矮、再小一号、最淡（l4），读作挂在最后一段下面的注脚
     // （2026-10-25 用户：原「展开更多」整行和对话一样高，读着像一段对话）
     const linkCls = "flex h-6 items-center rounded-md pl-2 pr-2 text-left text-l3 hover:bg-hover hover:text-l1";
-    const opened = openByFolder.get(folderKey) ?? [];
+
     // 正看着的那段排得比较靠后（从对话页点开的旧对话）：也摆出来，不然侧栏里找不到「现在在哪」
-    const selIdx = selectedChatKey ? chats.findIndex((s) => chatKey(s) === selectedChatKey) : -1;
+    const selIdx = selectedChatKey ? chats.findIndex((r) => chatKey(r.s) === selectedChatKey) : -1;
     const visible = selIdx >= shown ? [...chats.slice(0, shown), chats[selIdx]] : chats.slice(0, shown);
+    const openedAll = openByFolder.get(folderKey) ?? [];
+    // 分叉标签还没认出新会话（Claude 等发第一句才落盘）：挂在原对话下面，原对话不在这一串里才照常放最上面
+    const listedHere = new Set(visible.map((r) => chatKey(r.s)));
+    const forkOpenOf = new Map<string, OpenTabRow[]>();
+    for (const r of openedAll) {
+      if (r.forkParentKey && listedHere.has(r.forkParentKey)) {
+        forkOpenOf.set(r.forkParentKey, [...(forkOpenOf.get(r.forkParentKey) ?? []), r]);
+      }
+    }
+    const opened = openedAll.filter((r) => !(r.forkParentKey && listedHere.has(r.forkParentKey)));
     const remaining = chats.length - visible.length;
     const more = remaining > 0;
     return (
@@ -1174,7 +1308,12 @@ export default function ProjectTree({
         {chats.length === 0 ? (
           opened.length === 0 && <p className="py-1 pl-2 pr-2 text-xs text-l4">还没有对话</p>
         ) : (
-          visible.map((s) => renderChat(s, project, name))
+          visible.map((r) => (
+            <Fragment key={chatKey(r.s)}>
+              {renderChat(r.s, project, name, undefined, true, r)}
+              {(forkOpenOf.get(chatKey(r.s)) ?? []).map((o) => renderOpenRow(o, r.depth + 1, name))}
+            </Fragment>
+          ))
         )}
         {(more || folded) && (
           <div className="flex items-center">
@@ -1645,7 +1784,7 @@ export default function ProjectTree({
             <MoreHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
           </button>
         </div>
-        {open && renderChats(chatsByRoot.get(fkey) ?? [], row.project, row.name, fkey)}
+        {open && renderChats(chatRowsOf.get(fkey) ?? [], row.project, row.name, fkey)}
       </div>
     );
   }
@@ -1690,7 +1829,7 @@ export default function ProjectTree({
             <MoreHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
           </button>
         </div>
-        {open && renderChats(scratchList, null, "随手聊", SCRATCH_FOLDER_KEY)}
+        {open && renderChats(chatRowsOf.get(SCRATCH_FOLDER_KEY) ?? [], null, "随手聊", SCRATCH_FOLDER_KEY)}
       </div>
     );
   }

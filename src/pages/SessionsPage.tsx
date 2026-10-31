@@ -11,6 +11,7 @@ import {
   FileText,
   Flag,
   Forward,
+  GitFork,
   Package,
   MoreHorizontal,
   Pencil,
@@ -3147,6 +3148,21 @@ export default function SessionsPage({ visible }: { visible: boolean }) {
                         icon: SquareTerminal,
                         onSelect: () => resumeInTerminal(ss),
                       },
+                      // 简报从源文件写：源文件不在了（只剩保留快照）不给
+                      ...(ss.alive
+                        ? [
+                            {
+                              label: "分叉成新对话",
+                              icon: GitFork,
+                              title: "把这段对话整段复制成新的一段接着聊，侧栏挂在它下面，原对话不动（Kimi、Cursor、Gemini 没有原生分叉，改为带着简报另开一段、先出方案）",
+                              onSelect: () => {
+                                const st = useAppStore.getState();
+                                st.requestForkSession(ss);
+                                st.setPage("terminal");
+                              },
+                            },
+                          ]
+                        : []),
                       {
                         label: "在外部终端继续",
                         icon: SquareArrowOutUpRight,

@@ -707,6 +707,8 @@ export interface HandoffTargetDto {
   installed: boolean;
   /** false（目前仅 kimi）= 无交互注入参数，简报路径需手动发送 */
   promptSupported: boolean;
+  /** 有原生分叉：分叉成新对话走 CLI 自己的 fork（整段上下文带过去）；false = 写简报另开 */
+  nativeFork: boolean;
 }
 
 /** build_handoff_brief 返回：简报文件路径 + 一句话概述 */

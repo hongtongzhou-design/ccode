@@ -2031,8 +2031,8 @@ pub(crate) fn split_codex_args(args: &[String], port: u16) -> (Vec<String>, Vec<
         i += 1;
     }
     // 恢复时远程 TUI 拒收权限参数（「Permission overrides are not supported when resuming a remote task」，
-    // 0.163 端到端实测）：改成 app-server 的配置，效果相同
-    if tui.first().map(String::as_str) == Some("resume") {
+    // 0.163 端到端实测）：改成 app-server 的配置，效果相同。分叉（`codex fork`）同样是接一段已有任务
+    if matches!(tui.first().map(String::as_str), Some("resume" | "fork")) {
         let mut kept = Vec::new();
         let mut j = 0;
         while j < tui.len() {
@@ -2069,7 +2069,7 @@ pub(crate) fn split_codex_args(args: &[String], port: u16) -> (Vec<String>, Vec<
         }
         tui = kept;
     }
-    let at = if tui.first().map(String::as_str) == Some("resume") {
+    let at = if matches!(tui.first().map(String::as_str), Some("resume" | "fork")) {
         tui.len().min(2)
     } else {
         0
@@ -4336,6 +4336,15 @@ mod e2e {
         }
         std::thread::sleep(Duration::from_millis(500));
         let all = snaps.lock().unwrap().clone();
+        // 旁路报会话的先后（分叉核对：新会话认出来之前有没有先报原会话、换会话来源是什么）
+        let mut sessions_seen: Vec<(Option<String>, Option<String>, u32)> = Vec::new();
+        for s in &all {
+            let k = (s.session_id.clone(), s.session_source.clone(), s.session_seq);
+            if sessions_seen.last() != Some(&k) {
+                sessions_seen.push(k);
+            }
+        }
+        println!("{agent}: 旁路报的会话先后 {sessions_seen:?}");
         let mut statuses: Vec<String> = Vec::new();
         for s in &all {
             let x = s.turn.as_ref().map(|t| t.status.to_string()).unwrap_or("-".into());
@@ -4587,6 +4596,55 @@ mod e2e {
             report(&agent, "（接回）", &r);
             resumed = Some((sid, r));
         }
+        // E2E_FORK=1：停掉后按 Mesa 的原生分叉参数（agent_specs fork）分出一段新会话再跑一轮，
+        // 看新会话 id 不同、带着原会话的全部记录（2026-10-31）
+        let mut forked = None;
+        if first.done && std::env::var("E2E_FORK").is_ok() {
+            // 程序状态旁路（Grok）不报会话 id：临时 HOME 里只有这一段，扫出来
+            let newest = |agent: &str, not: Option<&str>| {
+                crate::sessions::scan_sessions()
+                    .sessions
+                    .into_iter()
+                    .filter(|m| m.agent == agent && Some(m.session_id.as_str()) != not)
+                    .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+            };
+            let sid = first
+                .last
+                .session_id
+                .clone()
+                .or_else(|| newest(&agent, None).map(|m| m.session_id))
+                .expect("有会话 id 才能分叉");
+            let (prepend, fork, id_ok) = crate::agents::fork_args(&agent, &sid).expect("这家有原生分叉");
+            let mut again = Vec::new();
+            if prepend {
+                again.extend(fork.iter().cloned());
+            }
+            again.extend(args.iter().cloned());
+            if !prepend {
+                again.extend(fork.iter().cloned());
+            }
+            let new_id = id_ok.then(|| uuid::Uuid::new_v4().to_string());
+            if let Some(id) = &new_id {
+                again.push("--session-id".into());
+                again.push(id.clone());
+            }
+            let r = run_once(&agent, &bin, &home, &work, again, &env, &env_remove, false, false);
+            report(&agent, "（分叉）", &r);
+            // 有的家旁路不报文件（Qwen / OpenCode）或不报会话（Grok）：按新会话 id 扫，没 id 取原会话以外最新的那段
+            let meta = crate::sessions::scan_sessions().sessions.into_iter().find(|m| {
+                m.agent == agent && r.last.session_id.as_deref() == Some(m.session_id.as_str())
+            });
+            let meta = meta.or_else(|| r.last.session_id.is_none().then(|| newest(&agent, Some(&sid))).flatten());
+            let path = r.last.transcript_path.clone().or_else(|| meta.as_ref().map(|m| m.file_path.clone()));
+            let got = r.last.session_id.clone().or_else(|| meta.as_ref().map(|m| m.session_id.clone()));
+            let msgs = path.as_deref().map(|p| crate::sessions::conversation_impl_raw(&agent, p)).unwrap_or_default();
+            let users = msgs.iter().filter(|m| m.role == "user").count();
+            if let Some(p) = &path {
+                let _ = std::fs::copy(p, std::env::temp_dir().join(format!("mesa-fork-{agent}.jsonl")));
+            }
+            println!("{agent}（分叉）: 新会话 {got:?}，记录里用户消息 {users} 条，文件 {path:?}");
+            forked = Some((sid, new_id, users, got, r));
+        }
         // E2E_KEEP=<目录>（CLI 金丝雀）：删临时 HOME 前留下会话文件原件、Mesa 解析器读出的对话、旁路走过的状态
         if let Ok(keep) = std::env::var("E2E_KEEP") {
             let keep = Path::new(&keep);
@@ -4642,6 +4700,22 @@ mod e2e {
         if let Some((sid, r)) = resumed {
             assert!(r.done, "接回后这一轮也走完：{:?}", r.statuses);
             assert_eq!(r.last.session_id.as_deref(), Some(sid.as_str()), "接回的是同一段对话");
+        }
+        if let Some((sid, new_id, users, got, r)) = forked {
+            assert!(r.done, "分叉后这一轮也走完：{:?}", r.statuses);
+            let got = got.as_deref();
+            assert!(got.is_some_and(|g| g != sid), "分叉是另一段会话：{got:?}");
+            if let Some(id) = new_id {
+                assert_eq!(got, Some(id.as_str()), "--session-id 定下的就是新会话");
+            }
+            // Codex（0.163）的分叉 rollout 不抄历史，只在 session_meta 记 forked_from_id 指回原会话（模型照样带着上下文，
+            // 假网关见到历史里的工具结果直接回 done）；其余几家把历史抄进新会话文件
+            if agent == "codex" {
+                let head = std::fs::read_to_string(std::env::temp_dir().join("mesa-fork-codex.jsonl")).unwrap_or_default();
+                assert!(head.lines().next().is_some_and(|l| l.contains(&format!("\"forked_from_id\":\"{sid}\""))), "分叉 rollout 指回原会话");
+            } else {
+                assert!(users >= 2, "新会话带着原会话的记录（用户消息 {users} 条）");
+            }
         }
     }
 }

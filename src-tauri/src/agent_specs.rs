@@ -44,6 +44,9 @@ pub struct AgentSpec {
     pub fixed_session_id: bool,
     /// 按 ID 恢复会话的参数格式
     pub resume: ResumeSpec,
+    /// 原生分叉（2026-10-31 用户：照 Claude 客户端的 fork）：把整段对话复制成新会话接着聊，带全部上下文。
+    /// None = 这家没有（cursor）或没核实（gemini 本机未装），Mesa 退回「写简报另开」
+    pub fork: Option<ForkSpec>,
     /// 技能分发目录（相对用户 home 的路径段）；symlink/copy 是运行时回退策略，不是 per-agent 数据
     pub skills_dir: &'static [&'static str],
     /// 安装与更新渠道
@@ -260,6 +263,16 @@ pub struct ResumeSpec {
     pub args: &'static [&'static str],
 }
 
+/// 原生分叉的参数；args 里 {session} 占位被分叉的原会话 ID
+pub struct ForkSpec {
+    /// codex 的 fork 是子命令需放最前，其余是位置无关的 flag
+    pub prepend: bool,
+    pub args: &'static [&'static str],
+    /// 分叉同时能用 --session-id 指定新会话的 ID（claude / codebuddy / grok：启动即锁定会话关联；
+    /// qwen 拒收「Cannot use --session-id with --continue or --resume」，新会话按标签认领找）
+    pub session_id: bool,
+}
+
 pub struct BrewPackage {
     pub name: &'static str,
     pub cask: bool,
@@ -379,6 +392,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         permission_args: &[("ask", &["--permission-mode", "default"]), ("auto", &["--permission-mode", "auto"]), ("full", &["--permission-mode", "bypassPermissions"])],
         fixed_session_id: true,
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        fork: Some(ForkSpec { prepend: false, args: &["-r", "{session}", "--fork-session"], session_id: true }),
         skills_dir: &[".claude", "skills"],
         packaging: PackagingSpec {
             brew_install: Some(BrewPackage { name: "claude-code", cask: true }),
@@ -442,6 +456,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         permission_args: &[("ask", &["-a", "on-request"]), ("auto", &["--approve-for-me"]), ("full", &["-a", "never", "-s", "danger-full-access"])],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: true, args: &["resume", "{session}"] },
+        fork: Some(ForkSpec { prepend: true, args: &["fork", "{session}"], session_id: false }),
         skills_dir: &[".codex", "skills"],
         packaging: PackagingSpec {
             brew_install: Some(BrewPackage { name: "codex", cask: true }),
@@ -508,6 +523,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         permission_args: &[("ask", &["--approval-mode", "default"]), ("full", &["--approval-mode", "yolo"])],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        fork: None,
         skills_dir: &[".gemini", "skills"],
         packaging: PackagingSpec {
             brew_install: Some(BrewPackage { name: "gemini-cli", cask: false }),
@@ -562,6 +578,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         permission_args: &[("ask", &["--approval-mode", "default"]), ("auto", &["--approval-mode", "auto"]), ("full", &["--approval-mode", "yolo"])],
         fixed_session_id: true,
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        fork: Some(ForkSpec { prepend: false, args: &["-r", "{session}", "--fork-session"], session_id: false }),
         skills_dir: &[".qwen", "skills"],
         packaging: PackagingSpec {
             brew_install: Some(BrewPackage { name: "qwen-code", cask: false }),
@@ -633,6 +650,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         permission_args: &[("full", &["--auto"])],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: false, args: &["--session", "{session}"] },
+        fork: Some(ForkSpec { prepend: false, args: &["--session", "{session}", "--fork"], session_id: false }),
         skills_dir: &[".config", "opencode", "skills"],
         packaging: PackagingSpec {
             brew_install: Some(BrewPackage { name: "anomalyco/tap/opencode", cask: false }),
@@ -677,6 +695,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         permission_args: &[("auto", &["--yolo"]), ("full", &["--auto"])],
         fixed_session_id: false,
         resume: ResumeSpec { prepend: false, args: &["-S", "{session}"] },
+        fork: None,
         skills_dir: &[".kimi-code", "skills"],
         packaging: PackagingSpec {
             npm_install: Some("@moonshot-ai/kimi-code"),
@@ -762,6 +781,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         fixed_session_id: true,
         // -r|--resume [sessionId] 可带 id；-c 是续最近（不带 id 的场景前端不用）
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        fork: Some(ForkSpec { prepend: false, args: &["-r", "{session}", "--fork-session"], session_id: true }),
         skills_dir: &[".codebuddy", "skills"],
         packaging: PackagingSpec {
             npm_install: Some("@tencent-ai/codebuddy-code"),
@@ -815,6 +835,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         fixed_session_id: false,
         // --resume <uuid> 必须带 id（无参会卡 Ink TUI）；--continue 续最近（前端不用）
         resume: ResumeSpec { prepend: false, args: &["--resume", "{session}"] },
+        fork: None,
         // 未验证 CLI 是否真读该目录，分发保守走 copy 模式（见下方 skill_dist 字段）
         skills_dir: &[".cursor", "skills-cursor"],
         packaging: PackagingSpec {
@@ -884,6 +905,7 @@ static AGENT_SPECS: &[AgentSpec] = &[
         fixed_session_id: true,
         // -r/--resume [ID_OR_TITLE] 按 ID 恢复；-c/--continue 续最近（前端不用）
         resume: ResumeSpec { prepend: false, args: &["-r", "{session}"] },
+        fork: Some(ForkSpec { prepend: false, args: &["-r", "{session}", "--fork-session"], session_id: true }),
         // 与 Mesa SSOT 同构（目录 + SKILL.md）；首版未经实机验证，分发强制 copy（见下方 skill_dist 字段）
         skills_dir: &[".grok", "skills"],
         packaging: PackagingSpec {
@@ -1615,6 +1637,18 @@ mod tests {
     }
 
     /// 注册表完整性：全部已知 agent 都有规格，必填字段非空
+    #[test]
+    fn native_fork_args_name_the_source_session() {
+        // 2026-10-31 本机 --help 与端到端（scripts/e2e-model-routing E2E_FORK=1）核实的六家
+        for id in ["claude-code", "codex", "qwen", "opencode", "codebuddy", "grok"] {
+            let fork = agent_spec(id).and_then(|s| s.fork.as_ref()).unwrap_or_else(|| panic!("{id} 有原生分叉"));
+            assert!(fork.args.contains(&"{session}"), "{id} 的分叉参数缺 {{session}} 占位");
+        }
+        for id in ["gemini", "kimi", "cursor"] {
+            assert!(agent_spec(id).unwrap().fork.is_none(), "{id} 没核实过原生分叉");
+        }
+    }
+
     #[test]
     fn registry_covers_all_known_agents_with_required_fields() {
         assert_eq!(all_agent_specs().len(), KNOWN_IDS.len());

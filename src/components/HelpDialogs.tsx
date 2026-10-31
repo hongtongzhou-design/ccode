@@ -651,7 +651,7 @@ export function HelpAboutDialog({
             className="h-16 w-16"
           />
           <span className="mt-2 text-lg font-semibold text-l1">Mesa</span>
-          <span className="text-xs text-l3">AI 科研工作台</span>
+          <span className="text-xs text-l3">AI Agent 工作台</span>
           <span className="mt-2 flex items-center gap-1">
             <span className="font-mono text-xs text-l2">
               {envLine ? envLine.replace(/^Mesa /, "") : "…"}

@@ -51,3 +51,30 @@ export function strongestCaret(states: Iterable<RunCaretState | null | undefined
   }
   return out;
 }
+
+/** Mesa 里关掉 / 停下的会话，那之后多久内的写入还算它自己收尾时补的（Claude 退出前会补几行元数据） */
+export const STOPPED_GRACE_MS = 5000;
+
+/**
+ * Mesa 自己停下的会话不再算「外面在跑」（2026-10-31 用户：会话都关了，侧栏那行光标还在呼吸）。
+ * 列表的 live 是后端按「60 秒内写过、尾部没收尾」现算的，关掉标签后到下一次刷新之间（最长一分多钟）还是旧值；
+ * 关在回合中途时尾部是「在干活」，刷新回来 60 秒内也还是 live。停下之后没再写过的一律熄掉；
+ * 之后又有写入（外面的终端接着这段在聊）照常亮。没变化原样返回同一个数组
+ */
+export function quietStoppedSessions<T extends { agent: string; sessionId: string; live: boolean; updatedAt: string | null }>(
+  list: T[],
+  stopped: ReadonlyMap<string, number>,
+): T[] {
+  if (stopped.size === 0) return list;
+  let changed = false;
+  const out = list.map((s) => {
+    if (!s.live) return s;
+    const at = stopped.get(`${s.agent}\n${s.sessionId}`);
+    if (at == null) return s;
+    const written = s.updatedAt ? Date.parse(s.updatedAt) : NaN;
+    if (Number.isFinite(written) && written > at + STOPPED_GRACE_MS) return s;
+    changed = true;
+    return { ...s, live: false };
+  });
+  return changed ? out : list;
+}

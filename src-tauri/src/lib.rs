@@ -708,6 +708,7 @@ pub fn run() {
             sessions::claim_next_session_for_card,
             sessions::claim_next_session_for_step,
             sessions::delete_session,
+            sessions::record_session_fork,
             internal_sessions::internal_sessions_stats,
             internal_sessions::cleanup_internal_sessions,
             sessions::delete_project_sessions,

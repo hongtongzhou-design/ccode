@@ -35,6 +35,8 @@ pub struct HandoffTargetDto {
     pub installed: bool,
     /// 注册表 prompt_inject 非 Unsupported（目前仅 kimi 需手动发送首条指令）
     pub prompt_supported: bool,
+    /// 有原生分叉（agent_specs fork）：分叉成新对话走 CLI 自己的 fork，整段上下文带过去；否则写简报另开
+    pub native_fork: bool,
 }
 
 /// 接力目标清单：九 CLI 全量返回，前端按 installed/prompt_supported 排序与标注
@@ -51,6 +53,7 @@ fn handoff_targets_sync() -> Vec<HandoffTargetDto> {
             id: spec.id.into(),
             installed: crate::agents::resolve_binary(spec.binary).is_some(),
             prompt_supported: spec.prompt_inject != PromptInject::Unsupported,
+            native_fork: spec.fork.is_some(),
         })
         .collect()
 }

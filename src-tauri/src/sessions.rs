@@ -4585,6 +4585,9 @@ pub fn scan_sessions() -> ScanResult {
     let mut out = Vec::new();
     let mut chain_members = HashMap::new();
     let mut claude_hidden: Vec<(String, SessionMetaDto)> = Vec::new();
+    let forks = read_session_forks();
+    let fork_children: HashSet<(&str, &str)> =
+        forks.iter().map(|(a, c, _)| (a.as_str(), c.as_str())).collect();
     let mut cache = scan_file_cache().lock().unwrap_or_else(|e| e.into_inner());
     // 冷启动兜底（2026-10-16）：装回上一进程落盘的 meta 缓存——指纹未变的文件
     // 直接沿用旧解析结果，归档 zst 一个字节都不用重读（秒开的关键）
@@ -4607,7 +4610,13 @@ pub fn scan_sessions() -> ScanResult {
     if let Some(home) = crate::dirs::home_dir() {
         let mut claude_files = Vec::new();
         collect_files(&home.join(".claude").join("projects"), 2, &mut claude_files);
-        let claude_metas = cached_claude(claude_files, claude);
+        let mut claude_metas = cached_claude(claude_files, claude);
+        // Mesa 分叉出来的那份不按接续并进原对话（见 SESSION_FORKS_DDL）
+        for (m, lin) in claude_metas.iter_mut() {
+            if fork_children.contains(&("claude-code", m.session_id.as_str())) {
+                lin.parent = None;
+            }
+        }
         let (reps, members, hidden) = merge_claude_chains(claude_metas);
         out.extend(reps);
         chain_members.extend(members);
@@ -4628,6 +4637,13 @@ pub fn scan_sessions() -> ScanResult {
             let archived = f.components().any(|c| c.as_os_str() == "archived_sessions");
             codex_file_meta(f, true, archived)
         });
+        let codex_metas = codex_metas
+            .into_iter()
+            .map(|(m, p)| {
+                let p = p.filter(|_| !fork_children.contains(&("codex", m.session_id.as_str())));
+                (m, p)
+            })
+            .collect();
         let (reps, members) = merge_codex_chains(codex_metas);
         out.extend(reps);
         chain_members.extend(members);
@@ -4878,6 +4894,13 @@ pub fn scan_sessions() -> ScanResult {
         // chained 已在 codex 段整体替换过，这里合并而不是覆盖
         chained.extend(grok_next);
         *grok_summary = grok_summary_next;
+        let grok_metas = grok_metas
+            .into_iter()
+            .map(|(m, p)| {
+                let p = p.filter(|_| !fork_children.contains(&("grok", m.session_id.as_str())));
+                (m, p)
+            })
+            .collect();
         let (reps, members) = merge_codex_chains(grok_metas);
         out.extend(reps);
         chain_members.extend(members);
@@ -5051,6 +5074,7 @@ pub fn scan_sessions() -> ScanResult {
             m
         })
         .collect();
+    apply_session_forks(&mut out, &chain_members, &forks);
     ScanResult {
         sessions: out,
         chain_members,
@@ -5411,7 +5435,79 @@ pub(crate) fn open_db() -> Result<Connection, String> {
     )
     .map_err(|e| format!("初始化 session_meta 表失败: {e}"))?;
     migrate_session_meta(&conn);
+    conn.execute_batch(SESSION_FORKS_DDL)
+        .map_err(|e| format!("初始化 session_forks 表失败: {e}"))?;
     Ok(conn)
+}
+
+/// Mesa 发起的分叉（2026-10-31）：新会话 → 原会话。CLI 自己写的上游指针（Claude 的接续链、Codex 的
+/// forked_from_id、Grok 的 parent_session_id）分不清「接着聊另存」和「分叉」，按接续并成一条会把原对话藏掉；
+/// 记在这里的一律当分叉单列，forked_from 指回原对话
+const SESSION_FORKS_DDL: &str = "CREATE TABLE IF NOT EXISTS session_forks(
+  agent TEXT NOT NULL, child_id TEXT NOT NULL, parent_id TEXT NOT NULL, created_at TEXT NOT NULL,
+  PRIMARY KEY(agent, child_id));";
+
+/// (agent, 新会话, 原会话)；库打不开当没有
+fn read_session_forks() -> Vec<(String, String, String)> {
+    let Ok(conn) = open_db() else { return Vec::new() };
+    let Ok(mut stmt) = conn.prepare("SELECT agent, child_id, parent_id FROM session_forks") else {
+        return Vec::new();
+    };
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// 分叉标签认出自己的新会话后登记（运行页调用）。同一个会话不能是自己的分叉
+#[tauri::command]
+pub async fn record_session_fork(agent: String, child_id: String, parent_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if child_id.trim().is_empty() || parent_id.trim().is_empty() || child_id == parent_id {
+            return Err("分叉记录不完整".to_string());
+        }
+        let conn = open_db()?;
+        conn.execute(
+            "INSERT INTO session_forks(agent, child_id, parent_id, created_at) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(agent, child_id) DO NOTHING",
+            params![agent, child_id, parent_id, now_iso()],
+        )
+        .map_err(|e| format!("登记分叉失败: {e}"))?;
+        invalidate_scan_cache();
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 扫描收尾：Mesa 登记的分叉指回原对话所在那一行（原对话并进了链就指链代表）；CLI 已认出的分叉不动
+fn apply_session_forks(
+    out: &mut [SessionMetaDto],
+    chain_members: &HashMap<String, Vec<String>>,
+    forks: &[(String, String, String)],
+) {
+    if forks.is_empty() {
+        return;
+    }
+    let mut rep_of: HashMap<&str, &str> = HashMap::new();
+    for (rep, members) in chain_members {
+        for m in members {
+            rep_of.insert(m.as_str(), rep.as_str());
+        }
+    }
+    let resolve = |id: &str| -> String { rep_of.get(id).copied().unwrap_or(id).to_string() };
+    let targets: Vec<(String, String, String)> = forks
+        .iter()
+        .map(|(agent, child, parent)| (agent.clone(), resolve(child), resolve(parent)))
+        .filter(|(_, c, p)| c != p)
+        .collect();
+    for m in out.iter_mut() {
+        if m.forked_from.is_some() {
+            continue;
+        }
+        if let Some((_, _, p)) = targets.iter().find(|(a, c, _)| *a == m.agent && *c == m.session_id) {
+            m.forked_from = Some(p.clone());
+        }
+    }
 }
 
 /// 多个 Agent 同时落库时，WAL 让读不被写的提交挡住（默认的回滚日志模式下写提交会短暂独占整库）。
@@ -10151,6 +10247,29 @@ mod tests {
             },
             fork.map(String::from),
         )
+    }
+
+    #[test]
+    fn mesa_fork_stays_its_own_row_pointing_back_to_parent() {
+        // t2 是 Mesa 分叉出来的（扫描时已去掉它的上游指针），t3 是在分叉上接着聊另存的；
+        // 原会话 t1 自己又接着聊出 t4
+        let metas = vec![
+            codex_meta("t1", "2026-07-01T00:00:00Z", None),
+            codex_meta("t2", "2026-07-02T00:00:00Z", None),
+            codex_meta("t3", "2026-07-03T00:00:00Z", Some("t2")),
+            codex_meta("t4", "2026-07-04T00:00:00Z", Some("t1")),
+        ];
+        let (mut merged, members) = merge_codex_chains(metas);
+        apply_session_forks(
+            &mut merged,
+            &members,
+            &[("codex".into(), "t2".into(), "t1".into()), ("codex".into(), "x".into(), "x".into())],
+        );
+        assert_eq!(merged.len(), 2, "分叉单列，原对话不被藏掉");
+        let fork = merged.iter().find(|m| m.session_id == "t3").unwrap();
+        assert_eq!(fork.forked_from.as_deref(), Some("t4"), "指回原对话那一行（链代表）");
+        let parent = merged.iter().find(|m| m.session_id == "t4").unwrap();
+        assert_eq!(parent.forked_from, None);
     }
 
     #[test]

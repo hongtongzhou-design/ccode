@@ -150,6 +150,98 @@ export function scratchChats(
     .sort(byRecent);
 }
 
+/**
+ * 分叉出来的对话挂在原对话下面（2026-10-31 用户照 Claude 客户端侧栏）。认两种来路：CLI 自己的真分叉（forkedFrom，
+ * Claude 续链里分出去的那条）和 Mesa 的「从这里分叉 / 分叉成新对话」（同一家的接力，handoffFrom*）；跨家接力不算分叉。
+ * 返回原对话的 `agent\nsessionId`，不是分叉的返回 null
+ */
+export function forkParentKey(s: SessionMetaDto): string | null {
+  if (s.forkedFrom) return `${s.agent}\n${s.forkedFrom}`;
+  if (s.handoffFromSession && s.handoffFromAgent === s.agent) return `${s.agent}\n${s.handoffFromSession}`;
+  return null;
+}
+
+export interface ForkRow {
+  s: SessionMetaDto;
+  /** 0 = 顶格；1 起是分叉，分叉的分叉再深一层 */
+  depth: number;
+  /** 底下挂着几段（含分叉的分叉）；0 = 没有分叉，不给开合箭头 */
+  forks: number;
+}
+
+/**
+ * 一个文件夹里的对话按分叉挂好（输入按最近活动倒序）：分叉紧跟在原对话下面，原对话不在这份列表里的照常顶格；
+ * 一家子排在其中最近动过的那一段的位置（分叉刚聊过，原对话跟着往上走），同一层仍按最近活动
+ */
+export function nestForks(chats: readonly SessionMetaDto[]): ForkRow[] {
+  const keyOf = (s: SessionMetaDto) => `${s.agent}\n${s.sessionId}`;
+  const byKey = new Map(chats.map((s) => [keyOf(s), s]));
+  const parentOf = (s: SessionMetaDto): string | null => {
+    const p = forkParentKey(s);
+    return p && p !== keyOf(s) && byKey.has(p) ? p : null;
+  };
+  // 绕回自己的（数据坏了才会有）当顶格，不然整串都挂不出来
+  const inCycle = (s: SessionMetaDto) => {
+    const seen = new Set([keyOf(s)]);
+    for (let p = parentOf(s); p; p = parentOf(byKey.get(p)!)) {
+      if (seen.has(p)) return true;
+      seen.add(p);
+    }
+    return false;
+  };
+  const kids = new Map<string, SessionMetaDto[]>();
+  const roots: SessionMetaDto[] = [];
+  for (const s of chats) {
+    const p = inCycle(s) ? null : parentOf(s);
+    if (p) kids.set(p, [...(kids.get(p) ?? []), s]);
+    else roots.push(s);
+  }
+  const index = new Map(chats.map((s, i) => [keyOf(s), i]));
+  const rank = new Map<string, number>();
+  const size = new Map<string, number>();
+  const measure = (s: SessionMetaDto): number => {
+    const k = keyOf(s);
+    let r = index.get(k)!;
+    let n = 0;
+    for (const c of kids.get(k) ?? []) {
+      r = Math.min(r, measure(c));
+      n += 1 + size.get(keyOf(c))!;
+    }
+    rank.set(k, r);
+    size.set(k, n);
+    return r;
+  };
+  roots.forEach(measure);
+  const byRank = (a: SessionMetaDto, b: SessionMetaDto) => rank.get(keyOf(a))! - rank.get(keyOf(b))!;
+  const out: ForkRow[] = [];
+  const walk = (s: SessionMetaDto, depth: number) => {
+    out.push({ s, depth, forks: size.get(keyOf(s))! });
+    for (const c of [...(kids.get(keyOf(s)) ?? [])].sort(byRank)) walk(c, depth + 1);
+  };
+  for (const r of [...roots].sort(byRank)) walk(r, 0);
+  return out;
+}
+
+/** 收起分叉的那几段底下的不列；keep（正看着的那段）被收在里面时照样列出来，不然侧栏里找不到「现在在哪」 */
+export function foldForks(rows: readonly ForkRow[], folded: ReadonlySet<string>, keep: string | null = null): ForkRow[] {
+  const out: ForkRow[] = [];
+  let hideBelow: number | null = null;
+  for (const r of rows) {
+    if (hideBelow != null && r.depth <= hideBelow) hideBelow = null;
+    const key = `${r.s.agent}\n${r.s.sessionId}`;
+    if (hideBelow != null) {
+      if (key === keep) out.push(r);
+      continue;
+    }
+    out.push(r);
+    if (r.forks > 0 && folded.has(key)) hideBelow = r.depth;
+  }
+  return out;
+}
+
+/** 收起了分叉的对话记在本机（键同置顶） */
+export const FORK_FOLDS_KEY = "ccode.sidebarForkFolds";
+
 /** 随手聊「归档 N 天没动的」默认天数 */
 export const SCRATCH_STALE_DAYS = 7;
 
@@ -182,6 +274,8 @@ export interface ChatRunInput {
   running: boolean;
   shell: boolean;
   attention: "done" | "working" | "confirm" | null;
+  /** 分叉标签的原会话 id（run-overview forkOf） */
+  forkOf?: string | null;
 }
 
 /** 行尾的运行状态光标（run-caret.ts）；null = 没开着 */
@@ -300,6 +394,8 @@ export interface OpenTabRow {
   dot: ChatDot;
   /** 归哪个文件夹（currentFolderKey 同口径）；null = 不在任何项目、也不是随手聊 */
   folderKey: string | null;
+  /** 分叉标签还没认出新会话时挂在哪段对话下面（`agent\nsessionId`）；不是分叉为 null */
+  forkParentKey: string | null;
 }
 
 /**
@@ -327,7 +423,7 @@ export function openTabRows(input: {
           ? title && title !== "终端"
             ? title
             : "终端"
-          : r.sessionId
+          : r.sessionId || r.forkOf
             ? title || "对话"
             : "新对话";
     out.push({
@@ -336,6 +432,7 @@ export function openTabRows(input: {
       label,
       dot: kind === "chat" && r.running ? caretOfAttention(r.attention) : null,
       folderKey: input.folderOf(r.cwd),
+      forkParentKey: r.forkOf ? `${r.agentId}\n${r.forkOf}` : null,
     });
   }
   return out;

@@ -145,7 +145,20 @@
 | 安装 / 更新 | 官方脚本 `curl -fsSL https://x.ai/cli/install.sh \| bash`（mac/Linux/Git Bash）→ `~/.grok/bin/grok`；Windows `irm https://x.ai/cli/install.ps1 \| iex` → `%USERPROFILE%\.grok\bin\grok.exe`；**npm 官方包 `@xai-official/grok`**（postinstall 解压到 `~/.grok/bin/`）。自更新 `grok update`（非交互；`grok update --check --json` 机器可读）。Windows 支持官方称 best-effort |
 | 坑 | `auth.json` grok 自己原子重写（0600），我们只读；`session_search.sqlite` 不是会话本体；headless 不读 stdin；`--permission-mode plan` 门控链路未确认别用；base url 注入必须走 `GROK_MODELS_BASE_URL`（见「注入 env」行），`GROK_CLI_CHAT_PROXY_BASE_URL` 是 xAI 内部代理口勿用；`GROK_DEFAULT_MODEL` 不在目录即静默回退；当前版本支持 `-m/--model`、`--reasoning-effort`，Ccode 启动时优先使用 flag；**未选模型时 Ccode 用绑定模型清单第一个兜底注入 `GROK_DEFAULT_MODEL`+`-m`（2026-09-17 实测）**——grok 按 id 路由，不注会回落 config.toml `[models].default` 的第一方 grok-* 模型，第一方 id 绕过网关直连 `cli-chat-proxy.grok.com`，网络不通的环境表现为「连接超时」而非「模型不存在」，极易误诊成网关不通；`[models].default` 与注入的 `allowed_models` 不一致会**直接拒启动**（1.0.34 实证，见「注入 env」行——Ccode 已改为 overlay 同时写 `default`）；`api_backend`/`context_window` 仍必须来自 `[model.<id>]` 或网关目录，声明非 `chat_completions` 但未登记时 Ccode 会阻止启动；**能连上 x.ai 时用非 xAI 密钥可能被要求登录**（1.0.70，2026-10-25 起 CI 实证，同版本此前不会，疑为服务端变化）：`resolved credentials auth_type=ApiKey` 之后仍 `auto-triggering login at startup`、转设备登录、不发请求；连不上 x.ai 的环境照常。`auth.preferred_method = "api_key"` 可固定只用密钥，但 GROK_CONFIG overlay 白名单不收 `auth` 段（`grok inspect --json` 实测只剩 `sections: models`），只能写用户 config.toml——Mesa 不写，暂未处理，真实中转用户撞上再定。金丝雀里 Grok 出站指向不监听的本机代理（canary.py `OFFLINE`），与连不上 x.ai 的开发机可比
 
-## 跨 agent 共性结论
+## 原生分叉（2026-10-31 本机 --help + 假网关端到端 E2E_FORK=1 核实；实现 = agent_specs `fork`）
+
+| Agent | 参数 | 能同时 `--session-id` 定新 id | 新会话文件 |
+|---|---|---|---|
+| claude-code 2.1.308 | `-r <id> --fork-session` | 能（不带 --fork-session 时报「--session-id can only be used with --continue or --resume if --fork-session is also specified」） | 抄全部历史 |
+| codebuddy | `-r <id> --fork-session` | 能 | 抄全部历史 |
+| qwen | `-r <id> --fork-session` | 不能（「Cannot use --session-id with --continue or --resume」） | 抄全部历史 |
+| grok | `-r <id> --fork-session` | 能 | 抄全部历史，首条加「This session was forked from another session」提示 |
+| opencode | `--session <id> --fork` | 无此参数 | 抄全部历史（库里新 ses_） |
+| codex 0.163 | `codex fork <id>`（子命令，放最前；`--remote` 与权限参数同 resume） | 无此参数 | **不抄历史**，只在 session_meta 记 `forked_from_id`；模型上下文照带 |
+| kimi | `kimi fork [id]`（`-y` 跳过确认）是否进交互未实测，暂不用 | — | — |
+| cursor | 无 | — | — |
+| gemini | 本机未装，未核实 | — | — |
+
 
 1. **会话格式全是内部格式**——解析层统一防御式策略，并准备「原始 JSON 视图」作为降级。
 2. **项目归属推导各家各样**——在各自 adapter 的 `list_sessions` 里解决，对上层统一暴露 `project_path`。
