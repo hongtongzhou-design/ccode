@@ -1412,10 +1412,13 @@ function App() {
   }, []);
 
   // 启动时进入（设置 → 通用，start-page.ts）：工作台 / 上次的对话 / 上次的项目 / 新对话。
-  // 等首屏数据就位再定——「上次的项目」要项目列表，「新对话」要连接列表挑默认 Agent。只做一次
+  // 等首屏数据就位再定——「上次的项目」要项目列表，「新对话」要连接列表挑默认 Agent。只做一次。
+  // 数据就位时与 setBootDataReady 同一批定下页面：应用树第一帧就是去处，不先画一帧工作台再跳
+  //（放在挂载后的 effect 里定，启动遮罩淡出时会透出那一帧工作台）
   const startActionAppliedRef = useRef(false);
-  useEffect(() => {
-    if (startActionAppliedRef.current || !settings || !(bootDataReady || bootCapReached)) return;
+  const applyStartAction = useCallback(() => {
+    const store = useAppStore.getState();
+    if (startActionAppliedRef.current || !store.settings) return;
     startActionAppliedRef.current = true;
     const read = (key: string) => {
       try {
@@ -1424,19 +1427,21 @@ function App() {
         return null;
       }
     };
-    const store = useAppStore.getState();
-    const action = resolveStartAction(settings.startPage, {
+    const action = resolveStartAction(store.settings.startPage, {
       hasLastChat: parseRecoverableTerminalState(read(TERMINAL_TABS_STORAGE_KEY)).tabs.length > 0,
       lastProjectPath: read(LAST_PROJECT_KEY),
       projectPaths: store.projectPaths,
     });
-    if (action.kind === "last-chat") setPage("terminal");
+    if (action.kind === "last-chat") store.setPage("terminal");
     else if (action.kind === "project") {
       if (action.path) store.setSelectProjectReq(action.path);
-      setPage("workspaces");
+      store.setPage("workspaces");
     } else if (action.kind === "new-chat") void openQuickChat();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings, bootDataReady, bootCapReached]);
+  }, []);
+  // 兜底：2.5s 硬顶先放行（数据没就位）或设置晚到时，在这里补定
+  useEffect(() => {
+    if (settings && (bootDataReady || bootCapReached)) applyStartAction();
+  }, [settings, bootDataReady, bootCapReached, applyStartAction]);
 
   useEffect(() => {
     // 各加载的 catch 已就地弹 toast 并把 promise 救回 resolved，allSettled 只等完成
@@ -1460,7 +1465,10 @@ function App() {
           );
         })
         .catch((e) => toast(`设置加载失败：${String(e)}`, "warning")),
-    ]).then(() => setBootDataReady(true));
+    ]).then(() => {
+      applyStartAction();
+      setBootDataReady(true);
+    });
     // 依赖体检（git/node/安装渠道）：缺 git 时收件箱常驻「依赖」条目；失败静默不阻塞首屏
     useAppStore.getState().refreshDepCheck();
   }, [
@@ -1470,6 +1478,7 @@ function App() {
     loadRecentRepos,
     loadSettings,
     checkAppUpdate,
+    applyStartAction,
   ]);
 
   // 前端未捕获异常上报到进程内日志缓冲（设置页「诊断」可见）；同消息 5s 去重防刷屏
