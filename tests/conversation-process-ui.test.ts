@@ -79,7 +79,9 @@ async function mount() {
   const root = createRoot(el);
   const render = (props: Record<string, unknown>) => act(async () => root.render(h(Conversation, props)));
   const button = (text: string) => {
-    const found = Array.from(el.querySelectorAll("button")).find((b) => b.textContent?.includes(text));
+    // 先按文字找；只有图标的按钮（消息悬停操作）按 aria-label 找
+    const all = Array.from(el.querySelectorAll("button"));
+    const found = all.find((b) => b.textContent?.includes(text)) ?? all.find((b) => b.getAttribute("aria-label") === text);
     assert.ok(found, `缺少按钮：${text}`);
     return found as HTMLButtonElement;
   };
@@ -248,7 +250,7 @@ test("悬停操作浮着不占高度：用户的挂在气泡下面靠右缘，�
     assert.ok(edit.closest(".rounded-2xl"), "用户消息的操作挂在气泡上");
     assert.match(edit.className, /\btop-full\b/, "在气泡下面");
     assert.match(edit.className, /\bright-0\b/, "靠气泡右缘，不跑到左边");
-    const copies = Array.from(ui.el.querySelectorAll("button")).filter((b) => b.textContent?.includes("复制"));
+    const copies = Array.from(ui.el.querySelectorAll("button")).filter((b) => b.getAttribute("aria-label") === "复制");
     assert.equal(copies.length, 2);
     for (const b of copies) assert.match(b.parentElement!.className, /(^|\s)absolute(\s|$)/);
   } finally {
