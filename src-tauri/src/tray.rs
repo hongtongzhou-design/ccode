@@ -67,6 +67,12 @@ pub fn rebuild(app: &AppHandle) -> Result<(), String> {
             let id = event.id.0;
             handle_menu(&app2, &id);
         })
+        // Windows 习惯双击托盘图标打开窗口（Mac 菜单栏图标没有双击事件）
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
+                show_main(tray.app_handle());
+            }
+        })
         .build(app)
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -97,7 +103,7 @@ fn build_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
     let show = MenuItem::with_id(app, "show", "打开 Mesa", true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let quit =
-        MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
+        MenuItem::with_id(app, "quit", "退出 Mesa", true, None::<&str>).map_err(|e| e.to_string())?;
     let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
 
     let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = vec![Box::new(show)];
@@ -229,11 +235,7 @@ fn build_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, String> {
 }
 
 fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-    }
+    crate::window_close::show_main(app);
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -261,12 +263,8 @@ fn handle_menu(app: &AppHandle, id: &str) {
         return;
     }
     if id == "quit" {
-        // 走窗口关闭，让前端关窗守卫有机会确认「还有 agent 在跑」
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.close();
-        } else {
-            app.exit(0);
-        }
+        // 关窗口只是藏到后台，退出走退出确认（还有对话在跑时先问）
+        crate::window_close::request_quit(app);
         return;
     }
     if let Some(agent) = id.strip_prefix("conflict:") {

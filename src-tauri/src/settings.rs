@@ -13,6 +13,8 @@ pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
 /// 会话自动命名（聊完起名 + 打开对话页补名去重）默认开；关 = 全停，手改标题不受影响
 pub const DEFAULT_AUTO_TITLE_SESSIONS: bool = true;
 pub const DEFAULT_NAV_CAPSULE_RUN_ANNOUNCE: bool = true;
+/// 关主窗口默认留在后台（2026-10-31 用户拍板），见 window_close.rs
+pub const DEFAULT_CLOSE_TO_BACKGROUND: bool = true;
 /// 首次安装的主题与「跟随系统深浅」（2026-10-26 用户拍板：极简灰蓝深色 + 不跟随；
 /// 原 2026-10-22 琥珀 + 跟随）。不跟随才能保证新用户首屏就是深色，系统浅色也不换成浅色那套。
 /// 前端兜底在 themes.ts DEFAULT_THEME_ID，两边同步；存过值的老设置不受影响
@@ -260,6 +262,12 @@ pub struct AppSettingsDto {
     /// 打开对话页的补名去重（ai_retitle_all_sessions）全停；已有标题保留，
     /// 手改标题（title_source=user）本就不被覆盖，与此开关无关。
     pub auto_title_sessions: Option<bool>,
+    /// 关主窗口时留在后台（2026-10-31，默认开）：Mac 藏窗口、程序坞点图标回来；Windows 收进托盘。
+    /// 关 = 关窗口即退出 Mesa（同以前）。见 window_close.rs
+    pub close_to_background: Option<bool>,
+    /// Windows 第一次收进托盘的系统通知发过没有（只提醒一次）。不走 update_settings patch，
+    /// 只由 mark_close_hint_shown 写
+    pub close_hint_shown: Option<bool>,
     /// 出图模型（2026-10-23；2026-10-24 起编辑处在连接页「出图模型」，设置页只显示现状）：网关 id + 模型 id，
     /// Agent 经 `mesa_helper image` 出图时的默认值（image_gen.rs）。两者同进退，空串 = 清空
     pub image_gen_gateway_id: Option<String>,
@@ -897,6 +905,8 @@ fn with_defaults(s: AppSettingsDto) -> AppSettingsDto {
         auto_title_sessions: s
             .auto_title_sessions
             .or(Some(DEFAULT_AUTO_TITLE_SESSIONS)),
+        close_to_background: s.close_to_background.or(Some(DEFAULT_CLOSE_TO_BACKGROUND)),
+        close_hint_shown: s.close_hint_shown,
         image_gen_gateway_id: s.image_gen_gateway_id.filter(|v| !v.trim().is_empty()),
         image_gen_model: s.image_gen_model.filter(|v| !v.trim().is_empty()),
         internal_auto_clean: s.internal_auto_clean.or(Some(true)),
@@ -1057,6 +1067,9 @@ fn merge(cur: &mut AppSettingsDto, patch: AppSettingsDto) {
     }
     if patch.auto_title_sessions.is_some() {
         cur.auto_title_sessions = patch.auto_title_sessions;
+    }
+    if patch.close_to_background.is_some() {
+        cur.close_to_background = patch.close_to_background;
     }
     // 出图模型：网关与模型同进退，任一传空串 = 两个一起清空
     if patch.image_gen_gateway_id.is_some() || patch.image_gen_model.is_some() {
@@ -1499,6 +1512,28 @@ pub(crate) fn auto_title_sessions_enabled() -> bool {
     read_current()
         .auto_title_sessions
         .unwrap_or(DEFAULT_AUTO_TITLE_SESSIONS)
+}
+
+/// 关主窗口时留在后台还是退出（window_close.rs；设置缺失 = 留在后台）
+pub(crate) fn close_to_background() -> bool {
+    read_current()
+        .close_to_background
+        .unwrap_or(DEFAULT_CLOSE_TO_BACKGROUND)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn close_hint_shown() -> bool {
+    read_current().close_hint_shown.unwrap_or(false)
+}
+
+/// 记下「收进托盘」的提示已发过；读-改-写与 update_settings 同锁
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn mark_close_hint_shown() -> Result<(), String> {
+    let _g = crate::profiles::store_lock()?;
+    let path = settings_path()?;
+    let mut cur = read_checked(&path)?;
+    cur.close_hint_shown = Some(true);
+    write_to(&path, &cur)
 }
 
 pub(crate) fn rate_setting() -> Option<f64> {
@@ -1955,6 +1990,27 @@ mod tests {
         let back = with_defaults(read_from(&p));
         assert_eq!(back.workspace_root.as_deref(), Some("D:/mesa"));
         assert_eq!(back.workspace_root_history, Some(vec!["E:/old".to_string()]));
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn close_to_background_defaults_on_and_hint_flag_not_patchable() {
+        let p = tmp();
+        assert_eq!(with_defaults(read_from(&p)).close_to_background, Some(true));
+        let mut cur = read_from(&p);
+        merge(
+            &mut cur,
+            AppSettingsDto {
+                close_to_background: Some(false),
+                close_hint_shown: Some(true),
+                ..Default::default()
+            },
+        );
+        write_to(&p, &cur).unwrap();
+        let back = with_defaults(read_from(&p));
+        assert_eq!(back.close_to_background, Some(false));
+        // 「已提醒过」只由 mark_close_hint_shown 写，前端 patch 带不进来
+        assert_eq!(back.close_hint_shown, None);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 

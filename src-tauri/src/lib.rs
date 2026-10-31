@@ -149,6 +149,7 @@ mod updater;
 mod usage;
 mod watch_review;
 mod win_snap;
+mod window_close;
 mod workspaces;
 mod internal_sessions;
 mod ws_settings;
@@ -186,11 +187,6 @@ async fn prepare_app_exit(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    static CLOSE_DIALOG_OPEN: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    static ALLOW_CLOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    /// 关窗存盘只拦一次（拦下→通知前端→350ms 后二次 close 放行）
-    static FLUSH_CLOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     // 从访达 / 程序坞打开时环境是 launchd 给的最小一份，以下三步都必须在起任何线程之前：
     // 先补 UTF-8 的 LANG（shell 也要看到它，见 process::ensure_utf8_locale），
     // 再读一次登录 shell 的环境（conda、Homebrew、PATH 顺序与终端一致，凭据不带，见 shell_env），
@@ -297,6 +293,11 @@ pub fn run() {
                 let palette_item = MenuItemBuilder::with_id("palette", "命令面板")
                     .accelerator("CmdOrCtrl+K")
                     .build(app)?;
+                // 预置 quit() 直接走系统 terminate:，不经 ExitRequested——退出确认与收尾全被跳过。
+                // 自建一项：⌘Q 走 window_close::request_quit（关窗口只藏起来后，这是主要的退出路径）
+                let quit_item = MenuItemBuilder::with_id("quit", "退出 Mesa")
+                    .accelerator("CmdOrCtrl+Q")
+                    .build(app)?;
                 let app_menu = SubmenuBuilder::new(app, "Mesa")
                     .item(&about)
                     .separator()
@@ -309,7 +310,7 @@ pub fn run() {
                     .hide_others()
                     .show_all()
                     .separator()
-                    .quit()
+                    .item(&quit_item)
                     .build()?;
                 // 文件 → 新对话（2026-10-24，HIG：常用命令进菜单；⌘N 与侧栏「新对话」同一出口）。
                 // 加速键写死 ⌘N（同命令面板 ⌘K 先例）：设置页改了绑定，菜单这一条照旧
@@ -336,7 +337,7 @@ pub fn run() {
                     .select_all()
                     .build()?;
                 // 预置 close_window() 的加速键固定 ⌘W，改不了键，只能自建一项：⇧⌘W，行为与红绿灯关窗相同
-                // （走 CloseRequested，关窗存盘、在跑确认那一套照旧）
+                // （走 CloseRequested：主窗口默认藏到后台，见 window_close.rs）
                 let close_window_item = MenuItemBuilder::with_id("close-window", "关闭窗口")
                     .accelerator("CmdOrCtrl+Shift+W")
                     .build(app)?;
@@ -391,6 +392,7 @@ pub fn run() {
                             }
                         }
                     }
+                    "quit" => window_close::request_quit(app_handle),
                     "close-window" => {
                         // 键盘焦点所在的窗口；取不到就关主窗口
                         let target = app_handle
@@ -525,43 +527,11 @@ pub fn run() {
             if let tauri::WindowEvent::DragDrop(drop) = event {
                 attach_grants::grant_drop(drop);
             }
+            // 主窗口关窗：默认藏到后台，设置改成直接退出时走退出确认（window_close.rs）。
+            // 别的窗口（机构登录窗等）照常关
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if process::capture_count() > 0
-                    && !ALLOW_CLOSE.load(std::sync::atomic::Ordering::Acquire)
-                {
-                    use tauri_plugin_dialog::DialogExt;
-                    api.prevent_close();
-                    if CLOSE_DIALOG_OPEN.swap(true, std::sync::atomic::Ordering::AcqRel) {
-                        return;
-                    }
-                    let window = window.clone();
-                    window
-                        .app_handle()
-                        .dialog()
-                        .message("仍有后台任务运行，退出将终止这些任务。确认退出？")
-                        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
-                        .show(move |ok| {
-                            CLOSE_DIALOG_OPEN.store(false, std::sync::atomic::Ordering::Release);
-                            if ok {
-                                ALLOW_CLOSE.store(true, std::sync::atomic::Ordering::Release);
-                                let _ = window.close();
-                            }
-                        });
-                    return;
-                }
-                // 关窗存盘（2026-10-11 实机实证：前端 onCloseRequested 在红绿灯关窗时
-                // 不执行，终端回放的「关窗存点」乃至 agent 关窗确认守卫整条 JS 链路是
-                // 死的）。这里在 Rust 侧拦一次：通知前端各标签存回放，等 350ms 落盘
-                // 再放行关闭；FLUSH_CLOSE 保证只拦一次、二次 close 直接过。
-                if !FLUSH_CLOSE.load(std::sync::atomic::Ordering::Acquire) {
-                    api.prevent_close();
-                    FLUSH_CLOSE.store(true, std::sync::atomic::Ordering::Release);
-                    let window = window.clone();
-                    let _ = window.emit("mesa:flush-before-close", ());
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(350));
-                        let _ = window.close();
-                    });
+                if window.label() == "main" {
+                    window_close::on_main_close_requested(window, api);
                 }
             }
         })
@@ -590,6 +560,10 @@ pub fn run() {
             combo::combo_surface_for_gateway,
             combo::combo_surface_for_gateway_batch,
             tray::rebuild_tray,
+            window_close::quit_ack,
+            window_close::quit_background_count,
+            window_close::show_main_window,
+            window_close::confirm_quit,
             app_icon::apply_app_icon,
             cli_permission::cli_default_permission,
             profile_validation::validate_profile,
@@ -1109,6 +1083,17 @@ pub fn run() {
             if let tauri::RunEvent::Ready = event {
                 app_icon::apply_saved(app);
             }
+            // 窗口藏在后台时点程序坞图标：叫回主窗口
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                window_close::show_main(app);
+            }
+            // 程序坞右键「退出」、注销关机走系统 terminate:，等不到 ExitRequested，这里补一次收尾
+            if let tauri::RunEvent::Exit = event {
+                if !EXIT_STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    shutdown_for_exit(app);
+                }
+            }
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if EXIT_READY.load(std::sync::atomic::Ordering::Acquire) {
                     return;
@@ -1119,6 +1104,9 @@ pub fn run() {
                 }
                 let app = app.clone();
                 std::thread::spawn(move || {
+                    // 先让前端各标签存一版终端回放，等它落盘（关窗存盘挪到这里：关窗口不再等于退出）
+                    let _ = app.emit("mesa:flush-before-close", ());
+                    std::thread::sleep(std::time::Duration::from_millis(350));
                     shutdown_for_exit(&app);
                     app.exit(code.unwrap_or(0));
                 });

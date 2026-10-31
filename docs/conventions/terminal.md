@@ -775,11 +775,17 @@
 - **终端分屏（SplitView）只是显隐与排序变化**：全部标签仍在同一容器保持挂载，靠 flex order 把活跃标签（左）与对照标签
   （右）排到分隔条两侧，禁止把标签移进第二棵子树（会重挂载杀 PTY）；右栏/文件树/改动跟随「活跃 pane」（点击切换，
   focusedId），分屏时两个 pane 的 PTY 都推流；分屏状态不进持久化白名单，仅分隔比例本地记忆。
-- **关标签/关窗进程守卫**：仅 `running && ptyId` 的 agent 标签弹确认（shell/已退出一律不弹），存活判定以后端
-  `pty_has_running_process` 为准，命令不存在/报错时静默跳过不阻塞关闭；关窗前对全部在跑标签统一确认一次，确认后放行
-  （allowWindowCloseRef 防 onCloseRequested 重入）。Tauri 的 `onCloseRequested` 前端封装最终调用 `window.destroy()`，且确认后
-  会调用 `window.close()`；`src-tauri/capabilities/default.json` 必须同时保留 `core:window:allow-destroy` 与
-  `core:window:allow-close`，否则进入终端页挂载监听后窗口无法关闭。
+- **关标签进程守卫**：仅 `running && ptyId` 的 agent 标签弹确认（shell/已退出一律不弹），存活判定以后端
+  `pty_has_running_process` 为准，命令不存在/报错时静默跳过不阻塞关闭。
+- **关窗与退出（2026-10-31 用户拍板，`window_close.rs`）**：关主窗口（红绿灯 / ⇧⌘W / Windows 自绘 ×）默认只藏窗口，
+  Mesa 留在后台（设置 `closeToBackground`，缺省开；关 = 关窗即走退出确认）。Mac 全屏时先退全屏再藏（直接 hide 留黑屏空间），
+  程序坞点图标经 `RunEvent::Reopen` 叫回；Windows 收进托盘，第一次发一条系统通知（`close_hint_shown` 只由 Rust 写），
+  托盘双击打开。别的窗口（`inst-login` 等）照常关。**退出只有一个入口 `request_quit`**：Mac 应用菜单自建「退出 Mesa」⌘Q
+  （**禁用预置 `quit()`**——它直接 terminate:，不经 ExitRequested，确认与收尾全跳过）、托盘「退出 Mesa」、关窗即退出模式的关窗。
+  `request_quit` 发 `mesa:quit-requested`，App.tsx 立刻 `quit_ack`，按 `terminalRunInputs` 的 running 数 + 后台捕获数决定
+  问不问（要问先 `show_main_window`），确认后 `confirm_quit`；1.5 秒没回执 Rust 兜底（只看后台捕获，弹原生框）。
+  卸载、更新重启等程序内 `exit` 不经确认。程序坞右键退出 / 注销走系统 terminate:，在 `RunEvent::Exit` 补一次收尾。
+  前端 `onCloseRequested` 不再挂（实机不执行，且若执行会绕开藏窗口）。
 
 ## 输入侧：图片粘贴 / 文件拖入 / 右键菜单 / 链接点击（2026-08-17）
 
@@ -869,9 +875,9 @@
   **Unicode11**：addon 注册后必须显式 `term.unicode.activeVersion = "11"` 才激活（首版漏了，
   宽度表一直是 Unicode 6——2026-10-10 核查发现并修正）。
   **回放**：快照式存档，存点 = 进程退出时 + 页面隐藏（pagehide/visibilitychange）+ **30 秒周期快照** +
-  Rust 侧关窗拦截（`mesa:flush-before-close` 事件，lib.rs `FLUSH_CLOSE`——2026-10-11 实机探针实证
-  前端 `onCloseRequested` 在红绿灯关窗时不执行，连既有 agent 关窗确认守卫也是死代码；周期快照兜住
-  任何死亡方式）；**不在卸载时存**（应用退出不触发卸载，首版因此整条链路失效）。
+  Rust 侧退出前信号（`mesa:flush-before-close` 事件，lib.rs `ExitRequested` 收尾线程发出后等 350ms；
+  2026-10-31 起关窗口只藏窗口，存点从关窗挪到退出——2026-10-11 实机探针实证前端 `onCloseRequested`
+  在红绿灯关窗时不执行；周期快照兜住任何死亡方式）；**不在卸载时存**（应用退出不触发卸载，首版因此整条链路失效）。
   全屏 TUI 挂在备用屏时普通缓冲往往是空屏，改拍备用屏可视行（claude 整场在 1049）。关标签即 drop；
   启动恢复完成后 `prune_terminal_replays` 只留当前标签集合，清崩溃残留。全屏 TUI 不另画滚动条：
   它接管滚轮后，xterm 自带滑块不显示。

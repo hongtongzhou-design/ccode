@@ -510,7 +510,7 @@ const SETTING_NAV: {
 }[] = [
   { id: "appearance", label: "外观", group: "basic", icon: Palette, description: "主题、透明度与应用图标" },
   { id: "terminal", label: "终端", group: "basic", icon: SquareTerminal, description: "内嵌终端的显示、外部终端与自定义运行时" },
-  { id: "startup", label: "通用", group: "basic", icon: SlidersHorizontal, description: "启动页面、导航形态与系统通知" },
+  { id: "startup", label: "通用", group: "basic", icon: SlidersHorizontal, description: "启动页面、导航形态、关窗与系统通知" },
   { id: "hotkeys", label: "快捷键", group: "basic", icon: Keyboard, description: "点绑定钮后按下新组合即保存，Esc 取消" },
   { id: "integration", label: "AI 与 Agent", group: "management", icon: Sparkles, description: "内置 AI 功能用哪份配置，以及 Mesa 对各家 Agent 的约束" },
   { id: "network", label: "网络", group: "management", icon: Globe, description: "出网代理、下载镜像与学校图书馆" },
@@ -3333,6 +3333,27 @@ export default function SettingsPage({ visible }: { visible: boolean }) {
             <option value="expanded">展开侧栏</option>
             <option value="collapsed">图标侧栏</option>
             <option value="hidden">完全隐藏 + 顶部灵动岛</option>
+          </select>
+        </Row>
+
+        <Row
+          label="关闭窗口时"
+          hint={
+            (settings?.closeToBackground ?? true)
+              ? IS_MAC
+                ? "窗口藏起来，Mesa 继续跑；点程序坞图标回来，⌘Q 才退出"
+                : "收进右下角托盘，Mesa 继续跑；从托盘图标打开或退出"
+              : "关掉窗口就退出 Mesa，正在跑的对话和定时任务一起停"
+          }
+          labelTitle="留在后台时，对话、定时任务、从手机添加都照常进行；有对话在跑时退出会先问一句"
+        >
+          <select
+            className={selectMd}
+            value={(settings?.closeToBackground ?? true) ? "background" : "quit"}
+            onChange={(e) => patch({ closeToBackground: e.target.value === "background" })}
+          >
+            <option value="background">留在后台</option>
+            <option value="quit">退出 Mesa</option>
           </select>
         </Row>
 

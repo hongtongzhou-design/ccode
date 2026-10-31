@@ -116,6 +116,8 @@ export interface AppSettings {
   notificationsEnabled: boolean;
   /** 会话自动命名（默认开）：聊完起名 + 打开对话页补名去重；关 = 全停，手改标题不受影响 */
   autoTitleSessions?: boolean;
+  /** 关主窗口时留在后台（默认开；Mac 藏窗口、Windows 收进托盘）；false = 关窗口即退出。见 window_close.rs */
+  closeToBackground?: boolean;
   /** 出图模型（网关 id + 模型 id，同进退；传空串 = 两个一起清空），见 image_gen.rs */
   imageGenGatewayId?: string | null;
   imageGenModel?: string | null;

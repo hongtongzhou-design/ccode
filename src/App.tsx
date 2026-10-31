@@ -40,7 +40,7 @@ import {
   type HelpDialogKind,
 } from "./components/HelpDialogs";
 import TopNavCapsule from "./components/TopNavCapsule";
-import { ConfirmDialogHost, confirmDialogOpen } from "./components/ConfirmDialog";
+import { ConfirmDialogHost, confirmDialog, confirmDialogOpen } from "./components/ConfirmDialog";
 import { markCoachTipSeen } from "./coach-tips";
 import { HoverTip, useHoverTip } from "./components/HoverTip";
 import { LoadingRows, rowActionClass } from "./components/PageFrame";
@@ -1036,6 +1036,49 @@ function App() {
       un?.();
     };
   }, [setPage]);
+
+  // 「退出 Mesa」（⌘Q、托盘、设置成关窗即退出时的关窗）：Rust 发 mesa:quit-requested，
+  // 这里先回执（不回执 Rust 1.5 秒后自己兜底），有对话的 AI 在跑或后台任务没完才把窗口叫出来问一句（window_close.rs）
+  const quitAskingRef = useRef(false);
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let cancelled = false;
+    listen("mesa:quit-requested", () => {
+      void invoke("quit_ack").catch(() => {});
+      if (quitAskingRef.current) return;
+      quitAskingRef.current = true;
+      void (async () => {
+        try {
+          window.dispatchEvent(new CustomEvent("mesa:save-terminal-replays"));
+          const agents = useAppStore
+            .getState()
+            .terminalRunInputs.filter((r) => r.running).length;
+          const background = await invoke<number>("quit_background_count").catch(() => 0);
+          if (agents > 0 || background > 0) {
+            const parts: string[] = [];
+            if (agents > 0) parts.push(`${agents} 段对话的 AI 还在运行`);
+            if (background > 0) parts.push(`${background} 个后台任务没有结束`);
+            await invoke("show_main_window").catch(() => {});
+            const ok = await confirmDialog(`${parts.join("，")}，退出 Mesa 会停下它们。确认退出？`, {
+              danger: true,
+              confirmText: "退出",
+            });
+            if (!ok) return;
+          }
+          await invoke("confirm_quit");
+        } finally {
+          quitAskingRef.current = false;
+        }
+      })();
+    }).then((f) => {
+      if (cancelled) f();
+      else un = f;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, []);
 
   // 托盘「设为全局」被 cc-switch 挡路（三平台都有托盘）：跳连接页，由连接页弹该连接的二次确认
   useEffect(() => {

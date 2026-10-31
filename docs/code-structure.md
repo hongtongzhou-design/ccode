@@ -1130,7 +1130,7 @@ src-tauri/src/
                              #   每槽体检摘要 latest-per-slot（摘要可按槽，绑定状态徽标
                              #   必须按「绑定默认模型 + URL/密钥指纹」取体检，禁「该槽最近一条」株连，§8）
   provider_id.rs             # provider 名 ccode-<网关短id> 单一出处；LEGACY="ccode" 仅旧 rollout
-  tray.rs                    # 系统托盘：按 Agent 列绑定一键设为全局；选中态 dry-run 子集比对；不改启动栏默认；cc-switch 挡路时不写盘，发 `tray:set-global` 让连接页弹确认
+  tray.rs                    # 系统托盘：按 Agent 列绑定一键设为全局；选中态 dry-run 子集比对；不改启动栏默认；cc-switch 挡路时不写盘，发 `tray:set-global` 让连接页弹确认；「打开 Mesa」/ 双击、「退出 Mesa」走 window_close.rs
   profile_validation.rs      # profile 三层验证：本地解析 → CLI 预检 → 最小 API 请求（脱敏）；
                              # 网关体检探针 probe_gateway（绕过 CLI 直连端点发 max_tokens=16 最小请求：
                              # 基础鉴权/裸流式 SSE 检测/带策略参数对比降级定位/自定义 Header 接受度，
@@ -1740,6 +1740,7 @@ scan_persist.rs            # 扫描缓存落盘层（2026-10-16，app.db scan_me
                              #   2026-10-20：macOS 没有 Homebrew 时 Node.js / Python / Quarto 走官方 .pkg（mac_pkg_url 从各家版本索引挑
                              #   地址，curl 下载后 osascript「with administrator privileges」跑 installer，Mesa 碰不到密码）；
                              #   TeX 两平台都可由 Quarto 装 TinyTeX（install_tex_via_quarto，Windows 写 PATH、macOS 不写）
+  window_close.rs            # 关窗与退出：主窗口关窗默认藏到后台（Mac 程序坞叫回、Windows 收托盘 + 首次通知），退出唯一入口 request_quit（前端确认、1.5 秒无回执原生兜底）；禁用预置 quit()
   win_snap.rs                # Windows 11 贴靠布局：自绘最大化按钮悬停够久，替用户按一次 Win+Z（只在 Win11、Mesa 在前台时）
   logbuf.rs                  # 诊断日志环形缓冲
   mac_fullscreen.rs          # macOS 订阅 NSWindow 将进 / 将出全屏通知，emit window:fullscreen-will-change（只报不改；前端壳底色借此跟系统动画淡变）

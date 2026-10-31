@@ -11,11 +11,9 @@ import {
 } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openDirectoryDialog } from "@tauri-apps/plugin-dialog";
-import { exit } from "@tauri-apps/plugin-process";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -10336,71 +10334,11 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     }
   }
 
-  // 关窗守卫：还有 agent 在跑的标签时，关窗前统一确认一次；确认后放行（allowCloseRef 防重入）。
-  // 后端命令未就绪时对应标签不计入，静默放行。
-  const allowWindowCloseRef = useRef(false);
+  // 退出前存回放：退出确认在 App.tsx（mesa:quit-requested），关窗口默认只藏到后台（window_close.rs）
   useEffect(() => {
-    const win = getCurrentWindow();
     let disposed = false;
-    let unlisten: (() => void) | undefined;
-    win
-      .onCloseRequested((event) => {
-        if (allowWindowCloseRef.current) return;
-        // 无论是否拦截确认，先让各标签终端存一版回放快照（同步分发，
-        // invoke 异步落盘，pagehide 会再兜底一次）
-        window.dispatchEvent(new CustomEvent("mesa:save-terminal-replays"));
-        const candidates = Object.values(statusesRef.current).filter(
-          (s) => s.running && s.ptyId,
-        );
-        if (candidates.length === 0) {
-          // 无 agent 也要给回放 IPC 留出落盘时间（120ms，体感无感），
-          // 否则立即销毁 webview 时快照可能没写完（2026-10-11 复核）
-          event.preventDefault();
-          void (async () => {
-            await new Promise((resolve) => setTimeout(resolve, 120));
-            allowWindowCloseRef.current = true;
-            await win.close().catch(() => exit(0));
-          })();
-          return;
-        }
-        event.preventDefault();
-        void (async () => {
-          let alive = 0;
-          for (const s of candidates) {
-            try {
-              if (
-                await invoke<boolean>("pty_has_running_process", {
-                  ptyId: s.ptyId,
-                })
-              )
-                alive++;
-            } catch {
-              /* 命令未就绪：该标签不计入守卫 */
-            }
-          }
-          if (
-            alive > 0 &&
-            !(await confirmDialog(
-              `还有 ${alive} 段对话的 AI 正在运行，确认退出并停下它们？`,
-              { danger: true },
-            ))
-          )
-            return;
-          allowWindowCloseRef.current = true;
-          // 等一小拍让回放 IPC 落盘再关窗
-          await new Promise((resolve) => setTimeout(resolve, 200));
-          // 正常路径走 window.close（触发 onCloseRequested 但被放行）；
-          // close 被权限拒绝时兜底直接退出进程（process:default 已授权）
-          await win.close().catch(() => exit(0));
-        })();
-      })
-      .then((u) => {
-        if (disposed) u();
-        else unlisten = u;
-      });
-    // Rust 侧的关窗前置信号（lib.rs on_window_event）：红绿灯关窗时上面的
-    // onCloseRequested 实机不执行（2026-10-11 探针实证），可靠路径是 Rust 拦一次、
-    // 发这条事件、等 350ms 再放行——这里接住并分发各标签的回放存盘
+    // Rust 侧的退出前置信号（lib.rs ExitRequested）：发这条事件、等 350ms 再收尾退出——
+    // 这里接住并分发各标签的回放存盘（JS onCloseRequested 实机不执行，2026-10-11 探针实证）
     let unlistenFlush: (() => void) | undefined;
     void listen("mesa:flush-before-close", () => {
       window.dispatchEvent(new CustomEvent("mesa:save-terminal-replays"));
@@ -10410,7 +10348,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
     });
     return () => {
       disposed = true;
-      unlisten?.();
       unlistenFlush?.();
     };
   }, []);
