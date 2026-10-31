@@ -23,7 +23,7 @@ One desktop app for the connections, chats and terminals of nine coding agents â
 
 </div>
 
-https://github.com/user-attachments/assets/c9e4a157-bc50-4511-be32-95ad0b2b3ce8
+https://github.com/user-attachments/assets/a9a7d744-3622-4427-805e-273a89e9326a
 
 <p align="center"><sub>60 seconds: from a pile of PDFs to an English review, with every citation traceable (on-screen text is in Chinese)</sub></p>
 
