@@ -78,6 +78,7 @@ import {
   sentUserRecorded,
   slashCommandRecorded,
   slashSettledLocally,
+  forkChatMessages,
 } from "../chat-handoff";
 import { recordChatHandoff } from "../chat-handoff-log";
 import { CANARY_PLATFORM, VERIFIED_VERSIONS, useCliNewer } from "../cli-verified";
@@ -9101,6 +9102,16 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
           autoStart: true,
         });
         setSurfaceModeByTab((prev) => ({ ...prev, [forkTabId]: "chat" }));
+        // 分出来的新会话发第一句才落盘（Claude 等），之前聊天层没东西可画、只剩一片空白（2026-10-31 用户实测「黑屏」）：
+        // 先把原对话最近一页摆上，新会话的记录出来就换成它
+        void invoke<ConversationPageDto>("get_session_conversation_page", {
+          agent: source.agentId,
+          filePath: source.file,
+          before: null,
+          around: null,
+        })
+          .then((page) => setForkPreview((prev) => ({ ...prev, [forkTabId]: page.messages })))
+          .catch(() => {});
         return forkTabId;
       }
       const brief = await invoke<{ filePath: string; summary: string }>(
@@ -9153,6 +9164,8 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   // 分叉标签认出自己的新会话（第一次认出的那个；之后 /clear 换的不算）就登记分叉：
   // CLI 自己写的上游指针会让列表把分叉当成「接着聊」并进原对话，登记了才单列、挂在原对话下面
   const recordedForkTabsRef = useRef(new Set<string>());
+  /** 原生分叉标签的「原对话」那一页：新会话记录出来之前聊天层先画它（Codex 的分叉记录不抄历史，一直垫在前面） */
+  const [forkPreview, setForkPreview] = useState<Record<string, ChatMessageDto[]>>({});
   useEffect(() => {
     for (const t of tabs) {
       const src = t.forkSource;
@@ -11012,8 +11025,17 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         frozen={!tabVisible && !inReader}
                         searchRequest={chatSearchByTab[t.id] ?? 0}
                         metaSlots={chatMetaSlots[t.id] ?? null}
-                        messages={sessionByTab[t.id]?.conv ?? []}
-                        state={sessionByTab[t.id]?.state ?? "idle"}
+                        messages={forkChatMessages(
+                          sessionByTab[t.id]?.conv ?? [],
+                          forkPreview[t.id],
+                          // 新会话还没记录文件时（发了第一句、等落盘）也垫着，别一下只剩刚发的那句
+                          t.forkSource?.agent === "codex" || !sessionByTab[t.id]?.file,
+                        )}
+                        state={
+                          forkPreview[t.id]?.length && !sessionByTab[t.id]?.conv.length
+                            ? "linked"
+                            : (sessionByTab[t.id]?.state ?? "idle")
+                        }
                         syncState={sessionByTab[t.id]?.sync ?? "waiting"}
                         loading={sessionByTab[t.id]?.pendingReply ?? false}
                         cwd={statuses[t.id]?.cwd ?? t.initialCwd ?? null}

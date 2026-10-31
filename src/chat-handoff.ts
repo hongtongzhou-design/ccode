@@ -358,3 +358,18 @@ export function modelSwitchCommand(
   const arg = agentId === "kimi" ? kimiModelArg(model) : model;
   return template.replace("{model}", arg);
 }
+
+/**
+ * 原生分叉标签的聊天层画什么（2026-10-31 用户实测分叉后「正在连接」然后一片空白）：分出来的新会话发第一句才落盘，
+ * 之前没有记录 → 先画原对话那一页（preview）；记录出来后 Claude 等家抄了全部历史，只画它；Codex 的分叉记录只有分叉后的新内容
+ * （session_meta 记 forked_from_id），原对话那一页一直垫在前面；新会话还没记录文件、只有刚发出去等落盘的那句时也垫着（prependPreview）
+ */
+export function forkChatMessages(
+  conv: ChatMessageDto[],
+  preview: ChatMessageDto[] | undefined,
+  prependPreview: boolean,
+): ChatMessageDto[] {
+  if (!preview?.length) return conv;
+  if (conv.length === 0) return preview;
+  return prependPreview ? [...preview, ...conv] : conv;
+}

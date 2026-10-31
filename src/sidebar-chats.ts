@@ -274,6 +274,8 @@ export interface ChatRunInput {
   running: boolean;
   shell: boolean;
   attention: "done" | "working" | "confirm" | null;
+  /** 分叉标签的原会话 id（run-overview forkOf） */
+  forkOf?: string | null;
 }
 
 /** 行尾的运行状态光标（run-caret.ts）；null = 没开着 */
@@ -392,6 +394,8 @@ export interface OpenTabRow {
   dot: ChatDot;
   /** 归哪个文件夹（currentFolderKey 同口径）；null = 不在任何项目、也不是随手聊 */
   folderKey: string | null;
+  /** 分叉标签还没认出新会话时挂在哪段对话下面（`agent\nsessionId`）；不是分叉为 null */
+  forkParentKey: string | null;
 }
 
 /**
@@ -419,7 +423,7 @@ export function openTabRows(input: {
           ? title && title !== "终端"
             ? title
             : "终端"
-          : r.sessionId
+          : r.sessionId || r.forkOf
             ? title || "对话"
             : "新对话";
     out.push({
@@ -428,6 +432,7 @@ export function openTabRows(input: {
       label,
       dot: kind === "chat" && r.running ? caretOfAttention(r.attention) : null,
       folderKey: input.folderOf(r.cwd),
+      forkParentKey: r.forkOf ? `${r.agentId}\n${r.forkOf}` : null,
     });
   }
   return out;

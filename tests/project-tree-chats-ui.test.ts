@@ -1266,3 +1266,22 @@ test("对话 ⋯「分叉成新对话」：把这段交给运行页按会话记�
     await view.close();
   }
 });
+
+test("分叉标签还没认出新会话时挂在原对话下面，标题去掉日期类型前缀（2026-10-31）", async () => {
+  const view = await renderTree({
+    terminalRunInputs: [
+      { tabId: "t1", title: "", agentId: "claude-code", model: "", cwd: PROJECT.path, running: true, shell: false, attention: "confirm", sessionId: "r5" },
+      { tabId: "tf", title: "0923|研究|镁硫电池第3篇精读", agentId: "claude-code", model: "", cwd: PROJECT.path, running: true, shell: false, attention: "done", sessionId: null, forkOf: "r3" },
+    ],
+  });
+  try {
+    const rows = Array.from(view.chatGroup("综述流程测试")!.querySelectorAll("[data-chat-key], [data-open-tab]"));
+    const i = rows.findIndex((b) => b.getAttribute("data-chat-key") === "claude-code\nr3");
+    const fork = rows[i + 1];
+    assert.equal(fork?.getAttribute("data-open-tab"), "tf", "紧跟在原对话后面");
+    assert.ok(fork.querySelector("[data-fork-link]"), "前面有接线");
+    assert.equal(fork.textContent?.trim(), "镁硫电池第3篇精读");
+  } finally {
+    await view.close();
+  }
+});

@@ -57,6 +57,8 @@ export interface RunOverviewInput {
   taskId?: string;
   /** 这个标签接着的会话（已接上的、或带着要接的）：侧栏对话行按它亮状态点、认「正在看的这段」 */
   sessionId?: string | null;
+  /** 分叉标签：从这段会话分出来的（原会话 id）；侧栏没认出新会话前把这一行挂在原对话下面 */
+  forkOf?: string | null;
 }
 
 /** 一个标签折成 RunOverviewInput。标签刚开、TerminalView 还没上报状态时先用开标签时就知道的（Agent / 目录 / 要接的会话）：
@@ -71,6 +73,7 @@ export function tabRunInput(
     reuseKey?: string;
     runId?: string;
     taskId?: string;
+    forkSource?: { agent: string; sessionId: string };
   },
   status:
     | {
@@ -99,6 +102,7 @@ export function tabRunInput(
     runId: status?.runId ?? tab.runId,
     taskId: tab.taskId,
     sessionId: status ? status.sessionId : (tab.resumeSessionId ?? null),
+    forkOf: tab.forkSource?.sessionId ?? null,
   };
 }
 
