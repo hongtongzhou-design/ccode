@@ -1282,7 +1282,7 @@ pub const TOOL_ENV: &str = "MESA_IMAGE_TOOL";
 
 const CLI_USAGE: &str = "用法：mesa_helper image --prompt \"描述\" --out 路径.png [--model 模型] [--size 1024x1024] [--n 1]\n\
      \x20                [--quality low|medium|high] [--resolution 1k|2k|4k] [--transparent]\n\
-     \x20     mesa_helper image --prompt-file 描述.txt --out 路径.png …   （长描述写进文件，避开命令行转义）\n\
+     \x20     mesa_helper image --prompt-file 描述.txt --out 路径.png …   （长描述写进文件，避开命令行转义；开头 # 行是备注，不发给模型）\n\
      \x20     mesa_helper image --image 原图.png --prompt \"要怎么改\" --out 新图.png   （改图：在原图上改，--image 可给多张）\n\
      \x20     mesa_helper image --list   （列出设置里的出图模型和各网关可用的出图模型）";
 
@@ -1298,6 +1298,12 @@ struct CliArgs {
     resolution: Option<Resolution>,
     transparent: bool,
     list: bool,
+}
+
+/// 描述文件开头以 # 起头的行是留档备注（模型、画幅、底图），不发给模型
+fn prompt_from_file(text: &str) -> String {
+    let body: Vec<&str> = text.lines().skip_while(|l| l.trim_start().starts_with('#') || l.trim().is_empty()).collect();
+    body.join("\n").trim().to_string()
 }
 
 fn parse_cli(args: &[String]) -> Result<CliArgs, String> {
@@ -1377,7 +1383,7 @@ pub fn helper_image_cli(args: &[String]) -> i32 {
     let prompt = match (&a.prompt, &a.prompt_file) {
         (Some(p), _) => p.clone(),
         (None, Some(f)) => match std::fs::read_to_string(f) {
-            Ok(t) => t,
+            Ok(t) => prompt_from_file(&t),
             Err(e) => {
                 eprintln!("读不了描述文件 {f}: {e}");
                 return 2;
@@ -1787,6 +1793,13 @@ mod tests {
         assert!(parse_cli(&["--out".to_string()]).is_err());
         let edit: Vec<String> = ["--image", "a.png", "--image", "b.jpg", "--prompt", "x"].iter().map(|s| s.to_string()).collect();
         assert_eq!(parse_cli(&edit).unwrap().images, vec!["a.png".to_string(), "b.jpg".to_string()]);
+    }
+
+    #[test]
+    fn prompt_file_skips_leading_note_lines() {
+        let t = "# gpt-image-2.5 · --size 1536x1024\n# 底图 figures/a.png\n\nKeep everything else the same.\n# not a note\n";
+        assert_eq!(prompt_from_file(t), "Keep everything else the same.\n# not a note");
+        assert_eq!(prompt_from_file("a cat\n"), "a cat");
     }
 
     #[test]

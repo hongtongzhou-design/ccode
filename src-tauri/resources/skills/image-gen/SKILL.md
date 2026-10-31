@@ -45,7 +45,7 @@ inside the cytoplasm on the right. Side view, left-to-right flow, white backgrou
 thin dark outlines, muted blue and coral palette, no text, no labels.
 ```
 
-描述超过一两行、带引号或换行时，写进文件用 `--prompt-file`。
+描述超过一两行、带引号或换行时，写进文件用 `--prompt-file`。这个文件就是留档用的 `<图名>.prompt.txt`（见「放哪、怎么交代」）：开头以 `#` 起头的行是备注，工具不会发给模型。
 
 ## 图里的文字
 
@@ -72,9 +72,9 @@ Windows PowerShell：`& $env:MESA_IMAGE_TOOL image --prompt "…" --out figures/
 - `--quality low|medium|high`：画质档位。`low` 出草图快，`high` 用于定稿。
 - `--transparent`：透明背景（png）。
 - `--n 2`：一次几张（1–4），文件名自动加 `-1`、`-2`；Gemini 系几张同时出，不会多等几倍时间。
-- `--prompt-file 描述.txt`：从文件读描述。
+- `--prompt-file 描述.txt`：从文件读描述；文件开头以 `#` 起头的行跳过不发。
 
-一张图常要 20 秒到 3 分钟，耐心等，别重复提交。在带沙箱的 Agent 里（如 Codex 的 workspace-write），命令联网会被拦、报「连不上网关」：按你自己的提权流程申请联网重跑这一条，不要改用别的方式。
+一张图常要 20 秒到 3 分钟，带 `--image` 改图常更久（2026-10-31 gpt-image-2.5 改一张 1536x1024 用了 260 秒），耐心等，别重复提交；你的命令工具有超时设置的，设到 6 分钟以上。在带沙箱的 Agent 里（如 Codex 的 workspace-write），命令联网会被拦、报「连不上网关」：按你自己的提权流程申请联网重跑这一条，不要改用别的方式。
 
 ### 输出怎么读
 
@@ -128,7 +128,7 @@ Windows PowerShell：`& $env:MESA_IMAGE_TOOL image --prompt "…" --out figures/
 - 描述只写要改的地方，并写明其余保持不变；用户说中文时照样可以翻成英文描述。
 - 「去背景」「擦掉某处」「换画幅」也走这条：分别写成 remove the background / remove the … / extend to 16:9 等。要真正透明的底，用 gpt-image 系加 `--transparent`。
 - 新图另存一个名字（`-v2`、`-blue-cap`），不覆盖原图；`--image` 最多 4 张（比如「把这两张合成一张」）。
-- 改完同样走「画完自检」，额外核对没要改的地方确实没变。
+- 改完同样走「画完自检」，额外核对没要改的地方确实没变：原图和新图各缩小一份，两张都打开对照着看（只看新图看不出哪里变了），交付时说清对照看到的——要加的加在了哪、其余哪些部分和原图一致、哪里有出入。
 
 ## 用进论文时
 
@@ -140,8 +140,14 @@ Windows PowerShell：`& $env:MESA_IMAGE_TOOL image --prompt "…" --out figures/
 ## 放哪、怎么交代
 
 - 研究项目放 `figures/`，编程项目放用户指定的位置（没说就问）；文件名用英文短词。
-- 把最终用的描述原文和参数记下来（同目录 `<图名>.prompt.txt`，第一行写模型和 `--size` / `--resolution` 等参数），方便重画。
-- 交付时说清：用的哪个模型、什么画幅和分辨率、存在哪、自检看了什么、还有哪些拿不准；说明这是 AI 生成的示意图。回复里写出图片的完整路径——Mesa 聊天里会把它直接显示成图，用户点图就能接着标注、接着改。
+- 把最终用的描述原文和参数记下来（同目录 `<图名>.prompt.txt`），方便重画。开头用 `#` 行写参数，出完图按 `model:` 行补上实际模型；改图的写上底图路径。`#` 行之后只放描述，同一个文件直接给 `--prompt-file` 用：
+
+  ```text
+  # 模型 gpt-image-2.5 · --size 1536x1024 · --resolution 2k
+  # 底图 figures/rainy-seaside.png（改图时写）
+  Keep everything else exactly the same. Add one person ...
+  ```
+- 交付时说清：用的哪个模型、什么画幅和分辨率、存在哪、自检看了什么（写看图看到的，不要把描述换个说法当结论）、还有哪些拿不准；说明这是 AI 生成的示意图。回复里写出图片的完整路径——Mesa 聊天里会把它直接显示成图，用户点图就能接着标注、接着改。
 
 ## 边界
 
