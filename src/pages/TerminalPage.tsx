@@ -79,6 +79,7 @@ import {
   slashCommandRecorded,
   slashSettledLocally,
   forkChatMessages,
+  forkPreviewCovered,
 } from "../chat-handoff";
 import { recordChatHandoff } from "../chat-handoff-log";
 import { CANARY_PLATFORM, VERIFIED_VERSIONS, useCliNewer } from "../cli-verified";
@@ -9166,6 +9167,19 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
   const recordedForkTabsRef = useRef(new Set<string>());
   /** 原生分叉标签的「原对话」那一页：新会话记录出来之前聊天层先画它（Codex 的分叉记录不抄历史，一直垫在前面） */
   const [forkPreview, setForkPreview] = useState<Record<string, ChatMessageDto[]>>({});
+  // 新会话的记录读到原对话的内容了（抄了全部历史的家）：丢掉 preview，之后只画新会话
+  useEffect(() => {
+    const done = Object.keys(forkPreview).filter((id) => {
+      const conv = sessionByTab[id]?.conv ?? [];
+      return !tabs.some((t) => t.id === id) || (conv.length > 0 && forkPreviewCovered(conv, forkPreview[id]));
+    });
+    if (done.length === 0) return;
+    setForkPreview((prev) => {
+      const next = { ...prev };
+      for (const id of done) delete next[id];
+      return next;
+    });
+  }, [forkPreview, sessionByTab, tabs]);
   useEffect(() => {
     for (const t of tabs) {
       const src = t.forkSource;
@@ -11028,8 +11042,6 @@ export default function TerminalPage({ visible }: { visible: boolean }) {
                         messages={forkChatMessages(
                           sessionByTab[t.id]?.conv ?? [],
                           forkPreview[t.id],
-                          // 新会话还没记录文件时（发了第一句、等落盘）也垫着，别一下只剩刚发的那句
-                          t.forkSource?.agent === "codex" || !sessionByTab[t.id]?.file,
                         )}
                         state={
                           forkPreview[t.id]?.length && !sessionByTab[t.id]?.conv.length

@@ -4336,6 +4336,15 @@ mod e2e {
         }
         std::thread::sleep(Duration::from_millis(500));
         let all = snaps.lock().unwrap().clone();
+        // 旁路报会话的先后（分叉核对：新会话认出来之前有没有先报原会话、换会话来源是什么）
+        let mut sessions_seen: Vec<(Option<String>, Option<String>, u32)> = Vec::new();
+        for s in &all {
+            let k = (s.session_id.clone(), s.session_source.clone(), s.session_seq);
+            if sessions_seen.last() != Some(&k) {
+                sessions_seen.push(k);
+            }
+        }
+        println!("{agent}: 旁路报的会话先后 {sessions_seen:?}");
         let mut statuses: Vec<String> = Vec::new();
         for s in &all {
             let x = s.turn.as_ref().map(|t| t.status.to_string()).unwrap_or("-".into());

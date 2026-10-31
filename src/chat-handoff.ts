@@ -360,16 +360,30 @@ export function modelSwitchCommand(
 }
 
 /**
- * 原生分叉标签的聊天层画什么（2026-10-31 用户实测分叉后「正在连接」然后一片空白）：分出来的新会话发第一句才落盘，
- * 之前没有记录 → 先画原对话那一页（preview）；记录出来后 Claude 等家抄了全部历史，只画它；Codex 的分叉记录只有分叉后的新内容
- * （session_meta 记 forked_from_id），原对话那一页一直垫在前面；新会话还没记录文件、只有刚发出去等落盘的那句时也垫着（prependPreview）
+ * 原生分叉标签的聊天层画什么（2026-10-31 用户实测分叉后「正在连接」然后一片空白、发第一句时闪一下）：
+ * 分出来的新会话发第一句才落盘，之前没有记录，先画原对话那一页（preview）。新会话的记录读到原对话的内容之前
+ * （刚发的那句只是本地回显、记录文件刚认出来还没读完、Codex 的分叉记录本来就不抄历史）一直把 preview 垫在前面；
+ * 读到了（Claude 等家抄了全部历史）就只画新会话自己的记录。按内容认，不按「有没有记录文件」认——
+ * 认出文件和读完文件之间那一下 conv 只剩刚发的一句，按文件认会整屏缩成一句再弹回来
  */
 export function forkChatMessages(
   conv: ChatMessageDto[],
   preview: ChatMessageDto[] | undefined,
-  prependPreview: boolean,
 ): ChatMessageDto[] {
   if (!preview?.length) return conv;
   if (conv.length === 0) return preview;
-  return prependPreview ? [...preview, ...conv] : conv;
+  return forkPreviewCovered(conv, preview) ? conv : [...preview, ...conv];
+}
+
+/** 新会话的记录里读到了原对话那一页的最后一段话：可以不再垫 preview（调用方据此把 preview 丢掉——
+ *  对话变长后最近一页里不再有那段话，不丢会又垫回去） */
+export function forkPreviewCovered(conv: ChatMessageDto[], preview: ChatMessageDto[]): boolean {
+  const textOf = (m: ChatMessageDto) =>
+    m.blocks
+      .filter((b) => b.kind === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+  const anchor = [...preview].reverse().find((m) => textOf(m) !== "");
+  return anchor != null && conv.some((m) => m.role === anchor.role && textOf(m) === textOf(anchor));
 }

@@ -381,11 +381,13 @@ test("本机命令记录：结果取终端里命令回显之后的几行，按�
   assert.deepEqual(merged.map((m) => m.blocks[0].text), ["你好", "你好！", "/status", "下一句"]);
 });
 
-test("forkChatMessages：新会话没记录先画原对话；抄了全部历史的只画新会话；Codex 一直垫着原对话", () => {
-  const m = (id: string): ChatMessageDto => ({ role: "user", blocks: [{ kind: "text", text: id, toolName: null, isError: false }], timestamp: null, usage: null, id, cwd: null }) as unknown as ChatMessageDto;
-  const preview = [m("p1"), m("p2")];
-  assert.deepEqual(forkChatMessages([], preview, false).map((x) => x.id), ["p1", "p2"]);
-  assert.deepEqual(forkChatMessages([m("p1"), m("p2"), m("n")], preview, false).map((x) => x.id), ["p1", "p2", "n"]);
-  assert.deepEqual(forkChatMessages([m("n")], preview, true).map((x) => x.id), ["p1", "p2", "n"]);
-  assert.deepEqual(forkChatMessages([m("n")], undefined, true).map((x) => x.id), ["n"]);
+test("forkChatMessages：新会话记录读到原对话内容之前一直垫着原对话，读到了只画新会话（Codex 的不抄历史，一直垫）", () => {
+  const m = (id: string, role = "user"): ChatMessageDto =>
+    ({ role, blocks: [{ kind: "text", text: id, toolName: null, isError: false }], timestamp: null, usage: null, id, cwd: null }) as unknown as ChatMessageDto;
+  const preview = [m("p1"), m("p2", "assistant")];
+  const ids = (xs: ChatMessageDto[]) => xs.map((x) => x.id);
+  assert.deepEqual(ids(forkChatMessages([], preview)), ["p1", "p2"], "还没记录：原对话");
+  assert.deepEqual(ids(forkChatMessages([m("n")], preview)), ["p1", "p2", "n"], "只有刚发的那句 / Codex 分叉记录：垫着");
+  assert.deepEqual(ids(forkChatMessages([m("p1"), m("p2", "assistant"), m("n")], preview)), ["p1", "p2", "n"], "抄了历史：只画新会话");
+  assert.deepEqual(ids(forkChatMessages([m("n")], undefined)), ["n"]);
 });
