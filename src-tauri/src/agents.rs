@@ -2898,6 +2898,12 @@ pub(crate) fn codex_catalog_entry_for(
         entry["context_window"] = serde_json::json!(ctx);
         entry["max_context_window"] = serde_json::json!(ctx);
     }
+    // 默认思考档：条目不写时 Codex 当成 `none`（0.166 app-server model/list 实测 defaultReasoningEffort = "none"），
+    // 客户端新建对话照发 `reasoning.effort = "none"`，推理模型直接 400「'none' is not supported」（2026-10-31 用户截图，
+    // 中转 gpt-6.1-sol）。写 medium（与官方条目同口径）；确知不思考的模型不写，`none` 正合适
+    if crate::model_registry::model_thinking_declared_for(model, gateway_id) != Some(false) {
+        entry["default_reasoning_level"] = serde_json::json!("medium");
+    }
     if let Some(vision) = crate::model_registry::model_supports_vision_declared_for(model, gateway_id)
     {
         entry["input_modalities"] = if vision {
@@ -7636,6 +7642,8 @@ api_backend = "responses"
         // 关键枚举拼写与打包条目一致（codex-rs models-manager/models.json）
         assert_eq!(e["shell_type"], "shell_command");
         assert_eq!(e["visibility"], "list");
+        // 不写默认思考档时 Codex 按 none 发，推理模型 400
+        assert_eq!(e["default_reasoning_level"], "medium");
         // freeform apply_patch 会中转被拒（cc-switch 实证）→ 不声明，走 shell 版
         assert!(e.get("apply_patch_tool_type").is_none());
         // base_instructions 用 Codex 自己的默认提示词（教模型用 apply_patch），不是一句话占位
