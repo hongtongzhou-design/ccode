@@ -3384,14 +3384,8 @@ export default function ProfilesPage({ visible }: { visible: boolean }) {
               {
                 label: "重启 Codex 客户端",
                 onClick: () =>
+                  // 点按钮即确认；走正常退出，客户端有任务在跑时由它自己弹退出确认，这里不再加一层
                   void (async () => {
-                    if (
-                      !(await confirmDialog(
-                        "将退出 ChatGPT（含 Codex 客户端）再重新打开。客户端里正在跑的任务会中断。继续？",
-                        { confirmText: "重启" },
-                      ))
-                    )
-                      return;
                     try {
                       await invoke("client_restart", { clientId: "codex-desktop" });
                       toast("Codex 客户端已重新打开，新建的对话走新连接", "success");
