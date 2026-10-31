@@ -2111,7 +2111,7 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 rounded-lg py-2 pl-3 pr-2 transition-colors ${
+                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(0,1fr)_5rem_7rem] items-center gap-2 rounded-lg py-2 pl-3 pr-2 transition-colors ${
                                   preview?.skill.id === skill.id
                                     ? "bg-chat-bubble"
                                     : "hover:bg-hover"
@@ -2248,7 +2248,9 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                   onOpen={() => void onView(skill)}
                                 />
                                 {/* 行内高频操作（2026-08-24 起与 MCP 页同口径）：裸图标钮 hover 淡入，
-                                    不套胶囊容器——实体栏压在列表行上层级脱节；tooltip 挂按钮上方（RowAction） */}
+                                    不套胶囊容器——实体栏压在列表行上层级脱节；tooltip 挂按钮上方（RowAction）。
+                                    每行是独立 grid：数量列与操作列定宽（操作列容得下四个钮），
+                                    多出「应用到全部」的行不把「N 个 Agent」挤歪 */}
                                 <div className="flex items-center justify-end">
                                   <div className={`flex items-center ${hoverRevealClass} focus-within:opacity-100`}>
                                     {(() => {
