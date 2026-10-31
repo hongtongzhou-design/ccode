@@ -3550,6 +3550,7 @@ fn restore_from(backups_dir: &Path, home: &Path, agent: &str) -> Result<Vec<Stri
 /// 家目录下的写 `~/a/b`：分隔符统一 `/`，Windows 上不出 `~/.claude\settings.json` 这种混写
 fn display_path(home: &Path, path: &Path) -> String {
     match path.strip_prefix(home) {
+        // 家目录下一律写成 `~/a/b`：Windows 上 join 出来的是反斜杠，拼出 `~/.claude\settings.json` 两种分隔符混着
         Ok(rel) => {
             let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
             format!("~/{}", parts.join("/"))

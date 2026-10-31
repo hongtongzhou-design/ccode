@@ -355,7 +355,9 @@ def global_phase(agent, gw, adir):
     home = tempfile.mkdtemp(prefix=f"{agent}-", dir=parent)
     work = os.path.join(home, "work")
     os.makedirs(work)
-    env = dict(os.environ, E2E_BASE=gw.base, E2E_GLOBAL_HOME=home, E2E_AGENT=agent)
+    # 写计划按搬迁变量找目录（CODEX_HOME 等）：本机设了就会写进真实配置目录，这里一并去掉
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(GLOBAL_DROP_PREFIXES)}
+    env.update(E2E_BASE=gw.base, E2E_GLOBAL_HOME=home, E2E_AGENT=agent)
     code, text = run([cargo(), "test", "--lib", "e2e_write_global_config", "--", "--ignored", "--nocapture"],
                      cwd=os.path.join(ROOT, "src-tauri"), env=env, timeout=1800)
     open(os.path.join(adir, "global-write.log"), "w", encoding="utf-8").write(text)
