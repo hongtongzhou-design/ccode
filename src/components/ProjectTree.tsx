@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AppWindow,
   Archive,
@@ -1029,7 +1029,8 @@ export default function ProjectTree({
               }
               commitRename(s);
             }}
-            className="min-w-0 flex-1 bg-transparent text-l1 outline-none"
+            // 字号同不在改名时的标题（.ccode-rail-text 13px），进出编辑不跳
+            className="ccode-rail-text min-w-0 flex-1 bg-transparent text-l1 outline-none"
           />
         </div>
       );
@@ -1186,7 +1187,7 @@ export default function ProjectTree({
 
   /** 开着、但列表里还没有的一行（openTabRows）：点了切过去，行尾 × 关掉（在跑的会先问）。
    *  新对话 / 纯终端前面带个小图标，和对话行区分开；不缩进同 renderChat */
-  function renderOpenRow(r: OpenTabRow) {
+  function renderOpenRow(r: OpenTabRow, depth = 0, folderName?: string) {
     const selected = page === "terminal" && r.tabId === terminalActiveTabId;
     const run = terminalRunInputs.find((x) => x.tabId === r.tabId);
     const unread = !selected && run != null && unreadSet.has(unreadKeyOf(run));
@@ -1220,9 +1221,18 @@ export default function ProjectTree({
           className={`flex h-8 min-w-0 items-center gap-2 rounded-md pl-2 pr-1 ${
             "text-l1"
           }`}
+          style={depth > 0 ? { paddingLeft: `${0.5 + (Math.min(depth, 3) - 1) * 0.875}rem` } : undefined}
         >
           {Icon && <Icon size={13} strokeWidth={1.8} aria-hidden="true" className="shrink-0 text-l4" />}
-          <span className="ccode-rail-text ccode-rail-fade min-w-0 flex-1 text-left">{r.label}</span>
+          {depth > 0 && (
+            <span aria-hidden="true" className="relative h-8 w-2.5 shrink-0" data-fork-link>
+              <span className="absolute left-0.5 top-1 h-3 w-2 rounded-bl-[3px] border-b border-l border-l4" />
+            </span>
+          )}
+          {/* 对话标签同对话行：去掉「MMDD|类型|」与开头重复的课题名，完整标题在悬停里 */}
+          <span className="ccode-rail-text ccode-rail-fade min-w-0 flex-1 text-left">
+            {r.kind === "chat" ? sidebarChatTitle(r.label, folderName) : r.label}
+          </span>
         </button>
         {/* 状态列同对话行：有光标才占一格，标题不进来；悬停时 × 原地顶替光标（这种行没有 ⋯） */}
         <div className="flex shrink-0 items-center gap-0.5 pr-0.5">
@@ -1256,10 +1266,20 @@ export default function ProjectTree({
     // 「显示更多 / 收起」是动作不是对话：比对话行矮、再小一号、最淡（l4），读作挂在最后一段下面的注脚
     // （2026-10-25 用户：原「展开更多」整行和对话一样高，读着像一段对话）
     const linkCls = "flex h-6 items-center rounded-md pl-2 pr-2 text-left text-l3 hover:bg-hover hover:text-l1";
-    const opened = openByFolder.get(folderKey) ?? [];
+
     // 正看着的那段排得比较靠后（从对话页点开的旧对话）：也摆出来，不然侧栏里找不到「现在在哪」
     const selIdx = selectedChatKey ? chats.findIndex((r) => chatKey(r.s) === selectedChatKey) : -1;
     const visible = selIdx >= shown ? [...chats.slice(0, shown), chats[selIdx]] : chats.slice(0, shown);
+    const openedAll = openByFolder.get(folderKey) ?? [];
+    // 分叉标签还没认出新会话（Claude 等发第一句才落盘）：挂在原对话下面，原对话不在这一串里才照常放最上面
+    const listedHere = new Set(visible.map((r) => chatKey(r.s)));
+    const forkOpenOf = new Map<string, OpenTabRow[]>();
+    for (const r of openedAll) {
+      if (r.forkParentKey && listedHere.has(r.forkParentKey)) {
+        forkOpenOf.set(r.forkParentKey, [...(forkOpenOf.get(r.forkParentKey) ?? []), r]);
+      }
+    }
+    const opened = openedAll.filter((r) => !(r.forkParentKey && listedHere.has(r.forkParentKey)));
     const remaining = chats.length - visible.length;
     const more = remaining > 0;
     return (
@@ -1268,7 +1288,12 @@ export default function ProjectTree({
         {chats.length === 0 ? (
           opened.length === 0 && <p className="py-1 pl-2 pr-2 text-xs text-l4">还没有对话</p>
         ) : (
-          visible.map((r) => renderChat(r.s, project, name, undefined, true, r))
+          visible.map((r) => (
+            <Fragment key={chatKey(r.s)}>
+              {renderChat(r.s, project, name, undefined, true, r)}
+              {(forkOpenOf.get(chatKey(r.s)) ?? []).map((o) => renderOpenRow(o, r.depth + 1, name))}
+            </Fragment>
+          ))
         )}
         {(more || folded) && (
           <div className="flex items-center">
