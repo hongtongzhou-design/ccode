@@ -469,6 +469,8 @@ export default function ProjectTree({
   /** 随手聊节头 ⋯ 的菜单（随手聊不是项目，没有项目那一份菜单） */
   const [scratchMenu, setScratchMenu] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState<{ key: string; value: string } | null>(null);
+  /** 双击标题进改名时，第一下点开对话后终端会晚一点抢焦点：输入框出现后这段时间里被抢走就收回来 */
+  const renameShownAt = useRef(0);
   const composingRef = useRef(false);
   /** 刚点下去、还没切过去的那段（2026-10-26 实测：高亮要等切换那一帧画完，晚 100–200ms） */
   const [pressedChatKey, setPressedChatKey] = useState<string | null>(null);
@@ -1019,7 +1021,14 @@ export default function ProjectTree({
               e.preventDefault();
               commitRename(s);
             }}
-            onBlur={() => commitRename(s)}
+            onBlur={(e) => {
+              if (performance.now() - renameShownAt.current < 500) {
+                const el = e.currentTarget;
+                requestAnimationFrame(() => el.isConnected && el.focus());
+                return;
+              }
+              commitRename(s);
+            }}
             className="min-w-0 flex-1 bg-transparent text-l1 outline-none"
           />
         </div>
@@ -1074,10 +1083,16 @@ export default function ProjectTree({
           data-chat-key={key}
           data-picked={isPicked ? "1" : undefined}
           aria-description={picked.size > 0 ? (isPicked ? "已选中，可批量置顶或归档" : "未选中") : undefined}
+          // 双击标题 = 改名（同右键「重命名」）；第一下照旧点开这段
+          onDoubleClick={(e) => {
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            renameShownAt.current = performance.now();
+            setRenaming({ key, value: full });
+          }}
           onPointerEnter={() => prefetchConversation(s)}
           onFocus={() => prefetchConversation(s)}
           aria-current={selected ? "true" : undefined}
-          title={`${full}\n${depth > 0 ? "分叉出来的对话 · " : ""}${origin ? `${origin} · ` : ""}${agent} · ${relTime(s.updatedAt)}${dot ? ` · ${dotTitle(dot)}` : ""}\n点一下接着聊`}
+          title={`${full}\n${depth > 0 ? "分叉出来的对话 · " : ""}${origin ? `${origin} · ` : ""}${agent} · ${relTime(s.updatedAt)}${dot ? ` · ${dotTitle(dot)}` : ""}\n点一下接着聊，双击改名`}
           className={`flex h-8 min-w-0 items-center gap-2 rounded-md pl-2 pr-1 ${
             "text-l1"
           }`}
