@@ -65,6 +65,7 @@ import type {
   SkillPathDto,
   SkillUpdateDto,
 } from "../types";
+import { groupByUsage, skillSummary } from "../skill-list-display";
 
 const SOURCE_LABEL: Record<string, string> = {
   builtin: "内置",
@@ -2103,8 +2104,17 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                       </button>
                       {!catCollapsed.has(category) && (
                         <div className="pt-1">
+                        {/* 「Mesa 内置」组内按用途加小标题，其余组照旧一整列 */}
+                        {(category === "Mesa 内置"
+                          ? groupByUsage(categorySkills)
+                          : [{ label: null, skills: categorySkills }]
+                        ).map((sub) => (
+                        <div key={sub.label ?? ""} className={sub.label ? "mt-3 first:mt-1" : undefined}>
+                        {sub.label && (
+                          <div className="px-3 pb-1 text-xs text-l4">{sub.label}</div>
+                        )}
                         <ul className="space-y-0.5">
-                          {categorySkills.map((skill) => {
+                          {sub.skills.map((skill) => {
                             const stale = (skill.staleCopies ?? []).length > 0;
                             const update = updates[skill.id];
                             return (
@@ -2178,9 +2188,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     const desc = displayDescription(
                                       skill.description,
                                     );
+                                    // 只显示第一句（写给 Agent 的触发说明留在悬停与详情，skill-list-display.ts）
                                     return desc ? (
-                                      <div className="mt-0.5 truncate text-xs text-l4">
-                                        {desc}
+                                      <div className="mt-0.5 truncate text-xs text-l4" title={desc}>
+                                        {skillSummary(desc)}
                                       </div>
                                     ) : null;
                                   })()}
@@ -2308,6 +2319,8 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                             );
                           })}
                         </ul>
+                        </div>
+                        ))}
                         </div>
                       )}
                     </section>
