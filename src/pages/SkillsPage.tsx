@@ -15,6 +15,12 @@ import {
   Trash2,
   WandSparkles,
   Workflow,
+  BookOpen,
+  ChartColumn,
+  ListChecks,
+  PenLine,
+  Puzzle,
+  type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
@@ -65,7 +71,15 @@ import type {
   SkillPathDto,
   SkillUpdateDto,
 } from "../types";
-import { groupByUsage, skillSummary } from "../skill-list-display";
+import { groupByUsage, usageGroupOf } from "../skill-list-display";
+
+/** 行首图标按用途取（与连接页、MCP 页行首 16px 线条图标同口径）；没登记的用拼图 */
+const USAGE_ICONS: Record<string, LucideIcon> = {
+  文献: BookOpen,
+  数据与作图: ChartColumn,
+  写作与成稿: PenLine,
+  审查与校对: ListChecks,
+};
 
 const SOURCE_LABEL: Record<string, string> = {
   builtin: "内置",
@@ -2121,12 +2135,16 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                               <li
                                 key={skill.id}
                                 onClick={() => void onView(skill)}
-                                className={`group grid min-h-12 cursor-pointer grid-cols-[minmax(0,1fr)_5rem_7rem] items-center gap-2 rounded-lg py-2 pl-3 pr-2 transition-colors ${
+                                className={`group grid min-h-12 cursor-pointer grid-cols-[16px_minmax(0,1fr)_5rem_7rem] items-center gap-x-3 rounded-lg py-2 pl-3 pr-2 transition-colors ${
                                   preview?.skill.id === skill.id
                                     ? "bg-chat-bubble"
                                     : "hover:bg-hover"
                                 }`}
                               >
+                                {(() => {
+                                  const Icon = USAGE_ICONS[usageGroupOf(skill.name)] ?? Puzzle;
+                                  return <Icon size={16} strokeWidth={1.6} className="text-l4" aria-hidden="true" />;
+                                })()}
                                 <div className="min-w-0">
                                   <div className="flex min-w-0 items-center gap-1.5">
                                     <span className="min-w-0 truncate text-base font-medium text-l1">
@@ -2188,10 +2206,10 @@ export default function SkillsPage({ visible }: { visible: boolean }) {
                                     const desc = displayDescription(
                                       skill.description,
                                     );
-                                    // 只显示第一句（写给 Agent 的触发说明留在悬停与详情，skill-list-display.ts）
+                                    // 整段一行铺满再截断，悬停看全文（2026-10-31 试过只留第一句，用户：「中间太空了」）
                                     return desc ? (
                                       <div className="mt-0.5 truncate text-xs text-l4" title={desc}>
-                                        {skillSummary(desc)}
+                                        {desc}
                                       </div>
                                     ) : null;
                                   })()}

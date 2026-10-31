@@ -1,18 +1,8 @@
 /**
- * 技能页列表的展示口径（2026-10-31 用户：「按建议做」；tests/skill-list-display.test.ts）。
- * - 描述行只显示第一句：SKILL.md 的 description 是写给 Agent 的触发说明（「××规范。当用户要求……时使用」），
- *   第一句就是给人看的名字，全文留在悬停和右侧详情。只改显示，不动技能文件。
- * - 「Mesa 内置」组内按用途加小标题（10-11 拍板的「Mesa 内置」分组不动）；组内原有顺序不变。
+ * 技能页列表按用途分（2026-10-31 用户：「按建议做」；tests/skill-list-display.test.ts）。
+ * 「Mesa 内置」组内按用途加小标题（10-11 拍板的「Mesa 内置」分组不动），组内原有顺序不变；
+ * 每行左侧的图标也按用途取（SkillsPage USAGE_ICONS），不是每行一样的占位方块。
  */
-
-/** 描述的第一句；中文到第一个「。」，英文到第一个「. 」；取不出（或整段只有一句）原样返回 */
-export function skillSummary(desc: string): string {
-  const t = desc.trim();
-  const zh = t.indexOf("。");
-  const en = t.search(/\.\s/);
-  const cut = [zh, en].filter((i) => i > 0).sort((a, b) => a - b)[0];
-  return cut === undefined ? t : t.slice(0, cut);
-}
 
 /** 内置技能按用途分小节；顺序即小节顺序。新增内置技能没登记的落「其他」 */
 export const BUILTIN_USAGE_GROUPS: ReadonlyArray<{ label: string; names: readonly string[] }> = [
@@ -36,6 +26,11 @@ export const BUILTIN_USAGE_GROUPS: ReadonlyArray<{ label: string; names: readonl
   },
   { label: "审查与校对", names: ["bib-check", "stats-check"] },
 ];
+
+/** 技能属于哪个用途小节；没登记的（含用户自己的技能）= 「其他」 */
+export function usageGroupOf(name: string): string {
+  return BUILTIN_USAGE_GROUPS.find((g) => g.names.includes(name))?.label ?? "其他";
+}
 
 /** 把一组技能按用途切成小节；空小节不出；每节内保持传入顺序 */
 export function groupByUsage<T extends { name: string }>(

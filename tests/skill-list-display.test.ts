@@ -1,17 +1,12 @@
 import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import test from "node:test";
-import { BUILTIN_USAGE_GROUPS, groupByUsage, skillSummary } from "../src/skill-list-display.ts";
+import { BUILTIN_USAGE_GROUPS, groupByUsage, usageGroupOf } from "../src/skill-list-display.ts";
 
-test("描述只取第一句：中文到「。」，英文到「. 」，取不出原样", () => {
-  assert.equal(skillSummary("文献检索与筛选规范。当用户要求……时使用。"), "文献检索与筛选规范");
-  assert.equal(
-    skillSummary("Write and revise empirical research papers. Use for IMRaD manuscripts."),
-    "Write and revise empirical research papers",
-  );
-  assert.equal(skillSummary("  只有一句没有句号  "), "只有一句没有句号");
-  assert.equal(skillSummary("v1.2 版本说明。其余"), "v1.2 版本说明", "版本号里的点不算句末");
-  assert.equal(skillSummary(""), "");
+test("用途归属：登记过的按小节，用户自己的技能落「其他」", () => {
+  assert.equal(usageGroupOf("lit-search"), "文献");
+  assert.equal(usageGroupOf("stats-check"), "审查与校对");
+  assert.equal(usageGroupOf("apple-design"), "其他");
 });
 
 test("用途分组：随包的内置技能每个都登记了小节，不落「其他」", () => {
